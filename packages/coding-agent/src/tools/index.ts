@@ -67,6 +67,8 @@ export * from "../lsp";
 export * from "../session/streaming-output";
 export * from "../task";
 export * from "../web/search";
+// Workflow tool (new)
+export * from "../workflow/workflow-tool";
 export * from "./ask";
 export * from "./ast-edit";
 export * from "./ast-grep";
