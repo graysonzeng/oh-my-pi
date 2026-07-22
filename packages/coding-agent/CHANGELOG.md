@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Added the initial multi-model coding workflow foundation with deterministic transitions, SQLite persistence, role-based model routing, structured runtime integration, verification, and targeted tests.
+
 ## [17.0.7] - 2026-07-21
 
 ### Fixed
