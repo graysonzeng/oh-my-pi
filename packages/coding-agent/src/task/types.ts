@@ -479,6 +479,8 @@ export interface SingleResult {
 	tokens: number;
 	/** Count of assistant requests (assistant message_end events) across the run. */
 	requests: number;
+	/** Number of tool calls executed across the run when counted; omit when unknown. */
+	toolCalls?: number;
 	/** Latest per-turn context size at task completion. See `AgentProgress.contextTokens`. */
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. */

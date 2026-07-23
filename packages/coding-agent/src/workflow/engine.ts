@@ -4,9 +4,16 @@ import { abortRegisteredWorkflow, registerWorkflowAbort, unregisterWorkflowAbort
 import { ArtifactStore } from "./artifact-store";
 import { BudgetLedger, type BudgetSnapshot } from "./budget-ledger";
 import { ContextBuilder } from "./context-builder";
-import { DEFAULT_MODEL_PROFILES, getDefaultConfig, type WorkflowDefaultConfig } from "./default-config";
-import { BudgetExhaustedError, WorkflowCancelledError, WorkflowError, WorkflowPolicyError } from "./errors";
+import { getDefaultConfig, type WorkflowDefaultConfig } from "./default-config";
+import {
+	BudgetExhaustedError,
+	mapWorkflowErrorOutcome,
+	WorkflowCancelledError,
+	WorkflowError,
+	WorkflowPolicyError,
+} from "./errors";
 import { FindingTracker } from "./finding-tracker";
+import { assertSupportedModelProfile } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
 import { RuntimeAdapter } from "./runtime-adapter";
 import { redactSecretsInText } from "./secret-redact";
@@ -31,6 +38,7 @@ import type {
 	VerifierPort,
 	WorkflowRequest,
 	WorkflowRole,
+	WorkflowRuntimeEvidence,
 	WorkflowState,
 	WorkflowStatus,
 } from "./types";
@@ -95,6 +103,8 @@ export class WorkflowEngine {
 	#verification: VerificationArtifactV1 | undefined;
 	#codeReview: ReviewArtifactV1 | undefined;
 	#finalVerification: VerificationArtifactV1 | undefined;
+	#plannerProfileId: string | undefined;
+	#plannerVendor: string | undefined;
 	#implementerVendor: string | undefined;
 	#planCycles = 0;
 	#lastRouteProfileId: string | undefined;
@@ -102,7 +112,10 @@ export class WorkflowEngine {
 	constructor(options: WorkflowEngineOptions = {}) {
 		this.#ownsStore = options.ownsStore ?? options.store === undefined;
 		this.#store = options.store ?? new WorkflowStore();
-		this.#router = options.router ?? new ModelRouter(Object.values(DEFAULT_MODEL_PROFILES));
+		this.#config = { ...getDefaultConfig(), ...options.config };
+		const profiles = Object.values(this.#config.profiles);
+		for (const profile of profiles) assertSupportedModelProfile(profile);
+		this.#router = options.router ?? new ModelRouter(profiles);
 		// Production wiring injects createDefaultRuntimeAdapter(); pure tests inject fakes.
 		// No default real runner here — avoids task/natives load and AGENTS.md dynamic-import ban.
 		this.#adapter =
@@ -112,7 +125,6 @@ export class WorkflowEngine {
 					hint: "Pass adapter or use createDefaultRuntimeAdapter()",
 				});
 			});
-		this.#config = { ...getDefaultConfig(), ...options.config };
 		this.#session = options.session;
 		this.#signal = options.signal;
 		const cwd = options.session?.cwd ?? process.cwd();
@@ -129,6 +141,7 @@ export class WorkflowEngine {
 					"git status",
 					"git status --short",
 					"biome check",
+					"bun test",
 				],
 			});
 		this.#budgetLedger =
@@ -258,7 +271,7 @@ export class WorkflowEngine {
 		singleStep: boolean,
 	): Promise<WorkflowRunResult> {
 		this.#controller = new AbortController();
-		registerWorkflowAbort(workflowId, this.#controller);
+		registerWorkflowAbort(workflowId, this.#controller, this.#controller);
 		const parentSignal = this.#signal;
 		if (parentSignal) {
 			if (parentSignal.aborted) this.#controller.abort();
@@ -269,143 +282,157 @@ export class WorkflowEngine {
 		const maxSteps = singleStep ? 1 : 32;
 
 		try {
-		while (steps < maxSteps) {
-			steps += 1;
-			if (this.#controller.signal.aborted) {
-				await this.cancel(workflowId, "aborted");
-				break;
-			}
-
-			let state = await this.#requireState(workflowId);
-			if (TERMINAL.has(state.status)) break;
-
-			// Exclusive runner lock — second concurrent runner fails until release.
-			let claimed = false;
-			try {
-				await this.#store.claimRunner(workflowId, this.#runnerOwnerId, state.version);
-				claimed = true;
-			} catch (error) {
-				if (error instanceof WorkflowPolicyError) throw error;
-				throw error;
-			}
-
-			try {
-				state = await this.#requireState(workflowId);
-
-				// Advance created → planning without budget/provider (no external call)
-				if (state.status === "created") {
-					const next = getNextStage("created", null);
-					if (!next || !isValidTransition(state.status, next)) {
-						throw new WorkflowPolicyError("invalid_transition", { from: state.status, to: next });
-					}
-					await this.#store.transitionWorkflow(
-						workflowId,
-						"created",
-						next,
-						"start planning",
-						undefined,
-						state.version,
-					);
-					if (singleStep) break;
-					continue;
+			while (steps < maxSteps) {
+				steps += 1;
+				if (this.#controller.signal.aborted) {
+					await this.cancel(workflowId, "aborted");
+					break;
 				}
 
-				// Hard-stop before stages that call providers/verifier
-				if (!(await this.#budgetLedger.checkPreStage())) {
-					const snap = this.#budgetLedger.snapshot();
-					await this.#store.transitionWorkflow(
-						workflowId,
-						state.status,
-						"blocked",
-						"budget_exhausted",
-						state.currentAttemptId,
-						state.version,
-					);
-					throw new BudgetExhaustedError(snap.requests, snap.costUsd ?? "unknown", snap.limitUsd);
-				}
+				let state = await this.#requireState(workflowId);
+				if (TERMINAL.has(state.status)) break;
 
-				if (!session) {
-					throw new WorkflowPolicyError("session_required_for_stage", { stage: state.status });
-				}
-
-				const started = Date.now();
+				// Exclusive runner lock — second concurrent runner fails until release.
+				let claimed = false;
 				try {
-					await this.#executeCurrentStage(workflowId, state, session);
+					await this.#store.claimRunner(workflowId, this.#runnerOwnerId, state.version);
+					claimed = true;
 				} catch (error) {
-					if (error instanceof WorkflowCancelledError || this.#controller.signal.aborted) {
-						await this.cancel(workflowId, "cancelled during stage");
-						break;
-					}
-					if (error instanceof BudgetExhaustedError) throw error;
-					if (error instanceof WorkflowPolicyError && error.message.includes("independent_reviewer")) {
-						const s = await this.#requireState(workflowId);
-						if (s.currentAttemptId) {
-							await this.#finishOpenAttempt(workflowId, s.currentAttemptId, "failed", {
-								kind: "policy_violation",
-								summary: "independent_reviewer_unavailable",
-							});
+					if (error instanceof WorkflowPolicyError) throw error;
+					throw error;
+				}
+
+				try {
+					state = await this.#requireState(workflowId);
+
+					// Advance created → planning without budget/provider (no external call)
+					if (state.status === "created") {
+						const next = getNextStage("created", null);
+						if (!next || !isValidTransition(state.status, next)) {
+							throw new WorkflowPolicyError("invalid_transition", { from: state.status, to: next });
 						}
-						const s2 = await this.#requireState(workflowId);
 						await this.#store.transitionWorkflow(
 							workflowId,
-							s2.status,
-							"blocked",
-							"independent_reviewer_unavailable",
-							s2.currentAttemptId,
-							s2.version,
+							"created",
+							next,
+							"start planning",
+							undefined,
+							state.version,
 						);
-						break;
+						if (singleStep) break;
+						continue;
 					}
-					const s = await this.#requireState(workflowId);
-					if (!TERMINAL.has(s.status)) {
-						if (s.currentAttemptId) {
-							await this.#finishOpenAttempt(workflowId, s.currentAttemptId, "failed", {
-								kind: "internal",
-								summary: error instanceof Error ? error.message : "stage failed",
-							});
-						}
-						const s2 = await this.#requireState(workflowId);
-						if (!TERMINAL.has(s2.status)) {
-							await this.#store.transitionWorkflow(
-								workflowId,
-								s2.status,
-								"failed",
-								error instanceof Error ? error.message : "stage failed",
-								s2.currentAttemptId,
-								s2.version,
-							);
-						}
-					}
-					throw error;
-				} finally {
-					this.#budgetLedger.recordStageTime(Date.now() - started);
-					await this.#store.saveBudgetTotals(
-						workflowId,
-						this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
-					);
-				}
 
-				if (singleStep) break;
-			} finally {
-				if (claimed) {
-					await this.#store.releaseRunner(workflowId, this.#runnerOwnerId);
+					// Hard-stop before stages that call providers/verifier
+					if (!(await this.#budgetLedger.checkPreStage())) {
+						const snap = this.#budgetLedger.snapshot();
+						await this.#store.transitionWorkflow(
+							workflowId,
+							state.status,
+							"blocked",
+							"budget_exhausted",
+							state.currentAttemptId,
+							state.version,
+						);
+						throw new BudgetExhaustedError(snap.requests, snap.costUsd ?? "unknown", snap.limitUsd);
+					}
+
+					if (!session) {
+						throw new WorkflowPolicyError("session_required_for_stage", { stage: state.status });
+					}
+
+					const started = Date.now();
+					try {
+						await this.#executeCurrentStage(workflowId, state, session);
+					} catch (error) {
+						if (error instanceof WorkflowCancelledError || this.#controller.signal.aborted) {
+							await this.cancel(workflowId, "cancelled during stage");
+							break;
+						}
+						if (error instanceof BudgetExhaustedError) throw error;
+						const kind = error instanceof WorkflowError ? error.kind : "internal";
+						const outcome = mapWorkflowErrorOutcome(kind);
+						const redactedSummary = redactSecretsInText(
+							error instanceof Error ? error.message : "stage failed",
+						).slice(0, 500);
+						if (
+							outcome === "blocked" ||
+							(error instanceof WorkflowPolicyError && error.message.includes("independent_reviewer"))
+						) {
+							const s = await this.#requireState(workflowId);
+							if (s.currentAttemptId && !TERMINAL.has(s.status)) {
+								await this.#finishOpenAttempt(workflowId, s.currentAttemptId, "failed", {
+									kind,
+									summary: redactedSummary,
+								});
+							}
+							const s2 = await this.#requireState(workflowId);
+							if (!TERMINAL.has(s2.status)) {
+								await this.#store.transitionWorkflow(
+									workflowId,
+									s2.status,
+									"blocked",
+									redactedSummary,
+									s2.currentAttemptId,
+									s2.version,
+								);
+							}
+							// Stage handlers that already transitioned (e.g. write_stage_interrupted) must still surface.
+							if (error instanceof WorkflowPolicyError && !error.message.includes("independent_reviewer")) {
+								throw error;
+							}
+							break;
+						}
+						const s = await this.#requireState(workflowId);
+						if (!TERMINAL.has(s.status)) {
+							if (s.currentAttemptId) {
+								await this.#finishOpenAttempt(workflowId, s.currentAttemptId, "failed", {
+									kind,
+									summary: redactedSummary,
+								});
+							}
+							const s2 = await this.#requireState(workflowId);
+							if (!TERMINAL.has(s2.status)) {
+								await this.#store.transitionWorkflow(
+									workflowId,
+									s2.status,
+									"failed",
+									redactedSummary,
+									s2.currentAttemptId,
+									s2.version,
+								);
+							}
+						}
+						throw error;
+					} finally {
+						this.#budgetLedger.recordStageTime(Date.now() - started);
+						await this.#store.saveBudgetTotals(
+							workflowId,
+							this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
+						);
+					}
+
+					if (singleStep) break;
+				} finally {
+					if (claimed) {
+						await this.#store.releaseRunner(workflowId, this.#runnerOwnerId);
+					}
 				}
 			}
-		}
 
-		const finalState = await this.#requireState(workflowId);
-		return {
-			state: finalState,
-			plan: this.#plan,
-			planReview: this.#planReview,
-			implementation: this.#implementation,
-			verification: this.#verification,
-			codeReview: this.#codeReview,
-			finalVerification: this.#finalVerification,
-			routingAudit: [...this.#routingAudit],
-		};
+			const finalState = await this.#requireState(workflowId);
+			return {
+				state: finalState,
+				plan: this.#plan,
+				planReview: this.#planReview,
+				implementation: this.#implementation,
+				verification: this.#verification,
+				codeReview: this.#codeReview,
+				finalVerification: this.#finalVerification,
+				routingAudit: [...this.#routingAudit],
+			};
 		} finally {
-			unregisterWorkflowAbort(workflowId);
+			unregisterWorkflowAbort(workflowId, this.#controller);
 		}
 	}
 
@@ -423,8 +450,10 @@ export class WorkflowEngine {
 
 		switch (stage) {
 			case "planning": {
-				const { artifact: plan, usage } = await this.#withProfileFallback("planner", {}, profile =>
-					new PlanStage(this.#adapter).execute({
+				const { artifact: plan, usage } = await this.#withProfileFallback("planner", {}, profile => {
+					this.#plannerProfileId = profile.id;
+					this.#plannerVendor = profile.vendor;
+					return new PlanStage(this.#adapter).execute({
 						workflowId,
 						attemptId,
 						profile,
@@ -436,8 +465,8 @@ export class WorkflowEngine {
 						}),
 						session,
 						signal,
-					}),
-				);
+					});
+				});
 				this.#plan = plan;
 				await this.#persistArtifact(workflowId, attemptId, "plan", plan);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage);
@@ -448,16 +477,22 @@ export class WorkflowEngine {
 			case "plan_review": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
 				this.#budgetLedger.recordReviewerCycle();
-				const { artifact: review, usage } = await this.#withProfileFallback("plan_reviewer", {}, profile =>
-					new PlanReviewStage(this.#adapter).execute({
-						workflowId,
-						attemptId,
-						profile,
-						assignment: "Review the plan for correctness and feasibility",
-						context: this.#contextBuilder.buildPlanReviewContext(this.#plan!),
-						session,
-						signal,
-					}),
+				const { artifact: review, usage } = await this.#withProfileFallback(
+					"plan_reviewer",
+					{
+						excludedProfileIds: this.#plannerProfileId ? [this.#plannerProfileId] : [],
+						avoidVendor: this.#plannerVendor,
+					},
+					profile =>
+						new PlanReviewStage(this.#adapter).execute({
+							workflowId,
+							attemptId,
+							profile,
+							assignment: "Review the plan for correctness and feasibility",
+							context: this.#contextBuilder.buildPlanReviewContext(this.#plan!),
+							session,
+							signal,
+						}),
 				);
 				this.#planReview = review;
 				await this.#persistArtifact(workflowId, attemptId, "review", review);
@@ -491,7 +526,13 @@ export class WorkflowEngine {
 			}
 			case "implementing": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
-				const { artifact: impl, usage } = await this.#withProfileFallback("implementer", {}, async profile => {
+				const {
+					artifact: impl,
+					usage,
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+				} = await this.#withProfileFallback("implementer", {}, async profile => {
 					this.#implementerVendor = profile.vendor;
 					return new ImplementStage(this.#adapter).execute({
 						workflowId,
@@ -506,7 +547,11 @@ export class WorkflowEngine {
 				});
 				this.#implementation = impl;
 				await this.#persistArtifact(workflowId, attemptId, "implementation", impl);
-				await this.#recordUsageAndProfile(workflowId, attemptId, usage);
+				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+				});
 				const next = getNextStage("implementing", null);
 				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "implementation ready", fresh.version);
 				return;
@@ -522,6 +567,7 @@ export class WorkflowEngine {
 					commands,
 					forbiddenPaths: this.#config.forbiddenPaths,
 					signal,
+					timeoutMs: this.#config.verificationTimeoutMs,
 					cwd,
 				});
 				this.#verification = verification;
@@ -570,15 +616,19 @@ export class WorkflowEngine {
 					},
 				);
 				this.#codeReview = review;
-				for (const f of review.findings) this.#findingTracker.add(f);
+				for (const f of review.findings) {
+					const blocking = FindingTracker.computeBlockingDisposition(f, review, this.#config.confidenceThreshold);
+					f.blocking = blocking;
+					this.#findingTracker.add(f, { blocking });
+				}
 				await this.#persistArtifact(workflowId, attemptId, "review", review);
+				await this.#persistFindingsState(workflowId, attemptId);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage);
 
 				const blocking = review.findings.filter(
 					f =>
 						(f.status === "open" || f.status === "in_progress") &&
-						f.confidence >= this.#config.confidenceThreshold &&
-						(f.priority === "P0" || f.priority === "P1" || review.decision === "changes_requested"),
+						FindingTracker.computeBlockingDisposition(f, review, this.#config.confidenceThreshold),
 				);
 				let decision = review.decision;
 				if (decision === "approved" && blocking.length > 0) decision = "changes_requested";
@@ -624,7 +674,13 @@ export class WorkflowEngine {
 					}
 				}
 				const primary = open[0];
-				const { artifact: repaired, usage } = await this.#withProfileFallback(
+				const {
+					artifact: repaired,
+					usage,
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+				} = await this.#withProfileFallback(
 					"repair",
 					{
 						finding: primary,
@@ -669,11 +725,17 @@ export class WorkflowEngine {
 				// Resolve only explicitly addressed finding IDs (never auto-all).
 				const resolvedIds = new Set(repaired.addressedStepIds);
 				for (const id of open.map(f => f.id)) {
-					if (resolvedIds.has(id)) this.#findingTracker.resolve(id, "resolved");
+					if (resolvedIds.has(id)) {
+						this.#findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
+					}
 				}
 				await this.#persistArtifact(workflowId, attemptId, "implementation", this.#implementation);
 				await this.#persistFindingsState(workflowId, attemptId);
-				await this.#recordUsageAndProfile(workflowId, attemptId, usage);
+				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+				});
 				// One completed repair attempt toward maxRepairCycles.
 				this.#budgetLedger.recordRepairCycle();
 				const next = getNextStage("repairing", null);
@@ -682,10 +744,7 @@ export class WorkflowEngine {
 			}
 			case "final_verify": {
 				const commands = this.#trustedVerificationCommands(this.#plan?.verificationCommands);
-				const threshold = this.#config.confidenceThreshold;
-				const openFindings = this.#findingTracker
-					.getOpen()
-					.filter(f => f.confidence >= threshold && (f.priority === "P0" || f.priority === "P1"));
+				const openFindings = this.#findingTracker.getOpen().filter(f => f.blocking === true);
 				const verification = await new FinalVerifyStage(this.#verifier).execute({
 					workflowId,
 					attemptId,
@@ -694,6 +753,7 @@ export class WorkflowEngine {
 					implementation: this.#implementation,
 					openFindings,
 					signal,
+					timeoutMs: this.#config.verificationTimeoutMs,
 					cwd,
 				});
 				this.#finalVerification = verification;
@@ -730,13 +790,7 @@ export class WorkflowEngine {
 
 	#isRetryableProviderError(error: unknown): boolean {
 		if (error instanceof WorkflowError) {
-			return (
-				error.kind === "timeout" ||
-				error.kind === "rate_limit" ||
-				error.kind === "schema_violation" ||
-				error.kind === "provider_transient" ||
-				error.kind === "quota"
-			);
+			return mapWorkflowErrorOutcome(error.kind) === "retry_or_fallback";
 		}
 		return false;
 	}
@@ -785,8 +839,7 @@ export class WorkflowEngine {
 				const kind = error instanceof WorkflowError ? error.kind : "";
 				const retryableKinds = route.profile.retryPolicy?.retryableErrorKinds ?? [];
 				const kindOk =
-					this.#isRetryableProviderError(error) ||
-					(typeof kind === "string" && retryableKinds.includes(kind));
+					this.#isRetryableProviderError(error) || (typeof kind === "string" && retryableKinds.includes(kind));
 				if (attempt < maxAttempts - 1 && kindOk) {
 					unavailable.add(route.profileId);
 					continue;
@@ -932,15 +985,27 @@ export class WorkflowEngine {
 			if (!loaded?.content) continue;
 			try {
 				const parsed = JSON.parse(loaded.content) as { kind?: string; findings?: ReviewFindingV1[] };
-				if (parsed.kind === "plan") this.#plan = parsed as PlanArtifactV1;
-				else if (parsed.kind === "review") {
+				if (parsed.kind === "plan") {
+					this.#plan = parsed as PlanArtifactV1;
+					// Restore planner route context for plan_review diversity across Engine resume.
+					if (this.#plan.modelProfileId) this.#plannerProfileId = this.#plan.modelProfileId;
+					if (this.#plan.provider) this.#plannerVendor = this.#plan.provider;
+				} else if (parsed.kind === "review") {
 					const review = parsed as ReviewArtifactV1;
 					if (review.subject === "plan") this.#planReview = review;
 					else this.#codeReview = review;
-					for (const f of review.findings ?? []) this.#findingTracker.add(f);
+					for (const f of review.findings ?? []) {
+						const blocking =
+							review.subject === "implementation"
+								? typeof f.blocking === "boolean"
+									? f.blocking
+									: FindingTracker.computeBlockingDisposition(f, review, this.#config.confidenceThreshold)
+								: (f.blocking ?? false);
+						this.#findingTracker.add(f, { blocking });
+					}
 				} else if (parsed.kind === "findings-state") {
 					for (const f of parsed.findings ?? []) {
-						this.#findingTracker.add(f);
+						this.#findingTracker.add(f, { blocking: f.blocking });
 						if (f.status === "resolved" || f.status === "rejected") {
 							this.#findingTracker.resolve(f.id, f.status);
 						}
@@ -983,11 +1048,27 @@ export class WorkflowEngine {
 		workflowId: string,
 		attemptId: string,
 		usage: unknown,
+		evidence?: WorkflowRuntimeEvidence,
 	): Promise<void> {
 		const profileId = this.#lastRouteProfileId;
 		this.#budgetLedger.recordRequest(usage as never, profileId);
+		if (evidence?.toolCalls && evidence.toolCalls > 0) {
+			this.#budgetLedger.recordToolCalls(evidence.toolCalls);
+		}
 		if (profileId) {
 			await this.#store.setAttemptProfile(workflowId, attemptId, profileId);
+		}
+		if (evidence?.resolvedProvider || evidence?.resolvedModel) {
+			await this.#persistArtifact(workflowId, attemptId, "runtime-evidence", {
+				kind: "runtime-evidence",
+				schemaVersion: 1,
+				workflowId,
+				attemptId,
+				resolvedProvider: evidence.resolvedProvider,
+				resolvedModel: evidence.resolvedModel,
+				toolCalls: evidence.toolCalls,
+				profileId,
+			});
 		}
 		await this.#persistRoutingAudit(workflowId, attemptId);
 	}

@@ -60,4 +60,40 @@ describe("ImplementationVerifyStage patch content", () => {
 		const files = changedFilesFromPatch("diff --git a/foo.ts b/foo.ts\n+++ b/foo.ts\n+hi\n");
 		expect(files).toContain("foo.ts");
 	});
+
+	it("fails closed when branch mode has no readable patch evidence", async () => {
+		let verifyCalls = 0;
+		const verifier: VerifierPort = {
+			async verify() {
+				verifyCalls += 1;
+				return {
+					kind: "verification",
+					passed: true,
+					checks: [],
+					schemaVersion: 1,
+					workflowId: "wf1",
+					attemptId: "a1",
+					stage: "implementation_verify",
+					createdAt: new Date().toISOString(),
+				};
+			},
+		};
+
+		const stage = new ImplementationVerifyStage(verifier);
+		const result = await stage.execute({
+			workflowId: "wf1",
+			attemptId: "a1",
+			implementation: implArtifact({
+				patchPath: undefined,
+				branchName: "wf/branch-only",
+				changedFiles: ["src/model-reported-only.ts"],
+			}),
+			commands: [],
+			cwd: dir,
+		});
+
+		expect(result.passed).toBe(false);
+		expect(result.checks[0]?.id).toBe("isolation-artifact");
+		expect(verifyCalls).toBe(0);
+	});
 });

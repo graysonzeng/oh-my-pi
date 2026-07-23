@@ -43,4 +43,12 @@ describe("FindingTracker", () => {
 		expect(tracker.getById("f1")?.status).toBe("resolved");
 		expect(tracker.getOpen().length).toBe(0);
 	});
+
+	it("normalizes newly added findings to open and preserves engine blocking metadata", () => {
+		const tracked = tracker.add(finding({ id: "f-engine", summary: "reported fixed", status: "resolved" }), {
+			blocking: true,
+		});
+		expect(tracked.status).toBe("open");
+		expect(tracked.blocking).toBe(true);
+	});
 });

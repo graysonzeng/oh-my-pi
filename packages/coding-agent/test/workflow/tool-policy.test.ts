@@ -1,7 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { RuntimeAdapter, type StructuredRunnerResult } from "../../src/workflow/runtime-adapter";
 import {
+	assertWorkflowCommandAllowed,
+	assertWorkflowPathAllowed,
 	isReadonlyWorkflowRole,
 	READONLY_TOOLS,
 	ToolPolicyFactory,
@@ -44,6 +49,16 @@ function baseRequest(
 }
 
 describe("Workflow tool policy (readonly planning)", () => {
+	let dir: string;
+
+	beforeEach(async () => {
+		dir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-tool-policy-"));
+	});
+
+	afterEach(async () => {
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
 	it("classifies planner and reviewers as readonly", () => {
 		expect(isReadonlyWorkflowRole("planner")).toBe(true);
 		expect(isReadonlyWorkflowRole("plan_reviewer")).toBe(true);
@@ -170,5 +185,46 @@ describe("Workflow tool policy (readonly planning)", () => {
 		expect(seenTools).toContain("edit");
 		expect(seenTools).toContain("write");
 		expect(seenTools).not.toContain("task");
+	});
+
+	it("rejects forbidden workflow write paths after repo-relative normalization", async () => {
+		expect(() =>
+			assertWorkflowPathAllowed(path.join(dir, "nested/../package.json"), {
+				repoRoot: dir,
+				forbiddenPaths: ["package.json"],
+			}),
+		).toThrow(/forbidden|workflow/i);
+	});
+
+	it("rejects workflow bash commands outside the allowlist", () => {
+		expect(() =>
+			assertWorkflowCommandAllowed("echo not-allowed", {
+				allowedCommands: ["bun test", "bun check"],
+			}),
+		).toThrow(/forbidden|workflow|policy/i);
+	});
+
+	it("rejects shell-chained commands that only prefix-match an allowlisted entry", () => {
+		expect(() =>
+			assertWorkflowCommandAllowed("bun test; rm -rf /", {
+				allowedCommands: ["bun test", "bun check"],
+			}),
+		).toThrow(/forbidden|workflow|policy/i);
+		expect(() =>
+			assertWorkflowCommandAllowed("bun test && rm -rf /", {
+				allowedCommands: ["bun test"],
+			}),
+		).toThrow(/forbidden|workflow|policy/i);
+		expect(() =>
+			assertWorkflowCommandAllowed("bun test $(rm -rf /)", {
+				allowedCommands: ["bun test"],
+			}),
+		).toThrow(/forbidden|workflow|policy/i);
+		// Safe trailing args remain allowed.
+		expect(() =>
+			assertWorkflowCommandAllowed("bun test packages/coding-agent/test/workflow", {
+				allowedCommands: ["bun test"],
+			}),
+		).not.toThrow();
 	});
 });

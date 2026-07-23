@@ -21,7 +21,7 @@ export const DEFAULT_MODEL_PROFILES = {
 		maxRuntimeMs: 300_000,
 		retryPolicy: {
 			maxAttempts: 2,
-			retryableErrorKinds: ["timeout", "rate_limit"],
+			retryableErrorKinds: ["timeout", "rate_limit", "authentication", "provider_transient"],
 			fallbackProfileIds: ["gpt_planner"],
 		},
 		contextPolicy: { ...baseContext },
@@ -36,7 +36,11 @@ export const DEFAULT_MODEL_PROFILES = {
 		toolPolicyId: "readonly-planning",
 		maxRequests: 50,
 		maxRuntimeMs: 300_000,
-		retryPolicy: { maxAttempts: 2, retryableErrorKinds: ["timeout", "rate_limit"], fallbackProfileIds: [] },
+		retryPolicy: {
+			maxAttempts: 2,
+			retryableErrorKinds: ["timeout", "rate_limit", "authentication", "provider_transient"],
+			fallbackProfileIds: [],
+		},
 		contextPolicy: { ...baseContext },
 	},
 	claude_plan_reviewer: {
@@ -49,7 +53,11 @@ export const DEFAULT_MODEL_PROFILES = {
 		toolPolicyId: "readonly-review",
 		maxRequests: 50,
 		maxRuntimeMs: 180_000,
-		retryPolicy: { maxAttempts: 2, retryableErrorKinds: ["timeout"], fallbackProfileIds: ["gpt_plan_reviewer"] },
+		retryPolicy: {
+			maxAttempts: 2,
+			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
+			fallbackProfileIds: ["gpt_plan_reviewer"],
+		},
 		contextPolicy: { ...baseContext, includeFullTranscript: false },
 	},
 	gpt_plan_reviewer: {
@@ -62,7 +70,11 @@ export const DEFAULT_MODEL_PROFILES = {
 		toolPolicyId: "readonly-review",
 		maxRequests: 50,
 		maxRuntimeMs: 180_000,
-		retryPolicy: { maxAttempts: 2, retryableErrorKinds: ["timeout"], fallbackProfileIds: [] },
+		retryPolicy: {
+			maxAttempts: 2,
+			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
+			fallbackProfileIds: [],
+		},
 		contextPolicy: { ...baseContext, includeFullTranscript: false },
 	},
 	grok_implementer: {
@@ -94,7 +106,11 @@ export const DEFAULT_MODEL_PROFILES = {
 		toolPolicyId: "readonly-review",
 		maxRequests: 50,
 		maxRuntimeMs: 180_000,
-		retryPolicy: { maxAttempts: 2, retryableErrorKinds: ["timeout"], fallbackProfileIds: ["gpt_reviewer"] },
+		retryPolicy: {
+			maxAttempts: 2,
+			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
+			fallbackProfileIds: ["gpt_reviewer"],
+		},
 		contextPolicy: { ...baseContext, maxArtifactBytes: 2 * 1024 * 1024 },
 	},
 	gpt_reviewer: {
@@ -107,7 +123,11 @@ export const DEFAULT_MODEL_PROFILES = {
 		toolPolicyId: "readonly-review",
 		maxRequests: 50,
 		maxRuntimeMs: 180_000,
-		retryPolicy: { maxAttempts: 2, retryableErrorKinds: ["timeout"], fallbackProfileIds: [] },
+		retryPolicy: {
+			maxAttempts: 2,
+			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
+			fallbackProfileIds: [],
+		},
 		contextPolicy: { ...baseContext, maxArtifactBytes: 2 * 1024 * 1024 },
 	},
 	grok_repair: {
@@ -120,7 +140,11 @@ export const DEFAULT_MODEL_PROFILES = {
 		toolPolicyId: "scoped-repair",
 		maxRequests: 100,
 		maxRuntimeMs: 300_000,
-		retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: ["claude_repair"] },
+		retryPolicy: {
+			maxAttempts: 1,
+			retryableErrorKinds: ["authentication", "provider_transient"],
+			fallbackProfileIds: ["claude_repair"],
+		},
 		contextPolicy: {
 			includePlan: true,
 			includeReviewFindings: true,
@@ -139,7 +163,11 @@ export const DEFAULT_MODEL_PROFILES = {
 		toolPolicyId: "scoped-repair",
 		maxRequests: 50,
 		maxRuntimeMs: 300_000,
-		retryPolicy: { maxAttempts: 2, retryableErrorKinds: ["timeout"], fallbackProfileIds: ["gpt_repair"] },
+		retryPolicy: {
+			maxAttempts: 2,
+			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
+			fallbackProfileIds: ["gpt_repair"],
+		},
 		contextPolicy: {
 			includePlan: true,
 			includeReviewFindings: true,
@@ -158,7 +186,11 @@ export const DEFAULT_MODEL_PROFILES = {
 		toolPolicyId: "scoped-repair",
 		maxRequests: 50,
 		maxRuntimeMs: 300_000,
-		retryPolicy: { maxAttempts: 2, retryableErrorKinds: ["timeout"], fallbackProfileIds: [] },
+		retryPolicy: {
+			maxAttempts: 2,
+			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
+			fallbackProfileIds: [],
+		},
 		contextPolicy: {
 			includePlan: true,
 			includeReviewFindings: true,
@@ -180,9 +212,11 @@ export interface WorkflowDefaultConfig {
 	confidenceThreshold: number;
 	requireIndependentReview: boolean;
 	isolation: { merge: "patch" | "branch"; apply: boolean };
+	/** Hard timeout for each verification command (ms). */
+	verificationTimeoutMs: number;
 	verificationCommands: string[];
 	forbiddenPaths: string[];
-	profiles: typeof DEFAULT_MODEL_PROFILES;
+	profiles: typeof DEFAULT_MODEL_PROFILES | Record<string, ModelProfile>;
 }
 
 export function getDefaultConfig(): WorkflowDefaultConfig {
@@ -196,7 +230,9 @@ export function getDefaultConfig(): WorkflowDefaultConfig {
 		confidenceThreshold: 0.6,
 		requireIndependentReview: true,
 		isolation: { merge: "patch", apply: true },
-		verificationCommands: ["bun test", "bun check"],
+		verificationTimeoutMs: 120_000,
+		// Prefer trusted repo checks + focused commands; full `bun test` is opt-in via settings.
+		verificationCommands: ["git diff --check", "bun check"],
 		forbiddenPaths: ["node_modules", "dist", "build", ".git"],
 		profiles: DEFAULT_MODEL_PROFILES,
 	};

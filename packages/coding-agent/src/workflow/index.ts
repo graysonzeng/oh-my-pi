@@ -10,6 +10,7 @@ export * from "./model-profile-registry";
 export * from "./model-router";
 export * from "./runtime-adapter";
 export * from "./schemas";
+export * from "./session-config";
 export * from "./sqlite-store";
 export * from "./tool-policy";
 export * from "./transitions";

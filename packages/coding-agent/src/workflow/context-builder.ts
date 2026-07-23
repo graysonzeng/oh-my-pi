@@ -26,7 +26,7 @@ export function renderContextTemplate(template: string, vars: Record<string, str
 	});
 	// {{name}}
 	out = out.replace(/\{\{(\w+)\}\}/g, (_m, name: string) => vars[name] ?? "");
-	return out.replace(/\n{3,}/g, "\n\n").trim() + "\n";
+	return `${out.replace(/\n{3,}/g, "\n\n").trim()}\n`;
 }
 
 /**

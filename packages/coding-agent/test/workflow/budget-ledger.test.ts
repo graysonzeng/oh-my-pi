@@ -59,6 +59,25 @@ describe("BudgetLedger", () => {
 		expect(led.checkProfileBudget("p2", { maxRequests: 2 })).toBe(true);
 	});
 
+	it("restores per-profile request and cost gates from a snapshot", () => {
+		const original = new BudgetLedger({ limitUsd: 100, maxRequests: 100 });
+		original.recordRequest(
+			{
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0.5, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.5 },
+			},
+			"limited",
+		);
+		const restored = new BudgetLedger({ limitUsd: 100, maxRequests: 100 });
+		restored.restore(original.snapshot());
+		expect(restored.checkProfileBudget("limited", { maxRequests: 1 })).toBe(false);
+		expect(restored.checkProfileBudget("limited", { maxCostUsd: 0.5 })).toBe(false);
+	});
+
 	it("pre-stage and pre-retry hard-stop on limits", async () => {
 		expect(await ledger.checkPreStage()).toBe(true);
 		ledger.recordRepairCycle();

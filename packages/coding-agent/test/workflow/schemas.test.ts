@@ -115,6 +115,23 @@ describe("Workflow schemas", () => {
 		).toThrow();
 	});
 
+	it("accepts engine-owned blocking and resolution evidence metadata", () => {
+		const parsed = ReviewFindingSchema.parse({
+			id: "f-engine",
+			priority: "P2",
+			category: "correctness",
+			status: "resolved",
+			confidence: 0.9,
+			summary: "fixed by engine repair",
+			explanation: "repair artifact addressed it",
+			suggestedOwner: "implementer",
+			blocking: true,
+			resolutionEvidence: ["repair:att_2"],
+		});
+		expect(parsed.blocking).toBe(true);
+		expect(parsed.resolutionEvidence).toEqual(["repair:att_2"]);
+	});
+
 	it("rejects unknown keys on strict objects", () => {
 		expect(() => PlanArtifactSchema.parse({ ...validPlan, extraField: true })).toThrow();
 	});

@@ -1,4 +1,5 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
+import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ToolSession } from "../tools";
 
 /** Isolation controls for write stages (mirrors task isolation without importing task). */
@@ -73,6 +74,10 @@ export interface ReviewFindingV1 {
 	file?: string;
 	line?: number;
 	suggestedOwner: "implementer" | "reasoning_repair" | "human";
+	/** Engine-owned disposition captured from the accepted review decision. */
+	blocking?: boolean;
+	/** Engine-owned evidence for resolved/rejected transitions. */
+	resolutionEvidence?: string[];
 }
 
 export interface ReviewArtifactV1 extends ArtifactHeader {
@@ -119,7 +124,7 @@ export interface ModelProfile {
 	vendor: "anthropic" | "openai" | "xai" | string;
 	modelPattern: string | string[];
 	roles: WorkflowRole[];
-	thinkingLevel?: string;
+	thinkingLevel?: ConfiguredThinkingLevel;
 	promptTemplate: string;
 	promptVersion: string;
 	toolPolicyId: string;
@@ -167,6 +172,16 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	usage?: Usage;
 	/** Isolation merge result: true applied, false failed/not applied, null N/A. */
 	changesApplied?: boolean | null;
+	resolvedProvider?: string;
+	resolvedModel?: string;
+	toolCalls?: number;
+}
+
+export interface WorkflowRuntimeEvidence {
+	usage?: Usage;
+	resolvedProvider?: string;
+	resolvedModel?: string;
+	toolCalls?: number;
 }
 
 export interface WorkflowRequest {

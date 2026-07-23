@@ -4,21 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { abortRegisteredWorkflow, registerWorkflowAbort } from "../../src/workflow/abort-registry";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
+import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { WorkflowPolicyError } from "../../src/workflow/errors";
 import { RuntimeAdapter, wrapSessionForWorkflowIsolation } from "../../src/workflow/runtime-adapter";
-import { redactSecretsInText } from "../../src/workflow/secret-redact";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import { RepairStage } from "../../src/workflow/stages/repair";
-import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
-import {
-	fakeSession,
-	implArtifact,
-	passVerifier,
-	planArtifact,
-	reviewArtifact,
-	scriptedRunner,
-} from "./helpers";
+import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
 
 describe("P1 production blockers", () => {
 	let store: WorkflowStore;
@@ -78,11 +70,11 @@ describe("P1 production blockers", () => {
 					id: "raw",
 					structuredOutput: {
 						status: "valid",
-						data: implArtifact({ addressedStepIds: [], patchPath: undefined, branchName: undefined }),
+						data: implArtifact({ addressedStepIds: [], summary: "noop" }),
 					},
-					patchPath: "/tmp/r.patch",
+					patchPath: "patches/x.patch",
+					branchName: "wf/r",
 				},
-				changesApplied: true,
 			})),
 		);
 		const result = await stage.execute({
@@ -91,7 +83,7 @@ describe("P1 production blockers", () => {
 			profile: DEFAULT_MODEL_PROFILES.grok_repair,
 			findingIds: ["f1", "f2"],
 			findings: [],
-			assignment: "repair",
+			assignment: "Repair findings: f1, f2",
 			context: "ctx",
 			session: fakeSession(),
 		});
@@ -106,11 +98,31 @@ describe("P1 production blockers", () => {
 		);
 	});
 
-	it("persist path redacts secrets", () => {
-		const raw = JSON.stringify({ summary: "token=abcdefghijklmnop" });
-		const redacted = redactSecretsInText(raw);
-		expect(redacted).not.toContain("abcdefghijklmnop");
-		expect(redacted).toContain("[REDACTED]");
+	it("persisted artifacts redact secret-like values through the engine store path", async () => {
+		const arts = new ArtifactStore(artifactDir);
+		const engine = new WorkflowEngine({
+			store,
+			session: fakeSession(),
+			adapter: new RuntimeAdapter(
+				scriptedRunner({
+					plan: planArtifact({ summary: "token=abcdefghijklmnop" }),
+					planReview: reviewArtifact("approved", "plan"),
+					implement: implArtifact(),
+					codeReview: reviewArtifact("approved", "implementation"),
+				}),
+			),
+			verifier: passVerifier(),
+			artifactStore: arts,
+		});
+		const id = await engine.startWorkflow({ request: "redact" });
+		await engine.run(id);
+		const snap = await store.resumeFromPersistedState(id);
+		const planMeta = snap?.artifacts.find(a => a.kind === "plan");
+		expect(planMeta).toBeDefined();
+		const loaded = await arts.load(planMeta!.relativePath, planMeta!.sha256);
+		expect(loaded?.content).toBeDefined();
+		expect(loaded?.content).not.toContain("abcdefghijklmnop");
+		expect(loaded?.content).toContain("[REDACTED]");
 	});
 
 	it("abort registry signals registered controllers", () => {
@@ -159,7 +171,7 @@ describe("P1 production blockers", () => {
 				scriptedRunner({
 					plan: planArtifact(),
 					planReview: reviewArtifact("approved", "plan"),
-					implement: implArtifact({ branchName: "b", patchPath: undefined }),
+					implement: implArtifact(),
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
@@ -185,11 +197,10 @@ describe("P1 production blockers", () => {
 				scriptedRunner({
 					plan: planArtifact(),
 					planReview: reviewArtifact("approved", "plan"),
-					implement: implArtifact({ branchName: "b", patchPath: undefined }),
+					implement: implArtifact(),
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			// Leave verifier default so constructor picks session.cwd — then override spawn via custom:
 			verifier: {
 				async verify(a, commands) {
 					spawnedCwd.push(tmp); // session cwd should be used by engine wiring in production
@@ -216,5 +227,25 @@ describe("P1 production blockers", () => {
 		await engine.run(id);
 		expect(session.cwd).toBe(tmp);
 		await fs.rm(tmp, { recursive: true, force: true });
+	});
+
+	it("accumulates runtime toolCalls into the budget ledger snapshot", async () => {
+		const engine = new WorkflowEngine({
+			store,
+			session: fakeSession(),
+			adapter: new RuntimeAdapter(
+				scriptedRunner({
+					plan: planArtifact(),
+					planReview: reviewArtifact("approved", "plan"),
+					implement: implArtifact(),
+					codeReview: reviewArtifact("approved", "implementation"),
+				}),
+			),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+		});
+		const id = await engine.startWorkflow({ request: "toolcalls" });
+		await engine.run(id);
+		expect(engine.budgetSnapshot().toolCalls).toBeGreaterThan(0);
 	});
 });

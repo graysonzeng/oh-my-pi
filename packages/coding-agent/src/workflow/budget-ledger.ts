@@ -14,6 +14,11 @@ export interface BudgetSnapshot {
 	stageTimeMs: number;
 	repairCycles: number;
 	reviewerCycles: number;
+	profiles: Array<{
+		profileId: string;
+		requests: number;
+		costUsd: number | null;
+	}>;
 }
 
 export interface BudgetLimits {
@@ -163,6 +168,14 @@ export class BudgetLedger {
 		if (snapshot.stageTimeMs !== undefined) this.#stageTimeMs = snapshot.stageTimeMs;
 		if (snapshot.repairCycles !== undefined) this.#repairCycles = snapshot.repairCycles;
 		if (snapshot.reviewerCycles !== undefined) this.#reviewerCycles = snapshot.reviewerCycles;
+		if (snapshot.profiles) {
+			this.#profileRequests.clear();
+			this.#profileCost.clear();
+			for (const profile of snapshot.profiles) {
+				this.#profileRequests.set(profile.profileId, profile.requests);
+				this.#profileCost.set(profile.profileId, profile.costUsd);
+			}
+		}
 	}
 
 	snapshot(): BudgetSnapshot {
@@ -179,6 +192,11 @@ export class BudgetLedger {
 			stageTimeMs: this.#stageTimeMs,
 			repairCycles: this.#repairCycles,
 			reviewerCycles: this.#reviewerCycles,
+			profiles: [...this.#profileRequests.entries()].map(([profileId, requests]) => ({
+				profileId,
+				requests,
+				costUsd: this.#profileCost.has(profileId) ? (this.#profileCost.get(profileId) ?? null) : 0,
+			})),
 		};
 	}
 }

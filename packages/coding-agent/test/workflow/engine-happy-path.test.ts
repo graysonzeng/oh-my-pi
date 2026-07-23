@@ -3,7 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
+import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
+import { WorkflowPolicyError } from "../../src/workflow/errors";
+import { assertSupportedModelProfile } from "../../src/workflow/model-profile-registry";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
@@ -53,5 +56,74 @@ describe("WorkflowEngine happy path", () => {
 
 	it("reports available budget", async () => {
 		expect(await engine.budgetCheckPreStage()).toBe(true);
+	});
+
+	it("constructs router from configured profiles so custom planner routing is used", async () => {
+		const customPlanner = {
+			...DEFAULT_MODEL_PROFILES.claude_planner,
+			id: "custom_planner",
+			modelPattern: ["custom-planner-model"],
+			retryPolicy: {
+				maxAttempts: 1,
+				retryableErrorKinds: [],
+				fallbackProfileIds: [],
+			},
+		};
+		const seenModels: string[] = [];
+		const customEngine = new WorkflowEngine({
+			store,
+			config: {
+				profiles: {
+					...DEFAULT_MODEL_PROFILES,
+					claude_planner: customPlanner,
+				},
+			},
+			adapter: new RuntimeAdapter(async request => {
+				if (request.agent === "designer" || request.agent === "planner") {
+					const model = Array.isArray(request.model) ? request.model[0] : request.model;
+					seenModels.push(String(model));
+					return {
+						result: {
+							id: "raw-plan",
+							structuredOutput: { status: "valid", data: planArtifact() },
+						},
+					};
+				}
+				throw new Error(`unexpected agent ${request.agent}`);
+			}),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+		});
+		const id = await customEngine.startWorkflow({ request: "custom profiles" });
+		await customEngine.resume(id, { singleStep: true }); // created → planning
+		await customEngine.resume(id, { singleStep: true }); // run planning
+		expect(seenModels).toContain("custom-planner-model");
+		expect(customEngine.routingAudit.some(a => a.profileId === "custom_planner")).toBe(true);
+	});
+
+	it("rejects unsupported model profile fields at construction", () => {
+		expect(() =>
+			assertSupportedModelProfile({
+				...DEFAULT_MODEL_PROFILES.grok_implementer,
+				toolAliases: { bash: "shell" },
+			}),
+		).toThrow(WorkflowPolicyError);
+		expect(
+			() =>
+				new WorkflowEngine({
+					store,
+					config: {
+						profiles: {
+							...DEFAULT_MODEL_PROFILES,
+							grok_implementer: {
+								...DEFAULT_MODEL_PROFILES.grok_implementer,
+								maxInputTokens: 1000,
+							},
+						},
+					},
+					session: fakeSession(),
+				}),
+		).toThrow(/unsupported_model_profile_field/);
 	});
 });

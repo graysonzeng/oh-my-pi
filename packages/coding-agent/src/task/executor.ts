@@ -1969,6 +1969,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		durationMs: Date.now() - args.startTime,
 		tokens: progress.tokens,
 		requests: progress.requests,
+		toolCalls: progress.toolCount,
 		contextTokens: progress.contextTokens,
 		contextWindow: progress.contextWindow,
 		modelOverride,

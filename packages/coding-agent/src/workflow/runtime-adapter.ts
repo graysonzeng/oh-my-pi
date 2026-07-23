@@ -1,10 +1,10 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { ToolSession } from "../tools";
 import codeReviewerPrompt from "../prompts/workflow/code-reviewer.md" with { type: "text" };
 import implementerPrompt from "../prompts/workflow/implementer.md" with { type: "text" };
 import planReviewerPrompt from "../prompts/workflow/plan-reviewer.md" with { type: "text" };
 import plannerPrompt from "../prompts/workflow/planner.md" with { type: "text" };
 import repairPrompt from "../prompts/workflow/repair.md" with { type: "text" };
+import type { ToolSession } from "../tools";
 import {
 	WorkflowCancelledError,
 	WorkflowError,
@@ -38,6 +38,7 @@ export interface StructuredRunnerRequest {
 	context?: string;
 	agent?: string;
 	model?: string | string[];
+	thinkingLevel?: WorkflowAgentRequest["profile"]["thinkingLevel"];
 	outputSchema?: unknown;
 	schemaMode?: "permissive" | "strict";
 	isolation?: WorkflowIsolationControls;
@@ -67,6 +68,8 @@ export interface StructuredRunnerResult {
 		exitCode?: number;
 		error?: string;
 		aborted?: boolean;
+		resolvedModel?: string;
+		toolCalls?: number;
 	};
 	/** Whether isolated changes were applied to the main worktree. null when N/A. */
 	changesApplied?: boolean | null;
@@ -169,6 +172,17 @@ export class RuntimeAdapter implements RuntimePort {
 		session = wrapSessionForWorkflowIsolation(session, isolationRequested);
 
 		const policyFactory = new ToolPolicyFactory();
+		const policy = policyFactory.getPolicyForRole(request.role);
+		if (!policy.readonly) {
+			session = {
+				...session,
+				workflowWritePolicy: {
+					repoRoot: request.session.cwd,
+					forbiddenPaths: [...policy.forbiddenPaths],
+				},
+				workflowCommandPolicy: { allowedCommands: [...policy.allowedCommands] },
+			};
+		}
 		const allowedTools = policyFactory.allowedToolsForRole(request.role);
 		// Honor profile.disabledTools by filtering allowlist when present.
 		const disabled = new Set(request.profile.disabledTools ?? []);
@@ -182,6 +196,7 @@ export class RuntimeAdapter implements RuntimePort {
 			context,
 			agent: RuntimeAdapter.agentNameForRole(request.role),
 			model: request.profile.modelPattern,
+			thinkingLevel: request.profile.thinkingLevel,
 			outputSchema: request.outputSchema,
 			schemaMode: "strict",
 			isolation,
@@ -227,6 +242,7 @@ export class RuntimeAdapter implements RuntimePort {
 					{ status: structured?.status },
 				);
 			}
+			const resolved = parseResolvedModel(body.resolvedModel);
 			return {
 				artifact: structured.data as TArtifact,
 				rawResultId: body.id,
@@ -235,6 +251,9 @@ export class RuntimeAdapter implements RuntimePort {
 				branchName: body.branchName,
 				usage: body.usage,
 				changesApplied: result.changesApplied ?? null,
+				resolvedProvider: resolved?.provider,
+				resolvedModel: resolved?.model,
+				toolCalls: body.toolCalls,
 			};
 		} catch (error) {
 			throw this.#normalizeError(error);
@@ -268,4 +287,15 @@ export class RuntimeAdapter implements RuntimePort {
 		}
 		return new WorkflowError(message, this.#classifyErrorKind(message), { cause: error });
 	}
+}
+
+function parseResolvedModel(value: string | undefined): { provider: string; model: string } | undefined {
+	if (!value) return undefined;
+	const slash = value.indexOf("/");
+	if (slash <= 0 || slash === value.length - 1) return undefined;
+	const provider = value.slice(0, slash);
+	const selector = value.slice(slash + 1);
+	const thinkingSuffix = selector.lastIndexOf(":");
+	const model = thinkingSuffix > 0 ? selector.slice(0, thinkingSuffix) : selector;
+	return { provider, model };
 }

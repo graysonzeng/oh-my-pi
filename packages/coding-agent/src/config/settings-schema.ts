@@ -4108,12 +4108,44 @@ export const SETTINGS_SCHEMA = {
 	},
 	"workflow.verificationCommands": {
 		type: "array",
-		default: ["bun test", "bun check"],
+		default: ["git diff --check", "bun check"],
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Workflow Verification Commands",
-			description: "Deterministic commands run after implementation and before completion",
+			description:
+				"Trusted deterministic checks after implementation (prefer repo checks + focused tests; full suite is opt-in)",
+		},
+	},
+	"workflow.verificationTimeoutMs": {
+		type: "number",
+		default: 120_000,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Verification Timeout (ms)",
+			description: "Hard timeout per verification command before the workflow fails the check",
+		},
+	},
+	"workflow.maxPlanCycles": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Max Plan Cycles",
+			description: "Bounded plan rejection / replan loops before the workflow blocks",
+		},
+	},
+	"workflow.profiles": {
+		type: "record",
+		default: {} as Record<string, unknown>,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Model Profiles",
+			description:
+				"Optional model profile map overriding workflow defaults (empty uses built-in planner/reviewer/implementer/repair profiles)",
 		},
 	},
 

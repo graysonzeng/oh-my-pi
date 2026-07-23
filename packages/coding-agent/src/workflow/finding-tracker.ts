@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import type { ReviewFindingV1 } from "./types";
+import type { ReviewArtifactV1, ReviewFindingV1 } from "./types";
 
 export type FindingEscalation = "first_repair" | "reasoning" | "block";
 
@@ -17,6 +16,21 @@ export class FindingTracker {
 	/** fingerprint → number of times observed across repair cycles */
 	readonly #cycleCounts = new Map<string, number>();
 
+	/**
+	 * Engine disposition from review decision (ignores model-supplied `blocking`).
+	 * High-confidence P0/P1, or any finding under `changes_requested`.
+	 */
+	static computeBlockingDisposition(
+		finding: Pick<ReviewFindingV1, "priority" | "confidence">,
+		review: Pick<ReviewArtifactV1, "decision">,
+		confidenceThreshold: number,
+	): boolean {
+		return (
+			finding.confidence >= confidenceThreshold &&
+			(finding.priority === "P0" || finding.priority === "P1" || review.decision === "changes_requested")
+		);
+	}
+
 	static fingerprint(finding: Pick<ReviewFindingV1, "category" | "summary" | "file" | "line">): string {
 		const normalized = [
 			finding.category,
@@ -24,14 +38,17 @@ export class FindingTracker {
 			finding.line ?? "",
 			finding.summary.trim().toLowerCase().replace(/\s+/g, " "),
 		].join("|");
-		return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+		return new Bun.CryptoHasher("sha256").update(normalized).digest("hex").slice(0, 16);
 	}
 
-	add(finding: ReviewFindingV1): TrackedFinding {
+	add(finding: ReviewFindingV1, options: { blocking?: boolean } = {}): TrackedFinding {
 		const fingerprint = FindingTracker.fingerprint(finding);
 		const existing = this.#findings.get(finding.id);
 		const tracked: TrackedFinding = {
 			...finding,
+			status: "open",
+			blocking: options.blocking ?? finding.blocking ?? existing?.blocking ?? false,
+			resolutionEvidence: undefined,
 			fingerprint,
 			repairCycles: existing?.repairCycles ?? 0,
 		};
@@ -51,9 +68,12 @@ export class FindingTracker {
 		return this.getAll().filter(f => f.status === "open" || f.status === "in_progress");
 	}
 
-	resolve(id: string, status: "resolved" | "rejected" = "resolved"): void {
+	resolve(id: string, status: "resolved" | "rejected" = "resolved", evidence: string[] = ["engine:explicit"]): void {
 		const f = this.#findings.get(id);
-		if (f) f.status = status;
+		if (f && evidence.length > 0) {
+			f.status = status;
+			f.resolutionEvidence = [...evidence];
+		}
 	}
 
 	/** Record that a repair cycle touched this fingerprint (or finding id). */

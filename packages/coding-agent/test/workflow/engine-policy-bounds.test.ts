@@ -188,27 +188,15 @@ describe("WorkflowEngine policy bounds regressions", () => {
 
 	it("final_verify ignores open P1 findings below confidence threshold", async () => {
 		const stage = new FinalVerifyStage(passVerifier());
-		const threshold = 0.6;
-		const findings: ReviewFindingV1[] = [
-			finding({ id: "low", priority: "P1", confidence: 0.2, status: "open" }),
-			finding({ id: "high", priority: "P1", confidence: 0.9, status: "open" }),
-		];
-		// Same filter the engine applies before calling FinalVerifyStage
-		const engineFilter = (list: ReviewFindingV1[]) =>
-			list.filter(
-				f =>
-					(f.status === "open" || f.status === "in_progress") &&
-					f.confidence >= threshold &&
-					(f.priority === "P0" || f.priority === "P1"),
-			);
-		expect(engineFilter(findings).map(f => f.id)).toEqual(["high"]);
-		expect(engineFilter([findings[0]!])).toEqual([]);
+		// Engine passes only findings marked blocking=true (confidence/priority already applied at intake).
+		const advisory = finding({ id: "low", priority: "P1", confidence: 0.2, status: "open", blocking: false });
+		const blocking = finding({ id: "high", priority: "P1", confidence: 0.9, status: "open", blocking: true });
 
 		const advisoryPass = await stage.execute({
 			workflowId: "wf",
 			attemptId: "att-low",
 			commands: [],
-			openFindings: engineFilter([findings[0]!]),
+			openFindings: [advisory],
 			implementation: implArtifact({ branchName: "wf/x", patchPath: undefined }),
 		});
 		expect(advisoryPass.passed).toBe(true);
@@ -218,7 +206,7 @@ describe("WorkflowEngine policy bounds regressions", () => {
 			workflowId: "wf",
 			attemptId: "att-high",
 			commands: [],
-			openFindings: engineFilter(findings),
+			openFindings: [blocking],
 			implementation: implArtifact({ branchName: "wf/x", patchPath: undefined }),
 		});
 		expect(blockingFail.passed).toBe(false);
@@ -247,6 +235,102 @@ describe("WorkflowEngine policy bounds regressions", () => {
 		const workflowId = await engine.startWorkflow({ request: "advisory finding" });
 		const result = await engine.run(workflowId);
 		expect(result.state.status).toBe("completed");
+	});
+
+	it("final verify fails closed on unresolved blocking P2 findings from accepted review flow", async () => {
+		let reviewCount = 0;
+		const blockingP2 = finding({
+			id: "p2-blocking",
+			priority: "P2",
+			confidence: 0.95,
+			summary: "blocking correctness defect",
+		});
+		const engine = new WorkflowEngine({
+			store,
+			config: { maxRepairCycles: 1 },
+			adapter: new RuntimeAdapter(
+				scriptedRunner({
+					plan: planArtifact(),
+					planReview: reviewArtifact("approved", "plan"),
+					implement: implArtifact(),
+					codeReview: () => {
+						reviewCount += 1;
+						return reviewCount === 1
+							? reviewArtifact("changes_requested", "implementation", [blockingP2])
+							: reviewArtifact("approved", "implementation", []);
+					},
+					repair: implArtifact({
+						addressedStepIds: [],
+						summary: "repair skipped the blocking P2 finding",
+					}),
+				}),
+			),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+		});
+
+		const workflowId = await engine.startWorkflow({ request: "do not complete with open blocking P2" });
+		await engine.run(workflowId).catch(() => {});
+		const finalState = await engine.getState(workflowId);
+		expect(finalState?.status).toBe("blocked");
+	});
+
+	it("cross-Engine resume still blocks on open blocking P2 before findings-state repair write", async () => {
+		let reviewCount = 0;
+		const blockingP2 = finding({
+			id: "p2-blocking-resume",
+			priority: "P2",
+			confidence: 0.95,
+			summary: "blocking P2 must survive hydrate",
+		});
+		const dbPath = path.join(os.tmpdir(), `wf-p2-resume-${crypto.randomUUID()}.db`);
+		const mk = (s: WorkflowStore) =>
+			new WorkflowEngine({
+				store: s,
+				config: { maxRepairCycles: 1 },
+				adapter: new RuntimeAdapter(
+					scriptedRunner({
+						plan: planArtifact(),
+						planReview: reviewArtifact("approved", "plan"),
+						implement: implArtifact(),
+						codeReview: () => {
+							reviewCount += 1;
+							return reviewCount === 1
+								? reviewArtifact("changes_requested", "implementation", [blockingP2])
+								: reviewArtifact("approved", "implementation", []);
+						},
+						repair: implArtifact({
+							addressedStepIds: [],
+							summary: "repair skipped the blocking P2 finding",
+						}),
+					}),
+				),
+				verifier: passVerifier(),
+				artifactStore: new ArtifactStore(artifactDir),
+				session: fakeSession(),
+			});
+
+		let fileStore = new WorkflowStore(dbPath);
+		const engine1 = mk(fileStore);
+		const workflowId = await engine1.startWorkflow({ request: "resume blocking P2" });
+		// Advance until first code_review lands in repairing (no findings-state yet).
+		for (let i = 0; i < 20; i++) {
+			const status = (await engine1.getState(workflowId))?.status;
+			if (status === "repairing") break;
+			await engine1.resume(workflowId, { singleStep: true });
+		}
+		expect((await engine1.getState(workflowId))?.status).toBe("repairing");
+		fileStore.close();
+
+		fileStore = new WorkflowStore(dbPath);
+		const engine2 = mk(fileStore);
+		await engine2.resume(workflowId).catch(() => {});
+		const finalState = await engine2.getState(workflowId);
+		expect(finalState?.status).toBe("blocked");
+		expect(finalState?.status).not.toBe("completed");
+		fileStore.close();
+		await fs.rm(dbPath, { force: true });
 	});
 
 	it("maxPlanCycles hard-stops after bounded plan rejections", async () => {

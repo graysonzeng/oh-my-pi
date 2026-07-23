@@ -1,9 +1,13 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ArtifactIntegrityError } from "./errors";
 import type { Artifact } from "./types";
+
+function isMissingFile(err: unknown): boolean {
+	return typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code === "ENOENT";
+}
 
 /** Default outside the repo so artifacts never pollute git status. */
 export function defaultWorkflowArtifactDir(): string {
@@ -29,8 +33,7 @@ export class ArtifactStore {
 		const sha256 = artifact.sha256 ?? this.computeSha256(content);
 		const relativePath = artifact.relativePath || path.join(artifact.workflowId, `${id}.json`);
 		const filePath = path.join(this.#baseDir, relativePath);
-		await fs.mkdir(path.dirname(filePath), { recursive: true });
-		await fs.writeFile(filePath, content, "utf8");
+		await Bun.write(filePath, content);
 		return {
 			id,
 			workflowId: artifact.workflowId,
@@ -47,7 +50,7 @@ export class ArtifactStore {
 	async load(relativePath: string, expectedSha256?: string): Promise<Artifact | null> {
 		const filePath = path.join(this.#baseDir, relativePath);
 		try {
-			const content = await fs.readFile(filePath, "utf8");
+			const content = await Bun.file(filePath).text();
 			const sha256 = this.computeSha256(content);
 			if (expectedSha256 && sha256 !== expectedSha256) {
 				throw new ArtifactIntegrityError("artifact_hash_mismatch", {
@@ -76,16 +79,13 @@ export class ArtifactStore {
 			};
 		} catch (error) {
 			if (error instanceof ArtifactIntegrityError) throw error;
-			// Only missing files are soft-null; permission/IO failures must surface.
-			if (error && typeof error === "object" && "code" in error && (error as { code: unknown }).code === "ENOENT") {
-				return null;
-			}
+			if (isMissingFile(error)) return null;
 			throw error;
 		}
 	}
 
 	computeSha256(content: string): string {
-		return createHash("sha256").update(content).digest("hex");
+		return new Bun.CryptoHasher("sha256").update(content).digest("hex");
 	}
 
 	async listByWorkflow(workflowId: string): Promise<Artifact[]> {

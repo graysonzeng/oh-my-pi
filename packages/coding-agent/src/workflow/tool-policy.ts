@@ -1,6 +1,52 @@
+import * as path from "node:path";
 import type { PlanModeState } from "../plan-mode/state";
 import type { ToolSession } from "../tools";
+import { WorkflowPolicyError } from "./errors";
 import type { WorkflowRole } from "./types";
+
+export interface WorkflowWritePolicy {
+	repoRoot: string;
+	forbiddenPaths: string[];
+}
+
+export interface WorkflowCommandPolicy {
+	allowedCommands: string[];
+}
+
+export function assertWorkflowPathAllowed(targetPath: string, policy: WorkflowWritePolicy): void {
+	const root = path.resolve(policy.repoRoot);
+	const resolved = path.resolve(root, targetPath);
+	const relative = path.relative(root, resolved);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		throw new WorkflowPolicyError("workflow_path_outside_repo", { path: targetPath });
+	}
+	const normalized = relative.split(path.sep).join("/");
+	const forbidden = policy.forbiddenPaths.some(entry => {
+		const candidate = path.normalize(entry).split(path.sep).join("/").replace(/\/+$/, "");
+		return normalized === candidate || normalized.startsWith(`${candidate}/`);
+	});
+	if (forbidden) {
+		throw new WorkflowPolicyError("workflow_path_forbidden", { path: normalized });
+	}
+}
+
+/** Shell metacharacters that turn a prefix-allowed command into a chain/expansion. */
+const WORKFLOW_COMMAND_SHELL_META = /[;|&`$()<>\n]/;
+
+export function assertWorkflowCommandAllowed(command: string, policy: WorkflowCommandPolicy): void {
+	const normalized = command.trim().replace(/\s+/g, " ");
+	const allowed = policy.allowedCommands.some(entry => {
+		const expected = entry.trim().replace(/\s+/g, " ");
+		if (normalized === expected) return true;
+		if (!normalized.startsWith(`${expected} `)) return false;
+		// Prefix form may only append path-like args — not shell chaining / expansion.
+		if (WORKFLOW_COMMAND_SHELL_META.test(normalized)) return false;
+		return true;
+	});
+	if (!allowed) {
+		throw new WorkflowPolicyError("workflow_command_forbidden", { command: normalized });
+	}
+}
 
 /**
  * Readonly roles must not edit the workspace.

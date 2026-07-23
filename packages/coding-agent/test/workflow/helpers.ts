@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../../src/tools";
 import type { StructuredRunner } from "../../src/workflow/runtime-adapter";
@@ -34,6 +35,17 @@ const usage: Usage = {
 	cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
 };
 
+/** Trusted isolation evidence used by engine verify stages in tests. */
+export const SAMPLE_PATCH =
+	"diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+const x = 1\n";
+
+/** Persist a readable patch under cwd so implementation_verify can fail closed on trust, not ENOENT. */
+export async function materializeSamplePatch(cwd: string, relativePath = "patches/x.patch"): Promise<string> {
+	const full = path.isAbsolute(relativePath) ? relativePath : path.join(cwd, relativePath);
+	await Bun.write(full, SAMPLE_PATCH);
+	return full;
+}
+
 export function planArtifact(overrides: Partial<PlanArtifactV1> = {}): PlanArtifactV1 {
 	return {
 		schemaVersion: 1,
@@ -48,7 +60,7 @@ export function planArtifact(overrides: Partial<PlanArtifactV1> = {}): PlanArtif
 		affectedFiles: [{ path: "src/a.ts", action: "modify", reason: "fix" }],
 		implementationSteps: [{ id: "s1", description: "edit", dependsOn: [] }],
 		acceptanceCriteria: ["tests pass"],
-		verificationCommands: ["echo ok"],
+		verificationCommands: ["git diff --check"],
 		risks: [],
 		rollback: [],
 		...overrides,
@@ -167,13 +179,20 @@ export function scriptedRunner(script: {
 			throw new Error(`unexpected agent ${agent}`);
 		}
 		const impl = data as ImplementationArtifactV1;
+		const patchPath = impl.patchPath;
+		if ((label === "implement" || label === "repair") && patchPath) {
+			const cwd = request.session?.cwd ?? "/tmp";
+			await materializeSamplePatch(cwd, patchPath);
+		}
 		return {
 			result: {
 				id: `raw_${label}`,
 				structuredOutput: { status: "valid", data },
-				patchPath: impl.patchPath,
+				patchPath,
 				branchName: impl.branchName,
 				usage,
+				toolCalls: label === "implement" || label === "repair" ? 3 : undefined,
+				resolvedModel: "xai/grok-code-test",
 			},
 		};
 	};

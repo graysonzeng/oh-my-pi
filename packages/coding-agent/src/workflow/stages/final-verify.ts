@@ -59,7 +59,7 @@ export class FinalVerifyStage {
 
 		const checks = [...base.checks];
 		const openBlocking = (input.openFindings ?? []).filter(
-			f => (f.status === "open" || f.status === "in_progress") && (f.priority === "P0" || f.priority === "P1"),
+			f => (f.status === "open" || f.status === "in_progress") && f.blocking === true,
 		);
 		if (openBlocking.length > 0) {
 			checks.push({

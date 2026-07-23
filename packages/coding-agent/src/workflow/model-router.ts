@@ -24,6 +24,10 @@ export interface RouteOptions {
 	degradedMode?: boolean;
 	/** Profile ids that are currently unavailable. */
 	unavailableProfileIds?: Iterable<string>;
+	/** Profile ids forbidden for this decision (for reviewer diversity). */
+	excludedProfileIds?: Iterable<string>;
+	/** Prefer a different vendor when one is available. */
+	avoidVendor?: string;
 	/** Finding used for repair routing. */
 	finding?: ReviewFindingV1;
 	/** Tracker for repeated/complex escalation. */
@@ -60,7 +64,7 @@ export class ModelRouter {
 	 * Throws WorkflowPolicyError when independent review is required and no alternate vendor exists.
 	 */
 	resolve(role: WorkflowRole, options: RouteOptions = {}): RoutingDecision {
-		const unavailable = new Set(options.unavailableProfileIds ?? []);
+		const unavailable = new Set([...(options.unavailableProfileIds ?? []), ...(options.excludedProfileIds ?? [])]);
 		const preferReasoning =
 			options.preferReasoningRepair ||
 			(options.finding && options.findingTracker
@@ -69,6 +73,10 @@ export class ModelRouter {
 			(options.finding ? options.finding.suggestedOwner === "reasoning_repair" : false);
 
 		let candidates = this.#candidates(role, unavailable);
+		if (options.avoidVendor) {
+			const diverse = candidates.filter(profile => profile.vendor !== options.avoidVendor);
+			if (diverse.length > 0) candidates = diverse;
+		}
 
 		if (role === "repair" && preferReasoning) {
 			const reasoning = candidates.filter(p => p.vendor === "anthropic" || p.vendor === "openai");

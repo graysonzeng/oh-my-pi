@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { RuntimeAdapter, type StructuredRunner, type StructuredRunnerResult } from "../../src/workflow/runtime-adapter";
 import type { WorkflowAgentRequest } from "../../src/workflow/types";
-import { fakeSession } from "./helpers";
+import { fakeSession, implArtifact } from "./helpers";
 
 function baseRequest(signal?: AbortSignal): WorkflowAgentRequest {
 	return {
@@ -129,6 +129,54 @@ describe("RuntimeAdapter", () => {
 		});
 		await adapter.run(baseRequest());
 		expect(seenAgent).toBe("task"); // implementer → task
+	});
+
+	it("attaches workflow-scoped write and command policy to write stages", async () => {
+		let seenSession: WorkflowAgentRequest["session"] | undefined;
+		const adapter = new RuntimeAdapter(async req => {
+			seenSession = req.session;
+			return okResult(implArtifact());
+		});
+		await adapter.run(baseRequest());
+		const policySession = seenSession as WorkflowAgentRequest["session"] & {
+			workflowWritePolicy?: { repoRoot: string; forbiddenPaths: string[] };
+			workflowCommandPolicy?: { allowedCommands: string[] };
+		};
+		expect(policySession.workflowWritePolicy).toMatchObject({
+			repoRoot: "/tmp",
+			forbiddenPaths: expect.arrayContaining(["package.json", "bun.lock"]),
+		});
+		expect(policySession.workflowCommandPolicy?.allowedCommands).toEqual(
+			expect.arrayContaining(["bun test", "bun check", "biome check"]),
+		);
+	});
+
+	it("reports resolved runtime model and tool-call usage without trusting artifact claims", async () => {
+		const adapter = new RuntimeAdapter(async () => ({
+			result: {
+				id: "resolved",
+				structuredOutput: { status: "valid", data: implArtifact({ provider: "fake", model: "fake" }) },
+				resolvedModel: "anthropic/claude-sonnet-4",
+				toolCalls: 7,
+			},
+		}));
+		const result = await adapter.run(baseRequest());
+		expect(result.resolvedProvider).toBe("anthropic");
+		expect(result.resolvedModel).toBe("claude-sonnet-4");
+		expect(result.toolCalls).toBe(7);
+	});
+
+	it("maps supported profile thinking level into the structured request", async () => {
+		let thinkingLevel: string | undefined;
+		const adapter = new RuntimeAdapter(async request => {
+			thinkingLevel = request.thinkingLevel;
+			return okResult(implArtifact());
+		});
+		const request = baseRequest();
+		const high = "high" as NonNullable<WorkflowAgentRequest["profile"]["thinkingLevel"]>;
+		request.profile = { ...request.profile, thinkingLevel: high };
+		await adapter.run(request);
+		expect(thinkingLevel).toBe(high);
 	});
 
 	it("fails when exitCode is non-zero even if structured output is valid", async () => {

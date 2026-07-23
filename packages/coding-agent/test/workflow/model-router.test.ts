@@ -23,6 +23,15 @@ describe("ModelRouter", () => {
 		expect(decision.reason).toMatch(/fallback/);
 	});
 
+	it("selects a distinct plan-review profile and prefers another vendor", () => {
+		const decision = router.resolve("plan_reviewer", {
+			excludedProfileIds: ["claude_plan_reviewer"],
+			avoidVendor: "anthropic",
+		});
+		expect(decision.profileId).toBe("gpt_plan_reviewer");
+		expect(decision.vendor).toBe("openai");
+	});
+
 	it("rejects same-vendor code review unless degraded", () => {
 		expect(() =>
 			router.resolve("code_reviewer", {

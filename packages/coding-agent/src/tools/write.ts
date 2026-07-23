@@ -35,6 +35,7 @@ import {
 	readArchiveEntries,
 	writeArchive,
 } from "../utils/zip";
+import { assertWorkflowPathAllowed } from "../workflow/tool-policy";
 import { routeWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
@@ -983,6 +984,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
+		if (this.session.workflowWritePolicy) {
+			assertWorkflowPathAllowed(path, this.session.workflowWritePolicy);
+		}
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);

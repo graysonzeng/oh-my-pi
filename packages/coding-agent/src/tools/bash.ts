@@ -21,6 +21,7 @@ import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer 
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
+import { assertWorkflowCommandAllowed } from "../workflow/tool-policy";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
@@ -745,6 +746,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	): Promise<AgentToolResult<BashToolDetails>> {
 		let command = rawCommand;
 		const env = normalizeBashEnv(rawEnv);
+		if (this.session.workflowCommandPolicy) {
+			assertWorkflowCommandAllowed(command, this.session.workflowCommandPolicy);
+		}
 
 		// Extract leading `cd <path> && ...` into cwd when the model ignores the cwd parameter.
 		// Constrained to a single line so a `&&` that sits on a later line of a multiline

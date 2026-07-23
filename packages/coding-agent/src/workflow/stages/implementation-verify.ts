@@ -46,15 +46,13 @@ export class ImplementationVerifyStage {
 	async execute(input: ImplementationVerifyInput): Promise<VerificationArtifactV1> {
 		const impl = input.implementation;
 		let patchContent: string | undefined;
-		let changedFiles = [...(impl.changedFiles ?? [])];
+		const changedFiles: string[] = [];
 		const cwd = input.cwd ?? process.cwd();
 
 		// Collect current + prior patch paths (priorPatch: stored in unresolved after repair accumulate).
 		const patchPaths = [
 			impl.patchPath,
-			...(impl.unresolved ?? [])
-				.filter(u => u.startsWith("priorPatch:"))
-				.map(u => u.slice("priorPatch:".length)),
+			...(impl.unresolved ?? []).filter(u => u.startsWith("priorPatch:")).map(u => u.slice("priorPatch:".length)),
 		].filter((p): p is string => Boolean(p));
 
 		const chunks: string[] = [];
@@ -73,8 +71,8 @@ export class ImplementationVerifyStage {
 		}
 		if (chunks.length > 0) patchContent = chunks.join("\n");
 
-		// Fail closed: isolation write without readable patch/branch evidence is not verifiable.
-		if (!impl.branchName && !patchContent) {
+		// Branch names and model-reported files are not diff evidence.
+		if (!patchContent) {
 			return {
 				kind: "verification",
 				passed: false,
@@ -82,7 +80,7 @@ export class ImplementationVerifyStage {
 					{
 						id: "isolation-artifact",
 						status: "failed",
-						summary: "Implementation lacks readable patch content or branch from isolation runtime",
+						summary: "Implementation lacks readable persisted patch content from isolation runtime",
 					},
 				],
 				schemaVersion: 1,

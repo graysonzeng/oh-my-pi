@@ -31,9 +31,9 @@ import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
-import { getDefaultConfig } from "../workflow/default-config";
 import { WorkflowEngine } from "../workflow/engine";
 import { createDefaultRuntimeAdapter } from "../workflow/runtime-default";
+import { buildWorkflowConfigFromSessionSettings } from "../workflow/session-config";
 import { WorkflowStore } from "../workflow/sqlite-store";
 import { WorkflowTool } from "../workflow/workflow-tool";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -150,6 +150,10 @@ export interface DeferredDiagnosticsEntry {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/** Workflow-only normalized path guard installed for scoped write stages. */
+	workflowWritePolicy?: { repoRoot: string; forbiddenPaths: string[] };
+	/** Workflow-only command allowlist installed for scoped write stages. */
+	workflowCommandPolicy?: { allowedCommands: string[] };
 	/** Whether UI is available */
 	hasUI: boolean;
 	/**
@@ -382,42 +386,15 @@ export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool |
 /** Build a production WorkflowEngine from session `workflow.*` settings. */
 function createEngineFromSessionSettings(session: ToolSession): WorkflowEngine {
 	const raw = (key: string): unknown => session.settings?.get?.(key as never);
-	const asString = (key: string, fallback: string): string => {
-		const value = raw(key);
-		return typeof value === "string" && value.length > 0 ? value : fallback;
-	};
-	const asBool = (key: string, fallback: boolean): boolean => {
-		const value = raw(key);
-		return typeof value === "boolean" ? value : fallback;
-	};
-	const asNumber = (key: string, fallback: number): number => {
-		const value = raw(key);
-		return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-	};
-	const asStringArray = (key: string, fallback: string[]): string[] => {
-		const value = raw(key);
-		return Array.isArray(value) && value.every(item => typeof item === "string") ? (value as string[]) : fallback;
-	};
-	const defaults = getDefaultConfig();
-	const storage = asString("workflow.storagePath", "");
+	const storageRaw = raw("workflow.storagePath");
+	const storage = typeof storageRaw === "string" && storageRaw.length > 0 ? storageRaw : "";
 	const store = storage ? new WorkflowStore(storage) : new WorkflowStore();
-	const isolationRaw = raw("workflow.isolationMerge");
-	const isolationMerge: "patch" | "branch" =
-		isolationRaw === "branch" || isolationRaw === "patch" ? isolationRaw : defaults.isolation.merge;
 	return new WorkflowEngine({
 		store,
 		ownsStore: true,
 		session,
 		adapter: createDefaultRuntimeAdapter(),
-		config: {
-			degradedMode: asBool("workflow.degradedMode", defaults.degradedMode),
-			requireIndependentReview: asBool("workflow.requireIndependentReview", defaults.requireIndependentReview),
-			maxBudgetUsd: asNumber("workflow.maxBudgetUsd", defaults.maxBudgetUsd),
-			maxRepairCycles: asNumber("workflow.maxRepairCycles", defaults.maxRepairCycles),
-			confidenceThreshold: asNumber("workflow.confidenceThreshold", defaults.confidenceThreshold),
-			isolation: { merge: isolationMerge, apply: defaults.isolation.apply },
-			verificationCommands: asStringArray("workflow.verificationCommands", defaults.verificationCommands),
-		},
+		config: buildWorkflowConfigFromSessionSettings(raw),
 	});
 }
 

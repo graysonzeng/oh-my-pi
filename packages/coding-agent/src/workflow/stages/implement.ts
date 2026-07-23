@@ -21,6 +21,9 @@ export interface ImplementStageResult {
 	artifact: ImplementationArtifactV1;
 	usage?: Usage;
 	changesApplied?: boolean | null;
+	resolvedProvider?: string;
+	resolvedModel?: string;
+	toolCalls?: number;
 }
 
 export class ImplementStage {
@@ -71,7 +74,8 @@ export class ImplementStage {
 				stage: "implementing",
 				createdAt: modelArtifact.createdAt ?? new Date().toISOString(),
 				modelProfileId: input.profile.id,
-				provider: input.profile.vendor,
+				provider: result.resolvedProvider ?? input.profile.vendor,
+				model: result.resolvedModel,
 				promptVersion: input.profile.promptVersion,
 				patchPath,
 				branchName,
@@ -85,6 +89,13 @@ export class ImplementStage {
 			},
 			"ImplementationArtifact",
 		);
-		return { artifact, usage: result.usage, changesApplied: result.changesApplied };
+		return {
+			artifact,
+			usage: result.usage,
+			changesApplied: result.changesApplied,
+			resolvedProvider: result.resolvedProvider,
+			resolvedModel: result.resolvedModel,
+			toolCalls: result.toolCalls,
+		};
 	}
 }

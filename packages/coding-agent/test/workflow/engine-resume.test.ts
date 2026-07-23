@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	abortRegisteredWorkflow,
+	registerWorkflowAbort,
+	unregisterWorkflowAbort,
+} from "../../src/workflow/abort-registry";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
@@ -129,5 +134,83 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 		expect(stale?.errorSummary).toBe("stale_in_progress_on_resume");
 		// At least one completed planning attempt after the stale one
 		expect(attempts.some(a => a.stage === "planning" && a.status === "completed" && a.id !== staleId)).toBe(true);
+	});
+
+	it("plan_review after Engine rebuild still excludes planner profile/vendor", async () => {
+		const seenReviewerModels: string[] = [];
+		const mk = (s: WorkflowStore) =>
+			new WorkflowEngine({
+				store: s,
+				adapter: new RuntimeAdapter(async request => {
+					const agent = request.agent ?? "";
+					if (agent === "designer" || agent === "planner") {
+						return {
+							result: {
+								id: "raw_plan",
+								structuredOutput: {
+									status: "valid",
+									data: planArtifact({
+										modelProfileId: "claude_planner",
+										provider: "anthropic",
+									}),
+								},
+							},
+						};
+					}
+					if (agent === "reviewer" || agent === "plan_reviewer") {
+						const model = Array.isArray(request.model) ? request.model[0] : request.model;
+						seenReviewerModels.push(String(model));
+						return {
+							result: {
+								id: "raw_plan_review",
+								structuredOutput: {
+									status: "valid",
+									data: reviewArtifact("approved", "plan"),
+								},
+							},
+						};
+					}
+					throw new Error(`unexpected agent ${agent}`);
+				}),
+				verifier: passVerifier(),
+				artifactStore: new ArtifactStore(artifactDir),
+				session: fakeSession(),
+			});
+
+		const engine1 = mk(store);
+		const workflowId = await engine1.startWorkflow({ request: "plan review diversity resume" });
+		await engine1.resume(workflowId, { singleStep: true }); // → planning
+		await engine1.resume(workflowId, { singleStep: true }); // planning → plan_review
+		expect((await engine1.getState(workflowId))?.status).toBe("plan_review");
+
+		store.close();
+		store = new WorkflowStore(dbPath);
+		const engine2 = mk(store);
+		await engine2.resume(workflowId, { singleStep: true }); // run plan_review
+		expect(seenReviewerModels.length).toBe(1);
+		// gpt_plan_reviewer modelPattern starts with gpt-5.*; anthropic claude_* would be same-vendor as planner.
+		expect(seenReviewerModels[0]).toMatch(/^gpt-/);
+		expect(engine2.routingAudit.some(a => a.profileId === "gpt_plan_reviewer")).toBe(true);
+		expect(engine2.routingAudit.some(a => a.profileId === "claude_plan_reviewer")).toBe(false);
+	});
+
+	it("abort unregister is owner-scoped under concurrent registration", () => {
+		const workflowId = `wf_abort_${crypto.randomUUID()}`;
+		const ownerA = { id: "a" };
+		const ownerB = { id: "b" };
+		const controllerA = new AbortController();
+		const controllerB = new AbortController();
+
+		const registeredA = registerWorkflowAbort(workflowId, controllerA, ownerA);
+		expect(registeredA).toBe(ownerA);
+		const registeredB = registerWorkflowAbort(workflowId, controllerB, ownerB);
+		// Second registrant does not steal ownership
+		expect(registeredB).toBe(ownerB);
+		expect(unregisterWorkflowAbort(workflowId, ownerB)).toBe(false);
+		expect(controllerA.signal.aborted).toBe(false);
+		expect(abortRegisteredWorkflow(workflowId)).toBe(true);
+		expect(controllerA.signal.aborted).toBe(true);
+		expect(unregisterWorkflowAbort(workflowId, ownerA)).toBe(true);
+		expect(abortRegisteredWorkflow(workflowId)).toBe(false);
 	});
 });

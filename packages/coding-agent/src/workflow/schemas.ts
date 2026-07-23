@@ -78,6 +78,8 @@ export const ReviewFindingSchema = z
 		file: z.string().optional(),
 		line: z.number().int().positive().optional(),
 		suggestedOwner: z.enum(["implementer", "reasoning_repair", "human"]),
+		blocking: z.boolean().optional(),
+		resolutionEvidence: z.array(z.string().min(1)).optional(),
 	})
 	.strict();
 

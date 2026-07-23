@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { WorkflowPolicyError } from "./errors";
 import { isValidTransition } from "./transitions";
@@ -389,7 +389,7 @@ export class WorkflowStore {
 	}
 
 	computeSha256(content: string): string {
-		return createHash("sha256").update(content).digest("hex");
+		return new Bun.CryptoHasher("sha256").update(content).digest("hex");
 	}
 
 	async transitionWorkflow(
