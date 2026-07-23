@@ -3,7 +3,20 @@
 ## [Unreleased]
 
 ### Added
-- Added the initial multi-model coding workflow foundation with deterministic transitions, SQLite persistence, role-based model routing, structured runtime integration, verification, and targeted tests.
+- Added multi-model coding workflow MVP: pure transition/schema policy, SQLite resume with version locks and artifact hashes, model routing with diversity/fallback audit metadata, budget + finding escalation, injectable runtime adapter with production factory wiring, deterministic verifier matrix, port-driven stages, engine repair/budget/cancel/resume loops, and built-in `workflow` tool (`start|status|resume|cancel`) with settings and role prompts.
+- Documented workflow lifecycle, recovery, and blocked states in `docs/workflow.md`.
+
+### Fixed
+- Workflow write stages no longer dead-end when `task.isolation.mode` is `none` (session-local upgrade to `auto`); isolation patches are retained/copied for verification; `changesApplied: false` fails closed.
+- Repair no longer auto-resolves all findings on empty `addressedStepIds`; cumulative patches/files retained across repair; interrupted write stages block instead of silent re-run.
+- Verifier uses session cwd; SQLite enforces legal transitions; durable artifacts secret-redacted; in-process cancel aborts registered runners; `resume forceUnlock` clears stale locks.
+- Scoped implement/repair tool allowlists are enforced via structured-subagent `allowedTools`; per-profile request/cost gates and retry kinds apply; routing audit + attempt profile ids are persisted; tool-owned SQLite stores dispose after each call.
+- Workflow write/command path policies are enforced at tool execution; implementation verify requires readable isolation patch evidence (branch-only / model-reported files fail closed).
+- Findings are engine-owned (`open` on intake, evidence-bearing resolve/reject); final verify gates all unresolved blocking findings including P2/P3.
+- Abort unregister is owner-scoped; authentication participates in profile fallback; verification commands honor `verificationTimeoutMs`; budget snapshots restore per-profile and tool-call counters.
+- Engine router uses configured profiles; plan-review diversity excludes planner profile/vendor; unsupported profile fields are rejected; default verification commands prefer `git diff --check` + `bun check`.
+- Production workflow construction reads validated `workflow.profiles` from settings (defaults only when unset); findings `blocking` and planner route context survive cross-Engine resume; workflow bash allowlist rejects shell-chained prefix bypasses.
+
 
 ## [17.0.7] - 2026-07-21
 
