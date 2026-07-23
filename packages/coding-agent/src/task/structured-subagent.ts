@@ -110,6 +110,11 @@ export interface StructuredSubagentRequest {
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	/**
+	 * When set, subagent tools are restricted to this allowlist (workflow scoped write/read policies).
+	 * Implies restrictToolNames for the executor session.
+	 */
+	allowedTools?: readonly string[];
 }
 
 /** A normalized preflight result, reusable by tests and adapters. */
@@ -262,7 +267,16 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	let effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	// Workflow (and other adapters) may supply an explicit tool allowlist.
+	if (!planMode && request.allowedTools && request.allowedTools.length > 0) {
+		effectiveAgent = {
+			...effectiveAgent,
+			tools: [...request.allowedTools],
+			// Prevent recursive unrestricted fan-out under scoped write policies.
+			spawns: undefined,
+		};
+	}
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -401,7 +415,7 @@ function buildExecutorOptions(
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
-		restrictToolNames: policy.planMode,
+		restrictToolNames: policy.planMode || Boolean(request.allowedTools?.length),
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,

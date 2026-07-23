@@ -1,7 +1,10 @@
+import type { WorkflowErrorKind } from "./types";
+
 export class WorkflowError extends Error {
-	kind: string;
-	details?: unknown;
-	constructor(message: string, kind: string, details?: unknown) {
+	readonly kind: WorkflowErrorKind;
+	readonly details?: unknown;
+
+	constructor(message: string, kind: WorkflowErrorKind, details?: unknown) {
 		super(message);
 		this.kind = kind;
 		this.details = details;
@@ -16,7 +19,35 @@ export class WorkflowPolicyError extends WorkflowError {
 }
 
 export class BudgetExhaustedError extends WorkflowError {
-	constructor(attempt: number, budgetUsed: number, limit: number) {
-		super(`Budget exhausted after ${attempt} attempts. Used ${budgetUsed} of ${limit}`, "budget_exhausted");
+	constructor(attempt: number, budgetUsed: number | "unknown", limit: number) {
+		super(`Budget exhausted after ${attempt} attempts. Used ${budgetUsed} of ${limit}`, "budget_exhausted", {
+			attempt,
+			budgetUsed,
+			limit,
+		});
+	}
+}
+
+export class WorkflowSchemaError extends WorkflowError {
+	constructor(message: string, details?: unknown) {
+		super(message, "schema_violation", details);
+	}
+}
+
+export class WorkflowCancelledError extends WorkflowError {
+	constructor(message = "Workflow cancelled", details?: unknown) {
+		super(message, "cancelled", details);
+	}
+}
+
+export class WorkflowTimeoutError extends WorkflowError {
+	constructor(message = "Workflow stage timed out", details?: unknown) {
+		super(message, "timeout", details);
+	}
+}
+
+export class ArtifactIntegrityError extends WorkflowError {
+	constructor(message: string, details?: unknown) {
+		super(message, "internal", details);
 	}
 }

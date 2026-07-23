@@ -4024,6 +4024,99 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Multi-model coding workflow
+	"workflow.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Multi-Model Workflow",
+			description: "Enable the multi-model coding workflow tool (start/status/resume/cancel)",
+		},
+	},
+	"workflow.storagePath": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Storage Path",
+			description: "SQLite path for workflow state; empty uses the default workflow.db in cwd",
+		},
+	},
+	"workflow.degradedMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Degraded Mode",
+			description: "Allow same-vendor code review when an independent reviewer is unavailable",
+		},
+	},
+	"workflow.requireIndependentReview": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Require Independent Review",
+			description: "Require code reviewer vendor to differ from implementer unless degraded mode is on",
+		},
+	},
+	"workflow.maxBudgetUsd": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Budget (USD)",
+			description: "Hard stop when known provider-reported cost reaches this limit",
+		},
+	},
+	"workflow.maxRepairCycles": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Max Repair Cycles",
+			description: "Bounded repair attempts before the workflow blocks",
+		},
+	},
+	"workflow.confidenceThreshold": {
+		type: "number",
+		default: 0.6,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Review Confidence Threshold",
+			description: "Findings below this confidence are advisory for blocking decisions",
+		},
+	},
+	"workflow.isolationMerge": {
+		type: "enum",
+		values: ["patch", "branch"] as const,
+		default: "patch",
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Isolation Merge",
+			description: "How implement/repair isolation merges results back",
+		},
+	},
+	"workflow.verificationCommands": {
+		type: "array",
+		default: ["bun test", "bun check"],
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Verification Commands",
+			description: "Deterministic commands run after implementation and before completion",
+		},
+	},
+
 	"title.refreshOnReplan": {
 		type: "boolean",
 		default: true,

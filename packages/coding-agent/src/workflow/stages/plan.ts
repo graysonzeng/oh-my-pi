@@ -1,42 +1,61 @@
-import type { PlanArtifactV1 } from "../types";
+import type { Usage } from "@oh-my-pi/pi-ai";
+import type { ToolSession } from "../../tools";
+import { PlanArtifactJsonSchema } from "../json-schemas";
+import { parseWorkflowArtifact } from "../parse-artifact";
+import { PlanArtifactSchema } from "../schemas";
+import type { ModelProfile, PlanArtifactV1, RuntimePort } from "../types";
 
-export interface PlanStageContext {
+export interface PlanStageInput {
 	workflowId: string;
 	attemptId: string;
-	summary?: string;
-	assumptions?: string[];
-	nonGoals?: string[];
-	affectedFiles?: PlanArtifactV1["affectedFiles"];
-	steps?: PlanArtifactV1["implementationSteps"];
-	acceptanceCriteria?: string[];
-	verificationCommands?: string[];
-	risks?: string[];
-	rollback?: string[];
+	profile: ModelProfile;
+	assignment: string;
+	context: string;
+	session: ToolSession;
+	signal?: AbortSignal;
+}
+
+export interface PlanStageResult {
+	artifact: PlanArtifactV1;
+	usage?: Usage;
 }
 
 export class PlanStage {
-	async execute(context: PlanStageContext): Promise<PlanArtifactV1> {
-		const plan: PlanArtifactV1 = {
-			kind: "plan",
-			summary: context.summary || "Default plan",
-			assumptions: context.assumptions || [],
-			nonGoals: context.nonGoals || [],
-			affectedFiles: context.affectedFiles || [],
-			implementationSteps: context.steps || [],
-			acceptanceCriteria: context.acceptanceCriteria || [],
-			verificationCommands: context.verificationCommands || [],
-			risks: context.risks || [],
-			rollback: context.rollback || [],
-			schemaVersion: 1,
-			workflowId: context.workflowId,
-			attemptId: context.attemptId,
-			stage: "planning",
-			createdAt: new Date().toISOString(),
-			modelProfileId: "claude_planner",
-			provider: "anthropic",
-			model: "claude-sonnet-*",
-			promptVersion: "1.0",
-		};
-		return plan;
+	readonly #runtime: RuntimePort;
+
+	constructor(runtime: RuntimePort) {
+		this.#runtime = runtime;
+	}
+
+	async execute(input: PlanStageInput): Promise<PlanStageResult> {
+		const request = this.#runtime.buildRequest({
+			workflowId: input.workflowId,
+			attemptId: input.attemptId,
+			role: "planner",
+			profile: input.profile,
+			assignment: input.assignment,
+			context: input.context,
+			outputSchema: PlanArtifactJsonSchema,
+			session: input.session,
+			signal: input.signal,
+		});
+		const result = await this.#runtime.run<PlanArtifactV1>(request);
+		const artifact = parseWorkflowArtifact(
+			PlanArtifactSchema,
+			{
+				...result.artifact,
+				kind: "plan",
+				schemaVersion: 1,
+				workflowId: input.workflowId,
+				attemptId: input.attemptId,
+				stage: "planning",
+				createdAt: (result.artifact as PlanArtifactV1).createdAt ?? new Date().toISOString(),
+				modelProfileId: input.profile.id,
+				provider: input.profile.vendor,
+				promptVersion: input.profile.promptVersion,
+			},
+			"PlanArtifact",
+		);
+		return { artifact, usage: result.usage };
 	}
 }

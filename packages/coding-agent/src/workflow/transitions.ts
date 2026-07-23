@@ -15,30 +15,63 @@ export const VALID_TRANSITIONS: Record<WorkflowStatus, WorkflowStatus[]> = {
 	failed: [],
 };
 
+/** Decision inputs that map a stage outcome to the next legal status. */
+export type TransitionDecision = "approved" | "changes_requested" | "blocked" | "passed" | "failed" | null;
+
 export function isValidTransition(from: WorkflowStatus, to: WorkflowStatus): boolean {
-	return VALID_TRANSITIONS[from]?.includes(to) || false;
+	return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
-export function getNextStage(
-	current: WorkflowStatus,
-	decision: "approved" | "changes_requested" | "blocked" | null,
-): WorkflowStatus | null {
+/**
+ * Pure policy: map stage + decision → next status.
+ * Models never choose the next stage; the engine validates this result against VALID_TRANSITIONS.
+ */
+export function getNextStage(current: WorkflowStatus, decision: TransitionDecision): WorkflowStatus | null {
 	switch (current) {
+		case "created":
+			return "planning";
 		case "planning":
-			return decision === "approved" ? "plan_review" : "blocked";
+			if (decision === "blocked") return "blocked";
+			if (decision === "failed") return "failed";
+			// Successful plan artifact advances to review
+			return "plan_review";
 		case "plan_review":
-			return decision === "approved" ? "implementing" : "planning";
+			if (decision === "approved") return "implementing";
+			if (decision === "changes_requested") return "planning";
+			if (decision === "blocked") return "blocked";
+			if (decision === "failed") return "failed";
+			return null;
 		case "implementing":
+			if (decision === "blocked") return "blocked";
+			if (decision === "failed") return "failed";
 			return "implementation_verify";
 		case "implementation_verify":
-			return "code_review";
+			if (decision === "passed" || decision === "approved") return "code_review";
+			if (decision === "failed" || decision === "changes_requested") return "repairing";
+			if (decision === "blocked") return "blocked";
+			return null;
 		case "code_review":
-			return "final_verify";
+			if (decision === "approved") return "final_verify";
+			if (decision === "changes_requested") return "repairing";
+			if (decision === "blocked") return "blocked";
+			if (decision === "failed") return "failed";
+			return null;
 		case "repairing":
+			if (decision === "blocked") return "blocked";
+			if (decision === "failed") return "failed";
 			return "implementation_verify";
 		case "final_verify":
-			return "completed";
+			if (decision === "passed" || decision === "approved") return "completed";
+			if (decision === "failed" || decision === "changes_requested") return "repairing";
+			if (decision === "blocked") return "blocked";
+			return null;
 		default:
 			return null;
+	}
+}
+
+export function assertValidTransition(from: WorkflowStatus, to: WorkflowStatus): void {
+	if (!isValidTransition(from, to)) {
+		throw new Error(`invalid_transition:${from}->${to}`);
 	}
 }

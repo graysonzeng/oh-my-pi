@@ -1,3 +1,13 @@
+import type { Usage } from "@oh-my-pi/pi-ai";
+import type { ToolSession } from "../tools";
+
+/** Isolation controls for write stages (mirrors task isolation without importing task). */
+export interface WorkflowIsolationControls {
+	requested?: boolean;
+	merge?: "patch" | "branch";
+	apply?: boolean;
+}
+
 export type WorkflowStatus =
 	| "created"
 	| "planning"
@@ -123,7 +133,7 @@ export interface ModelProfile {
 	maxCostUsd?: number;
 	retryPolicy: {
 		maxAttempts: number;
-		retryableErrorKinds: string[]; // WorkflowErrorKind
+		retryableErrorKinds: string[];
 		fallbackProfileIds: string[];
 	};
 	contextPolicy: {
@@ -143,7 +153,7 @@ export interface WorkflowAgentRequest {
 	assignment: string;
 	context?: string;
 	outputSchema?: unknown;
-	isolation?: StructuredSubagentIsolationControls;
+	isolation?: WorkflowIsolationControls;
 	session: ToolSession;
 	signal?: AbortSignal;
 }
@@ -155,12 +165,14 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	patchPath?: string;
 	branchName?: string;
 	usage?: Usage;
+	/** Isolation merge result: true applied, false failed/not applied, null N/A. */
+	changesApplied?: boolean | null;
 }
 
 export interface WorkflowRequest {
-	workflowId: string;
+	workflowId?: string;
 	request: string;
-	constraints: string;
+	constraints?: string;
 }
 
 export type WorkflowErrorKind =
@@ -202,7 +214,7 @@ export interface Artifact {
 	relativePath: string;
 	sha256: string;
 	createdAt: string;
-	content?: string; // for tests
+	content?: string;
 }
 
 export interface Transition {
@@ -229,6 +241,22 @@ export interface Attempt {
 	finishedAt?: string;
 }
 
-import type { Usage } from "@oh-my-pi/pi-ai";
-import type { StructuredSubagentIsolationControls } from "../task/structured-subagent";
-import type { ToolSession } from "../tools";
+/** Port used by stages — only adapter implements real provider I/O. */
+export interface RuntimePort {
+	buildRequest(request: WorkflowAgentRequest): WorkflowAgentRequest;
+	run<TArtifact = unknown>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>>;
+}
+
+/** Port used by verify stages — deterministic commands only. */
+export interface VerifierPort {
+	verify(
+		artifact: Pick<ArtifactHeader, "workflowId" | "attemptId" | "stage"> &
+			Partial<Pick<ArtifactHeader, "modelProfileId" | "provider" | "model" | "promptVersion">> & {
+				changedFiles?: string[];
+				patchContent?: string;
+			},
+		commands: string[],
+		forbiddenPaths?: string[],
+		options?: { signal?: AbortSignal; timeoutMs?: number; expectDirtyTree?: boolean },
+	): Promise<VerificationArtifactV1>;
+}
