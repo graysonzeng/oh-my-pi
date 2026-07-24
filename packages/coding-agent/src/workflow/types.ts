@@ -135,6 +135,7 @@ export interface PromptStrategy {
 	kind: "verbose" | "concise" | "structured" | "custom";
 	/** Template id: default | concise-claude | structured-gpt | explicit-grok */
 	systemPromptTemplate?: string;
+	/** Reserved: static example bank not shipped; applyPromptStrategy ignores for now. */
 	fewShotPolicy?: {
 		enabled: boolean;
 		maxExamples: number;
@@ -170,6 +171,7 @@ export interface ToolStrategy {
 		/** Built-in summarizer keys: bash, read, grep, test, ls — or "*" default. */
 		summarizerKeys?: string[];
 	};
+	/** Reserved until agent parallel tool limit is enforced; stored on profiles only. */
 	maxConcurrentTools?: number;
 }
 

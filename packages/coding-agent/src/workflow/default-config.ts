@@ -26,7 +26,8 @@ const baseContext = {
 const conciseClaudePrompt: PromptStrategy = {
 	kind: "concise",
 	systemPromptTemplate: "concise-claude",
-	fewShotPolicy: { enabled: true, maxExamples: 1, dynamicSelection: true },
+	// ponytail: few-shot bank not shipped — keep policy off so config does not pretend otherwise
+	fewShotPolicy: { enabled: false, maxExamples: 1, dynamicSelection: false },
 	thinkingPrompt: { enabled: true, style: "scratchpad" },
 	roleEmphasis: "light",
 	instructionFormat: "natural",
@@ -35,7 +36,7 @@ const conciseClaudePrompt: PromptStrategy = {
 const structuredGptPrompt: PromptStrategy = {
 	kind: "structured",
 	systemPromptTemplate: "structured-gpt",
-	fewShotPolicy: { enabled: true, maxExamples: 2, dynamicSelection: true },
+	fewShotPolicy: { enabled: false, maxExamples: 2, dynamicSelection: false },
 	roleEmphasis: "medium",
 	instructionFormat: "numbered",
 };
@@ -43,7 +44,7 @@ const structuredGptPrompt: PromptStrategy = {
 const explicitGrokPrompt: PromptStrategy = {
 	kind: "verbose",
 	systemPromptTemplate: "explicit-grok",
-	fewShotPolicy: { enabled: true, maxExamples: 3, dynamicSelection: true },
+	fewShotPolicy: { enabled: false, maxExamples: 3, dynamicSelection: false },
 	thinkingPrompt: { enabled: true, style: "step-by-step" },
 	roleEmphasis: "heavy",
 	instructionFormat: "numbered",

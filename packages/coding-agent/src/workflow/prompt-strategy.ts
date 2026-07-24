@@ -74,10 +74,19 @@ export function applyPromptStrategy(input: {
 				: "\nUse a brief scratchpad of key decisions before acting.\n"
 			: "";
 
+	const formatHint =
+		strategy?.instructionFormat === "numbered"
+			? "\n[INSTRUCTION FORMAT: Prefer numbered steps.]\n"
+			: strategy?.instructionFormat === "xml-tagged"
+				? "\n[INSTRUCTION FORMAT: Structure key sections with XML-like tags such as <plan>, <steps>, <output>.]\n"
+				: "";
+
+	// ponytail: fewShotPolicy.maxExamples / dynamicSelection reserved until a static example bank ships.
 	const parts = [
 		rendered.trim(),
 		emphasis.trim(),
 		thinking.trim(),
+		formatHint.trim(),
 		input.rolePrompt.trim(),
 		input.context?.trim(),
 	].filter(Boolean);
@@ -90,7 +99,7 @@ export function defaultPromptStrategyForVendor(vendor: string): PromptStrategy {
 		return {
 			kind: "concise",
 			systemPromptTemplate: "concise-claude",
-			fewShotPolicy: { enabled: true, maxExamples: 1, dynamicSelection: true },
+			fewShotPolicy: { enabled: false, maxExamples: 1, dynamicSelection: false },
 			thinkingPrompt: { enabled: true, style: "scratchpad" },
 			roleEmphasis: "light",
 			instructionFormat: "natural",
@@ -100,7 +109,7 @@ export function defaultPromptStrategyForVendor(vendor: string): PromptStrategy {
 		return {
 			kind: "structured",
 			systemPromptTemplate: "structured-gpt",
-			fewShotPolicy: { enabled: true, maxExamples: 2, dynamicSelection: true },
+			fewShotPolicy: { enabled: false, maxExamples: 2, dynamicSelection: false },
 			roleEmphasis: "medium",
 			instructionFormat: "numbered",
 		};
@@ -109,7 +118,7 @@ export function defaultPromptStrategyForVendor(vendor: string): PromptStrategy {
 	return {
 		kind: "verbose",
 		systemPromptTemplate: "explicit-grok",
-		fewShotPolicy: { enabled: true, maxExamples: 3, dynamicSelection: true },
+		fewShotPolicy: { enabled: false, maxExamples: 3, dynamicSelection: false },
 		thinkingPrompt: { enabled: true, style: "step-by-step" },
 		roleEmphasis: "heavy",
 		instructionFormat: "numbered",

@@ -1,4 +1,5 @@
 import type { ToolSession } from "../tools";
+import { withToolHistoryEviction } from "./artifact-inclusion";
 import { type ContextSegment, estimateTokens, evictContext } from "./context-evictor";
 import type { ContextStrategy } from "./types";
 
@@ -40,17 +41,18 @@ export function applyContextStrategyEviction(
 	strategy: ContextStrategy | undefined,
 	maxBytesBudget: number,
 ): string | undefined {
-	if (!context || !strategy?.eviction?.enabled) return context;
+	const effective = withToolHistoryEviction(strategy);
+	if (!context || !effective?.eviction?.enabled) return context;
 
 	const maxTokens = Math.max(1, Math.ceil(maxBytesBudget / 4));
 	const currentTokens = estimateTokens(context);
-	const targetTokens = Math.floor(maxTokens * strategy.targetUtilization);
+	const targetTokens = Math.floor(maxTokens * effective.targetUtilization);
 	if (currentTokens <= targetTokens) return context;
 
 	const parts = context.split(/(?=^## )/m).filter(p => p.length > 0);
 	if (parts.length <= 1) {
 		// Single blob: hard-cap with marker rather than inventing fake structure.
-		const keep = Math.max(0, Math.floor(maxBytesBudget * strategy.targetUtilization) - 40);
+		const keep = Math.max(0, Math.floor(maxBytesBudget * effective.targetUtilization) - 40);
 		return `${context.slice(0, keep)}\n/* truncated by contextStrategy eviction */`;
 	}
 
@@ -65,7 +67,7 @@ export function applyContextStrategyEviction(
 
 	const kept = evictContext({
 		segments,
-		strategy,
+		strategy: effective,
 		currentTokens,
 		maxTokens,
 	});

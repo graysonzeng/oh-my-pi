@@ -1,10 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "arktype";
 import { parametersToJsonSchema, wrapAgentToolWithWorkflowAliases } from "../../src/tools/workflow-alias-wrap";
-import {
-	applyWorkflowToolSessionFields,
-	pickWorkflowToolSessionFields,
-} from "../../src/tools/workflow-session-fields";
+import { applyWorkflowToolSessionFields, pickWorkflowToolSessionFields } from "../../src/tools/workflow-session-fields";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { RuntimeAdapter, type StructuredRunnerRequest } from "../../src/workflow/runtime-adapter";
 import { prepareWorkflowInvocation } from "../../src/workflow/runtime-invocation";
@@ -209,10 +206,7 @@ describe("argumentAliases on live AgentTool surface (production wrap)", () => {
 		expect(wire?.properties).not.toHaveProperty("path");
 		expect(wire?.required).toContain("file_path");
 
-		const out = (await wrapped.execute("c1", { file_path: "/repo/a.ts", offset: 2 })) as Record<
-			string,
-			unknown
-		>;
+		const out = (await wrapped.execute("c1", { file_path: "/repo/a.ts", offset: 2 })) as Record<string, unknown>;
 		expect(out.path).toBe("/repo/a.ts");
 		expect(out.file_path).toBeUndefined();
 	});

@@ -74,6 +74,8 @@ describe("prepareWorkflowInvocation applies strategies", () => {
 
 		expect(grokPrep.styleMarker).toBe("explicit-grok");
 		expect(grokPrep.context).toMatch(/explicit-grok|BEGIN NOW|ONLY job/i);
+		expect(grokPrep.context).toMatch(/INSTRUCTION FORMAT: Prefer numbered steps/);
+		expect(grokPrep.context).toMatch(/Output valid JSON/);
 
 		// Distinct markers
 		expect(claudePrep.context).not.toEqual(grokPrep.context);

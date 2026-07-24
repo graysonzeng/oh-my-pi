@@ -106,6 +106,34 @@ export class RuntimeAdapter implements RuntimePort {
 	}
 
 	async run<TArtifact = unknown>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>> {
+		const retry = request.profile.outputStrategy?.retryOnSchemaViolation;
+		const maxAttempts = retry?.enabled ? Math.max(1, retry.maxRetries) : 1;
+		let working: WorkflowAgentRequest = request;
+		let lastSchemaError: WorkflowSchemaError | undefined;
+
+		for (let attempt = 0; attempt < maxAttempts; attempt++) {
+			try {
+				return await this.#runOnce<TArtifact>(working);
+			} catch (error) {
+				const normalized = this.#normalizeError(error);
+				if (!(normalized instanceof WorkflowSchemaError) || attempt >= maxAttempts - 1) {
+					throw normalized;
+				}
+				lastSchemaError = normalized;
+				if (retry?.includeErrorInRetry) {
+					const hint = `\n\n[RETRY ${attempt + 1}] Previous output violated schema: ${normalized.message}\nPlease fix and output valid JSON.`;
+					working = {
+						...working,
+						context: `${working.context?.trim() ?? ""}${hint}`,
+					};
+				}
+			}
+		}
+
+		throw lastSchemaError ?? new WorkflowSchemaError("schema retry exhausted");
+	}
+
+	async #runOnce<TArtifact>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>> {
 		const prepared = prepareWorkflowInvocation(request);
 		// strictMode:true → strict; strictMode:false → permissive; omitted → strict (safe default).
 		const schemaMode =

@@ -134,6 +134,9 @@ export function resolveTruncationRule(
 	return wildcard;
 }
 
+const PROGRESS_NOISE_RE =
+	/^\s*(?:✓|✔|√|●|○|◌|·|\*|[-|\\/])\s|^\s*\d+%|\b(?:PASS(?:ED)?|ok)\b.*\b(?:ms|s)\b|Downloading|Installing|Compiling|Building\s+\.\.\./i;
+
 export const DEFAULT_SUMMARIZERS: Record<string, SummarizerFn> = {
 	bash: (output, _tool, args) => {
 		const lines = output.split("\n");
@@ -147,7 +150,17 @@ export const DEFAULT_SUMMARIZERS: Record<string, SummarizerFn> = {
 		if (errors.length > 0) {
 			return `Exit code: ${exitCode}\nErrors (${errors.length}):\n${errors.slice(0, 10).join("\n")}`;
 		}
-		return `Exit code: ${exitCode}, ${lines.length} lines output (truncated)`;
+		// RTK-style: drop progress/pass noise; keep a short head+tail of remaining signal.
+		const signal = lines.filter(l => l.trim() && !PROGRESS_NOISE_RE.test(l));
+		const dropped = lines.length - signal.length;
+		if (signal.length === 0) {
+			return `Exit code: ${exitCode}, ${lines.length} lines output (noise stripped)`;
+		}
+		const head = signal.slice(0, 8);
+		const tail = signal.length > 12 ? signal.slice(-4) : [];
+		const body = tail.length > 0 ? [...head, `... [${signal.length - 12} signal lines omitted] ...`, ...tail] : head;
+		const suffix = dropped > 0 ? `\n(${dropped} progress/pass lines stripped)` : "";
+		return `Exit code: ${exitCode}\n${body.join("\n")}${suffix}`;
 	},
 
 	read: (output, _tool, args) => {

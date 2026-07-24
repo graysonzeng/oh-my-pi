@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ToolSession } from "../tools";
 import { abortRegisteredWorkflow, registerWorkflowAbort, unregisterWorkflowAbort } from "./abort-registry";
+import { resolveArtifactInclusion } from "./artifact-inclusion";
 import { ArtifactStore } from "./artifact-store";
 import { BudgetLedger, type BudgetSnapshot } from "./budget-ledger";
 import { ContextBuilder } from "./context-builder";
@@ -495,7 +496,7 @@ export class WorkflowEngine {
 							profile,
 							assignment: "Review the plan for correctness and feasibility",
 							context: await this.#buildStageContext(
-								this.#contextBuilder.buildPlanReviewContext(this.#plan!),
+								this.#contextBuilder.buildPlanReviewContext(this.#plan!, resolveArtifactInclusion(profile)),
 								profile,
 								session,
 								this.#plan?.affectedFiles.map(f => f.path),
@@ -550,7 +551,11 @@ export class WorkflowEngine {
 						profile,
 						assignment: "Implement the approved plan in isolation",
 						context: await this.#buildStageContext(
-							this.#contextBuilder.buildImplementContext(this.#plan!, this.#planReview),
+							this.#contextBuilder.buildImplementContext(
+								this.#plan!,
+								this.#planReview,
+								resolveArtifactInclusion(profile),
+							),
 							profile,
 							session,
 							this.#plan?.affectedFiles.map(f => f.path),
@@ -624,6 +629,7 @@ export class WorkflowEngine {
 									plan: this.#plan!,
 									implementation: this.#implementation!,
 									verification: this.#verification,
+									inclusion: resolveArtifactInclusion(profile),
 								}),
 								profile,
 								session,
@@ -725,6 +731,7 @@ export class WorkflowEngine {
 									verification: this.#verification,
 									implementation: this.#implementation,
 									reviewExplanation: this.#codeReview?.explanation ?? this.#planReview?.explanation,
+									inclusion: resolveArtifactInclusion(profile),
 								}),
 								profile,
 								session,
@@ -1100,6 +1107,7 @@ export class WorkflowEngine {
 		evidence?: WorkflowRuntimeEvidence,
 	): Promise<void> {
 		const profileId = this.#lastRouteProfileId;
+		const profile = profileId ? this.#router.list().find(p => p.id === profileId) : undefined;
 		this.#budgetLedger.recordRequest(usage as never, profileId);
 		if (evidence?.toolCalls && evidence.toolCalls > 0) {
 			this.#budgetLedger.recordToolCalls(evidence.toolCalls);
@@ -1107,6 +1115,29 @@ export class WorkflowEngine {
 		if (profileId) {
 			await this.#store.setAttemptProfile(workflowId, attemptId, profileId);
 		}
+		// Durable per-attempt usage for Stabilize & Measure baselines (design Phase A2).
+		await this.#persistArtifact(workflowId, attemptId, "usage", {
+			kind: "usage",
+			schemaVersion: 1,
+			workflowId,
+			attemptId,
+			profileId: profileId ?? null,
+			usage: usage ?? null,
+			toolCalls: evidence?.toolCalls ?? null,
+			resolvedProvider: evidence?.resolvedProvider ?? null,
+			resolvedModel: evidence?.resolvedModel ?? null,
+			strategies: profile
+				? {
+						promptTemplate: profile.promptStrategy?.systemPromptTemplate ?? null,
+						instructionFormat: profile.promptStrategy?.instructionFormat ?? null,
+						toolTruncation: profile.toolStrategy?.outputTruncation?.enabled ?? false,
+						resultSummarization: profile.toolStrategy?.resultSummarization?.enabled ?? false,
+						repoMap: profile.contextStrategy?.repoMap?.enabled ?? false,
+						eviction: profile.contextStrategy?.eviction?.enabled ?? false,
+						schemaRetry: profile.outputStrategy?.retryOnSchemaViolation?.enabled ?? false,
+					}
+				: null,
+		});
 		if (evidence?.resolvedProvider || evidence?.resolvedModel) {
 			await this.#persistArtifact(workflowId, attemptId, "runtime-evidence", {
 				kind: "runtime-evidence",

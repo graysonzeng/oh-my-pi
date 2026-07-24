@@ -1,3 +1,4 @@
+export * from "./artifact-inclusion";
 export * from "./artifact-store";
 export * from "./budget-ledger";
 export * from "./claude-cli-runtime";

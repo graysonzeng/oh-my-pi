@@ -127,6 +127,12 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 	);
 	const maxBytes = request.profile.contextPolicy?.maxArtifactBytes ?? Number.POSITIVE_INFINITY;
 	let context = injected.context;
+	const outputPrefix = request.profile.outputStrategy?.outputPrefixPrompt?.trim();
+	if (outputPrefix && context) {
+		context = `${context.trim()}\n\n${outputPrefix}`;
+	} else if (outputPrefix) {
+		context = outputPrefix;
+	}
 	if (context && context.length > maxBytes) {
 		context = `${context.slice(0, Math.max(0, maxBytes - 32))}\n/* truncated by contextPolicy */`;
 	}

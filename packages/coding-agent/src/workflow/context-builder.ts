@@ -3,6 +3,7 @@ import implementContextTemplate from "../prompts/workflow/context-implement.hbs.
 import planContextTemplate from "../prompts/workflow/context-plan.hbs.md" with { type: "text" };
 import planReviewContextTemplate from "../prompts/workflow/context-plan-review.hbs.md" with { type: "text" };
 import repairContextTemplate from "../prompts/workflow/context-repair.hbs.md" with { type: "text" };
+import type { ResolvedArtifactInclusion } from "./artifact-inclusion";
 import { buildRepoMap } from "./repo-map-builder";
 import type {
 	ContextStrategy,
@@ -13,6 +14,8 @@ import type {
 	VerificationArtifactV1,
 	WorkflowRequest,
 } from "./types";
+
+const OMITTED = "(omitted by profile context inclusion)";
 
 /**
  * Minimal Handlebars-subset renderer for static workflow context templates.
@@ -49,18 +52,31 @@ export class ContextBuilder {
 		});
 	}
 
-	buildPlanReviewContext(plan: PlanArtifactV1): string {
+	buildPlanReviewContext(plan: PlanArtifactV1, inclusion?: ResolvedArtifactInclusion): string {
+		const includePlan = inclusion?.includePlan !== false;
 		return renderContextTemplate(planReviewContextTemplate, {
-			planJson: JSON.stringify(this.#truncatePlan(plan), null, 2),
+			planJson: includePlan ? JSON.stringify(this.#truncatePlan(plan), null, 2) : OMITTED,
 		});
 	}
 
-	buildImplementContext(plan: PlanArtifactV1, review?: ReviewArtifactV1 | null): string {
+	buildImplementContext(
+		plan: PlanArtifactV1,
+		review?: ReviewArtifactV1 | null,
+		inclusion?: ResolvedArtifactInclusion,
+	): string {
+		const includePlan = inclusion?.includePlan !== false;
+		const includeReview = inclusion?.includeReviewFindings !== false;
+		const reviewNotes =
+			includeReview && review?.findings?.length
+				? this.#findingsBlock(review.findings)
+				: includeReview
+					? ""
+					: OMITTED;
 		return renderContextTemplate(implementContextTemplate, {
-			planJson: JSON.stringify(this.#truncatePlan(plan), null, 2),
-			acceptanceCriteria: plan.acceptanceCriteria.map(c => `- ${c}`).join("\n"),
-			verificationCommands: plan.verificationCommands.map(c => `- ${c}`).join("\n"),
-			reviewNotes: review?.findings?.length ? this.#findingsBlock(review.findings) : "",
+			planJson: includePlan ? JSON.stringify(this.#truncatePlan(plan), null, 2) : OMITTED,
+			acceptanceCriteria: includePlan ? plan.acceptanceCriteria.map(c => `- ${c}`).join("\n") : OMITTED,
+			verificationCommands: includePlan ? plan.verificationCommands.map(c => `- ${c}`).join("\n") : OMITTED,
+			reviewNotes,
 		});
 	}
 
@@ -68,16 +84,22 @@ export class ContextBuilder {
 		plan: PlanArtifactV1;
 		implementation: ImplementationArtifactV1;
 		verification?: VerificationArtifactV1 | null;
+		inclusion?: ResolvedArtifactInclusion;
 	}): string {
+		const includePlan = input.inclusion?.includePlan !== false;
+		const includeVerification = input.inclusion?.includeVerification !== false;
 		return renderContextTemplate(codeReviewContextTemplate, {
-			planJson: JSON.stringify(this.#truncatePlan(input.plan), null, 2),
+			planJson: includePlan ? JSON.stringify(this.#truncatePlan(input.plan), null, 2) : OMITTED,
 			implementationSummary: input.implementation.summary,
 			changedFiles: JSON.stringify(input.implementation.changedFiles),
 			patchPath: input.implementation.patchPath ?? "(none)",
 			branchName: input.implementation.branchName ?? "(none)",
-			verificationJson: input.verification
-				? JSON.stringify({ passed: input.verification.passed, checks: input.verification.checks }, null, 2)
-				: "(none)",
+			verificationJson:
+				includeVerification && input.verification
+					? JSON.stringify({ passed: input.verification.passed, checks: input.verification.checks }, null, 2)
+					: includeVerification
+						? "(none)"
+						: OMITTED,
 		});
 	}
 
@@ -87,14 +109,21 @@ export class ContextBuilder {
 		verification?: VerificationArtifactV1 | null;
 		implementation?: ImplementationArtifactV1 | null;
 		reviewExplanation?: string;
+		inclusion?: ResolvedArtifactInclusion;
 	}): string {
+		const includePlan = input.inclusion?.includePlan !== false;
+		const includeReview = input.inclusion?.includeReviewFindings !== false;
+		const includeVerification = input.inclusion?.includeVerification !== false;
 		return renderContextTemplate(repairContextTemplate, {
-			planJson: JSON.stringify(this.#truncatePlan(input.plan), null, 2),
-			findings: this.#findingsBlock(input.findings),
-			reviewExplanation: input.reviewExplanation?.trim() ?? "",
-			verificationJson: input.verification
-				? JSON.stringify({ passed: input.verification.passed, checks: input.verification.checks }, null, 2)
-				: "(none)",
+			planJson: includePlan ? JSON.stringify(this.#truncatePlan(input.plan), null, 2) : OMITTED,
+			findings: includeReview ? this.#findingsBlock(input.findings) : OMITTED,
+			reviewExplanation: includeReview ? (input.reviewExplanation?.trim() ?? "") : OMITTED,
+			verificationJson:
+				includeVerification && input.verification
+					? JSON.stringify({ passed: input.verification.passed, checks: input.verification.checks }, null, 2)
+					: includeVerification
+						? "(none)"
+						: OMITTED,
 			implementationSummary: input.implementation
 				? `summary=${input.implementation.summary}; files=${JSON.stringify(input.implementation.changedFiles)}`
 				: "(none)",

@@ -283,4 +283,60 @@ describe("RuntimeAdapter", () => {
 		expect(seenContext).toMatch(/Injection boundary/i);
 		expect(seenContext).toContain("ctx");
 	});
+
+	it("retries on schema violation when outputStrategy.retryOnSchemaViolation is enabled", async () => {
+		let calls = 0;
+		const contexts: string[] = [];
+		const adapter = new RuntimeAdapter(async req => {
+			calls += 1;
+			contexts.push(req.context ?? "");
+			if (calls === 1) {
+				return {
+					result: {
+						id: "bad",
+						structuredOutput: { status: "invalid", error: "missing summary" },
+					},
+				};
+			}
+			return okResult(implArtifact());
+		});
+		const profile = {
+			...DEFAULT_MODEL_PROFILES.grok_implementer,
+			outputStrategy: {
+				...DEFAULT_MODEL_PROFILES.grok_implementer.outputStrategy,
+				retryOnSchemaViolation: { enabled: true, maxRetries: 2, includeErrorInRetry: true },
+			},
+		};
+		const result = await adapter.run(baseRequest(undefined, { profile, role: "implementer" }));
+		expect(result.artifact).toBeDefined();
+		expect(calls).toBe(2);
+		expect(contexts[1]).toMatch(/RETRY 1/);
+		expect(contexts[1]).toMatch(/missing summary/);
+	});
+
+	it("does not retry schema violations when retry is disabled", async () => {
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async () => {
+			calls += 1;
+			return {
+				result: {
+					id: "bad",
+					structuredOutput: { status: "invalid", error: "bad json" },
+				},
+			};
+		});
+		await expect(
+			adapter.run(
+				baseRequest(undefined, {
+					profile: {
+						...baseRequest().profile,
+						outputStrategy: {
+							retryOnSchemaViolation: { enabled: false, maxRetries: 3, includeErrorInRetry: true },
+						},
+					},
+				}),
+			),
+		).rejects.toMatchObject({ kind: "schema_violation" });
+		expect(calls).toBe(1);
+	});
 });

@@ -77,11 +77,16 @@ describe("summarizeToolOutput", () => {
 		expect(summary.length).toBeLessThan(output.length);
 	});
 
-	it("bash success truncates to line count", () => {
-		const output = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n");
+	it("bash success keeps short signal head and strips progress noise", () => {
+		const output = [
+			...Array.from({ length: 20 }, (_, i) => `✓ pass test_${i} (1ms)`),
+			...Array.from({ length: 20 }, (_, i) => `signal ${i}`),
+		].join("\n");
 		const summary = DEFAULT_SUMMARIZERS.bash!(output, "bash");
 		expect(summary).toMatch(/Exit code: 0/);
-		expect(summary).toMatch(/50 lines/);
+		expect(summary).toMatch(/signal 0/);
+		expect(summary).toMatch(/stripped|omitted/i);
+		expect(summary.length).toBeLessThan(output.length);
 	});
 
 	it("read summarizer reports path and size", () => {
