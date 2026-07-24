@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
-import { WorkflowPolicyError } from "../../src/workflow/errors";
 import { assertSupportedModelProfile } from "../../src/workflow/model-profile-registry";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
@@ -102,13 +101,13 @@ describe("WorkflowEngine happy path", () => {
 		expect(customEngine.routingAudit.some(a => a.profileId === "custom_planner")).toBe(true);
 	});
 
-	it("rejects unsupported model profile fields at construction", () => {
+	it("accepts toolAliases and rejects still-unsupported maxInputTokens", () => {
 		expect(() =>
 			assertSupportedModelProfile({
 				...DEFAULT_MODEL_PROFILES.grok_implementer,
 				toolAliases: { bash: "shell" },
 			}),
-		).toThrow(WorkflowPolicyError);
+		).not.toThrow();
 		expect(
 			() =>
 				new WorkflowEngine({

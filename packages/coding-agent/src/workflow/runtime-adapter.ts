@@ -8,6 +8,7 @@ import {
 	WorkflowTimeoutError,
 } from "./errors";
 import { prepareWorkflowInvocation } from "./runtime-invocation";
+import type { ToolDescriptor } from "./schema-enhancer";
 import type {
 	RuntimePort,
 	WorkflowAgentRequest,
@@ -37,6 +38,13 @@ export interface StructuredRunnerRequest {
 	attemptId?: string;
 	/** Scoped tool allowlist forwarded to structured-subagent. */
 	allowedTools?: readonly string[];
+	/**
+	 * Per-model tool-result post-processor (truncation/summarization).
+	 * Also installed on session.workflowToolOptimization for the live tool path.
+	 */
+	processToolResult?: (toolName: string, output: string, args?: unknown) => string;
+	/** Remap tool descriptors (aliases) for the model wire surface. */
+	transformTools?: (tools: ToolDescriptor[]) => ToolDescriptor[];
 }
 
 /** Minimal shape returned by runStructuredSubagent — kept local so pure tests need no natives. */
@@ -99,6 +107,9 @@ export class RuntimeAdapter implements RuntimePort {
 
 	async run<TArtifact = unknown>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>> {
 		const prepared = prepareWorkflowInvocation(request);
+		// strictMode:true → strict; strictMode:false → permissive; omitted → strict (safe default).
+		const schemaMode =
+			request.profile.outputStrategy?.schemaEnhancement?.strictMode === false ? "permissive" : "strict";
 
 		const mappedRequest: StructuredRunnerRequest = {
 			session: prepared.session,
@@ -108,8 +119,8 @@ export class RuntimeAdapter implements RuntimePort {
 			agent: RuntimeAdapter.agentNameForRole(request.role),
 			model: request.profile.modelPattern,
 			thinkingLevel: request.profile.thinkingLevel,
-			outputSchema: request.outputSchema,
-			schemaMode: "strict",
+			outputSchema: prepared.outputSchema ?? request.outputSchema,
+			schemaMode,
 			isolation: prepared.isolation,
 			maxRuntimeMs: request.profile.maxRuntimeMs,
 			signal: request.signal,
@@ -117,6 +128,8 @@ export class RuntimeAdapter implements RuntimePort {
 			workflowId: request.workflowId,
 			attemptId: request.attemptId,
 			allowedTools: prepared.allowedTools,
+			processToolResult: prepared.processToolResult,
+			transformTools: prepared.transformTools,
 		};
 
 		try {

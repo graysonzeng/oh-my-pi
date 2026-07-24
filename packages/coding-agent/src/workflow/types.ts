@@ -130,6 +130,88 @@ export interface WorkflowRuntimeConfig {
 	profile?: string;
 }
 
+/** Per-model system prompt style and instruction shaping. */
+export interface PromptStrategy {
+	kind: "verbose" | "concise" | "structured" | "custom";
+	/** Template id: default | concise-claude | structured-gpt | explicit-grok */
+	systemPromptTemplate?: string;
+	fewShotPolicy?: {
+		enabled: boolean;
+		maxExamples: number;
+		dynamicSelection: boolean;
+	};
+	thinkingPrompt?: {
+		enabled: boolean;
+		style: "step-by-step" | "scratchpad" | "none";
+	};
+	roleEmphasis?: "light" | "medium" | "heavy";
+	instructionFormat?: "natural" | "numbered" | "xml-tagged";
+}
+
+export type TruncationStrategy = "head" | "tail" | "smart" | "none";
+
+export interface ToolOutputTruncationRule {
+	toolName: string | string[];
+	strategy: TruncationStrategy;
+	maxBytes?: number;
+	maxLines?: number;
+	preservePatterns?: string[];
+}
+
+export interface ToolStrategy {
+	toolAliases?: Record<string, string>;
+	argumentAliases?: Record<string, Record<string, string>>;
+	outputTruncation?: {
+		enabled: boolean;
+		rules: ToolOutputTruncationRule[];
+	};
+	resultSummarization?: {
+		enabled: boolean;
+		/** Built-in summarizer keys: bash, read, grep, test, ls — or "*" default. */
+		summarizerKeys?: string[];
+	};
+	maxConcurrentTools?: number;
+}
+
+export interface ContextStrategy {
+	targetUtilization: number;
+	repoMap?: {
+		enabled: boolean;
+		maxFiles: number;
+		strategy: "full-content" | "symbols-only" | "hybrid";
+	};
+	eviction?: {
+		enabled: boolean;
+		preserveUserTurns: boolean;
+		evictPersisted: boolean;
+		keepRecentN: number;
+	};
+	artifactInclusion?: {
+		includePlan: boolean;
+		includeReviewFindings: boolean;
+		includeVerification: boolean;
+		maxArtifactBytes: number;
+	};
+	toolHistory?: {
+		maxToolCalls: number;
+		summarizeOld: boolean;
+	};
+}
+
+export interface OutputStrategy {
+	schemaEnhancement?: {
+		addDescriptions: boolean;
+		addExamples: boolean;
+		strictMode: boolean;
+	};
+	outputPrefixPrompt?: string;
+	retryOnSchemaViolation?: {
+		enabled: boolean;
+		maxRetries: number;
+		includeErrorInRetry: boolean;
+	};
+}
+
 export interface ModelProfile {
 	id: string;
 	vendor: "anthropic" | "openai" | "xai" | string;
@@ -141,6 +223,14 @@ export interface ModelProfile {
 	toolPolicyId: string;
 	toolAliases?: Record<string, string>;
 	argumentAliases?: Record<string, Record<string, string>>;
+	/** Per-model prompt shaping (style template, few-shot, role emphasis). */
+	promptStrategy?: PromptStrategy;
+	/** Per-model tool output truncation, summarization, and concurrency. */
+	toolStrategy?: ToolStrategy;
+	/** Per-model context window utilization, eviction, and repo-map. */
+	contextStrategy?: ContextStrategy;
+	/** Per-model structured-output schema enhancement and retry. */
+	outputStrategy?: OutputStrategy;
 	disabledTools?: string[];
 	maxRequests: number;
 	maxRuntimeMs: number;

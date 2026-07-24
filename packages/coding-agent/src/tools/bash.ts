@@ -21,6 +21,7 @@ import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer 
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
+import { applySessionToolOutput, workflowToolWireName } from "../workflow/tool-optimization";
 import { assertWorkflowCommandAllowed } from "../workflow/tool-policy";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
@@ -375,6 +376,10 @@ function stripBackgroundNotice(text: string, async: BashToolDetails["async"] | u
  */
 export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSchemaWithAsync, BashToolDetails> {
 	readonly name = "bash";
+	/** Model wire name when workflow toolAliases remaps bash (e.g. run_command). */
+	get customWireName(): string | undefined {
+		return workflowToolWireName(this.session, this.name);
+	}
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
@@ -534,9 +539,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			if (!normalizeResultOutput(result).startsWith(`[${message}]\n`)) {
 				outputLines.push("", `[${message}]`);
 			}
-			const timeoutOutputText = await enforceInlineByteCap(outputLines.join("\n"), {
-				saveArtifact: full => saveBashOriginalArtifact(this.session, full),
-			});
+			const timeoutOutputText = applySessionToolOutput(
+				this.session,
+				"bash",
+				await enforceInlineByteCap(outputLines.join("\n"), {
+					saveArtifact: full => saveBashOriginalArtifact(this.session, full),
+				}),
+				{ exitCode, timedOut: true },
+			);
 			return toolResult(details)
 				.text(timeoutOutputText)
 				.truncationFromSummary(result, { direction: "tail" })
@@ -550,9 +560,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// Final defense at the tool-result boundary: no bash path (client bridge,
 		// head-retention spill, minimizer miss) may emit more than
 		// ~DEFAULT_MAX_BYTES inline. No-op for already-bounded output.
-		const cappedOutputText = await enforceInlineByteCap(outputText, {
-			saveArtifact: full => saveBashOriginalArtifact(this.session, full),
-		});
+		const cappedOutputText = applySessionToolOutput(
+			this.session,
+			"bash",
+			await enforceInlineByteCap(outputText, {
+				saveArtifact: full => saveBashOriginalArtifact(this.session, full),
+			}),
+			{ exitCode },
+		);
 
 		const resultBuilder = toolResult(details)
 			.text(cappedOutputText)

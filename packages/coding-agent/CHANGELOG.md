@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Added quality-first per-model optimization for workflow: tool-output truncation/summarization, schema enhancement, tool/argument aliases, per-model prompt styles (concise Claude / structured GPT / explicit Grok), CWL-style context eviction, regex repo-map with hybrid ranking, quality gate (>3% drop → quality-priority rollback), and default profiles covering eight target models (Fable/Sol plan-review, GLM/Grok implement).
+- Wired per-model strategies onto the production path: `RuntimeAdapter.run` forwards `processToolResult`/`transformTools` and profile `schemaMode`; `prepareWorkflowInvocation` installs `session.workflowToolOptimization` used by bash/read/grep; engine stage context calls `appendRepoMapIfEnabled`; context eviction runs under utilization pressure.
+- Wired `argumentAliases` onto the live AgentTool surface: `createTools` applies `wrapAgentToolWithWorkflowAliases` so model-facing schemas use wire names (e.g. `read.path` → `file_path` for `grok_implementer`) and execute reverse-maps to internal names.
+- Propagate `workflowToolOptimization` (and write/command policies) from `prepareWorkflowInvocation` through structured-subagent `ExecutorOptions` into `createAgentSession` ToolSession before `createTools`, so embedded children honor argumentAliases and processResult.
 - Added profile-selectable embedded, Codex CLI, and Claude Code runtimes for deterministic multi-model workflows, including structured output, cancellation, usage evidence, and isolated write execution.
 - Added multi-model coding workflow MVP: pure transition/schema policy, SQLite resume with version locks and artifact hashes, model routing with diversity/fallback audit metadata, budget + finding escalation, injectable runtime adapter with production factory wiring, deterministic verifier matrix, port-driven stages, engine repair/budget/cancel/resume loops, and built-in `workflow` tool (`start|status|resume|cancel`) with settings and role prompts.
 - Documented workflow lifecycle, recovery, and blocked states in `docs/workflow.md`.

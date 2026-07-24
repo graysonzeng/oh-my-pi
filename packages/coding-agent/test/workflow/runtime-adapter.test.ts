@@ -1,9 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import { RuntimeAdapter, type StructuredRunner, type StructuredRunnerResult } from "../../src/workflow/runtime-adapter";
+import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
+import {
+	RuntimeAdapter,
+	type StructuredRunner,
+	type StructuredRunnerRequest,
+	type StructuredRunnerResult,
+} from "../../src/workflow/runtime-adapter";
 import type { WorkflowAgentRequest } from "../../src/workflow/types";
 import { fakeSession, implArtifact } from "./helpers";
 
-function baseRequest(signal?: AbortSignal): WorkflowAgentRequest {
+function baseRequest(signal?: AbortSignal, overrides: Partial<WorkflowAgentRequest> = {}): WorkflowAgentRequest {
 	return {
 		workflowId: "wf_1",
 		attemptId: "att_1",
@@ -33,6 +39,7 @@ function baseRequest(signal?: AbortSignal): WorkflowAgentRequest {
 		isolation: { requested: true, merge: "patch", apply: true },
 		session: fakeSession(),
 		signal,
+		...overrides,
 	};
 }
 
@@ -129,6 +136,68 @@ describe("RuntimeAdapter", () => {
 		});
 		await adapter.run(baseRequest());
 		expect(seenAgent).toBe("task"); // implementer → task
+	});
+
+	it("forwards processToolResult/transformTools and session.workflowToolOptimization on real run path", async () => {
+		let seen: StructuredRunnerRequest | undefined;
+		const adapter = new RuntimeAdapter(async req => {
+			seen = req;
+			return okResult(implArtifact());
+		});
+		const profile = DEFAULT_MODEL_PROFILES.grok_implementer;
+		await adapter.run(
+			baseRequest(undefined, {
+				profile,
+				role: "implementer",
+				outputSchema: {
+					type: "object",
+					properties: { summary: { type: "string" } },
+					required: ["summary"],
+				},
+			}),
+		);
+
+		expect(seen).toBeDefined();
+		// schemaMode honors outputStrategy.schemaEnhancement.strictMode === false → permissive
+		expect(seen!.schemaMode).toBe("permissive");
+		expect(typeof seen!.processToolResult).toBe("function");
+		expect(typeof seen!.transformTools).toBe("function");
+
+		const huge = `${"ok line\n".repeat(400)}ERROR: compile failed\n`;
+		const processed = seen!.processToolResult!("bash", huge, { exitCode: 1 });
+		expect(processed.length).toBeLessThan(huge.length);
+		expect(processed).toMatch(/ERROR|Exit code/);
+
+		const tools = seen!.transformTools!([
+			{ name: "bash", schema: { type: "object", properties: { command: { type: "string" } } } },
+			{ name: "read", schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+		]);
+		expect(tools[0]?.customWireName).toBe("run_command");
+		expect(tools[1]?.schema?.properties).toHaveProperty("file_path");
+
+		// Live tool path: same processResult installed on the session handed to the runner.
+		const sessionOpt = seen!.session.workflowToolOptimization;
+		expect(sessionOpt?.processResult).toBeDefined();
+		expect(sessionOpt?.toolAliases?.bash).toBe("run_command");
+		const viaSession = sessionOpt!.processResult("bash", huge, { exitCode: 1 });
+		expect(viaSession.length).toBeLessThan(huge.length);
+	});
+
+	it("uses strict schemaMode when profile enables strictMode", async () => {
+		let seenMode: string | undefined;
+		const adapter = new RuntimeAdapter(async req => {
+			seenMode = req.schemaMode;
+			return okResult(implArtifact());
+		});
+		const profile = DEFAULT_MODEL_PROFILES.gpt_planner;
+		await adapter.run(
+			baseRequest(undefined, {
+				profile,
+				role: "planner",
+				isolation: undefined,
+			}),
+		);
+		expect(seenMode).toBe("strict");
 	});
 
 	it("attaches workflow-scoped write and command policy to write stages", async () => {

@@ -432,6 +432,18 @@ export interface ExecutorOptions {
 	 * set this false so disposal unregisters them instead of leaving idle peers.
 	 */
 	keepAlive?: boolean;
+	/**
+	 * Workflow-scoped ToolSession fields from prepareWorkflowInvocation.
+	 * Forwarded into createAgentSession so createTools applies toolAliases /
+	 * argumentAliases / processResult on the embedded child path.
+	 */
+	workflowToolOptimization?: {
+		processResult: (toolName: string, output: string, args?: unknown) => string;
+		toolAliases?: Record<string, string>;
+		argumentAliases?: Record<string, Record<string, string>>;
+	};
+	workflowWritePolicy?: { repoRoot: string; forbiddenPaths: string[] };
+	workflowCommandPolicy?: { allowedCommands: string[] };
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -2603,6 +2615,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},
+				// Workflow prepare installs these on the parent session; createTools
+				// must see them on the child ToolSession (argumentAliases / processResult).
+				workflowToolOptimization: options.workflowToolOptimization,
+				workflowWritePolicy: options.workflowWritePolicy,
+				workflowCommandPolicy: options.workflowCommandPolicy,
 			});
 
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager));

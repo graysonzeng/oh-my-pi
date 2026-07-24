@@ -1,8 +1,11 @@
 import { WorkflowPolicyError } from "./errors";
 import type { ModelProfile, WorkflowRuntimeKind } from "./types";
 
-/** Fields accepted on ModelProfile but not wired through the structured runner. */
-const UNSUPPORTED_RUNTIME_FIELDS = ["toolAliases", "argumentAliases", "maxInputTokens", "maxOutputTokens"] as const;
+/**
+ * Fields accepted on ModelProfile but not yet wired through the structured runner.
+ * toolAliases / argumentAliases are supported via schema-enhancer transforms — not rejected.
+ */
+const UNSUPPORTED_RUNTIME_FIELDS = ["maxInputTokens", "maxOutputTokens"] as const;
 
 const KNOWN_RUNTIME_KINDS = new Set<WorkflowRuntimeKind>(["embedded", "codex_cli", "claude_cli"]);
 

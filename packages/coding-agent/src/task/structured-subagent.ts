@@ -18,6 +18,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ToolSession } from "../tools";
+import { pickWorkflowToolSessionFields } from "../tools/workflow-session-fields";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
@@ -385,6 +386,9 @@ function buildExecutorOptions(
 		getSessionId: session.getSessionId ?? (() => null),
 	};
 	const enableMCP = !policy.planMode && (session.enableMCP ?? true);
+	// Forward prepareWorkflowInvocation session fields so createTools on the child
+	// sees toolAliases / argumentAliases / processResult (and write/command policies).
+	const workflowFields = pickWorkflowToolSessionFields(session);
 	return {
 		cwd: session.cwd,
 		agent: policy.effectiveAgent,
@@ -443,6 +447,7 @@ function buildExecutorOptions(
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+		...workflowFields,
 	};
 }
 

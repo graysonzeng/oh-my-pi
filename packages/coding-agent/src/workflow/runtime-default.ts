@@ -37,6 +37,10 @@ async function preservePatchArtifact(
 
 const productionRunner: StructuredRunner = async (request: StructuredRunnerRequest) => {
 	const isolationRequested = request.isolation?.requested === true;
+	// Argument/tool aliases: prepareWorkflowInvocation installs
+	// session.workflowToolOptimization; createTools applies
+	// wrapAgentToolWithWorkflowAliases so model-facing parameters use wire names
+	// (e.g. file_path) and execute reverse-maps to internal names (path).
 	const result = await runStructuredSubagent({
 		session: request.session,
 		invocationKind: request.invocationKind,

@@ -64,6 +64,7 @@ import {
 } from "../utils/image-loading";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { type ArchiveReader, formatArchiveEntryLines, openArchive, parseArchivePathCandidates } from "../utils/zip";
+import { applySessionToolOutput, workflowToolWireName } from "../workflow/tool-optimization";
 import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import {
 	type ConflictEntry,
@@ -888,6 +889,10 @@ type SuffixMatchCache = Map<string, { absolutePath: string; displayPath: string 
  */
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
+	/** Model wire name when workflow toolAliases remaps read. */
+	get customWireName(): string | undefined {
+		return workflowToolWireName(this.session, this.name);
+	}
 	readonly approval = (args: unknown): ToolTier =>
 		pathTargetsSsh(String((args as { path?: unknown }).path ?? "")) ? "exec" : "read";
 	readonly label = "Read";
@@ -1469,7 +1474,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (options.raw === true && options.sourcePath && options.immutable !== true && rawSeenLines) {
 			recordInMemorySeenLines(this.session, options.sourcePath, text, rawSeenLines);
 		}
-		resultBuilder.text(outputText);
+		resultBuilder.text(
+			applySessionToolOutput(this.session, "read", outputText, {
+				path: options.sourcePath,
+			}),
+		);
 		if (truncationInfo) {
 			resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
 		}

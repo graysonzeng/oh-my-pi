@@ -196,6 +196,7 @@ import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { ttsTool } from "./tools/tts";
+import { applyWorkflowToolSessionFields } from "./tools/workflow-session-fields";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { buildNamedToolChoice } from "./utils/tool-choice";
@@ -565,6 +566,20 @@ export interface CreateAgentSessionOptions {
 	 * `@opentelemetry/api` package returns a no-op tracer in that case.
 	 */
 	telemetry?: AgentTelemetryConfig;
+
+	/**
+	 * Workflow-scoped tool session fields (from prepareWorkflowInvocation via
+	 * structured-subagent ExecutorOptions). Applied to the ToolSession before
+	 * createTools so wrapAgentToolWithWorkflowAliases sees argumentAliases and
+	 * bash/read/grep honor processResult / path policies.
+	 */
+	workflowToolOptimization?: {
+		processResult: (toolName: string, output: string, args?: unknown) => string;
+		toolAliases?: Record<string, string>;
+		argumentAliases?: Record<string, Record<string, string>>;
+	};
+	workflowWritePolicy?: { repoRoot: string; forbiddenPaths: string[] };
+	workflowCommandPolicy?: { allowedCommands: string[] };
 
 	/**
 	 * Fired once, when the agent loop hands its first request to the provider
@@ -1788,6 +1803,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getArtifactsDir,
 			options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : undefined,
 		);
+
+		// Workflow prepare installs optimization + path/command policies on the parent
+		// session; subagent ExecutorOptions forwards them here so createTools /
+		// wrapAgentToolWithWorkflowAliases see argumentAliases and processResult.
+		applyWorkflowToolSessionFields(toolSession, {
+			workflowToolOptimization: options.workflowToolOptimization,
+			workflowWritePolicy: options.workflowWritePolicy,
+			workflowCommandPolicy: options.workflowCommandPolicy,
+		});
 
 		// Create built-in tools (already wrapped with meta notice formatting)
 		const builtinTools = await logger.time("createAllTools", createTools, toolSession, options.toolNames);

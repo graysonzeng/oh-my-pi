@@ -3,7 +3,9 @@ import implementContextTemplate from "../prompts/workflow/context-implement.hbs.
 import planContextTemplate from "../prompts/workflow/context-plan.hbs.md" with { type: "text" };
 import planReviewContextTemplate from "../prompts/workflow/context-plan-review.hbs.md" with { type: "text" };
 import repairContextTemplate from "../prompts/workflow/context-repair.hbs.md" with { type: "text" };
+import { buildRepoMap } from "./repo-map-builder";
 import type {
+	ContextStrategy,
 	ImplementationArtifactV1,
 	PlanArtifactV1,
 	ReviewArtifactV1,
@@ -97,6 +99,33 @@ export class ContextBuilder {
 				? `summary=${input.implementation.summary}; files=${JSON.stringify(input.implementation.changedFiles)}`
 				: "(none)",
 		});
+	}
+
+	/**
+	 * Optionally append a compressed repo-map when contextStrategy.repoMap is enabled.
+	 * Failures degrade to no map (never throw into the stage path).
+	 */
+	async appendRepoMapIfEnabled(
+		context: string,
+		opts: {
+			cwd: string;
+			contextStrategy?: ContextStrategy;
+			relevantFiles?: string[];
+		},
+	): Promise<string> {
+		const repo = opts.contextStrategy?.repoMap;
+		if (!repo?.enabled) return context;
+		try {
+			const map = await buildRepoMap({
+				cwd: opts.cwd,
+				relevantFiles: opts.relevantFiles,
+				maxFiles: repo.maxFiles,
+				strategy: repo.strategy,
+			});
+			return `${context.trim()}\n\n## Repo map\n${map}\n`;
+		} catch {
+			return context;
+		}
 	}
 
 	#truncatePlan(plan: PlanArtifactV1): PlanArtifactV1 {

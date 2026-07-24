@@ -63,6 +63,7 @@ import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { type TodoPhase, TodoTool } from "./todo";
+import { wrapAgentToolWithWorkflowAliases } from "./workflow-alias-wrap";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, XdevRegistry } from "./xdev";
 import { YieldTool } from "./yield";
@@ -155,6 +156,18 @@ export interface ToolSession {
 	workflowWritePolicy?: { repoRoot: string; forbiddenPaths: string[] };
 	/** Workflow-only command allowlist installed for scoped write stages. */
 	workflowCommandPolicy?: { allowedCommands: string[] };
+	/**
+	 * Workflow per-model tool optimization (truncation/summarization + wire aliases).
+	 * Installed by prepareWorkflowInvocation for scoped stages.
+	 */
+	workflowToolOptimization?: {
+		/** Post-process tool result text before it enters model context. */
+		processResult: (toolName: string, output: string, args?: unknown) => string;
+		/** Internal tool name → model wire name (AgentTool.customWireName). */
+		toolAliases?: Record<string, string>;
+		/** Internal arg name → wire name, keyed by tool name. */
+		argumentAliases?: Record<string, Record<string, string>>;
+	};
 	/** Whether UI is available */
 	hasUI: boolean;
 	/**
@@ -623,7 +636,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const baseResults = await Promise.all(
 		baseEntries.map(async ([name, factory]) => {
 			const tool = await logger.time(`createTools:${name}`, factory as ToolFactory, session);
-			return tool ? wrapToolWithMetaNotice(tool) : null;
+			if (!tool) return null;
+			// Per-model toolAliases / argumentAliases from workflow stages.
+			return wrapAgentToolWithWorkflowAliases(wrapToolWithMetaNotice(tool), session);
 		}),
 	);
 	let tools = baseResults.filter((r): r is Tool => r !== null);
@@ -662,13 +677,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	) {
 		const writeTool = await logger.time("createTools:write", BUILTIN_TOOLS.write, session);
 		if (writeTool) {
-			tools.push(wrapToolWithMetaNotice(writeTool));
+			tools.push(wrapAgentToolWithWorkflowAliases(wrapToolWithMetaNotice(writeTool), session));
 		}
 	}
 	if (!restrictToolNames && xdevMounted && !tools.some(tool => tool.name === "read")) {
 		const readTool = await logger.time("createTools:read", BUILTIN_TOOLS.read, session);
 		if (readTool) {
-			tools.push(wrapToolWithMetaNotice(readTool));
+			tools.push(wrapAgentToolWithWorkflowAliases(wrapToolWithMetaNotice(readTool), session));
 		}
 	}
 

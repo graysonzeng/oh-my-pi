@@ -5,8 +5,12 @@ import plannerPrompt from "../prompts/workflow/planner.md" with { type: "text" }
 import repairPrompt from "../prompts/workflow/repair.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { WorkflowCancelledError, WorkflowPolicyError } from "./errors";
+import { applyPromptStrategy } from "./prompt-strategy";
+import { enhanceSchemaForProfile, type ToolDescriptor, transformToolsForProfile } from "./schema-enhancer";
+import { applyContextStrategyEviction } from "./tool-optimization";
+import { processToolOutput } from "./tool-output-manager";
 import { isReadonlyWorkflowRole, ToolPolicyFactory, wrapSessionForWorkflowRole } from "./tool-policy";
-import type { WorkflowAgentRequest, WorkflowIsolationControls } from "./types";
+import type { ModelProfile, WorkflowAgentRequest, WorkflowIsolationControls } from "./types";
 
 /** Versioned workflow role prompts keyed by ModelProfile.promptTemplate. */
 export const WORKFLOW_PROMPTS: Readonly<Record<string, string>> = {
@@ -19,16 +23,33 @@ export const WORKFLOW_PROMPTS: Readonly<Record<string, string>> = {
 
 /**
  * Inject static role prompt into the request sent to the runner.
+ * When profile.promptStrategy is set, applies per-model style template (concise/structured/explicit).
  */
 export function injectWorkflowPrompt(
 	promptTemplate: string,
 	assignment: string,
 	context?: string,
-): { assignment: string; context?: string } {
+	profile?: Pick<ModelProfile, "promptStrategy">,
+	role?: WorkflowAgentRequest["role"],
+	outputSchema?: unknown,
+): { assignment: string; context?: string; styleMarker?: string | null } {
 	const template = WORKFLOW_PROMPTS[promptTemplate]?.trim();
-	if (!template) return { assignment, context };
+	if (!template) return { assignment, context, styleMarker: null };
+
+	if (profile?.promptStrategy && role) {
+		const applied = applyPromptStrategy({
+			profile,
+			role,
+			rolePrompt: template,
+			context: context?.trim() ? `## Context\n${context}` : undefined,
+			assignment,
+			outputSchema,
+		});
+		return { assignment, context: applied.context, styleMarker: applied.styleMarker };
+	}
+
 	const ctx = context?.trim() ? `${template}\n\n## Context\n${context}` : template;
-	return { assignment, context: ctx };
+	return { assignment, context: ctx, styleMarker: null };
 }
 
 /**
@@ -63,11 +84,20 @@ export interface PreparedWorkflowInvocation {
 	isolationRequested: boolean;
 	allowedTools?: string[];
 	session: ToolSession;
+	/** Non-null when a per-model style template was applied. */
+	styleMarker?: string | null;
+	/** Schema after outputStrategy enhancement (may equal request.outputSchema). */
+	outputSchema?: unknown;
+	/** Apply toolStrategy truncation/summarization to a tool result string. */
+	processToolResult: (toolName: string, output: string, args?: unknown) => string;
+	/** Remap tool descriptors with profile aliases for the model wire surface. */
+	transformTools: (tools: ToolDescriptor[]) => ToolDescriptor[];
 }
 
 /**
  * Shared workflow-owned preparation before provider-specific execution.
- * Rejects aborted requests and readonly isolation; injects prompts/policy/tools.
+ * Rejects aborted requests and readonly isolation; injects prompts/policy/tools;
+ * applies per-model prompt, schema, and tool strategies.
  */
 export function prepareWorkflowInvocation(request: WorkflowAgentRequest): PreparedWorkflowInvocation {
 	if (request.signal?.aborted) {
@@ -85,12 +115,35 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 	const isolation = readonlyRole ? undefined : request.isolation;
 	const isolationRequested = isolation?.requested === true;
 
-	const injected = injectWorkflowPrompt(request.profile.promptTemplate, request.assignment, request.context);
+	const enhancedSchema = enhanceSchemaForProfile(request.outputSchema, request.profile);
+
+	const injected = injectWorkflowPrompt(
+		request.profile.promptTemplate,
+		request.assignment,
+		request.context,
+		request.profile,
+		request.role,
+		enhancedSchema,
+	);
 	const maxBytes = request.profile.contextPolicy?.maxArtifactBytes ?? Number.POSITIVE_INFINITY;
 	let context = injected.context;
 	if (context && context.length > maxBytes) {
 		context = `${context.slice(0, Math.max(0, maxBytes - 32))}\n/* truncated by contextPolicy */`;
 	}
+
+	// Optional repo-map / contextStrategy artifact cap is applied when contextStrategy is present
+	// and context already includes a map (stages may inject via ContextBuilder).
+	const strategyMax = request.profile.contextStrategy?.artifactInclusion?.maxArtifactBytes;
+	if (strategyMax && context && context.length > strategyMax) {
+		context = `${context.slice(0, Math.max(0, strategyMax - 32))}\n/* truncated by contextStrategy */`;
+	}
+
+	// CWL-style eviction under utilization pressure (production call site for evictContext).
+	const evictionBudget =
+		request.profile.contextStrategy?.artifactInclusion?.maxArtifactBytes ??
+		request.profile.contextPolicy?.maxArtifactBytes ??
+		maxBytes;
+	context = applyContextStrategyEviction(context, request.profile.contextStrategy, evictionBudget);
 
 	let session = wrapSessionForWorkflowRole(request.session, request.role);
 	session = wrapSessionForWorkflowIsolation(session, isolationRequested);
@@ -111,6 +164,32 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 	const disabled = new Set(request.profile.disabledTools ?? []);
 	const effectiveTools = allowedTools && disabled.size > 0 ? allowedTools.filter(t => !disabled.has(t)) : allowedTools;
 
+	const toolStrategy = request.profile.toolStrategy;
+	const processToolResult = (toolName: string, output: string, args?: unknown) =>
+		processToolOutput(output, toolName, toolStrategy, args);
+
+	const transformTools = (tools: ToolDescriptor[]) => transformToolsForProfile(tools, request.profile);
+
+	const toolAliases = {
+		...(request.profile.toolStrategy?.toolAliases ?? {}),
+		...(request.profile.toolAliases ?? {}),
+	};
+	const argumentAliases = {
+		...(request.profile.toolStrategy?.argumentAliases ?? {}),
+		...(request.profile.argumentAliases ?? {}),
+	};
+
+	// Always install optimization on the session so bash/read/grep honor processResult
+	// and customWireName on the real tool path (not only via PreparedWorkflowInvocation helpers).
+	session = {
+		...session,
+		workflowToolOptimization: {
+			processResult: processToolResult,
+			toolAliases: Object.keys(toolAliases).length > 0 ? toolAliases : undefined,
+			argumentAliases: Object.keys(argumentAliases).length > 0 ? argumentAliases : undefined,
+		},
+	};
+
 	return {
 		request,
 		assignment: injected.assignment,
@@ -120,5 +199,9 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 		isolationRequested,
 		allowedTools: effectiveTools ? [...effectiveTools] : undefined,
 		session,
+		styleMarker: injected.styleMarker,
+		outputSchema: enhancedSchema,
+		processToolResult,
+		transformTools,
 	};
 }

@@ -450,19 +450,24 @@ export class WorkflowEngine {
 
 		switch (stage) {
 			case "planning": {
-				const { artifact: plan, usage } = await this.#withProfileFallback("planner", {}, profile => {
+				const { artifact: plan, usage } = await this.#withProfileFallback("planner", {}, async profile => {
 					this.#plannerProfileId = profile.id;
 					this.#plannerVendor = profile.vendor;
+					const context = await this.#buildStageContext(
+						this.#contextBuilder.buildPlanContext({
+							request,
+							priorReview: this.#planReview,
+							constraints: request.constraints,
+						}),
+						profile,
+						session,
+					);
 					return new PlanStage(this.#adapter).execute({
 						workflowId,
 						attemptId,
 						profile,
 						assignment: request.request,
-						context: this.#contextBuilder.buildPlanContext({
-							request,
-							priorReview: this.#planReview,
-							constraints: request.constraints,
-						}),
+						context,
 						session,
 						signal,
 					});
@@ -483,13 +488,18 @@ export class WorkflowEngine {
 						excludedProfileIds: this.#plannerProfileId ? [this.#plannerProfileId] : [],
 						avoidVendor: this.#plannerVendor,
 					},
-					profile =>
+					async profile =>
 						new PlanReviewStage(this.#adapter).execute({
 							workflowId,
 							attemptId,
 							profile,
 							assignment: "Review the plan for correctness and feasibility",
-							context: this.#contextBuilder.buildPlanReviewContext(this.#plan!),
+							context: await this.#buildStageContext(
+								this.#contextBuilder.buildPlanReviewContext(this.#plan!),
+								profile,
+								session,
+								this.#plan?.affectedFiles.map(f => f.path),
+							),
 							session,
 							signal,
 						}),
@@ -539,7 +549,12 @@ export class WorkflowEngine {
 						attemptId,
 						profile,
 						assignment: "Implement the approved plan in isolation",
-						context: this.#contextBuilder.buildImplementContext(this.#plan!, this.#planReview),
+						context: await this.#buildStageContext(
+							this.#contextBuilder.buildImplementContext(this.#plan!, this.#planReview),
+							profile,
+							session,
+							this.#plan?.affectedFiles.map(f => f.path),
+						),
 						session,
 						signal,
 						isolation: this.#config.isolation,
@@ -604,11 +619,19 @@ export class WorkflowEngine {
 							attemptId,
 							profile,
 							assignment: "Independent code review of the implementation",
-							context: this.#contextBuilder.buildCodeReviewContext({
-								plan: this.#plan!,
-								implementation: this.#implementation!,
-								verification: this.#verification,
-							}),
+							context: await this.#buildStageContext(
+								this.#contextBuilder.buildCodeReviewContext({
+									plan: this.#plan!,
+									implementation: this.#implementation!,
+									verification: this.#verification,
+								}),
+								profile,
+								session,
+								[
+									...(this.#plan?.affectedFiles.map(f => f.path) ?? []),
+									...(this.#implementation?.changedFiles ?? []),
+								],
+							),
 							session,
 							signal,
 							confidenceThreshold: this.#config.confidenceThreshold,
@@ -687,7 +710,7 @@ export class WorkflowEngine {
 						findingTracker: this.#findingTracker,
 						preferReasoningRepair: primary ? this.#findingTracker.needsReasoningRepair(primary) : false,
 					},
-					profile =>
+					async profile =>
 						new RepairStage(this.#adapter).execute({
 							workflowId,
 							attemptId,
@@ -695,13 +718,22 @@ export class WorkflowEngine {
 							findingIds: open.map(f => f.id),
 							findings: open,
 							assignment: `Repair findings: ${open.map(f => f.id).join(", ")}`,
-							context: this.#contextBuilder.buildRepairContext({
-								plan: this.#plan!,
-								findings: open,
-								verification: this.#verification,
-								implementation: this.#implementation,
-								reviewExplanation: this.#codeReview?.explanation ?? this.#planReview?.explanation,
-							}),
+							context: await this.#buildStageContext(
+								this.#contextBuilder.buildRepairContext({
+									plan: this.#plan!,
+									findings: open,
+									verification: this.#verification,
+									implementation: this.#implementation,
+									reviewExplanation: this.#codeReview?.explanation ?? this.#planReview?.explanation,
+								}),
+								profile,
+								session,
+								[
+									...(this.#plan?.affectedFiles.map(f => f.path) ?? []),
+									...(this.#implementation?.changedFiles ?? []),
+									...open.map(f => f.file).filter((p): p is string => Boolean(p)),
+								],
+							),
 							session,
 							signal,
 							isolation: this.#config.isolation,
@@ -773,6 +805,23 @@ export class WorkflowEngine {
 			default:
 				throw new WorkflowPolicyError("unsupported_stage", { stage });
 		}
+	}
+
+	/**
+	 * Optionally append a compressed repo-map when profile.contextStrategy.repoMap is enabled.
+	 * Production call site for ContextBuilder.appendRepoMapIfEnabled.
+	 */
+	async #buildStageContext(
+		base: string,
+		profile: ModelProfile,
+		session: ToolSession,
+		relevantFiles?: string[],
+	): Promise<string> {
+		return this.#contextBuilder.appendRepoMapIfEnabled(base, {
+			cwd: session.cwd,
+			contextStrategy: profile.contextStrategy,
+			relevantFiles: relevantFiles?.length ? [...new Set(relevantFiles)] : undefined,
+		});
 	}
 
 	/** Finish an open attempt if still in_progress (no-op if already finished). */
