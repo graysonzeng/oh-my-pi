@@ -4145,7 +4145,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Modes",
 			label: "Workflow Model Profiles",
 			description:
-				"Optional model profile map overriding workflow defaults (empty uses built-in planner/reviewer/implementer/repair profiles)",
+				"Optional model profile map overriding workflow defaults (empty uses built-in planner/reviewer/implementer/repair profiles). Each profile may set runtime: { kind: embedded | codex_cli | claude_cli, executable?: string, profile?: string }. CLI kinds use the local codex/claude binaries; credentials stay in existing user CLI config and are never stored by omp.",
 		},
 	},
 

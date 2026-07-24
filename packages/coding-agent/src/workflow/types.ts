@@ -119,6 +119,17 @@ export interface VerificationArtifactV1 extends ArtifactHeader {
 
 export type WorkflowRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer" | "repair";
 
+/** Execution backend for a model profile — selected by config, never inferred from vendor. */
+export type WorkflowRuntimeKind = "embedded" | "codex_cli" | "claude_cli";
+
+export interface WorkflowRuntimeConfig {
+	kind: WorkflowRuntimeKind;
+	/** Binary name or absolute path; never a shell fragment. */
+	executable?: string;
+	/** Codex CLI `--profile` only; unsupported on other runtimes. */
+	profile?: string;
+}
+
 export interface ModelProfile {
 	id: string;
 	vendor: "anthropic" | "openai" | "xai" | string;
@@ -148,6 +159,8 @@ export interface ModelProfile {
 		includeFullTranscript: boolean;
 		maxArtifactBytes: number;
 	};
+	/** Omitted profiles normalize to `{ kind: "embedded" }`. */
+	runtime?: WorkflowRuntimeConfig;
 }
 
 export interface WorkflowAgentRequest {

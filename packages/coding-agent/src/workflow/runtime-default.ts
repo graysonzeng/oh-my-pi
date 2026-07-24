@@ -1,13 +1,21 @@
 /**
- * Production wiring for RuntimeAdapter.
- * Isolated from pure workflow modules so unit tests never load task/natives.
- * AGENTS.md forbids await import() — this file uses a top-level import instead.
+ * Production wiring for workflow runtimes (embedded + CLI).
+ * Pure unit tests may import this file when isolation is injected/faked —
+ * isolation-runner (pi-natives) is NOT imported here.
+ * AGENTS.md forbids await import() — isolation production deps live in
+ * `cli-isolation-production.ts` and are wired by the tools package.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { $which } from "@oh-my-pi/pi-utils/which";
 import { runStructuredSubagent } from "../task/structured-subagent";
 import { defaultWorkflowArtifactDir } from "./artifact-store";
+import { ClaudeCliRuntimeAdapter } from "./claude-cli-runtime";
+import type { CliIsolationDeps } from "./cli-isolation";
+import { type CliProcessRunner, runCliProcess } from "./cli-process";
+import { CodexCliRuntimeAdapter } from "./codex-cli-runtime";
 import { RuntimeAdapter, type StructuredRunner, type StructuredRunnerRequest } from "./runtime-adapter";
+import { WorkflowRuntimeDispatcher } from "./runtime-dispatcher";
 
 async function preservePatchArtifact(
 	patchPath: string | undefined,
@@ -23,7 +31,6 @@ async function preservePatchArtifact(
 		await Bun.write(dest, text);
 		return dest;
 	} catch {
-		// If source already gone, return original path so fail-closed verify can report it.
 		return patchPath;
 	}
 }
@@ -43,13 +50,11 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 		isolation: request.isolation,
 		maxRuntimeMs: request.maxRuntimeMs,
 		signal: request.signal,
-		// Keep isolation patches for workflow verification even after successful apply/cleanup.
 		retainArtifacts: isolationRequested || request.retainArtifacts === true,
 		allowedTools: request.allowedTools,
 	});
 
 	let patchPath = result.result.patchPath;
-	// Durable copy so verifier can read after isolation temp cleanup.
 	if (isolationRequested && patchPath && request.workflowId && request.attemptId) {
 		patchPath = (await preservePatchArtifact(patchPath, request.workflowId, request.attemptId)) ?? patchPath;
 	}
@@ -72,6 +77,45 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 	};
 };
 
-export function createDefaultRuntimeAdapter(): RuntimeAdapter {
-	return new RuntimeAdapter(productionRunner);
+export interface DefaultRuntimeDependencies {
+	processRunner?: CliProcessRunner;
+	resolveExecutable?: (name: string) => Promise<string | null> | string | null;
+	embeddedRunner?: StructuredRunner;
+	artifactRoot?: string;
+	/** Write-path isolation; production should pass createProductionCliIsolationDeps(). */
+	isolation?: CliIsolationDeps;
+}
+
+const whichCache = new Map<string, string | null>();
+
+async function defaultResolveExecutable(name: string): Promise<string | null> {
+	if (whichCache.has(name)) return whichCache.get(name) ?? null;
+	if (path.isAbsolute(name)) {
+		const exists = await Bun.file(name).exists();
+		const value = exists ? name : null;
+		whichCache.set(name, value);
+		return value;
+	}
+	const resolved = $which(name);
+	whichCache.set(name, resolved);
+	return resolved;
+}
+
+/**
+ * Mixed runtime dispatcher (embedded + Codex CLI + Claude CLI).
+ * Built-in defaults remain embedded until live smoke is authorized.
+ * For CLI write roles, pass `isolation` (see createProductionCliIsolationDeps).
+ */
+export function createDefaultRuntimeAdapter(dependencies: DefaultRuntimeDependencies = {}): WorkflowRuntimeDispatcher {
+	const processRunner = dependencies.processRunner ?? runCliProcess;
+	const resolveExecutable = dependencies.resolveExecutable ?? defaultResolveExecutable;
+	const embeddedRunner = dependencies.embeddedRunner ?? productionRunner;
+	const artifactRoot = dependencies.artifactRoot;
+	const isolation = dependencies.isolation;
+
+	return new WorkflowRuntimeDispatcher({
+		embedded: new RuntimeAdapter(embeddedRunner),
+		codexCli: new CodexCliRuntimeAdapter({ processRunner, resolveExecutable, artifactRoot, isolation }),
+		claudeCli: new ClaudeCliRuntimeAdapter({ processRunner, resolveExecutable, artifactRoot, isolation }),
+	});
 }

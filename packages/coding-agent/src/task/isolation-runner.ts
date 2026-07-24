@@ -128,7 +128,16 @@ async function writeIsolationPatch(
 }
 
 /**
- * Run a subagent inside an isolation worktree and capture its changes.
+ * Generic isolation lifecycle for any callback that mutates a worktree.
+ * Shared by subprocess runners and external CLI adapters.
+ */
+export interface IsolatedExecutionOptions extends Omit<IsolatedRunOptions, "baseOptions"> {
+	/** Execute inside the isolation worktree directory; return a SingleResult. */
+	run: (worktree: string) => Promise<SingleResult>;
+}
+
+/**
+ * Run a callback inside an isolation worktree and capture its changes.
  *
  * Branch mode: on success, commits the diff onto `omp/task/${agentId}` and
  * returns `branchName` + `nestedPatches`. On commit failure the branch is
@@ -144,18 +153,13 @@ async function writeIsolationPatch(
  *
  * The isolation handle is always torn down in `finally`.
  */
-export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
+export async function runIsolatedExecution(opts: IsolatedExecutionOptions): Promise<SingleResult> {
 	let handle: IsolationHandle | undefined;
 	try {
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
-		const result = await runSubprocess({
-			...opts.baseOptions,
-			worktree: isolationDir,
-			preloadedExtensionPaths: undefined,
-			preloadedCustomToolPaths: undefined,
-		});
+		const result = await opts.run(isolationDir);
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			try {
 				const commitResult = await commitToBranch(
@@ -216,6 +220,29 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			await cleanupIsolation(handle);
 		}
 	}
+}
+
+/**
+ * Run a subagent subprocess inside an isolation worktree (compatibility wrapper).
+ */
+export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
+	return runIsolatedExecution({
+		context: opts.context,
+		preferredBackend: opts.preferredBackend,
+		agentId: opts.agentId,
+		mergeMode: opts.mergeMode,
+		artifactsDir: opts.artifactsDir,
+		description: opts.description,
+		buildCommitMessage: opts.buildCommitMessage,
+		buildFailureResult: opts.buildFailureResult,
+		run: worktree =>
+			runSubprocess({
+				...opts.baseOptions,
+				worktree,
+				preloadedExtensionPaths: undefined,
+				preloadedCustomToolPaths: undefined,
+			}),
+	});
 }
 
 export interface IsolationMergeOptions {

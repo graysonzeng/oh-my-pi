@@ -1,10 +1,11 @@
 import { getDefaultConfig, type WorkflowDefaultConfig } from "./default-config";
-import { assertSupportedModelProfile } from "./model-profile-registry";
+import { assertSupportedModelProfile, normalizeModelProfile } from "./model-profile-registry";
 import type { ModelProfile } from "./types";
 
 /**
  * Merge settings `workflow.profiles` over defaults.
  * Empty / missing / non-object values fall back to defaults unchanged.
+ * Every merged profile is normalized (runtime defaults to embedded).
  */
 export function resolveWorkflowProfilesFromSettings(
 	rawProfiles: unknown,
@@ -28,8 +29,9 @@ export function resolveWorkflowProfilesFromSettings(
 			...partial,
 			id: typeof partial.id === "string" && partial.id.length > 0 ? partial.id : key,
 		} as ModelProfile;
-		assertSupportedModelProfile(profile);
-		merged[key] = profile;
+		const normalized = normalizeModelProfile(profile);
+		assertSupportedModelProfile(normalized);
+		merged[key] = normalized;
 	}
 	return merged;
 }

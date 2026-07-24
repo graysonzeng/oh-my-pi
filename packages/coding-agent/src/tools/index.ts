@@ -31,6 +31,7 @@ import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
+import { createProductionCliIsolationDeps } from "../workflow/cli-isolation-production";
 import { WorkflowEngine } from "../workflow/engine";
 import { createDefaultRuntimeAdapter } from "../workflow/runtime-default";
 import { buildWorkflowConfigFromSessionSettings } from "../workflow/session-config";
@@ -393,7 +394,7 @@ function createEngineFromSessionSettings(session: ToolSession): WorkflowEngine {
 		store,
 		ownsStore: true,
 		session,
-		adapter: createDefaultRuntimeAdapter(),
+		adapter: createDefaultRuntimeAdapter({ isolation: createProductionCliIsolationDeps() }),
 		config: buildWorkflowConfigFromSessionSettings(raw),
 	});
 }

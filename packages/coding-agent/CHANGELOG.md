@@ -3,8 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- Added profile-selectable embedded, Codex CLI, and Claude Code runtimes for deterministic multi-model workflows, including structured output, cancellation, usage evidence, and isolated write execution.
 - Added multi-model coding workflow MVP: pure transition/schema policy, SQLite resume with version locks and artifact hashes, model routing with diversity/fallback audit metadata, budget + finding escalation, injectable runtime adapter with production factory wiring, deterministic verifier matrix, port-driven stages, engine repair/budget/cancel/resume loops, and built-in `workflow` tool (`start|status|resume|cancel`) with settings and role prompts.
 - Documented workflow lifecycle, recovery, and blocked states in `docs/workflow.md`.
+
+### Notes
+- CLI runtimes require local `codex` and/or `claude` binaries authenticated via existing user configuration; omp never stores credentials or edits `~/.codex` / `~/.claude/settings.json`.
+- Built-in default profiles remain `runtime.kind = "embedded"` until live smoke is authorized; set `workflow.profiles.*.runtime` to enable Codex/Claude CLI paths.
+- Live provider smoke is opt-in and cost-bearing; automated tests use injectable process runners only.
+- Claude profiles should use Claude Code (Anthropic Messages). GPT/Grok profiles use Codex CLI (Responses). Do not route Claude through Codex by default.
+- If `~/.claude/settings.json` (or its resolved target) is world-readable, restrict permissions after reviewing other consumers — omp reports this risk but does not change shared auth files.
 
 ### Fixed
 - Workflow write stages no longer dead-end when `task.isolation.mode` is `none` (session-local upgrade to `auto`); isolation patches are retained/copied for verification; `changesApplied: false` fails closed.
