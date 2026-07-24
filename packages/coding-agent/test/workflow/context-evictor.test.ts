@@ -72,6 +72,35 @@ describe("evictContext", () => {
 		});
 		expect(out).toEqual(segments);
 	});
+
+	it("second-pass drop prefers oldest non-protected segments when still over target", () => {
+		// No persisted tools so first pass cannot free budget; second pass must drop oldest assistants.
+		const segments = [
+			seg({ id: "u0", type: "user", turnIndex: 0, tokens: 10, content: "task" }),
+			seg({ id: "a0", type: "assistant", turnIndex: 1, tokens: 100, content: "old plan" }),
+			seg({ id: "a1", type: "assistant", turnIndex: 2, tokens: 100, content: "mid plan" }),
+			seg({ id: "a2", type: "assistant", turnIndex: 3, tokens: 40, content: "recent" }),
+			seg({ id: "a3", type: "assistant", turnIndex: 4, tokens: 40, content: "latest" }),
+		];
+		// maxTurn=4, keepRecentN=2 → recentCutoff=3 (protect a2,a3); target = floor(200*0.5)=100
+		const out = evictContext({
+			segments,
+			strategy,
+			currentTokens: 290,
+			maxTokens: 200,
+		});
+		const ids = out.map(s => s.id);
+		expect(ids).toContain("u0");
+		expect(ids).toContain("a2");
+		expect(ids).toContain("a3");
+		// Oldest non-protected assistants are dropped first (a0 before a1).
+		expect(ids).not.toContain("a0");
+		// a1 may or may not remain depending on residual budget after a0; never drop a0 while keeping a1 alone.
+		if (ids.includes("a1")) {
+			// If mid remains, old must already be gone (asserted above).
+			expect(ids.indexOf("a1")).toBeGreaterThan(ids.indexOf("u0"));
+		}
+	});
 });
 
 describe("applyContextStrategyEviction (production helper)", () => {

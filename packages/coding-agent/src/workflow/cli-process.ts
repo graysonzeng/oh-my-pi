@@ -64,7 +64,7 @@ async function readBoundedStream(stream: ReadableStream<Uint8Array> | null, labe
 	return new TextDecoder().decode(merged);
 }
 
-function killProcess(proc: ReturnType<typeof Bun.spawn>): void {
+function killProcess(proc: Bun.Subprocess<"pipe", "pipe", "pipe">): void {
 	try {
 		proc.kill();
 	} catch {
@@ -111,7 +111,7 @@ export async function runCliProcess(request: CliProcessRequest): Promise<CliProc
 		}
 	}
 
-	let proc: ReturnType<typeof Bun.spawn>;
+	let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
 	try {
 		proc = Bun.spawn(request.command, {
 			cwd: request.cwd,

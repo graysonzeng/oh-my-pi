@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -80,7 +81,7 @@ async function walk(_root: string, dir: string, out: string[], max: number): Pro
 			continue;
 		}
 		const abs = path.join(dir, name);
-		let st: Awaited<ReturnType<typeof fs.stat>>;
+		let st: Stats;
 		try {
 			st = await fs.stat(abs);
 		} catch {

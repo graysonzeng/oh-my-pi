@@ -57,11 +57,11 @@ export function evictContext(options: EvictContextOptions): ContextSegment[] {
 		return sortByTurn(toKeep);
 	}
 
-	// Still over target: drop older assistant (and non-user) segments first, oldest first.
-	const sorted = [...toKeep].sort((a, b) => a.turnIndex - b.turnIndex);
+	// Still over target: drop non-protected assistant/tool/artifact segments, oldest first.
+	const sorted = [...toKeep].sort((a, b) => a.turnIndex - b.turnIndex || a.id.localeCompare(b.id));
 	const finalKeep: ContextSegment[] = [];
-	// Walk newest → oldest when deciding what to keep under budget.
-	for (const seg of [...sorted].reverse()) {
+	// Walk oldest → newest so low-turn segments are candidates for eviction first.
+	for (const seg of sorted) {
 		if (seg.type === "user" && eviction.preserveUserTurns) {
 			finalKeep.push(seg);
 			continue;

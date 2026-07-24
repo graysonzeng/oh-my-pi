@@ -203,11 +203,9 @@ export function summarizeToolOutput(
 	args?: unknown,
 	summarizers: Record<string, SummarizerFn> = DEFAULT_SUMMARIZERS,
 ): string {
-	const key =
-		toolName in summarizers ? toolName : toolName === "bash" || toolName.endsWith("test") ? toolName : toolName;
-	const fn = summarizers[key] ?? summarizers[toolName];
+	const fn = summarizers[toolName];
 	if (fn) return fn(output, toolName, args);
-	// Heuristic: test-like tools
+	// Heuristic: test-like tools share the test summarizer.
 	if (/test/i.test(toolName) && summarizers.test) return summarizers.test(output, toolName, args);
 	return output;
 }
