@@ -1,7 +1,7 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../../tools";
 import { PlanArtifactJsonSchema } from "../json-schemas";
-import { parseWorkflowArtifact } from "../parse-artifact";
+import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { PlanArtifactSchema } from "../schemas";
 import type { ModelProfile, PlanArtifactV1, RuntimePort } from "../types";
 
@@ -51,7 +51,7 @@ export class PlanStage {
 				workflowId: input.workflowId,
 				attemptId: input.attemptId,
 				stage: "planning",
-				createdAt: (result.artifact as PlanArtifactV1).createdAt ?? new Date().toISOString(),
+				createdAt: coerceIsoDatetime((result.artifact as PlanArtifactV1).createdAt),
 				modelProfileId: input.profile.id,
 				provider: input.profile.vendor,
 				promptVersion: input.profile.promptVersion,

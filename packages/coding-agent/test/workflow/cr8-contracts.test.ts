@@ -6,11 +6,30 @@ import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { ContextBuilder } from "../../src/workflow/context-builder";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { FindingTracker } from "../../src/workflow/finding-tracker";
-import { parseWorkflowArtifact } from "../../src/workflow/parse-artifact";
+import { coerceIsoDatetime, parseWorkflowArtifact } from "../../src/workflow/parse-artifact";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { ReviewArtifactSchema } from "../../src/workflow/schemas";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+
+describe("coerceIsoDatetime", () => {
+	it("normalizes parseable timestamps to Zod datetime-safe ISO-8601 UTC", () => {
+		// Date-only forms are UTC midnight per ES Date Time String Format.
+		expect(coerceIsoDatetime("2026-07-25")).toBe("2026-07-25T00:00:00.000Z");
+		expect(coerceIsoDatetime("2026-07-25T12:34:56.789Z")).toBe("2026-07-25T12:34:56.789Z");
+		// Non-Z datetime: must be parseable and end with Z (offset depends on local TZ).
+		const noZ = coerceIsoDatetime("2026-07-25T12:34:56");
+		expect(noZ).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+		expect(Number.isNaN(Date.parse(noZ))).toBe(false);
+	});
+
+	it("falls back for empty or unparseable values", () => {
+		const fixed = "2026-01-02T03:04:05.000Z";
+		expect(coerceIsoDatetime("", fixed)).toBe(fixed);
+		expect(coerceIsoDatetime("not-a-date", fixed)).toBe(fixed);
+		expect(coerceIsoDatetime(undefined, fixed)).toBe(fixed);
+	});
+});
 
 describe("CR8 contract fixes", () => {
 	let store: WorkflowStore;

@@ -89,6 +89,7 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 			exitCode: result.result.exitCode,
 			error: result.result.error,
 			aborted: result.result.aborted,
+			abortReason: result.result.abortReason,
 			resolvedModel: result.result.resolvedModel,
 			toolCalls: result.result.toolCalls,
 		},

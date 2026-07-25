@@ -237,7 +237,8 @@ export const DEFAULT_MODEL_PROFILES = {
 		}),
 		outputStrategy: claudeOutput,
 		maxRequests: 50,
-		maxRuntimeMs: 180_000,
+		// Live gateways can be slow; 3m was aborting code/plan review mid-stream.
+		maxRuntimeMs: 300_000,
 		retryPolicy: {
 			maxAttempts: 2,
 			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
@@ -263,7 +264,7 @@ export const DEFAULT_MODEL_PROFILES = {
 		}),
 		outputStrategy: gptOutput,
 		maxRequests: 50,
-		maxRuntimeMs: 180_000,
+		maxRuntimeMs: 300_000,
 		retryPolicy: {
 			maxAttempts: 2,
 			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
@@ -395,7 +396,7 @@ export const DEFAULT_MODEL_PROFILES = {
 		}),
 		outputStrategy: claudeOutput,
 		maxRequests: 50,
-		maxRuntimeMs: 180_000,
+		maxRuntimeMs: 300_000,
 		retryPolicy: {
 			maxAttempts: 2,
 			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],
@@ -421,7 +422,7 @@ export const DEFAULT_MODEL_PROFILES = {
 		}),
 		outputStrategy: gptOutput,
 		maxRequests: 50,
-		maxRuntimeMs: 180_000,
+		maxRuntimeMs: 300_000,
 		retryPolicy: {
 			maxAttempts: 2,
 			retryableErrorKinds: ["timeout", "authentication", "provider_transient"],

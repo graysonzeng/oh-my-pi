@@ -112,6 +112,31 @@ describe("RuntimeAdapter", () => {
 		});
 	});
 
+	it("maps maxRuntimeMs abortReason to retryable timeout, not cancelled", async () => {
+		const runtimeLimitRunner: StructuredRunner = async () => ({
+			result: {
+				id: "raw_rt",
+				aborted: true,
+				abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=180000)",
+			},
+		});
+		await expect(new RuntimeAdapter(runtimeLimitRunner).run(baseRequest())).rejects.toMatchObject({
+			kind: "timeout",
+			message: expect.stringMatching(/runtime limit exceeded/i),
+		});
+
+		const plainAbortRunner: StructuredRunner = async () => ({
+			result: {
+				id: "raw_cancel",
+				aborted: true,
+				abortReason: "Cancelled by caller",
+			},
+		});
+		await expect(new RuntimeAdapter(plainAbortRunner).run(baseRequest())).rejects.toMatchObject({
+			kind: "cancelled",
+		});
+	});
+
 	it("preserves request and abort signal on buildRequest", () => {
 		const adapter = new RuntimeAdapter(async () => okResult({}));
 		const controller = new AbortController();

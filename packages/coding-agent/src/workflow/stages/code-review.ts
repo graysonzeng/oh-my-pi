@@ -1,7 +1,7 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../../tools";
 import { ReviewArtifactJsonSchema } from "../json-schemas";
-import { parseWorkflowArtifact } from "../parse-artifact";
+import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { ReviewArtifactSchema } from "../schemas";
 import type { ModelProfile, ReviewArtifactV1, RuntimePort } from "../types";
 
@@ -54,7 +54,7 @@ export class CodeReviewStage {
 				workflowId: input.workflowId,
 				attemptId: input.attemptId,
 				stage: "code_review",
-				createdAt: (result.artifact as ReviewArtifactV1).createdAt ?? new Date().toISOString(),
+				createdAt: coerceIsoDatetime((result.artifact as ReviewArtifactV1).createdAt),
 				modelProfileId: input.profile.id,
 				provider: input.profile.vendor,
 				promptVersion: input.profile.promptVersion,

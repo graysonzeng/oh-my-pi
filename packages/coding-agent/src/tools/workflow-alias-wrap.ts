@@ -33,6 +33,16 @@ const CATALOG_STUB_PARAMETERS: JsonSchemaObject = {
 };
 
 /**
+ * Read a property from a tool through a Proxy trap.
+ * Always use the real tool instance as Reflect's receiver so class private-field
+ * getters (e.g. BashTool `#asyncEnabled`) keep a valid brand. Passing the Proxy
+ * as receiver throws TypeError: Cannot access invalid private field.
+ */
+function getToolProp(target: object, prop: PropertyKey): unknown {
+	return Reflect.get(target, prop, target);
+}
+
+/**
  * Convert tool.parameters to a plain JSON Schema object for property remapping.
  * Supports plain JSON Schema and arktype (toJsonSchema). Does not import
  * toolWireSchema / pi-ai (keeps workflow test graph free of pi_natives).
@@ -93,9 +103,9 @@ export function wrapAgentToolWithWorkflowAliases<T extends object>(tool: T, sess
 		const existing = record.customWireName;
 		if (existing || !toolAlias) return tool;
 		return new Proxy(tool, {
-			get(target, prop, receiver) {
+			get(target, prop) {
 				if (prop === "customWireName") return toolAlias;
-				return Reflect.get(target, prop, receiver);
+				return getToolProp(target, prop);
 			},
 		}) as T;
 	}
@@ -108,10 +118,10 @@ export function wrapAgentToolWithWorkflowAliases<T extends object>(tool: T, sess
 	const execute = record.execute;
 
 	return new Proxy(tool, {
-		get(target, prop, receiver) {
+		get(target, prop) {
 			if (prop === "parameters") return remappedParameters;
 			if (prop === "customWireName") {
-				const existing = Reflect.get(target, "customWireName", receiver);
+				const existing = getToolProp(target, "customWireName");
 				return existing ?? toolAlias;
 			}
 			if (prop === "execute") {
@@ -122,7 +132,7 @@ export function wrapAgentToolWithWorkflowAliases<T extends object>(tool: T, sess
 					return execute.call(target, toolCallId, internalArgs, ...rest);
 				};
 			}
-			return Reflect.get(target, prop, receiver);
+			return getToolProp(target, prop);
 		},
 	}) as T;
 }
@@ -162,13 +172,13 @@ export function applyWorkflowTransformTools<T extends object>(tools: T[], sessio
 			const desc = `${summary} [schema: ${locator}]`;
 			out.push(
 				new Proxy(base, {
-					get(target, prop, receiver) {
+					get(target, prop) {
 						if (prop === "parameters") return CATALOG_STUB_PARAMETERS;
 						if (prop === "description") return desc;
 						if (prop === "summary") return summary;
 						if (prop === "schemaLocator") return locator;
 						if (prop === "loadMode") return "discoverable";
-						return Reflect.get(target, prop, receiver);
+						return getToolProp(target, prop);
 					},
 				}) as T,
 			);
@@ -178,12 +188,12 @@ export function applyWorkflowTransformTools<T extends object>(tools: T[], sessio
 		if (d.customWireName) {
 			out.push(
 				new Proxy(base, {
-					get(target, prop, receiver) {
+					get(target, prop) {
 						if (prop === "customWireName") {
-							const existing = Reflect.get(target, "customWireName", receiver);
+							const existing = getToolProp(target, "customWireName");
 							return existing ?? d.customWireName;
 						}
-						return Reflect.get(target, prop, receiver);
+						return getToolProp(target, prop);
 					},
 				}) as T,
 			);

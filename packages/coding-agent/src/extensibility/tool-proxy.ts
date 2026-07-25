@@ -13,7 +13,9 @@ export function applyToolProxy<TTool extends object>(tool: TTool, wrapper: objec
 			visited.add(key);
 			Object.defineProperty(wrapper, key, {
 				get() {
-					const value = (tool as Record<PropertyKey, unknown>)[key];
+					// Use the real tool as Reflect receiver so private-field getters on class
+					// tools keep a valid brand (Proxy-as-receiver throws TypeError).
+					const value = Reflect.get(tool, key, tool);
 					// Bind real methods so `this` is preserved through the wrapper, but leave
 					// callable values that aren't plain functions untouched — notably an ArkType
 					// `Type` (the `parameters` schema) is callable yet lacks `Function.prototype.bind`.

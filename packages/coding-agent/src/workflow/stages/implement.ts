@@ -2,7 +2,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../../tools";
 import { WorkflowPolicyError } from "../errors";
 import { ImplementationArtifactJsonSchema } from "../json-schemas";
-import { parseWorkflowArtifact } from "../parse-artifact";
+import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { ImplementationArtifactSchema } from "../schemas";
 import type { ImplementationArtifactV1, ModelProfile, RuntimePort } from "../types";
 
@@ -74,7 +74,7 @@ export class ImplementStage {
 				workflowId: input.workflowId,
 				attemptId: input.attemptId,
 				stage: "implementing",
-				createdAt: modelArtifact.createdAt ?? new Date().toISOString(),
+				createdAt: coerceIsoDatetime(modelArtifact.createdAt),
 				modelProfileId: input.profile.id,
 				provider: result.resolvedProvider ?? input.profile.vendor,
 				model: result.resolvedModel,

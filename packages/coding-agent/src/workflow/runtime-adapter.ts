@@ -73,6 +73,8 @@ export interface StructuredRunnerResult {
 		exitCode?: number;
 		error?: string;
 		aborted?: boolean;
+		/** Present when aborted — distinguishes wall-clock maxRuntime from parent cancel. */
+		abortReason?: string;
 		resolvedModel?: string;
 		toolCalls?: number;
 	};
@@ -219,8 +221,17 @@ export class RuntimeAdapter implements RuntimePort {
 			const body = result.result;
 
 			if (body.aborted) {
-				throw new WorkflowCancelledError(body.error ?? "Workflow subagent was aborted", {
+				const abortText = `${body.abortReason ?? ""}\n${body.error ?? ""}`;
+				// Wall-clock profile maxRuntimeMs abort is a retryable timeout — not a user cancel.
+				if (/runtime limit exceeded|maxRuntimeMs|timed? ?out/i.test(abortText)) {
+					throw new WorkflowTimeoutError(
+						body.abortReason ?? body.error ?? "Workflow subagent runtime limit exceeded",
+						{ exitCode: body.exitCode, abortReason: body.abortReason },
+					);
+				}
+				throw new WorkflowCancelledError(body.error ?? body.abortReason ?? "Workflow subagent was aborted", {
 					exitCode: body.exitCode,
+					abortReason: body.abortReason,
 				});
 			}
 			if (body.error) {
@@ -356,9 +367,11 @@ export class RuntimeAdapter implements RuntimePort {
 		if (/timeout|timed out/i.test(message)) {
 			return new WorkflowTimeoutError(message, { cause: error });
 		}
-		if (/schema|structured|invalid/i.test(message)) {
+		// Match schema-ish failures only — do not treat "invalid private field" TypeErrors as schema.
+		if (/schema|structured|invalid output/i.test(message)) {
 			return new WorkflowSchemaError(message, { cause: error });
 		}
+
 		return new WorkflowError(message, this.#classifyErrorKind(message), { cause: error });
 	}
 }

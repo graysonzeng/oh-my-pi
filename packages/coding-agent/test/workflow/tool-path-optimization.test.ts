@@ -37,6 +37,30 @@ describe("live tool path helpers for workflowToolOptimization", () => {
 		expect(workflowToolWireName({} as never, "bash")).toBeUndefined();
 	});
 
+	it("toolAliases Proxy preserves private-field getters on description", () => {
+		// Regression: Reflect.get(..., receiver=Proxy) breaks class #private fields
+		// (live implement failed: TypeError on BashTool.#asyncEnabled via description).
+		class PrivateFieldTool {
+			name = "bash";
+			#flag = true;
+			get description(): string {
+				return this.#flag ? "async-on" : "async-off";
+			}
+			get customWireName(): string | undefined {
+				return undefined;
+			}
+			execute = async () => ({ content: [] });
+		}
+		const raw = new PrivateFieldTool();
+		expect(raw.description).toBe("async-on");
+
+		const wrapped = wrapAgentToolWithWorkflowAliases(raw, {
+			workflowToolOptimization: { toolAliases: { bash: "run_command" } },
+		});
+		expect((wrapped as { customWireName?: string }).customWireName).toBe("run_command");
+		expect((wrapped as { description: string }).description).toBe("async-on");
+	});
+
 	it("applySessionToolOutput shortens oversized bash via session processResult", () => {
 		const prep = prepareGrok();
 		const huge = `${"test pass case_ok duration=1ms\n".repeat(400)}ERROR: compile failed\n`;
