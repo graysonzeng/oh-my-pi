@@ -304,14 +304,69 @@ describe("RuntimeAdapter", () => {
 			...DEFAULT_MODEL_PROFILES.grok_implementer,
 			outputStrategy: {
 				...DEFAULT_MODEL_PROFILES.grok_implementer.outputStrategy,
+				// maxRetries = additional model calls after first → total 1+2=3
 				retryOnSchemaViolation: { enabled: true, maxRetries: 2, includeErrorInRetry: true },
 			},
 		};
 		const result = await adapter.run(baseRequest(undefined, { profile, role: "implementer" }));
 		expect(result.artifact).toBeDefined();
 		expect(calls).toBe(2);
-		expect(contexts[1]).toMatch(/RETRY 1/);
+		// Retry prompt comes from static schema-retry template
+		expect(contexts[1]).toMatch(/violated the required output schema|Violations/i);
 		expect(contexts[1]).toMatch(/missing summary/);
+	});
+
+	it("maxRetries=0 means no additional model calls", async () => {
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async () => {
+			calls += 1;
+			return {
+				result: {
+					id: "bad",
+					structuredOutput: { status: "invalid", error: "bad" },
+				},
+			};
+		});
+		await expect(
+			adapter.run(
+				baseRequest(undefined, {
+					profile: {
+						...baseRequest().profile,
+						outputStrategy: {
+							retryOnSchemaViolation: { enabled: true, maxRetries: 0, includeErrorInRetry: true },
+						},
+					},
+				}),
+			),
+		).rejects.toMatchObject({ kind: "schema_violation" });
+		expect(calls).toBe(1);
+	});
+
+	it("maxRetries=1 allows one additional model call (total 2)", async () => {
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async () => {
+			calls += 1;
+			if (calls === 1) {
+				return {
+					result: {
+						id: "bad",
+						structuredOutput: { status: "invalid", error: "bad" },
+					},
+				};
+			}
+			return okResult(implArtifact());
+		});
+		await adapter.run(
+			baseRequest(undefined, {
+				profile: {
+					...DEFAULT_MODEL_PROFILES.grok_implementer,
+					outputStrategy: {
+						retryOnSchemaViolation: { enabled: true, maxRetries: 1, includeErrorInRetry: true },
+					},
+				},
+			}),
+		);
+		expect(calls).toBe(2);
 	});
 
 	it("does not retry schema violations when retry is disabled", async () => {

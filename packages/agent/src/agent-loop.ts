@@ -1847,6 +1847,8 @@ async function executeToolCalls(
 			result: undefined as AgentToolResult<any> | undefined,
 			isError: false,
 			skipped: false,
+			/** True only when pre-marked by remainingToolCalls budget (not steering/abort). */
+			budgetSkipped: false,
 			toolResultMessage: undefined as ToolResultMessage | undefined,
 			resultEmitted: false,
 		};
@@ -1898,9 +1900,78 @@ async function executeToolCalls(
 		}
 	};
 
+	// When toolScheduling is opted in, buffer concurrent toolResult messages and
+	// flush them in original call order (design: ordered writeback).
+	const orderedWriteback =
+		config.toolScheduling !== undefined && config.toolScheduling.orderedResultWriteback !== false;
+	let nextEmitIndex = 0;
+
+	const flushOrderedResults = (): void => {
+		if (!orderedWriteback) return;
+		while (nextEmitIndex < records.length) {
+			const rec = records[nextEmitIndex]!;
+			if (!rec.toolResultMessage || rec.resultEmitted) {
+				if (rec.resultEmitted) {
+					nextEmitIndex++;
+					continue;
+				}
+				break;
+			}
+			// tool_execution_end + toolResult message already prepared on the record;
+			// emit stream events now in order.
+			const { toolCall } = rec;
+			if (!rec.started) {
+				stream.push({
+					type: "tool_execution_start",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: rec.args,
+					intent: toolCall.intent,
+				});
+			}
+			stream.push({
+				type: "tool_execution_end",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				result: rec.result!,
+				isError: rec.isError,
+			});
+			rec.resultEmitted = true;
+			emittedToolResults.push(rec.toolResultMessage);
+			stream.push({ type: "message_start", message: rec.toolResultMessage });
+			stream.push({ type: "message_end", message: rec.toolResultMessage });
+			nextEmitIndex++;
+		}
+	};
+
 	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult<any>, isError: boolean): void => {
 		if (record.resultEmitted) return;
+		if (record.toolResultMessage) {
+			// Already prepared (ordered writeback); just try to flush the queue head.
+			flushOrderedResults();
+			return;
+		}
 		const { toolCall } = record;
+		const toolResultMessage: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: result.content,
+			details: result.details,
+			isError,
+			...(result.useless && !isError ? { useless: true } : {}),
+			timestamp: Date.now(),
+		};
+		record.result = result;
+		record.isError = isError;
+		record.toolResultMessage = toolResultMessage;
+
+		if (orderedWriteback) {
+			// Defer stream message emission until head-of-line is ready.
+			flushOrderedResults();
+			return;
+		}
+
 		if (!record.started) {
 			stream.push({
 				type: "tool_execution_start",
@@ -1918,19 +1989,6 @@ async function executeToolCalls(
 			isError,
 		});
 
-		const toolResultMessage: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			content: result.content,
-			details: result.details,
-			isError,
-			...(result.useless && !isError ? { useless: true } : {}),
-			timestamp: Date.now(),
-		};
-		record.result = result;
-		record.isError = isError;
-		record.toolResultMessage = toolResultMessage;
 		record.resultEmitted = true;
 		emittedToolResults.push(toolResultMessage);
 
@@ -2018,6 +2076,11 @@ async function executeToolCalls(
 			});
 			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
 			return;
+		}
+		// Commit one tool-call from the shared remaining budget (cross-batch).
+		// Budget-skipped tools never reach here; abort-before-start does not consume.
+		if (config.toolScheduling && typeof config.toolScheduling.remainingToolCalls === "number") {
+			config.toolScheduling.remainingToolCalls = Math.max(0, config.toolScheduling.remainingToolCalls - 1);
 		}
 		record.started = true;
 		stream.push({
@@ -2198,8 +2261,61 @@ async function executeToolCalls(
 	let sharedTasks: Promise<void>[] = [];
 	const tasks: Promise<void>[] = [];
 
+	// Opt-in only: without toolScheduling, keep legacy shared/exclusive barriers
+	// (no claims, limiter, or budget) so default runs stay completion-ordered and
+	// handshake-safe. Scheduling features must not force-serialize unknown tools.
+	const scheduling = config.toolScheduling;
+	const maxConcurrent = scheduling?.maxConcurrentTools;
+	const conflictMode = scheduling?.resourceConflictMode ?? "conservative";
+	const limiter =
+		scheduling && typeof maxConcurrent === "number" && maxConcurrent > 0 && Number.isFinite(maxConcurrent)
+			? createConcurrencyLimiter(Math.max(1, Math.floor(maxConcurrent)))
+			: null;
+	// Cross-batch budget: remainingToolCalls on the config object is mutated after
+	// each committed start so later batches/stages see the reduced remaining count.
+	// Stage deadline: skip all when remainingStageTimeMs ≤ 0 or absolute deadline passed.
+	const stageTime = scheduling?.remainingStageTimeMs;
+	const deadlinePassed =
+		(typeof stageTime === "number" && stageTime <= 0) ||
+		(typeof config.deadline === "number" && Number.isFinite(config.deadline) && Date.now() >= config.deadline);
+	if (deadlinePassed) {
+		for (const record of records) {
+			record.skipped = true;
+			record.budgetSkipped = true;
+		}
+	}
+	const remainingBudget = scheduling?.remainingToolCalls;
+	if (typeof remainingBudget === "number" && remainingBudget >= 0 && !deadlinePassed) {
+		const canRun = Math.min(records.length, remainingBudget);
+		for (let i = canRun; i < records.length; i++) {
+			const record = records[i]!;
+			record.skipped = true;
+			record.budgetSkipped = true;
+		}
+		// Reserve the slots we plan to start; commit happens on start below.
+		// Over-budget slots are not reserved.
+	}
+
+	type ResourceClaim = { paths: string[]; access: "read" | "write" | "unknown"; exclusive?: boolean };
+	const claims: ResourceClaim[] | null = scheduling
+		? records.map(record => {
+				if (scheduling.resolveResourceClaim) {
+					try {
+						return scheduling.resolveResourceClaim(record.toolCall.name, record.args);
+					} catch {
+						return { paths: [], access: "unknown" as const, exclusive: true };
+					}
+				}
+				return inferDefaultResourceClaim(record.toolCall.name, record.args);
+			})
+		: null;
+
 	for (let index = 0; index < records.length; index++) {
-		const record = records[index];
+		const record = records[index]!;
+		if (record.skipped) {
+			tasks.push(Promise.resolve());
+			continue;
+		}
 		const concurrencyMode = record.tool?.concurrency;
 		let concurrency: "shared" | "exclusive";
 		if (typeof concurrencyMode === "function") {
@@ -2213,8 +2329,32 @@ async function executeToolCalls(
 		} else {
 			concurrency = concurrencyMode ?? "shared";
 		}
+
+		// Resource conflict only when toolScheduling is opted in.
+		if (claims) {
+			const claim = claims[index]!;
+			let forceExclusive = claim.exclusive === true;
+			if (!forceExclusive && concurrency === "shared") {
+				for (let j = 0; j < index; j++) {
+					if (records[j]?.skipped) continue;
+					if (resourceClaimsConflict(claims[j]!, claim, conflictMode)) {
+						forceExclusive = true;
+						break;
+					}
+				}
+			}
+			if (forceExclusive) concurrency = "exclusive";
+		}
+
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
-		const task = start.then(() => runTool(record, index));
+		const task = start.then(async () => {
+			const release = limiter ? await limiter.acquire() : () => {};
+			try {
+				await runTool(record, index);
+			} finally {
+				release();
+			}
+		});
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
@@ -2246,19 +2386,111 @@ async function executeToolCalls(
 	// especially when tool results are large (e.g. bash output).
 	await yieldIfDue();
 
+	// Emit missing results in original call order. budgetSkipped is distinct from
+	// steering/abort skipped so those still get createSkippedToolResult wording.
 	for (const record of records) {
-		if (!record.toolResultMessage) {
-			record.skipped = true;
+		if (record.toolResultMessage) continue;
+		if (record.budgetSkipped) {
 			recordSkippedTool(telemetry, {
 				toolCallId: record.toolCall.id,
 				toolName: record.toolCall.name,
 				status: "skipped",
 			});
-			emitToolResult(record, createSkippedToolResult(interruptState.source), true);
+			emitToolResult(
+				record,
+				{
+					content: [{ type: "text", text: "Skipped: tool-call budget exhausted for this stage" }],
+					details: {},
+				},
+				true,
+			);
+			continue;
 		}
+		record.skipped = true;
+		recordSkippedTool(telemetry, {
+			toolCallId: record.toolCall.id,
+			toolName: record.toolCall.name,
+			status: "skipped",
+		});
+		emitToolResult(record, createSkippedToolResult(interruptState.source), true);
 	}
 
 	return { toolResults: emittedToolResults };
+}
+
+/** Semaphore for max concurrent shared tools within one batch. */
+function createConcurrencyLimiter(max: number): { acquire: () => Promise<() => void> } {
+	let active = 0;
+	const waiters: Array<() => void> = [];
+	return {
+		async acquire() {
+			if (active < max) {
+				active++;
+				return () => {
+					active = Math.max(0, active - 1);
+					const next = waiters.shift();
+					if (next) next();
+				};
+			}
+			const { promise, resolve } = Promise.withResolvers<void>();
+			waiters.push(resolve);
+			await promise;
+			active++;
+			return () => {
+				active = Math.max(0, active - 1);
+				const next = waiters.shift();
+				if (next) next();
+			};
+		},
+	};
+}
+
+type LoopResourceClaim = { paths: string[]; access: "read" | "write" | "unknown"; exclusive?: boolean };
+
+const WRITE_TOOL_NAMES = new Set(["write", "edit", "apply_patch", "MultiEdit", "str_replace"]);
+const READ_TOOL_NAMES = new Set(["read", "grep", "ls", "glob", "search"]);
+
+function inferDefaultResourceClaim(toolName: string, args: Record<string, unknown>): LoopResourceClaim {
+	const paths: string[] = [];
+	for (const key of ["path", "file_path", "filePath", "target_file", "file"]) {
+		const v = args[key];
+		if (typeof v === "string" && v) paths.push(v.replace(/\\/g, "/").replace(/^\.\//, ""));
+	}
+	if (WRITE_TOOL_NAMES.has(toolName)) {
+		return { paths, access: "write", exclusive: paths.length === 0 };
+	}
+	if (READ_TOOL_NAMES.has(toolName)) {
+		return { paths, access: "read" };
+	}
+	if (toolName === "bash" || toolName === "run_command" || toolName === "shell") {
+		return { paths, access: "unknown", exclusive: true };
+	}
+	return { paths, access: "unknown" };
+}
+
+function resourceClaimsConflict(
+	a: LoopResourceClaim,
+	b: LoopResourceClaim,
+	mode: "conservative" | "permissive",
+): boolean {
+	if (a.exclusive && b.exclusive) return true;
+	if (a.exclusive && (b.access === "write" || b.access === "unknown")) return true;
+	if (b.exclusive && (a.access === "write" || a.access === "unknown")) return true;
+
+	const aWrite = a.access === "write";
+	const bWrite = b.access === "write";
+	if (a.paths.length && b.paths.length) {
+		const bSet = new Set(b.paths);
+		for (const p of a.paths) {
+			if (bSet.has(p) && (aWrite || bWrite)) return true;
+		}
+		return false;
+	}
+	if (mode === "permissive") return false;
+	if (a.access === "read" && b.access === "read") return false;
+	if (a.access === "unknown" && b.access === "unknown") return true;
+	if ((aWrite || a.access === "unknown") && (bWrite || b.access === "unknown")) return true;
+	return false;
 }
 
 /**

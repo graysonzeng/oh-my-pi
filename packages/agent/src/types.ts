@@ -104,6 +104,45 @@ export interface SteeringQueueState {
 /**
  * Configuration for the agent loop.
  */
+/**
+ * Optional tool-batch scheduling policy (max concurrency + resource conflict).
+ * Does not build a DAG; applies within a single tool batch only.
+ */
+export interface ToolSchedulingConfig {
+	/** Cap on concurrent shared tools. Default unlimited (existing barrier-only behavior). */
+	maxConcurrentTools?: number;
+	/**
+	 * Remaining tool-call budget across batches/stages for this agent run.
+	 * Mutable: the agent loop decrements after each started/committed call so
+	 * subsequent batches see the reduced budget. null/undefined = unlimited.
+	 * Abort/skip without start does not consume a slot.
+	 */
+	remainingToolCalls?: number | null;
+	/**
+	 * Remaining stage wall time in ms; when ≤0 at batch start, skip remaining tools.
+	 * null/undefined = unknown (do not skip for time).
+	 */
+	remainingStageTimeMs?: number | null;
+	/**
+	 * When "conservative" (default), tools with unknown resource claims serialize
+	 * against writes. Does not infer cross-turn dependencies.
+	 */
+	resourceConflictMode?: "conservative" | "permissive";
+	/**
+	 * When true (default when toolScheduling is set), buffer concurrent tool
+	 * results and emit toolResult messages in original call order.
+	 */
+	orderedResultWriteback?: boolean;
+	/**
+	 * Optional per-call resource claim resolver. Return paths + access mode.
+	 * When omitted, the loop uses a name/args heuristic (write tools + bash exclusive).
+	 */
+	resolveResourceClaim?: (
+		toolName: string,
+		args: Record<string, unknown>,
+	) => { paths: string[]; access: "read" | "write" | "unknown"; exclusive?: boolean };
+}
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model;
 
@@ -113,6 +152,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * - "wait" = defer steering until the current turn completes
 	 */
 	interruptMode?: "immediate" | "wait";
+
+	/**
+	 * Tool scheduling policy for parallel tool batches.
+	 * When unset, preserves historical shared/exclusive barrier behavior with no concurrency cap.
+	 */
+	toolScheduling?: ToolSchedulingConfig;
 
 	/**
 	 * Optional session identifier forwarded to LLM providers.

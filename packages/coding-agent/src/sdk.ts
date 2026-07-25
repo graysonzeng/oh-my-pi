@@ -196,7 +196,12 @@ import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { ttsTool } from "./tools/tts";
-import { applyWorkflowToolSessionFields } from "./tools/workflow-session-fields";
+import {
+	applyWorkflowToolSessionFields,
+	type WorkflowCommandPolicy,
+	type WorkflowToolOptimization,
+	type WorkflowWritePolicy,
+} from "./tools/workflow-session-fields";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { buildNamedToolChoice } from "./utils/tool-choice";
@@ -573,13 +578,9 @@ export interface CreateAgentSessionOptions {
 	 * createTools so wrapAgentToolWithWorkflowAliases sees argumentAliases and
 	 * bash/read/grep honor processResult / path policies.
 	 */
-	workflowToolOptimization?: {
-		processResult: (toolName: string, output: string, args?: unknown) => string;
-		toolAliases?: Record<string, string>;
-		argumentAliases?: Record<string, Record<string, string>>;
-	};
-	workflowWritePolicy?: { repoRoot: string; forbiddenPaths: string[] };
-	workflowCommandPolicy?: { allowedCommands: string[] };
+	workflowToolOptimization?: WorkflowToolOptimization;
+	workflowWritePolicy?: WorkflowWritePolicy;
+	workflowCommandPolicy?: WorkflowCommandPolicy;
 
 	/**
 	 * Fired once, when the agent loop hands its first request to the provider
@@ -2808,6 +2809,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 		const kimiApiFormatSetting = settings.get("providers.kimiApiFormat");
 		const kimiApiFormat = kimiApiFormatSetting === "auto" ? undefined : kimiApiFormatSetting;
+		const workflowOpt = options.workflowToolOptimization;
+		const workflowMaxConcurrent = workflowOpt?.maxConcurrentTools;
+		const workflowRemaining = workflowOpt?.remainingToolCalls;
+		const workflowConflict = workflowOpt?.resourceConflictMode ?? "conservative";
+		const hasWorkflowScheduling =
+			(typeof workflowMaxConcurrent === "number" && workflowMaxConcurrent > 0) ||
+			(typeof workflowRemaining === "number" && workflowRemaining >= 0);
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
@@ -2833,6 +2841,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 			followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
 			interruptMode: settings.get("interruptMode") ?? "immediate",
+			// Full workflow tool scheduling policy (concurrency + cross-batch budget + conflicts).
+			toolScheduling: hasWorkflowScheduling
+				? {
+						maxConcurrentTools:
+							typeof workflowMaxConcurrent === "number" && workflowMaxConcurrent > 0
+								? workflowMaxConcurrent
+								: undefined,
+						remainingToolCalls: typeof workflowRemaining === "number" ? workflowRemaining : null,
+						resourceConflictMode: workflowConflict,
+					}
+				: undefined,
 			thinkingBudgets: settings.getGroup("thinkingBudgets"),
 			temperature: settings.get("temperature") >= 0 ? settings.get("temperature") : undefined,
 			topP: settings.get("topP") >= 0 ? settings.get("topP") : undefined,

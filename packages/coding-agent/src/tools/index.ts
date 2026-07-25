@@ -31,7 +31,6 @@ import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
-import { createProductionCliIsolationDeps } from "../workflow/cli-isolation-production";
 import { WorkflowEngine } from "../workflow/engine";
 import { createDefaultRuntimeAdapter } from "../workflow/runtime-default";
 import { buildWorkflowConfigFromSessionSettings } from "../workflow/session-config";
@@ -63,7 +62,8 @@ import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { type TodoPhase, TodoTool } from "./todo";
-import { wrapAgentToolWithWorkflowAliases } from "./workflow-alias-wrap";
+import { applyWorkflowTransformTools, wrapAgentToolWithWorkflowAliases } from "./workflow-alias-wrap";
+import type { WorkflowAttemptEvidence, WorkflowToolOptimization } from "./workflow-session-fields";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, XdevRegistry } from "./xdev";
 import { YieldTool } from "./yield";
@@ -160,14 +160,9 @@ export interface ToolSession {
 	 * Workflow per-model tool optimization (truncation/summarization + wire aliases).
 	 * Installed by prepareWorkflowInvocation for scoped stages.
 	 */
-	workflowToolOptimization?: {
-		/** Post-process tool result text before it enters model context. */
-		processResult: (toolName: string, output: string, args?: unknown) => string;
-		/** Internal tool name → model wire name (AgentTool.customWireName). */
-		toolAliases?: Record<string, string>;
-		/** Internal arg name → wire name, keyed by tool name. */
-		argumentAliases?: Record<string, Record<string, string>>;
-	};
+	workflowToolOptimization?: WorkflowToolOptimization;
+	/** Attempt-level workflow evidence (prompt assembly receipt, etc.). */
+	workflowAttemptEvidence?: WorkflowAttemptEvidence;
 	/** Whether UI is available */
 	hasUI: boolean;
 	/**
@@ -407,7 +402,7 @@ function createEngineFromSessionSettings(session: ToolSession): WorkflowEngine {
 		store,
 		ownsStore: true,
 		session,
-		adapter: createDefaultRuntimeAdapter({ isolation: createProductionCliIsolationDeps() }),
+		adapter: createDefaultRuntimeAdapter(),
 		config: buildWorkflowConfigFromSessionSettings(raw),
 	});
 }
@@ -687,5 +682,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 	}
 
-	return tools;
+	// Catalog / presentation transform on real AgentTool descriptors (schema drop, filter).
+	// Must run after all tools are assembled so createTools-exposed objects match transformTools.
+	return applyWorkflowTransformTools(tools, session);
 }

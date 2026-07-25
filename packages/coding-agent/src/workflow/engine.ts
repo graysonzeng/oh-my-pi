@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import * as path from "node:path";
 import type { ToolSession } from "../tools";
 import { abortRegisteredWorkflow, registerWorkflowAbort, unregisterWorkflowAbort } from "./abort-registry";
 import { resolveArtifactInclusion } from "./artifact-inclusion";
@@ -17,13 +18,25 @@ import { FindingTracker } from "./finding-tracker";
 import { assertSupportedModelProfile } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
 import { RuntimeAdapter } from "./runtime-adapter";
+import {
+	buildScopeMetrics,
+	collectScopeMetricsFromGit,
+	plannedFilesFromPlan,
+	type ScopeMetricsV1,
+} from "./scope-metrics";
 import { redactSecretsInText } from "./secret-redact";
 import type { PersistedWorkflowSnapshot } from "./sqlite-store";
 import { WorkflowStore } from "./sqlite-store";
+import {
+	buildImplementerToReviewerHandoff,
+	buildPlannerToImplementerHandoff,
+	buildReviewerToRepairHandoff,
+	type StageHandoffV1,
+} from "./stage-handoff";
 import { CodeReviewStage } from "./stages/code-review";
 import { FinalVerifyStage } from "./stages/final-verify";
 import { ImplementStage } from "./stages/implement";
-import { ImplementationVerifyStage } from "./stages/implementation-verify";
+import { changedFilesFromPatch, ImplementationVerifyStage } from "./stages/implementation-verify";
 import { PlanStage } from "./stages/plan";
 import { PlanReviewStage } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
@@ -109,6 +122,7 @@ export class WorkflowEngine {
 	#implementerVendor: string | undefined;
 	#planCycles = 0;
 	#lastRouteProfileId: string | undefined;
+	#lastScopeMetrics: ScopeMetricsV1 | undefined;
 
 	constructor(options: WorkflowEngineOptions = {}) {
 		this.#ownsStore = options.ownsStore ?? options.store === undefined;
@@ -451,7 +465,12 @@ export class WorkflowEngine {
 
 		switch (stage) {
 			case "planning": {
-				const { artifact: plan, usage } = await this.#withProfileFallback("planner", {}, async profile => {
+				const {
+					artifact: plan,
+					usage,
+					promptAssemblyReceipt,
+					optimizationReceipts,
+				} = await this.#withProfileFallback("planner", {}, async profile => {
 					this.#plannerProfileId = profile.id;
 					this.#plannerVendor = profile.vendor;
 					const context = await this.#buildStageContext(
@@ -475,7 +494,10 @@ export class WorkflowEngine {
 				});
 				this.#plan = plan;
 				await this.#persistArtifact(workflowId, attemptId, "plan", plan);
-				await this.#recordUsageAndProfile(workflowId, attemptId, usage);
+				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
+					promptAssemblyReceipt,
+					optimizationReceipts,
+				});
 				const next = getNextStage("planning", "approved");
 				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "plan ready", fresh.version);
 				return;
@@ -483,7 +505,12 @@ export class WorkflowEngine {
 			case "plan_review": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
 				this.#budgetLedger.recordReviewerCycle();
-				const { artifact: review, usage } = await this.#withProfileFallback(
+				const {
+					artifact: review,
+					usage,
+					promptAssemblyReceipt,
+					optimizationReceipts,
+				} = await this.#withProfileFallback(
 					"plan_reviewer",
 					{
 						excludedProfileIds: this.#plannerProfileId ? [this.#plannerProfileId] : [],
@@ -507,7 +534,10 @@ export class WorkflowEngine {
 				);
 				this.#planReview = review;
 				await this.#persistArtifact(workflowId, attemptId, "review", review);
-				await this.#recordUsageAndProfile(workflowId, attemptId, usage);
+				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
+					promptAssemblyReceipt,
+					optimizationReceipts,
+				});
 				const next = getNextStage("plan_review", review.decision);
 				if (!next) throw new WorkflowPolicyError("invalid_review_decision", { decision: review.decision });
 				if (review.decision === "changes_requested") {
@@ -537,12 +567,20 @@ export class WorkflowEngine {
 			}
 			case "implementing": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
+				// Deterministic planner→implementer handoff from typed plan (+ optional plan review).
+				const plannerHandoff = buildPlannerToImplementerHandoff({
+					plan: this.#plan,
+					planReview: this.#planReview,
+				});
+				await this.#persistArtifact(workflowId, attemptId, "stage-handoff", plannerHandoff);
 				const {
 					artifact: impl,
 					usage,
 					resolvedProvider,
 					resolvedModel,
 					toolCalls,
+					promptAssemblyReceipt,
+					optimizationReceipts,
 				} = await this.#withProfileFallback("implementer", {}, async profile => {
 					this.#implementerVendor = profile.vendor;
 					return new ImplementStage(this.#adapter).execute({
@@ -559,6 +597,7 @@ export class WorkflowEngine {
 							profile,
 							session,
 							this.#plan?.affectedFiles.map(f => f.path),
+							plannerHandoff,
 						),
 						session,
 						signal,
@@ -567,10 +606,14 @@ export class WorkflowEngine {
 				});
 				this.#implementation = impl;
 				await this.#persistArtifact(workflowId, attemptId, "implementation", impl);
+				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, impl);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					resolvedProvider,
 					resolvedModel,
 					toolCalls,
+					promptAssemblyReceipt,
+					optimizationReceipts,
+					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 				});
 				const next = getNextStage("implementing", null);
 				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "implementation ready", fresh.version);
@@ -610,7 +653,18 @@ export class WorkflowEngine {
 					throw new WorkflowPolicyError("missing_artifacts_for_code_review", { workflowId });
 				}
 				this.#budgetLedger.recordReviewerCycle();
-				const { artifact: review, usage } = await this.#withProfileFallback(
+				const reviewerHandoff = buildImplementerToReviewerHandoff({
+					implementation: this.#implementation,
+					plan: this.#plan,
+					verification: this.#verification,
+				});
+				await this.#persistArtifact(workflowId, attemptId, "stage-handoff", reviewerHandoff);
+				const {
+					artifact: review,
+					usage,
+					promptAssemblyReceipt,
+					optimizationReceipts,
+				} = await this.#withProfileFallback(
 					"code_reviewer",
 					{
 						implementerVendor: this.#implementerVendor ?? this.#implementation.provider,
@@ -637,6 +691,7 @@ export class WorkflowEngine {
 									...(this.#plan?.affectedFiles.map(f => f.path) ?? []),
 									...(this.#implementation?.changedFiles ?? []),
 								],
+								reviewerHandoff,
 							),
 							session,
 							signal,
@@ -652,7 +707,10 @@ export class WorkflowEngine {
 				}
 				await this.#persistArtifact(workflowId, attemptId, "review", review);
 				await this.#persistFindingsState(workflowId, attemptId);
-				await this.#recordUsageAndProfile(workflowId, attemptId, usage);
+				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
+					promptAssemblyReceipt,
+					optimizationReceipts,
+				});
 
 				const blocking = review.findings.filter(
 					f =>
@@ -703,12 +761,24 @@ export class WorkflowEngine {
 					}
 				}
 				const primary = open[0];
+				const repairHandoff = this.#codeReview
+					? buildReviewerToRepairHandoff({
+							review: this.#codeReview,
+							verification: this.#verification,
+							implementation: this.#implementation,
+						})
+					: undefined;
+				if (repairHandoff) {
+					await this.#persistArtifact(workflowId, attemptId, "stage-handoff", repairHandoff);
+				}
 				const {
 					artifact: repaired,
 					usage,
 					resolvedProvider,
 					resolvedModel,
 					toolCalls,
+					promptAssemblyReceipt,
+					optimizationReceipts,
 				} = await this.#withProfileFallback(
 					"repair",
 					{
@@ -740,6 +810,7 @@ export class WorkflowEngine {
 									...(this.#implementation?.changedFiles ?? []),
 									...open.map(f => f.file).filter((p): p is string => Boolean(p)),
 								],
+								repairHandoff,
 							),
 							session,
 							signal,
@@ -770,10 +841,16 @@ export class WorkflowEngine {
 				}
 				await this.#persistArtifact(workflowId, attemptId, "implementation", this.#implementation);
 				await this.#persistFindingsState(workflowId, attemptId);
+				if (this.#plan) {
+					await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, this.#implementation);
+				}
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					resolvedProvider,
 					resolvedModel,
 					toolCalls,
+					promptAssemblyReceipt,
+					optimizationReceipts,
+					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 				});
 				// One completed repair attempt toward maxRepairCycles.
 				this.#budgetLedger.recordRepairCycle();
@@ -815,20 +892,81 @@ export class WorkflowEngine {
 	}
 
 	/**
-	 * Optionally append a compressed repo-map when profile.contextStrategy.repoMap is enabled.
-	 * Production call site for ContextBuilder.appendRepoMapIfEnabled.
+	 * Optionally append stage handoff then a compressed repo-map when enabled.
+	 * Production call site for ContextBuilder.appendStageHandoff + appendRepoMapIfEnabled.
 	 */
 	async #buildStageContext(
 		base: string,
 		profile: ModelProfile,
 		session: ToolSession,
 		relevantFiles?: string[],
+		handoff?: StageHandoffV1 | null,
 	): Promise<string> {
-		return this.#contextBuilder.appendRepoMapIfEnabled(base, {
+		const withHandoff = this.#contextBuilder.appendStageHandoff(base, handoff);
+		return this.#contextBuilder.appendRepoMapIfEnabled(withHandoff, {
 			cwd: session.cwd,
 			contextStrategy: profile.contextStrategy,
 			relevantFiles: relevantFiles?.length ? [...new Set(relevantFiles)] : undefined,
 		});
+	}
+
+	/**
+	 * Scope metrics from real patch/git evidence when available.
+	 * Prefer unified-diff paths over model-reported changedFiles; git worktree next; model last.
+	 */
+	async #persistScopeMetrics(
+		workflowId: string,
+		attemptId: string,
+		cwd: string,
+		plan: PlanArtifactV1,
+		impl: ImplementationArtifactV1,
+	): Promise<void> {
+		const planned = plannedFilesFromPlan(plan);
+		const forbidden = this.#config.forbiddenPaths ?? [];
+		let changedFromPatch: string[] = [];
+		if (impl.patchPath) {
+			const resolved = path.isAbsolute(impl.patchPath) ? impl.patchPath : path.join(cwd, impl.patchPath);
+			try {
+				const text = await Bun.file(resolved).text();
+				changedFromPatch = changedFilesFromPatch(text);
+			} catch {
+				// missing patch is handled by verify; scope degrades gracefully
+			}
+		}
+
+		let metrics: ScopeMetricsV1;
+		if (changedFromPatch.length > 0) {
+			metrics = buildScopeMetrics({
+				plannedFiles: planned,
+				forbiddenFiles: forbidden,
+				changedFiles: changedFromPatch,
+			});
+		} else {
+			try {
+				metrics = await collectScopeMetricsFromGit({
+					cwd,
+					plannedFiles: planned,
+					forbiddenFiles: forbidden,
+				});
+			} catch {
+				metrics = buildScopeMetrics({
+					plannedFiles: planned,
+					forbiddenFiles: forbidden,
+					changedFiles: [],
+				});
+			}
+			// Only fall back to model files when no patch/git evidence exists.
+			if (metrics.changedFiles.length === 0 && impl.changedFiles.length > 0) {
+				metrics = buildScopeMetrics({
+					plannedFiles: planned,
+					forbiddenFiles: forbidden,
+					changedFiles: impl.changedFiles,
+				});
+			}
+		}
+
+		this.#lastScopeMetrics = metrics;
+		await this.#persistArtifact(workflowId, attemptId, "scope-metrics", metrics);
 	}
 
 	/** Finish an open attempt if still in_progress (no-op if already finished). */
@@ -1126,6 +1264,11 @@ export class WorkflowEngine {
 			toolCalls: evidence?.toolCalls ?? null,
 			resolvedProvider: evidence?.resolvedProvider ?? null,
 			resolvedModel: evidence?.resolvedModel ?? null,
+			scopeMetricsKind: evidence?.scopeMetricsKind ?? null,
+			promptAssemblyReceipt: evidence?.promptAssemblyReceipt ?? null,
+			optimizationReceiptCount: Array.isArray(evidence?.optimizationReceipts)
+				? evidence.optimizationReceipts.length
+				: 0,
 			strategies: profile
 				? {
 						promptTemplate: profile.promptStrategy?.systemPromptTemplate ?? null,
@@ -1138,6 +1281,18 @@ export class WorkflowEngine {
 					}
 				: null,
 		});
+		if (evidence?.promptAssemblyReceipt) {
+			await this.#persistArtifact(workflowId, attemptId, "prompt-assembly-receipt", evidence.promptAssemblyReceipt);
+		}
+		if (evidence?.optimizationReceipts && evidence.optimizationReceipts.length > 0) {
+			await this.#persistArtifact(workflowId, attemptId, "tool-optimization-receipts", {
+				kind: "tool_optimization_receipts",
+				schemaVersion: 1,
+				workflowId,
+				attemptId,
+				receipts: evidence.optimizationReceipts,
+			});
+		}
 		if (evidence?.resolvedProvider || evidence?.resolvedModel) {
 			await this.#persistArtifact(workflowId, attemptId, "runtime-evidence", {
 				kind: "runtime-evidence",
@@ -1148,6 +1303,7 @@ export class WorkflowEngine {
 				resolvedModel: evidence.resolvedModel,
 				toolCalls: evidence.toolCalls,
 				profileId,
+				scopeMetricsKind: evidence.scopeMetricsKind ?? null,
 			});
 		}
 		await this.#persistRoutingAudit(workflowId, attemptId);

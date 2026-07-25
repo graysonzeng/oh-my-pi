@@ -1,20 +1,36 @@
 /**
- * Production wrapper for workflow per-model toolAliases / argumentAliases.
+ * Production wrapper for workflow per-model toolAliases / argumentAliases
+ * and catalog transformTools (schema drop / schemaLocator).
  *
  * createTools applies this so the embedded structured-subagent path exposes
  * model-facing parameter names (e.g. file_path) and reverse-maps execute args
  * to internal names (path). Kept out of workflow/tool-optimization so pure
  * workflow unit tests never load pi-ai/schema or pi_natives.
  */
-import { type JsonSchemaObject, remapSchemaProperties, reverseArgumentAliases } from "../workflow/schema-enhancer";
+import {
+	type JsonSchemaObject,
+	remapSchemaProperties,
+	reverseArgumentAliases,
+	type ToolDescriptor,
+} from "../workflow/schema-enhancer";
 
 /** Session slice used for alias wrap — avoids importing tools/index (cycle). */
 export interface WorkflowAliasSession {
 	workflowToolOptimization?: {
 		toolAliases?: Record<string, string>;
 		argumentAliases?: Record<string, Record<string, string>>;
+		/** Catalog / alias transform applied after tools are built. */
+		transformTools?: (tools: ToolDescriptor[]) => ToolDescriptor[];
 	};
 }
+
+/** Minimal empty object schema when catalog mode drops full parameters. */
+const CATALOG_STUB_PARAMETERS: JsonSchemaObject = {
+	type: "object",
+	properties: {},
+	additionalProperties: false,
+	description: "Schema omitted (catalog mode). Use schemaLocator to load full schema.",
+};
 
 /**
  * Convert tool.parameters to a plain JSON Schema object for property remapping.
@@ -109,4 +125,71 @@ export function wrapAgentToolWithWorkflowAliases<T extends object>(tool: T, sess
 			return Reflect.get(target, prop, receiver);
 		},
 	}) as T;
+}
+
+/**
+ * Apply session.workflowToolOptimization.transformTools to real AgentTool objects.
+ * - Drops tools not present in transform output (allowlist / presentation filter).
+ * - Catalog non-essential: replace parameters with stub schema, surface schemaLocator
+ *   on description/summary so the model-facing wire does not ship full JSON schema.
+ */
+export function applyWorkflowTransformTools<T extends object>(tools: T[], session: WorkflowAliasSession): T[] {
+	const transform = session.workflowToolOptimization?.transformTools;
+	if (!transform || tools.length === 0) return tools;
+
+	const descriptors: ToolDescriptor[] = [];
+	const toolByName = new Map<string, T>();
+	for (const tool of tools) {
+		const rec = tool as { name?: string; description?: string; parameters?: unknown };
+		if (typeof rec.name !== "string") continue;
+		toolByName.set(rec.name, tool);
+		descriptors.push({
+			name: rec.name,
+			description: typeof rec.description === "string" ? rec.description : rec.name,
+			schema: parametersToJsonSchema(rec.parameters) ?? { type: "object" },
+		});
+	}
+
+	const transformed = transform(descriptors);
+	const out: T[] = [];
+	for (const d of transformed) {
+		const base = toolByName.get(d.name);
+		if (!base) continue;
+		// Schema dropped by catalog presentation — stub parameters on the wire.
+		if (d.schema === undefined) {
+			const locator = typeof d.schemaLocator === "string" ? d.schemaLocator : `xd://tools/${d.name}`;
+			const summary = typeof d.description === "string" ? d.description : d.name;
+			const desc = `${summary} [schema: ${locator}]`;
+			out.push(
+				new Proxy(base, {
+					get(target, prop, receiver) {
+						if (prop === "parameters") return CATALOG_STUB_PARAMETERS;
+						if (prop === "description") return desc;
+						if (prop === "summary") return summary;
+						if (prop === "schemaLocator") return locator;
+						if (prop === "loadMode") return "discoverable";
+						return Reflect.get(target, prop, receiver);
+					},
+				}) as T,
+			);
+			continue;
+		}
+		// Schema kept — optionally surface customWireName from alias transform.
+		if (d.customWireName) {
+			out.push(
+				new Proxy(base, {
+					get(target, prop, receiver) {
+						if (prop === "customWireName") {
+							const existing = Reflect.get(target, "customWireName", receiver);
+							return existing ?? d.customWireName;
+						}
+						return Reflect.get(target, prop, receiver);
+					},
+				}) as T,
+			);
+			continue;
+		}
+		out.push(base);
+	}
+	return out;
 }

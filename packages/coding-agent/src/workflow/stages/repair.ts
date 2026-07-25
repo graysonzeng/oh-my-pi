@@ -26,6 +26,8 @@ export interface RepairStageResult {
 	resolvedProvider?: string;
 	resolvedModel?: string;
 	toolCalls?: number;
+	promptAssemblyReceipt?: unknown;
+	optimizationReceipts?: unknown[];
 }
 
 export class RepairStage {
@@ -101,6 +103,8 @@ export class RepairStage {
 			resolvedProvider: result.resolvedProvider,
 			resolvedModel: result.resolvedModel,
 			toolCalls: result.toolCalls,
+			promptAssemblyReceipt: result.promptAssemblyReceipt,
+			optimizationReceipts: result.optimizationReceipts,
 		};
 	}
 }

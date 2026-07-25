@@ -51,6 +51,7 @@ import type {
 	StreamFn,
 	ToolCallContext,
 	ToolChoiceDirective,
+	ToolSchedulingConfig,
 } from "./types";
 import { isSoftToolRequirement } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
@@ -128,6 +129,12 @@ export interface AgentOptions {
 	 * - "wait": defer steering until the current turn completes
 	 */
 	interruptMode?: "immediate" | "wait";
+
+	/**
+	 * Tool batch scheduling (max concurrency, resource conflicts, call budget).
+	 * Forwarded to {@link AgentLoopConfig.toolScheduling}.
+	 */
+	toolScheduling?: ToolSchedulingConfig;
 
 	/**
 	 * API format for Kimi Code provider: "openai" or "anthropic" (default: "anthropic")
@@ -346,6 +353,7 @@ export class Agent {
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
 	#interruptMode: "immediate" | "wait";
+	#toolScheduling?: ToolSchedulingConfig;
 	#sessionId?: string;
 	#deadline?: number;
 	#promptCacheKey?: string;
@@ -426,6 +434,7 @@ export class Agent {
 		this.#steeringMode = opts.steeringMode || "one-at-a-time";
 		this.#followUpMode = opts.followUpMode || "one-at-a-time";
 		this.#interruptMode = opts.interruptMode || "immediate";
+		this.#toolScheduling = opts.toolScheduling;
 		this.streamFn = opts.streamFn || streamSimple;
 		this.#sessionId = opts.sessionId;
 		this.#deadline = opts.deadline;
@@ -844,6 +853,14 @@ export class Agent {
 		return this.#interruptMode;
 	}
 
+	setToolScheduling(scheduling: ToolSchedulingConfig | undefined) {
+		this.#toolScheduling = scheduling;
+	}
+
+	getToolScheduling(): ToolSchedulingConfig | undefined {
+		return this.#toolScheduling;
+	}
+
 	setTools(t: AgentTool<any>[]) {
 		this.#state.tools = t;
 	}
@@ -1144,6 +1161,7 @@ export class Agent {
 			serviceTier: this.#serviceTier,
 			hideThinkingSummary: this.#hideThinkingSummary,
 			interruptMode: this.#interruptMode,
+			toolScheduling: this.#toolScheduling,
 			sessionId: this.#sessionId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,

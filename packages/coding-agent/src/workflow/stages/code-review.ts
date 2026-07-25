@@ -20,6 +20,8 @@ export interface CodeReviewStageInput {
 export interface CodeReviewStageResult {
 	artifact: ReviewArtifactV1;
 	usage?: Usage;
+	promptAssemblyReceipt?: unknown;
+	optimizationReceipts?: unknown[];
 }
 
 export class CodeReviewStage {
@@ -59,6 +61,11 @@ export class CodeReviewStage {
 			},
 			"CodeReviewArtifact",
 		);
-		return { artifact, usage: result.usage };
+		return {
+			artifact,
+			usage: result.usage,
+			promptAssemblyReceipt: result.promptAssemblyReceipt,
+			optimizationReceipts: result.optimizationReceipts,
+		};
 	}
 }

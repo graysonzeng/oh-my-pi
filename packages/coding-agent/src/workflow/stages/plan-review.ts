@@ -18,6 +18,8 @@ export interface PlanReviewStageInput {
 export interface PlanReviewStageResult {
 	artifact: ReviewArtifactV1;
 	usage?: Usage;
+	promptAssemblyReceipt?: unknown;
+	optimizationReceipts?: unknown[];
 }
 
 export class PlanReviewStage {
@@ -57,6 +59,11 @@ export class PlanReviewStage {
 			},
 			"PlanReviewArtifact",
 		);
-		return { artifact, usage: result.usage };
+		return {
+			artifact,
+			usage: result.usage,
+			promptAssemblyReceipt: result.promptAssemblyReceipt,
+			optimizationReceipts: result.optimizationReceipts,
+		};
 	}
 }

@@ -1020,6 +1020,255 @@ describe("agentLoop with AgentMessage", () => {
 		expect(startTimes.exclusive).toBeGreaterThan(finishTimes.fast);
 	});
 
+	it("caps concurrent shared tools via toolScheduling.maxConcurrentTools", async () => {
+		const toolSchema = type({ value: "string" });
+		let peak = 0;
+		let active = 0;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "work",
+			label: "Work",
+			description: "Work tool",
+			parameters: toolSchema,
+			concurrency: "shared",
+			async execute(_id, params) {
+				active++;
+				peak = Math.max(peak, active);
+				await Bun.sleep(30);
+				active--;
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "t1", name: "work", arguments: { value: "a" } },
+						{ type: "toolCall", id: "t2", name: "work", arguments: { value: "b" } },
+						{ type: "toolCall", id: "t3", name: "work", arguments: { value: "c" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			toolScheduling: { maxConcurrentTools: 1 },
+		};
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		expect(peak).toBe(1);
+	});
+
+	it("skips tool calls beyond remainingToolCalls budget and preserves result order slots", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "work",
+			label: "Work",
+			description: "Work",
+			parameters: toolSchema,
+			concurrency: "shared",
+			async execute(_id, params) {
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "t1", name: "work", arguments: { value: "first" } },
+						{ type: "toolCall", id: "t2", name: "work", arguments: { value: "second" } },
+						{ type: "toolCall", id: "t3", name: "work", arguments: { value: "third" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			toolScheduling: { remainingToolCalls: 1, maxConcurrentTools: 2 },
+		};
+		const toolResults: ToolResultMessage[] = [];
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				toolResults.push(event.message as ToolResultMessage);
+			}
+		}
+		expect(executed).toEqual(["first"]);
+		// All three tool results present in original call order (skipped still emit results).
+		expect(toolResults.map(r => r.toolCallId)).toEqual(["t1", "t2", "t3"]);
+		expect(toolResults[1]?.isError).toBe(true);
+		expect(toolResults[1]?.content[0]?.type === "text" && toolResults[1]!.content[0].text).toMatch(/budget/);
+		// Cross-batch: budget committed on start so remaining is now 0.
+		expect(config.toolScheduling?.remainingToolCalls).toBe(0);
+	});
+
+	it("decrements remainingToolCalls across multiple batches/turns", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "work",
+			label: "Work",
+			description: "Work",
+			parameters: toolSchema,
+			concurrency: "shared",
+			async execute(_id, params) {
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				// Batch 1: two tools
+				{
+					content: [
+						{ type: "toolCall", id: "a1", name: "work", arguments: { value: "a1" } },
+						{ type: "toolCall", id: "a2", name: "work", arguments: { value: "a2" } },
+					],
+				},
+				// Batch 2: two more — only one budget slot should remain after batch 1 if budget=3
+				{
+					content: [
+						{ type: "toolCall", id: "b1", name: "work", arguments: { value: "b1" } },
+						{ type: "toolCall", id: "b2", name: "work", arguments: { value: "b2" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const scheduling = { remainingToolCalls: 3, maxConcurrentTools: 4, orderedResultWriteback: true as const };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			toolScheduling: scheduling,
+		};
+		const toolResults: ToolResultMessage[] = [];
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				toolResults.push(event.message as ToolResultMessage);
+			}
+		}
+		// 3 commits total across batches: a1, a2, b1 — b2 budget-skipped
+		expect(executed).toEqual(["a1", "a2", "b1"]);
+		expect(scheduling.remainingToolCalls).toBe(0);
+		const ids = toolResults.map(r => r.toolCallId);
+		expect(ids).toContain("a1");
+		expect(ids).toContain("a2");
+		expect(ids).toContain("b1");
+		expect(ids).toContain("b2");
+		const b2 = toolResults.find(r => r.toolCallId === "b2");
+		expect(b2?.isError).toBe(true);
+		expect(b2?.content[0]?.type === "text" && b2!.content[0].text).toMatch(/budget/);
+	});
+
+	it("emits concurrent tool results in original call order when scheduling is opted in", async () => {
+		const toolSchema = type({ value: "string", delayMs: "number" });
+		const tool: AgentTool<typeof toolSchema, { value: string; delayMs: number }> = {
+			name: "work",
+			label: "Work",
+			description: "Work",
+			parameters: toolSchema,
+			concurrency: "shared",
+			async execute(_id, params) {
+				await Bun.sleep(params.delayMs);
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: { value: params.value, delayMs: params.delayMs },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						// slow first, fast second — completion order would be reverse without ordered writeback
+						{ type: "toolCall", id: "slow", name: "work", arguments: { value: "slow", delayMs: 40 } },
+						{ type: "toolCall", id: "fast", name: "work", arguments: { value: "fast", delayMs: 5 } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			toolScheduling: { maxConcurrentTools: 4, orderedResultWriteback: true },
+		};
+		const toolResults: ToolResultMessage[] = [];
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				toolResults.push(event.message as ToolResultMessage);
+			}
+		}
+		expect(toolResults.map(r => r.toolCallId)).toEqual(["slow", "fast"]);
+	});
+
+	it("serializes same-path writes under conservative resource conflict mode", async () => {
+		const toolSchema = type({ path: "string" });
+		const starts: number[] = [];
+		const finishes: number[] = [];
+		const tool: AgentTool<typeof toolSchema, { path: string }> = {
+			name: "write",
+			label: "Write",
+			description: "Write",
+			parameters: toolSchema,
+			concurrency: "shared",
+			async execute(_id, params) {
+				starts.push(Bun.nanoseconds());
+				await Bun.sleep(25);
+				finishes.push(Bun.nanoseconds());
+				return {
+					content: [{ type: "text", text: params.path }],
+					details: { path: params.path },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "w1", name: "write", arguments: { path: "src/a.ts" } },
+						{ type: "toolCall", id: "w2", name: "write", arguments: { path: "src/a.ts" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			toolScheduling: { resourceConflictMode: "conservative", maxConcurrentTools: 8 },
+		};
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		// Second write must start after first finishes (serialized by resource conflict).
+		expect(starts[1]!).toBeGreaterThan(finishes[0]!);
+	});
+
 	it("drops incomplete tool calls when assistant aborts before toolcall_end", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],

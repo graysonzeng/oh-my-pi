@@ -37,12 +37,33 @@ async function preservePatchArtifact(
 
 const productionRunner: StructuredRunner = async (request: StructuredRunnerRequest) => {
 	const isolationRequested = request.isolation?.requested === true;
-	// Argument/tool aliases: prepareWorkflowInvocation installs
+	// Ensure processToolResult + transformTools from prepare land on the live session
+	// before createTools / agent loop consume them.
+	const baseOpt = request.session.workflowToolOptimization;
+	const session =
+		request.processToolResult || request.transformTools
+			? {
+					...request.session,
+					workflowToolOptimization: {
+						processResult: request.processToolResult ?? baseOpt?.processResult ?? ((_t, o) => o),
+						toolAliases: baseOpt?.toolAliases,
+						argumentAliases: baseOpt?.argumentAliases,
+						maxConcurrentTools: baseOpt?.maxConcurrentTools,
+						remainingToolCalls: baseOpt?.remainingToolCalls,
+						resourceConflictMode: baseOpt?.resourceConflictMode,
+						transformTools: request.transformTools ?? baseOpt?.transformTools,
+						optimizationReceipts: baseOpt?.optimizationReceipts,
+						lastOptimizationReceipt: baseOpt?.lastOptimizationReceipt,
+					},
+				}
+			: request.session;
+
+	// Argument/tool aliases + catalog transform: prepareWorkflowInvocation installs
 	// session.workflowToolOptimization; createTools applies
-	// wrapAgentToolWithWorkflowAliases so model-facing parameters use wire names
-	// (e.g. file_path) and execute reverse-maps to internal names (path).
+	// wrapAgentToolWithWorkflowAliases and applyWorkflowTransformTools so model-facing
+	// parameters use wire names and catalog mode drops non-essential schemas.
 	const result = await runStructuredSubagent({
-		session: request.session,
+		session,
 		invocationKind: request.invocationKind,
 		assignment: request.assignment,
 		context: request.context,
@@ -67,6 +88,8 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 		result: {
 			id: result.result.id,
 			structuredOutput: result.result.structuredOutput,
+			// Expose raw model text for deterministic schema repair on the adapter path.
+			rawOutput: result.result.output,
 			patchPath,
 			branchName: result.result.branchName,
 			usage: result.result.usage,

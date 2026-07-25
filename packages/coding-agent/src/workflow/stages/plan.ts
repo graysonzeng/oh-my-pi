@@ -18,6 +18,8 @@ export interface PlanStageInput {
 export interface PlanStageResult {
 	artifact: PlanArtifactV1;
 	usage?: Usage;
+	promptAssemblyReceipt?: unknown;
+	optimizationReceipts?: unknown[];
 }
 
 export class PlanStage {
@@ -56,6 +58,11 @@ export class PlanStage {
 			},
 			"PlanArtifact",
 		);
-		return { artifact, usage: result.usage };
+		return {
+			artifact,
+			usage: result.usage,
+			promptAssemblyReceipt: result.promptAssemblyReceipt,
+			optimizationReceipts: result.optimizationReceipts,
+		};
 	}
 }

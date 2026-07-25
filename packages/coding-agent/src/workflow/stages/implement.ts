@@ -24,6 +24,8 @@ export interface ImplementStageResult {
 	resolvedProvider?: string;
 	resolvedModel?: string;
 	toolCalls?: number;
+	promptAssemblyReceipt?: unknown;
+	optimizationReceipts?: unknown[];
 }
 
 export class ImplementStage {
@@ -96,6 +98,8 @@ export class ImplementStage {
 			resolvedProvider: result.resolvedProvider,
 			resolvedModel: result.resolvedModel,
 			toolCalls: result.toolCalls,
+			promptAssemblyReceipt: result.promptAssemblyReceipt,
+			optimizationReceipts: result.optimizationReceipts,
 		};
 	}
 }

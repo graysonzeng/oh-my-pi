@@ -9,6 +9,12 @@ import {
 } from "./errors";
 import { prepareWorkflowInvocation } from "./runtime-invocation";
 import type { ToolDescriptor } from "./schema-enhancer";
+import {
+	defaultSchemaValidator,
+	renderSchemaRetryPrompt,
+	repairStructuredOutput,
+	totalSchemaModelAttempts,
+} from "./structured-output-repair";
 import type {
 	RuntimePort,
 	WorkflowAgentRequest,
@@ -56,6 +62,11 @@ export interface StructuredRunnerResult {
 			data?: unknown;
 			error?: string;
 		};
+		/**
+		 * Invalid or pre-validation raw model text when available.
+		 * Used by deterministic schema repair (BOM/fence/single-object extract).
+		 */
+		rawOutput?: string;
 		patchPath?: string;
 		branchName?: string;
 		usage?: Usage;
@@ -107,7 +118,9 @@ export class RuntimeAdapter implements RuntimePort {
 
 	async run<TArtifact = unknown>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>> {
 		const retry = request.profile.outputStrategy?.retryOnSchemaViolation;
-		const maxAttempts = retry?.enabled ? Math.max(1, retry.maxRetries) : 1;
+		// maxRetries = additional model calls after the first (total = 1 + maxRetries).
+		const maxRetries = retry?.enabled ? Math.max(0, retry.maxRetries) : 0;
+		const maxAttempts = retry?.enabled ? totalSchemaModelAttempts(maxRetries) : 1;
 		let working: WorkflowAgentRequest = request;
 		let lastSchemaError: WorkflowSchemaError | undefined;
 
@@ -116,21 +129,61 @@ export class RuntimeAdapter implements RuntimePort {
 				return await this.#runOnce<TArtifact>(working);
 			} catch (error) {
 				const normalized = this.#normalizeError(error);
-				if (!(normalized instanceof WorkflowSchemaError) || attempt >= maxAttempts - 1) {
+				if (!(normalized instanceof WorkflowSchemaError)) {
 					throw normalized;
 				}
 				lastSchemaError = normalized;
+
+				// Deterministic extract/repair on the error message body when it embeds raw JSON.
+				// Full raw capture is owned by the runner; here we only re-prompt for retries.
+				if (attempt >= maxAttempts - 1) {
+					throw normalized;
+				}
+
+				// Budget check before scheduling another model call.
+				const remainingModelCalls = maxAttempts - attempt - 1;
+				if (remainingModelCalls <= 0) {
+					throw normalized;
+				}
+
 				if (retry?.includeErrorInRetry) {
-					const hint = `\n\n[RETRY ${attempt + 1}] Previous output violated schema: ${normalized.message}\nPlease fix and output valid JSON.`;
+					const fragment = normalized.message.slice(0, 2000);
+					const hint = renderSchemaRetryPrompt({
+						violations: normalized.message,
+						schemaSummary: schemaSummaryForRetry(working.outputSchema),
+						previousOutput: fragment,
+					});
 					working = {
 						...working,
-						context: `${working.context?.trim() ?? ""}${hint}`,
+						context: `${working.context?.trim() ?? ""}\n\n${hint}`,
 					};
 				}
 			}
 		}
 
 		throw lastSchemaError ?? new WorkflowSchemaError("schema retry exhausted");
+	}
+
+	/**
+	 * Repair a raw model string against the request schema (shared by embedded/CLI adapters).
+	 * maxRetries counts additional model calls after the provided raw.
+	 */
+	async repairRawOutput(
+		raw: string,
+		schema: unknown,
+		options?: {
+			maxRetries?: number;
+			retryWithModel?: (prompt: string) => Promise<string>;
+			remainingModelCalls?: number;
+		},
+	) {
+		return repairStructuredOutput(raw, {
+			maxRetries: options?.maxRetries ?? 0,
+			schema,
+			validate: defaultSchemaValidator,
+			retryWithModel: options?.retryWithModel,
+			budget: { remainingModelCalls: options?.remainingModelCalls },
+		});
 	}
 
 	async #runOnce<TArtifact>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>> {
@@ -143,7 +196,8 @@ export class RuntimeAdapter implements RuntimePort {
 			session: prepared.session,
 			invocationKind: "task",
 			assignment: prepared.assignment,
-			context: prepared.context,
+			// Assembled stable+dynamic prompt text is the production model-facing context.
+			context: prepared.assembledPromptText || prepared.context,
 			agent: RuntimeAdapter.agentNameForRole(request.role),
 			model: request.profile.modelPattern,
 			thinkingLevel: request.profile.thinkingLevel,
@@ -173,6 +227,23 @@ export class RuntimeAdapter implements RuntimePort {
 				throw new WorkflowError(body.error, this.#classifyErrorKind(body.error), { exitCode: body.exitCode });
 			}
 			if (body.exitCode !== undefined && body.exitCode !== 0) {
+				// Schema violation often surfaces as exitCode=1 + structured invalid — try repair first.
+				const structuredFail = body.structuredOutput;
+				if (structuredFail && structuredFail.status !== "valid") {
+					const repaired = await this.#tryRepairStructured<TArtifact>(
+						body,
+						prepared.outputSchema ?? request.outputSchema,
+						prepared,
+						request,
+						result.changesApplied ?? null,
+					);
+					if (repaired) return repaired;
+					// Fall through to schema error so the outer retry loop can re-prompt.
+					throw new WorkflowSchemaError(
+						structuredFail.error ?? "Workflow subagent did not return a valid structured artifact",
+						{ status: structuredFail.status, rawOutput: body.rawOutput, exitCode: body.exitCode },
+					);
+				}
 				throw new WorkflowError(`Workflow subagent exited with code ${body.exitCode}`, "tool_failure", {
 					exitCode: body.exitCode,
 				});
@@ -189,9 +260,17 @@ export class RuntimeAdapter implements RuntimePort {
 
 			const structured = body.structuredOutput;
 			if (structured?.status !== "valid") {
+				const repaired = await this.#tryRepairStructured<TArtifact>(
+					body,
+					prepared.outputSchema ?? request.outputSchema,
+					prepared,
+					request,
+					result.changesApplied ?? null,
+				);
+				if (repaired) return repaired;
 				throw new WorkflowSchemaError(
 					structured?.error ?? "Workflow subagent did not return a valid structured artifact",
-					{ status: structured?.status },
+					{ status: structured?.status, rawOutput: body.rawOutput },
 				);
 			}
 			const resolved = parseResolvedModel(body.resolvedModel);
@@ -206,10 +285,53 @@ export class RuntimeAdapter implements RuntimePort {
 				resolvedProvider: resolved?.provider,
 				resolvedModel: resolved?.model,
 				toolCalls: body.toolCalls,
+				// After the live tool path finishes, optimization receipts (if any) sit on the shared array.
+				promptAssemblyReceipt: prepared.promptAssemblyReceipt,
+				optimizationReceipts:
+					prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
 			};
 		} catch (error) {
 			throw this.#normalizeError(error);
 		}
+	}
+
+	/**
+	 * Deterministic raw repair (BOM/fence/single-object) before model schema retry.
+	 * Returns a result when repair succeeds with zero model calls; otherwise undefined.
+	 */
+	async #tryRepairStructured<TArtifact>(
+		body: StructuredRunnerResult["result"],
+		schema: unknown,
+		prepared: ReturnType<typeof prepareWorkflowInvocation>,
+		request: WorkflowAgentRequest,
+		changesApplied: boolean | null,
+	): Promise<WorkflowAgentResult<TArtifact> | undefined> {
+		const raw = extractInvalidRaw(body);
+		if (!raw) return undefined;
+		const repaired = await repairStructuredOutput(raw, {
+			maxRetries: 0,
+			schema,
+			validate: defaultSchemaValidator,
+			budget: { remainingModelCalls: 0 },
+		});
+		if (!repaired.ok || repaired.value === undefined) return undefined;
+		const resolved = parseResolvedModel(body.resolvedModel);
+		return {
+			artifact: repaired.value as TArtifact,
+			rawResultId: body.id,
+			attemptId: request.attemptId,
+			patchPath: body.patchPath,
+			branchName: body.branchName,
+			usage: body.usage,
+			changesApplied,
+			resolvedProvider: resolved?.provider,
+			resolvedModel: resolved?.model,
+			toolCalls: body.toolCalls,
+			promptAssemblyReceipt: prepared.promptAssemblyReceipt,
+			optimizationReceipts:
+				prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
+			schemaRepairReceipt: repaired.receipt,
+		};
 	}
 
 	#classifyErrorKind(message: string): WorkflowErrorKind {
@@ -238,6 +360,31 @@ export class RuntimeAdapter implements RuntimePort {
 			return new WorkflowSchemaError(message, { cause: error });
 		}
 		return new WorkflowError(message, this.#classifyErrorKind(message), { cause: error });
+	}
+}
+
+function extractInvalidRaw(body: StructuredRunnerResult["result"]): string | undefined {
+	if (typeof body.rawOutput === "string" && body.rawOutput.length > 0) return body.rawOutput;
+	const data = body.structuredOutput?.data;
+	if (typeof data === "string" && data.length > 0) return data;
+	if (data !== undefined && data !== null) {
+		try {
+			return JSON.stringify(data);
+		} catch {
+			// fall through
+		}
+	}
+	const err = body.structuredOutput?.error;
+	if (typeof err === "string" && (err.includes("{") || err.includes("```"))) return err;
+	return undefined;
+}
+
+function schemaSummaryForRetry(schema: unknown): string {
+	try {
+		const s = JSON.stringify(schema ?? {});
+		return s.length > 800 ? `${s.slice(0, 800)}…` : s;
+	} catch {
+		return "{}";
 	}
 }
 

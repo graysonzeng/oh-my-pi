@@ -3,6 +3,7 @@ import {
 	DEFAULT_SUMMARIZERS,
 	DEFAULT_TRUNCATION_RULES,
 	processToolOutput,
+	processToolOutputDetailed,
 	summarizeToolOutput,
 	truncateToolOutput,
 } from "../../src/workflow/tool-output-manager";
@@ -89,12 +90,14 @@ describe("summarizeToolOutput", () => {
 		expect(summary.length).toBeLessThan(output.length);
 	});
 
-	it("read summarizer reports path and size", () => {
+	it("read summarizer retains body content (no metadata-only replacement)", () => {
 		const content = Array.from({ length: 100 }, (_, i) => `const x${i} = 1;`).join("\n");
 		const summary = summarizeToolOutput(content, "read", { path: "src/a.ts" });
 		expect(summary).toContain("src/a.ts");
 		expect(summary).toContain("100 lines");
-		expect(summary.length).toBeLessThan(content.length);
+		// Body must remain recoverable for the model — not path/size only.
+		expect(summary).toContain("const x0 = 1;");
+		expect(summary).toContain("const x99 = 1;");
 	});
 
 	it("grep summarizer caps matches", () => {
@@ -137,5 +140,32 @@ describe("processToolOutput", () => {
 		const text = "full output";
 		expect(processToolOutput(text, "bash", { outputTruncation: { enabled: false, rules: [] } })).toBe(text);
 		expect(processToolOutput(text, "bash", undefined)).toBe(text);
+	});
+
+	it("preserves existing [raw output: artifact://] footer through bash summarization", () => {
+		const huge = `${"ok line\n".repeat(200)}ERROR: boom\n[raw output: artifact://42]`;
+		const out = processToolOutput(huge, "bash", strategy, { exitCode: 1 });
+		expect(out).toContain("[raw output: artifact://42]");
+		expect(out).toMatch(/ERROR|Exit code/);
+		const detailed = processToolOutputDetailed(huge, "bash", strategy, { exitCode: 1 });
+		expect(detailed.receipt?.recoveryUri).toBe("artifact://42");
+		expect(detailed.receipt?.reversible).toBe(true);
+	});
+
+	it("read processToolOutput keeps body and does not invent recovery URI", () => {
+		const content = Array.from({ length: 200 }, (_, i) => `line ${i} with body`).join("\n");
+		const detailed = processToolOutputDetailed(content, "read", strategy, { path: "src/x.ts" });
+		expect(detailed.text).toContain("line 0 with body");
+		expect(detailed.receipt?.recoveryUri).toBeUndefined();
+		// Truncation may apply but body is not replaced with metadata-only text
+		expect(detailed.text).not.toMatch(/^Read src\/x\.ts: \d+ lines, \d+ bytes \(use 'grep'/);
+	});
+
+	it("never fabricates recovery URI when no footer existed", () => {
+		const huge = `${"pass ok\n".repeat(200)}ERROR: last\n`;
+		const detailed = processToolOutputDetailed(huge, "bash", strategy, { exitCode: 1 });
+		expect(detailed.receipt?.recoveryUri).toBeUndefined();
+		expect(detailed.text).not.toMatch(/artifact:\/\/(?!.*\])/); // no fake artifact footer
+		expect(detailed.text).not.toContain("[raw output: artifact://");
 	});
 });

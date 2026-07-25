@@ -171,7 +171,10 @@ export interface ToolStrategy {
 		/** Built-in summarizer keys: bash, read, grep, test, ls — or "*" default. */
 		summarizerKeys?: string[];
 	};
-	/** Reserved until agent parallel tool limit is enforced; stored on profiles only. */
+	/**
+	 * Cap concurrent shared tools in a single agent-loop batch.
+	 * Wired via Agent.toolScheduling.maxConcurrentTools when session installs the policy.
+	 */
 	maxConcurrentTools?: number;
 }
 
@@ -233,6 +236,16 @@ export interface ModelProfile {
 	contextStrategy?: ContextStrategy;
 	/** Per-model structured-output schema enhancement and retry. */
 	outputStrategy?: OutputStrategy;
+	/**
+	 * Gated tool/skill presentation. Default (missing) is direct mode with feature off.
+	 * When enabled + catalog, non-essential tools get xd:// locators without full schema.
+	 */
+	presentationPolicy?: {
+		enabled?: boolean;
+		mode?: "direct" | "catalog";
+		essentialTools?: string[];
+		skillCatalogOnly?: boolean;
+	};
 	disabledTools?: string[];
 	maxRequests: number;
 	maxRuntimeMs: number;
@@ -280,6 +293,12 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	resolvedProvider?: string;
 	resolvedModel?: string;
 	toolCalls?: number;
+	/** Prompt assembly receipt from prepareWorkflowInvocation (attempt evidence). */
+	promptAssemblyReceipt?: unknown;
+	/** Tool optimization receipts accumulated on the live tool path during the attempt. */
+	optimizationReceipts?: unknown[];
+	/** Deterministic schema repair attempt receipt when raw repair ran. */
+	schemaRepairReceipt?: unknown;
 }
 
 export interface WorkflowRuntimeEvidence {
@@ -287,6 +306,10 @@ export interface WorkflowRuntimeEvidence {
 	resolvedProvider?: string;
 	resolvedModel?: string;
 	toolCalls?: number;
+	promptAssemblyReceipt?: unknown;
+	optimizationReceipts?: unknown[];
+	/** Relative artifact kind ref when scope-metrics was persisted. */
+	scopeMetricsKind?: string;
 }
 
 export interface WorkflowRequest {

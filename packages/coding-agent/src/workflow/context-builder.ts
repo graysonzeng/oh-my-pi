@@ -5,6 +5,8 @@ import planReviewContextTemplate from "../prompts/workflow/context-plan-review.h
 import repairContextTemplate from "../prompts/workflow/context-repair.hbs.md" with { type: "text" };
 import type { ResolvedArtifactInclusion } from "./artifact-inclusion";
 import { buildRepoMap } from "./repo-map-builder";
+import type { StageHandoffV1 } from "./stage-handoff";
+import { serializeStageHandoff } from "./stage-handoff";
 import type {
 	ContextStrategy,
 	ImplementationArtifactV1,
@@ -155,6 +157,15 @@ export class ContextBuilder {
 		} catch {
 			return context;
 		}
+	}
+
+	/**
+	 * Append a persisted stage-boundary handoff block for the next role.
+	 * Source artifacts remain intact; this is a deterministic extract only.
+	 */
+	appendStageHandoff(context: string, handoff: StageHandoffV1 | null | undefined): string {
+		if (!handoff) return context;
+		return `${context.trim()}\n\n## Stage handoff (${handoff.edge})\n\`\`\`json\n${serializeStageHandoff(handoff)}\n\`\`\`\n`;
 	}
 
 	#truncatePlan(plan: PlanArtifactV1): PlanArtifactV1 {
