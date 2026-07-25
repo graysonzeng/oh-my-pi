@@ -119,17 +119,6 @@ export interface VerificationArtifactV1 extends ArtifactHeader {
 
 export type WorkflowRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer" | "repair";
 
-/** Execution backend for a model profile — selected by config, never inferred from vendor. */
-export type WorkflowRuntimeKind = "embedded" | "codex_cli" | "claude_cli";
-
-export interface WorkflowRuntimeConfig {
-	kind: WorkflowRuntimeKind;
-	/** Binary name or absolute path; never a shell fragment. */
-	executable?: string;
-	/** Codex CLI `--profile` only; unsupported on other runtimes. */
-	profile?: string;
-}
-
 /** Per-model system prompt style and instruction shaping. */
 export interface PromptStrategy {
 	kind: "verbose" | "concise" | "structured" | "custom";
@@ -264,8 +253,6 @@ export interface ModelProfile {
 		includeFullTranscript: boolean;
 		maxArtifactBytes: number;
 	};
-	/** Omitted profiles normalize to `{ kind: "embedded" }`. */
-	runtime?: WorkflowRuntimeConfig;
 }
 
 export interface WorkflowAgentRequest {

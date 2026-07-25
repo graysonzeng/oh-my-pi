@@ -5,7 +5,7 @@ import type { ModelProfile } from "./types";
 /**
  * Merge settings `workflow.profiles` over defaults.
  * Empty / missing / non-object values fall back to defaults unchanged.
- * Every merged profile is normalized (runtime defaults to embedded).
+ * Every merged profile is normalized (legacy profile.runtime is rejected).
  */
 export function resolveWorkflowProfilesFromSettings(
 	rawProfiles: unknown,

@@ -21,7 +21,6 @@ import { sha256Hex } from "../../src/workflow/optimization-receipt";
 import { PROMPT_ASSEMBLY_RECEIPT_KIND } from "../../src/workflow/prompt-assembly";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { createDefaultRuntimeAdapter } from "../../src/workflow/runtime-default";
-import { WorkflowRuntimeDispatcher } from "../../src/workflow/runtime-dispatcher";
 import { prepareWorkflowInvocation } from "../../src/workflow/runtime-invocation";
 import { SCOPE_METRICS_KIND } from "../../src/workflow/scope-metrics";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
@@ -636,9 +635,9 @@ describe("AC6 default-path budget + multi-runtime + real AgentTool transform", (
 		);
 	});
 
-	it("createDefaultRuntimeAdapter returns multi-runtime dispatcher (embedded + CLI)", () => {
+	it("createDefaultRuntimeAdapter returns embedded RuntimeAdapter only", () => {
 		const adapter = createDefaultRuntimeAdapter();
-		expect(adapter).toBeInstanceOf(WorkflowRuntimeDispatcher);
+		expect(adapter).toBeInstanceOf(RuntimeAdapter);
 	});
 
 	it("applyWorkflowTransformTools drops schema on real AgentTool-like objects in catalog mode", () => {

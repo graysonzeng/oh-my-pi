@@ -4,41 +4,23 @@ import { WorkflowPolicyError } from "../../src/workflow/errors";
 import { assertSupportedModelProfile, normalizeModelProfile } from "../../src/workflow/model-profile-registry";
 
 describe("normalizeModelProfile", () => {
-	it("accepts default profiles and defaults omitted runtime to embedded", () => {
+	it("accepts embedded multi-model profiles without runtime field", () => {
 		const profile = DEFAULT_MODEL_PROFILES.claude_planner;
-		const normalized = normalizeModelProfile(profile);
-		expect(normalized.id).toBe(profile.id);
-		expect(normalized.runtime).toEqual({ kind: "embedded" });
+		expect(normalizeModelProfile(profile).id).toBe(profile.id);
 		expect(() => assertSupportedModelProfile(profile)).not.toThrow();
 	});
 
-	it("keeps a codex cli executable and profile", () => {
-		const profile = normalizeModelProfile({
-			...DEFAULT_MODEL_PROFILES.grok_implementer,
-			runtime: { kind: "codex_cli", executable: "codex", profile: "default" },
-		});
-		expect(profile.runtime).toEqual({
-			kind: "codex_cli",
-			executable: "codex",
-			profile: "default",
-		});
-	});
-
-	it("rejects a claude runtime carrying a codex profile", () => {
-		expect(() =>
-			normalizeModelProfile({
-				...DEFAULT_MODEL_PROFILES.claude_planner,
-				runtime: { kind: "claude_cli", profile: "cli" },
-			}),
-		).toThrow(WorkflowPolicyError);
-	});
-
-	it("rejects empty executable", () => {
-		expect(() =>
-			normalizeModelProfile({
-				...DEFAULT_MODEL_PROFILES.claude_planner,
-				runtime: { kind: "claude_cli", executable: "   " },
-			}),
-		).toThrow(WorkflowPolicyError);
+	it("rejects legacy profile.runtime (codex_cli / claude_cli / embedded)", () => {
+		const legacy = {
+			...DEFAULT_MODEL_PROFILES.claude_planner,
+			runtime: { kind: "codex_cli", profile: "cli" },
+		};
+		expect(() => normalizeModelProfile(legacy as never)).toThrow(WorkflowPolicyError);
+		try {
+			normalizeModelProfile(legacy as never);
+		} catch (err) {
+			expect(err).toBeInstanceOf(WorkflowPolicyError);
+			expect((err as WorkflowPolicyError).message).toContain("workflow_cli_runtime_removed");
+		}
 	});
 });
