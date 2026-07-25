@@ -4,6 +4,8 @@ Deterministic multi-stage coding workflow: **plan → plan review → implement 
 
 The engine owns transitions. Models only return versioned artifacts. Deterministic verification cannot be overridden by model claims.
 
+Multi-model execution is **embedded only**: `RuntimeAdapter` → `runStructuredSubagent` with omp provider models and per-profile strategies. Vendor CLI backends (`profile.runtime` / `codex_cli` / `claude_cli`) were removed and fail closed if set.
+
 ## Lifecycle
 
 | Stage | Who | Notes |
@@ -11,13 +13,23 @@ The engine owns transitions. Models only return versioned artifacts. Determinist
 | `created` | tool `start` | No model call yet |
 | `planning` | planner profile | Strict `PlanArtifact` |
 | `plan_review` | independent reviewer | `approved` / `changes_requested` / `blocked` |
-| `implementing` | implementer (Grok-preferred) | Isolation required; real patch/branch only |
+| `implementing` | implementer (default: **GLM** primary, Grok/Terra fallback) | Isolation required; real patch/branch only |
 | `implementation_verify` | verifier (no LLM) | Configured commands + policy checks |
 | `code_review` | independent vendor when possible | Findings drive repair |
 | `repairing` | routed repair profile | Finding IDs; escalation then block |
 | `final_verify` | verifier | Only engine may move to `completed` |
 
 Terminal states: `completed`, `blocked`, `cancelled`, `failed`.
+
+Default profile registration order is the router preference (see `DEFAULT_MODEL_PROFILES` in `packages/coding-agent/src/workflow/default-config.ts`):
+
+| Role | Default preference |
+| --- | --- |
+| planner | Claude (Fable) → GPT-Sol → GLM |
+| plan_reviewer | Claude (Fable) → GPT-Sol |
+| implementer | GLM → Grok → Terra |
+| code_reviewer | Claude (Fable) → GPT |
+| repair (simple) | Grok; complex escalation → Claude/GPT |
 
 ## Tool operations
 
@@ -52,21 +64,37 @@ Common block reasons:
 - Independent reviewer unavailable (unless `workflow.degradedMode`)
 - Same finding fingerprint reaches third unresolved repair cycle
 - Policy / configuration failures
+- Isolation write stages without a readable patch / `changesApplied === false`
+
+**Not** a hard cancel: wall-clock profile `maxRuntimeMs` / "runtime limit exceeded" aborts map to retryable `timeout` so profile fallbacks can continue. True user/process cancel still yields terminal `cancelled`.
 
 Inspect with `workflow op=status`. Artifacts under the workflow artifact directory retain verification logs (secrets redacted).
 
 ## Configuration
 
-Settings group `workflow.*` (see settings schema):
+Settings group `workflow.*` (schema in `packages/coding-agent/src/config/settings-schema.ts`; also listed via `omp config list` under Modes). Prefer **nested** YAML under `workflow:` / `task:` (flat dotted keys may not bind depending on loader path):
 
 - `enabled`, `storagePath`
 - `degradedMode`, `requireIndependentReview`
 - `maxBudgetUsd`, `maxRepairCycles`, `maxPlanCycles`, `confidenceThreshold`
 - `isolationMerge`, `verificationCommands`, `verificationTimeoutMs`
+- `profiles` — optional override map; empty uses built-in defaults
+
+Related (not under `workflow.*`):
+
+- `task.isolation.mode` — use `auto` or `none` (legacy bare `worktree` is invalid). When workflow requests isolation and mode is `none`, the session is upgraded to `auto` for that run only.
 
 Default verification commands are trusted repository checks (`git diff --check`, `bun check`). Full-suite `bun test` is opt-in via settings. Model profile mappings live in `default-config` / registry and are wired into the production engine router — **do not hardcode public model IDs in engine logic**. Exact model availability and cost claims require **local** configuration and benchmark evidence; they are not guaranteed by this package.
 
-Unsupported profile fields (`toolAliases`, `argumentAliases`, `maxInputTokens`, `maxOutputTokens`) are rejected at construction until the structured-subagent runtime can honor them. Supported mappings include `thinkingLevel`, `disabledTools`, `maxRuntimeMs`, and `contextPolicy`.
+### Profile fields
+
+| Category | Fields | Behavior |
+| --- | --- | --- |
+| Supported (runtime + strategies) | `thinkingLevel`, `disabledTools`, `maxRuntimeMs`, `contextPolicy`, `modelPattern`, `promptStrategy` / `toolStrategy` / `contextStrategy` / `outputStrategy`, `toolAliases`, `argumentAliases` | Honored via structured-subagent + schema enhancer / tool-alias wraps |
+| Rejected | `maxInputTokens`, `maxOutputTokens` | Fail closed at profile registration until the runner can honor them |
+| Removed | `runtime` (`codex_cli` / `claude_cli` / legacy embedded tag) | Fail closed; multi-model is embedded RuntimeAdapter only |
+
+Default plan/code reviewer `maxRuntimeMs` is **300s** (slow gateways); implementer defaults are higher (up to 600s).
 
 ## Safety
 
@@ -85,3 +113,25 @@ Unsupported profile fields (`toolAliases`, `argumentAliases`, `maxInputTokens`, 
 - Readonly roles use plan-mode tool sets; implement/repair use scoped tool allowlists (no unrestricted task spawn)
 - Per-profile `maxRequests` / `maxCostUsd` and tool-call counters restore from budget snapshots on resume
 - Routing audit + resolved runtime model evidence artifacts are persisted when available
+- Model-supplied artifact `createdAt` values are coerced to ISO-8601 UTC before Zod validation (date-only / missing `Z` must not fail closed)
+- Wall-clock profile `maxRuntimeMs` / "runtime limit exceeded" subagent aborts map to retryable `timeout` (not hard `cancelled`)
+- Tool alias Proxies must use the underlying tool as `Reflect.get` receiver so class private-field getters (e.g. `BashTool.#asyncEnabled`) keep working
+
+## Live multi-model verification
+
+Optional, cost-bearing. Automated tests use injectable runners only; live smoke is opt-in.
+
+**Credentials (gateway):** load `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (mapped to `ANTHROPIC_API_KEY`) from `~/.claude/settings.json` `env`, or export them in the shell. Do not commit tokens.
+
+**Default protocol:** `anthropic-messages` via omp `providers.anthropic` / `models.yml`. The same gateway also answers OpenAI-compatible `POST /v1/chat/completions` (Bearer token) for dual-protocol checks.
+
+**Harness:** `.agent-artifacts/live-e2e/run-live-e2e.ts` (local artifact; not a package test and not published).
+
+1. Probe multiple model ids over anthropic-messages (`completeSimple` + `buildModel`).
+2. Create a fixture git repo + temp `agentDir` with gateway `models.yml` and nested `config.yml` (`workflow.*`, `task.isolation.mode: auto`, lightweight `verificationCommands` for the fixture).
+3. Drive production `workflow` tool via `createAgentSession`: `start` → `resume` (`singleStep`) until terminal.
+4. Write redacted `.agent-artifacts/live-e2e/report.json` (no secrets).
+
+**Pass criteria (harness):** ≥5 probe ok; durable `plan` + `review` artifacts; full path prefers terminal `completed` (with `implementation`); `blocked` after plan/review remains a minimum live success.
+
+**Recorded full path (2026-07-25):** protocol default anthropic-messages; OpenAI chat/completions smoke ok; probes 7/7 (`claude-sonnet-5`, `claude-fable-5`, `claude-opus-4-8`, `gpt-5.6-sol`, `gpt-5.6-terra`, `grok-4.5`, `glm-5.2`); workflow `wf_61f89e3f-…` → **`completed`** (`final_verify:passed`) through plan → plan_review → implement → implementation_verify → code_review → final_verify; artifacts include `plan`, `review`, `implementation`, `verification`, `findings-state`, `routing-audit`, `usage`, `stage_handoff`, `prompt_assembly_receipt`. Details: `.agent-artifacts/live-e2e/report.json` and root `progress.md` (session notes; not a package artifact).

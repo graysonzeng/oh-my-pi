@@ -676,7 +676,7 @@ Provider credentials and custom model definitions are configured separately — 
 
 ### Other groups
 
-`omp config list` exposes many more grouped settings, including: `task.*` (subagent concurrency, isolation, model overrides), `skills.*` and `commands.*` (discovery toggles), `mcp.*`, `github.*`, `async.*`, `goal.*`, `loop.*`, `todo.*`, `magicKeywords.*`, `ttsr.*` (time-traveling stream rules), `display.*`, `startup.*`, `share.*`, `collab.*`, `stt.*`/`tts.*`, `memories.*`/`hindsight.*`/`mnemopi.*` (memory backends), and `bashInterceptor.*`. Each follows the same type/default rules shown above.
+`omp config list` exposes many more grouped settings, including: `task.*` (subagent concurrency, isolation, model overrides), `workflow.*` (multi-model coding workflow: enablement, storage, budgets, verification commands, profiles — see [workflow.md](./workflow.md)), `skills.*` and `commands.*` (discovery toggles), `mcp.*`, `github.*`, `async.*`, `goal.*`, `loop.*`, `todo.*`, `magicKeywords.*`, `ttsr.*` (time-traveling stream rules), `display.*`, `startup.*`, `share.*`, `collab.*`, `stt.*`/`tts.*`, `memories.*`/`hindsight.*`/`mnemopi.*` (memory backends), and `bashInterceptor.*`. Each follows the same type/default rules shown above.
 
 ## Legacy migration
 
