@@ -2,23 +2,25 @@
 
 ## [Unreleased]
 
+### Removed
+- Removed workflow multi-vendor CLI runtimes (`codex_cli` / `claude_cli` adapters, process runner, CLI isolation, and runtime dispatcher). Multi-model workflows use the embedded `RuntimeAdapter` → `runStructuredSubagent` path only (omp provider models + `ModelProfile` strategies). Legacy `profile.runtime` in settings fails closed. Worker host (`__omp_worker_*`), task/structured-subagent isolation, and provider OAuth CLIs are unchanged.
+
 ### Added
+- Wired P0–P2 optimization into production paths: live tool `processToolOutputDetailed` + session receipts, engine stage-handoff/scope-metrics/prompt-assembly artifacts, gated presentation policy on prepare, catalog `transformTools` applied to real AgentTool descriptors in `createTools`, and `omp workflow-bench` thin CLI over `runBenchmarkSuite`.
+- Per-model optimization P0–P2: recoverable tool-output receipts (read body retained, `artifact://` footers preserved, no false recovery URIs), fixed-task benchmark suite/runner/scorecard with fake-runtime paired smoke, deterministic stage-boundary handoffs, layered structured-output repair (BOM/fence/JSON extract + static schema-retry prompt; `maxRetries` = additional model calls), git-diff scope metrics, gated `xd://` presentation policy, stable prompt-assembly receipts with cache observability, and `ToolStrategy.maxConcurrentTools` wiring into agent tool scheduling.
 - Added quality-first per-model optimization for workflow: tool-output truncation/summarization, schema enhancement, tool/argument aliases, per-model prompt styles (concise Claude / structured GPT / explicit Grok), CWL-style context eviction, regex repo-map with hybrid ranking, quality gate (>3% drop → quality-priority rollback), and default profiles covering eight target models (Fable/Sol plan-review, GLM/Grok implement).
 - Wired per-model strategies onto the production path: `RuntimeAdapter.run` forwards `processToolResult`/`transformTools` and profile `schemaMode`; `prepareWorkflowInvocation` installs `session.workflowToolOptimization` used by bash/read/grep; engine stage context calls `appendRepoMapIfEnabled`; context eviction runs under utilization pressure.
 - Wired `argumentAliases` onto the live AgentTool surface: `createTools` applies `wrapAgentToolWithWorkflowAliases` so model-facing schemas use wire names (e.g. `read.path` → `file_path` for `grok_implementer`) and execute reverse-maps to internal names.
 - Propagate `workflowToolOptimization` (and write/command policies) from `prepareWorkflowInvocation` through structured-subagent `ExecutorOptions` into `createAgentSession` ToolSession before `createTools`, so embedded children honor argumentAliases and processResult.
-- Added profile-selectable embedded, Codex CLI, and Claude Code runtimes for deterministic multi-model workflows, including structured output, cancellation, usage evidence, and isolated write execution.
-- Added multi-model coding workflow MVP: pure transition/schema policy, SQLite resume with version locks and artifact hashes, model routing with diversity/fallback audit metadata, budget + finding escalation, injectable runtime adapter with production factory wiring, deterministic verifier matrix, port-driven stages, engine repair/budget/cancel/resume loops, and built-in `workflow` tool (`start|status|resume|cancel`) with settings and role prompts.
+- Added multi-model coding workflow MVP: pure transition/schema policy, SQLite resume with version locks and artifact hashes, model routing with diversity/fallback audit metadata, budget + finding escalation, injectable embedded runtime adapter with production factory wiring, deterministic verifier matrix, port-driven stages, engine repair/budget/cancel/resume loops, and built-in `workflow` tool (`start|status|resume|cancel`) with settings and role prompts.
 - Documented workflow lifecycle, recovery, and blocked states in `docs/workflow.md`.
 
 ### Notes
-- CLI runtimes require local `codex` and/or `claude` binaries authenticated via existing user configuration; omp never stores credentials or edits `~/.codex` / `~/.claude/settings.json`.
-- Built-in default profiles remain `runtime.kind = "embedded"` until live smoke is authorized; set `workflow.profiles.*.runtime` to enable Codex/Claude CLI paths.
-- Live provider smoke is opt-in and cost-bearing; automated tests use injectable process runners only.
-- Claude profiles should use Claude Code (Anthropic Messages). GPT/Grok profiles use Codex CLI (Responses). Do not route Claude through Codex by default.
-- If `~/.claude/settings.json` (or its resolved target) is world-readable, restrict permissions after reviewing other consumers — omp reports this risk but does not change shared auth files.
+- Multi-model is embedded-only: different `ModelProfile`s resolve omp provider models; do not set `workflow.profiles.*.runtime`.
+- Live provider smoke is opt-in and cost-bearing; automated tests use injectable runners only.
 
 ### Fixed
+- Do not map `contextStrategy.toolHistory.maxToolCalls` (eviction keepRecentN) into `Agent.toolScheduling.remainingToolCalls` (hard skip budget); remainingToolCalls stays unlimited on the default prepare path.
 - Workflow write stages no longer dead-end when `task.isolation.mode` is `none` (session-local upgrade to `auto`); isolation patches are retained/copied for verification; `changesApplied: false` fails closed.
 - Repair no longer auto-resolves all findings on empty `addressedStepIds`; cumulative patches/files retained across repair; interrupted write stages block instead of silent re-run.
 - Verifier uses session cwd; SQLite enforces legal transitions; durable artifacts secret-redacted; in-process cancel aborts registered runners; `resume forceUnlock` clears stale locks.
