@@ -1,6 +1,10 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ToolSession } from "../tools";
+import type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
+
+/** Re-export for consumers that import receipt types from workflow/types. */
+export type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
 
 /** Isolation controls for write stages (mirrors task isolation without importing task). */
 export interface WorkflowIsolationControls {
@@ -117,6 +121,55 @@ export interface VerificationArtifactV1 extends ArtifactHeader {
 	}>;
 }
 
+/** Kind of a preserved stage-handoff item (deterministic extract, not model summary). */
+export type StageHandoffItemKind = "plan" | "finding" | "patch" | "verification";
+
+/** One retained fragment at a stage boundary. */
+export interface StageHandoffPreservedItem {
+	kind: StageHandoffItemKind;
+	artifactId: string;
+	/** Compact deterministic summary; ≤500 characters. */
+	summary: string;
+	/** UTF-8 byte length of `summary`. */
+	bytes: number;
+	/**
+	 * When true, item must not be dropped under budget pressure
+	 * (blocking findings, patch refs, failed verification, etc.).
+	 */
+	blocking: boolean;
+}
+
+/**
+ * Deterministic stage-boundary role-aware handoff (P1).
+ * Built only on successful stage completion; sources are never deleted.
+ */
+export interface StageHandoffV1 {
+	schemaVersion: 1;
+	kind: "stage_handoff";
+	fromStage: WorkflowStatus;
+	toStage: WorkflowStatus;
+	preservedItems: StageHandoffPreservedItem[];
+	/** Source artifact ids whose full bodies were not inlined (still recoverable). */
+	omittedArtifactIds: string[];
+	/** Recovery URIs for full source content (typically artifact://relativePath). */
+	recoveryUris: string[];
+	/** Total UTF-8 bytes of candidate source artifacts before extract. */
+	bytesBeforeHandoff: number;
+	/** Total UTF-8 bytes of preserved item summaries after extract. */
+	bytesAfterHandoff: number;
+	/** sha256 of canonical payload (stable key order; excludes timestamps). */
+	contentFingerprint: string;
+}
+
+/** Durable source ref used when sizing handoff bytes / recovery. */
+export interface StageHandoffArtifactRef {
+	artifactId: string;
+	/** UTF-8 byte length of full stored content. */
+	bytes: number;
+	/** Loadable recovery URI (e.g. artifact://workflowId/art_….json). */
+	recoveryUri: string;
+}
+
 export type WorkflowRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer" | "repair";
 
 /** Per-model system prompt style and instruction shaping. */
@@ -165,6 +218,20 @@ export interface ToolStrategy {
 	 * Wired via Agent.toolScheduling.maxConcurrentTools when session installs the policy.
 	 */
 	maxConcurrentTools?: number;
+	/**
+	 * Hard remaining tool-call budget for this stage (mutable across batches).
+	 * null/undefined = unlimited. Not derived from toolHistory.maxToolCalls.
+	 */
+	remainingToolCalls?: number | null;
+	/** Remaining stage wall time in ms; ≤0 skips remaining tools. null = unknown. */
+	remainingStageTimeMs?: number | null;
+	/**
+	 * Resource conflict mode for concurrent tools:
+	 * - serialize/conservative: same-path writes and mutating bash serialize
+	 * - fail: later conflicting tool is skipped with error
+	 * - permissive: only explicit exclusive / same-path write pairs conflict
+	 */
+	resourceConflictMode?: "serialize" | "fail" | "conservative" | "permissive";
 }
 
 export interface ContextStrategy {
@@ -227,13 +294,16 @@ export interface ModelProfile {
 	outputStrategy?: OutputStrategy;
 	/**
 	 * Gated tool/skill presentation. Default (missing) is direct mode with feature off.
-	 * When enabled + catalog, non-essential tools get xd:// locators without full schema.
+	 * When enabled + catalog, non-essential tools get xd://tools/{name} locators without full schema.
+	 * Also gated by settings `workflow.presentationOptimization.enabled` (default false).
 	 */
 	presentationPolicy?: {
 		enabled?: boolean;
 		mode?: "direct" | "catalog";
 		essentialTools?: string[];
 		skillCatalogOnly?: boolean;
+		/** Skill names whose full body is injected immediately when catalog mode is on. */
+		autoloadSkills?: string[];
 	};
 	disabledTools?: string[];
 	maxRequests: number;
@@ -280,8 +350,11 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	resolvedProvider?: string;
 	resolvedModel?: string;
 	toolCalls?: number;
-	/** Prompt assembly receipt from prepareWorkflowInvocation (attempt evidence). */
-	promptAssemblyReceipt?: unknown;
+	/**
+	 * Prompt assembly receipt from prepareWorkflowInvocation (attempt evidence).
+	 * After a successful run, provider cache counters are merged when usage reports them.
+	 */
+	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	/** Tool optimization receipts accumulated on the live tool path during the attempt. */
 	optimizationReceipts?: unknown[];
 	/** Deterministic schema repair attempt receipt when raw repair ran. */
@@ -293,7 +366,7 @@ export interface WorkflowRuntimeEvidence {
 	resolvedProvider?: string;
 	resolvedModel?: string;
 	toolCalls?: number;
-	promptAssemblyReceipt?: unknown;
+	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	optimizationReceipts?: unknown[];
 	/** Relative artifact kind ref when scope-metrics was persisted. */
 	scopeMetricsKind?: string;
@@ -389,4 +462,84 @@ export interface VerifierPort {
 		forbiddenPaths?: string[],
 		options?: { signal?: AbortSignal; timeoutMs?: number; expectDirtyTree?: boolean },
 	): Promise<VerificationArtifactV1>;
+}
+
+// ---------------------------------------------------------------------------
+// Availability preflight (dedicated probe seam — not RuntimePort.run)
+// ---------------------------------------------------------------------------
+
+export type AvailabilityProbeStatus = "available" | "unavailable" | "indeterminate";
+export type AvailabilityRequirement = "required" | "conditional";
+export type AvailabilityScopeStatus = "ready" | "degraded" | "blocked" | "not_required";
+
+/** Single physical probe request for one profile/runtime target. */
+export interface WorkflowAvailabilityProbeRequest {
+	profile: ModelProfile;
+	role: WorkflowRole;
+	session: ToolSession;
+	signal?: AbortSignal;
+	timeoutMs?: number;
+}
+
+/** Outcome of one physical probe before per-profile expansion. */
+export interface WorkflowAvailabilityProbeResult {
+	status: AvailabilityProbeStatus;
+	/** Only from runtime response metadata — never from profile config/vendor. */
+	actualProvider?: string;
+	/** Only from runtime response metadata — never from profile config/vendor. */
+	actualModel?: string;
+	/** Omitted when the target never started before the overall deadline. */
+	latencyMs?: number;
+	/** Observable response usage for this diagnostic request only. */
+	usage?: Usage;
+	/** Provider/runtime-reported cost. null means explicitly unknown; never infer zero. */
+	reportedCostUsd?: number | null;
+	errorKind?: string;
+	errorSummary?: string;
+}
+
+/**
+ * Dedicated availability probe port.
+ * Must not be implemented by forging schema artifacts through RuntimePort.run().
+ */
+export interface WorkflowAvailabilityPort {
+	probe(request: WorkflowAvailabilityProbeRequest): Promise<WorkflowAvailabilityProbeResult>;
+}
+
+/** Per-profile row in a preflight report (after single-flight expansion). */
+export interface WorkflowAvailabilityProfileResult {
+	profileId: string;
+	role: WorkflowRole;
+	requirement: AvailabilityRequirement;
+	status: AvailabilityProbeStatus;
+	runtime: "embedded";
+	actualProvider?: string;
+	actualModel?: string;
+	latencyMs?: number;
+	source?: "live" | "shared_live";
+	/** Marks this usage as preflight diagnostics, not stage/workflow model usage. */
+	usageKind: "diagnostic";
+	usage?: Usage;
+	reportedCostUsd?: number | null;
+	errorKind?: string;
+	errorSummary?: string;
+}
+
+/** Full preflight report returned from start/resume. */
+export interface WorkflowAvailabilityReport {
+	workflowId: string;
+	invocationId: string;
+	operation: "start" | "resume";
+	scope: "full" | "single_step";
+	checkedAt: string;
+	wallLatencyMs: number;
+	status: AvailabilityScopeStatus;
+	profiles: WorkflowAvailabilityProfileResult[];
+	/** Aggregate of physical live probes only; shared_live rows are not double-counted. */
+	usageKind: "diagnostic";
+	usage?: Usage;
+	/** Aggregate reported cost, or null when any physical probe cost is unknown. */
+	reportedCostUsd?: number | null;
+	/** Required roles with zero available routes (present when status is blocked). */
+	blockedRoles?: WorkflowRole[];
 }

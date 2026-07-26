@@ -4148,6 +4148,17 @@ export const SETTINGS_SCHEMA = {
 				"Optional model profile map overriding workflow defaults (empty uses built-in planner/reviewer/implementer/repair profiles). Multi-model workflows use the embedded RuntimeAdapter with omp provider models and per-profile strategies; profile.runtime / vendor CLI backends are not supported.",
 		},
 	},
+	"workflow.presentationOptimization.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Lazy Tool/Skill Presentation",
+			description:
+				"When enabled, workflow sessions may use catalog-mode tool/skill presentation (short descriptions + xd:// one-hop schema/body load). Default off; enable only after benchmark quality holds.",
+		},
+	},
 
 	"title.refreshOnReplan": {
 		type: "boolean",

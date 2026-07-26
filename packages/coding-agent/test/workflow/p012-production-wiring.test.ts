@@ -225,13 +225,19 @@ describe("P1 engine stage-handoff + scope-metrics production path", () => {
 				return loaded?.content ? JSON.parse(loaded.content) : null;
 			}),
 		);
-		const edges = handoffBodies.map(h => h?.edge).filter(Boolean);
-		expect(edges).toContain("planner→implementer");
-		expect(edges).toContain("implementer→reviewer");
+		const edges = handoffBodies.map(h => (h ? `${h.fromStage}→${h.toStage}` : null)).filter(Boolean);
+		expect(edges).toContain("planning→implementing");
+		expect(edges).toContain("implementing→code_review");
 		for (const body of handoffBodies) {
 			if (!body) continue;
 			expect(body.kind).toBe(STAGE_HANDOFF_KIND);
 			expect(body.contentFingerprint).toMatch(/^[a-f0-9]{64}$/);
+			expect(Array.isArray(body.preservedItems)).toBe(true);
+			expect(Array.isArray(body.omittedArtifactIds)).toBe(true);
+			expect(Array.isArray(body.recoveryUris)).toBe(true);
+			expect(typeof body.bytesBeforeHandoff).toBe("number");
+			expect(typeof body.bytesAfterHandoff).toBe("number");
+			expect(body.bytesBeforeHandoff).toBeGreaterThanOrEqual(body.bytesAfterHandoff);
 		}
 
 		const scopeMeta = artifacts.find(a => a.kind === "scope-metrics");
@@ -246,11 +252,14 @@ describe("P1 engine stage-handoff + scope-metrics production path", () => {
 		// Patch-derived path preferred over model-invented.ts
 		expect(scope.changedFiles).toContain("src/a.ts");
 		expect(scope.changedFiles).not.toContain("model-invented.ts");
+		// Canonical status vocabulary (adhered | warning | violation | indeterminate)
+		expect(["adhered", "warning", "violation", "indeterminate"]).toContain(scope.status);
 
 		const contexts = (engine as unknown as { __seenContexts: string[] }).__seenContexts;
 		const implementerCtx = contexts.find(c => c.includes("Stage handoff (planner→implementer)"));
 		expect(implementerCtx).toBeDefined();
-		expect(implementerCtx).toContain("goal.summary");
+		expect(implementerCtx).toContain("goal:");
+		expect(implementerCtx).toContain("preservedItems");
 
 		const promptReceipt = artifacts.find(a => a.kind === "prompt-assembly-receipt");
 		expect(promptReceipt).toBeDefined();
@@ -322,11 +331,21 @@ describe("P1 reviewer→repair handoff on production path", () => {
 				return loaded?.content ? JSON.parse(loaded.content) : null;
 			}),
 		);
-		const edges = bodies.map(b => b?.edge);
-		expect(edges).toContain("reviewer→repair");
+		const edges = bodies.map(b => (b ? `${b.fromStage}→${b.toStage}` : null));
+		expect(edges).toContain("code_review→repairing");
+
+		const repairHandoff = bodies.find(b => b?.fromStage === "code_review" && b?.toStage === "repairing");
+		expect(repairHandoff).toBeDefined();
+		expect(
+			repairHandoff!.preservedItems.some(
+				(p: { kind: string; blocking: boolean; summary: string }) =>
+					p.kind === "finding" && p.blocking && p.summary.includes("f1"),
+			),
+		).toBe(true);
 
 		const contexts = (engine as unknown as { __seenContexts: string[] }).__seenContexts;
 		expect(contexts.some(c => c.includes("Stage handoff (reviewer→repair)"))).toBe(true);
+		expect(contexts.some(c => c.includes("blocking_finding") && c.includes("f1"))).toBe(true);
 	});
 });
 
@@ -527,6 +546,259 @@ describe("P1 schema repair on production RuntimeAdapter path", () => {
 			} satisfies WorkflowAgentRequest),
 		).rejects.toThrow(/missing required field|schema|valid structured/i);
 	});
+
+	it("grok_implementer maxRetries=3 invalid→valid uses 2 model calls and injects retry prompt", async () => {
+		const schema = {
+			type: "object",
+			required: ["summary"],
+			properties: { summary: { type: "string" } },
+		};
+		let calls = 0;
+		const contexts: string[] = [];
+		const adapter = new RuntimeAdapter(async req => {
+			calls += 1;
+			contexts.push(req.context ?? "");
+			if (calls === 1) {
+				return {
+					result: {
+						id: "bad",
+						structuredOutput: { status: "invalid", error: "missing required field: summary" },
+						rawOutput: `{"other":true}`,
+						exitCode: 1,
+					},
+				};
+			}
+			return {
+				result: {
+					id: "ok",
+					structuredOutput: { status: "valid", data: { summary: "fixed by retry" } },
+				},
+			};
+		});
+		const profile = DEFAULT_MODEL_PROFILES.grok_implementer;
+		expect(profile.outputStrategy?.retryOnSchemaViolation?.maxRetries).toBe(3);
+		const result = await adapter.run({
+			workflowId: "wf",
+			attemptId: "att",
+			role: "implementer",
+			profile,
+			assignment: "produce schema-violating then fixed output",
+			session: fakeSession(),
+			outputSchema: schema,
+		} satisfies WorkflowAgentRequest);
+		expect((result.artifact as { summary: string }).summary).toBe("fixed by retry");
+		expect(calls).toBe(2);
+		expect(contexts[1]).toMatch(/violated the required output schema/i);
+		expect(contexts[1]).toMatch(/missing required field: summary|summary/i);
+		const receipt = result.schemaRepairReceipt as {
+			finalStatus: string;
+			layer3RetryCount: number;
+			repaired: boolean;
+			modelCalls: number;
+			maxRetries: number;
+			totalAttempts: number;
+			layer1Success: boolean;
+			budgetExhausted: boolean;
+			violationHistory: Array<{ attemptIndex: number; error: string; outputPreview?: string }>;
+			attempts: Array<{ attemptIndex: number; ok: boolean; outputPreview?: string }>;
+		};
+		expect(receipt.finalStatus).toBe("repaired_layer3");
+		expect(receipt.layer3RetryCount).toBe(1);
+		expect(receipt.repaired).toBe(true);
+		expect(receipt.modelCalls).toBe(2);
+		expect(receipt.maxRetries).toBe(3);
+		expect(receipt.layer1Success).toBe(false);
+		expect(receipt.budgetExhausted).toBe(false);
+		expect(receipt.totalAttempts).toBeGreaterThanOrEqual(1);
+		// First model invocation failure is retained (not overwritten by success).
+		expect(receipt.violationHistory.length).toBeGreaterThanOrEqual(1);
+		expect(receipt.violationHistory.some(v => /missing required field: summary|summary/i.test(v.error))).toBe(true);
+		expect(receipt.attempts.some(a => a.attemptIndex === 0 && a.ok === false)).toBe(true);
+		expect(receipt.attempts.some(a => typeof a.outputPreview === "string" && a.outputPreview.includes("other"))).toBe(
+			true,
+		);
+	});
+
+	it("invalid then second-call fenced L1 success keeps prior violations in receipt", async () => {
+		const schema = {
+			type: "object",
+			required: ["summary"],
+			properties: { summary: { type: "string" } },
+		};
+		const fenced = `\uFEFF\`\`\`json\n{"summary":"from-second-l1"}\n\`\`\``;
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async () => {
+			calls += 1;
+			if (calls === 1) {
+				return {
+					result: {
+						id: "bad-1",
+						structuredOutput: { status: "invalid", error: "missing required field: summary" },
+						rawOutput: `{"other":true}`,
+						exitCode: 1,
+					},
+				};
+			}
+			// Second runner call: invalid structured status but raw is L1-repairable fenced JSON.
+			return {
+				result: {
+					id: "fence-2",
+					structuredOutput: { status: "invalid", error: "parse failed", data: fenced },
+					rawOutput: fenced,
+					exitCode: 1,
+				},
+			};
+		});
+		const result = await adapter.run({
+			workflowId: "wf",
+			attemptId: "att",
+			role: "implementer",
+			profile: {
+				...DEFAULT_MODEL_PROFILES.grok_implementer,
+				outputStrategy: {
+					retryOnSchemaViolation: { enabled: true, maxRetries: 2, includeErrorInRetry: true },
+				},
+			},
+			assignment: "invalid then fenced",
+			session: fakeSession(),
+			outputSchema: schema,
+		} satisfies WorkflowAgentRequest);
+		expect(calls).toBe(2);
+		expect((result.artifact as { summary: string }).summary).toBe("from-second-l1");
+		const receipt = result.schemaRepairReceipt as {
+			finalStatus: string;
+			modelCalls: number;
+			maxRetries: number;
+			layer3RetryCount: number;
+			layer1Success: boolean;
+			repaired: boolean;
+			violationHistory: Array<{ attemptIndex: number; error: string; outputPreview?: string }>;
+			attempts: Array<{ attemptIndex: number; ok: boolean; outputPreview?: string }>;
+		};
+		// Must NOT collapse to pure first-call L1 (modelCalls=0 / only success attempt).
+		expect(receipt.finalStatus).toBe("repaired_layer3");
+		expect(receipt.modelCalls).toBe(2);
+		expect(receipt.maxRetries).toBe(2);
+		expect(receipt.layer3RetryCount).toBe(1);
+		expect(receipt.layer1Success).toBe(true); // final fix was L1 on second raw
+		expect(receipt.repaired).toBe(true);
+		// First failure retained.
+		expect(receipt.violationHistory.some(v => v.attemptIndex === 0)).toBe(true);
+		expect(receipt.violationHistory.some(v => /missing required field: summary/i.test(v.error))).toBe(true);
+		expect(receipt.attempts.some(a => a.attemptIndex === 0 && a.ok === false)).toBe(true);
+		expect(receipt.attempts.some(a => a.attemptIndex === 0 && a.outputPreview?.includes("other"))).toBe(true);
+		// Second L1 success present.
+		expect(receipt.attempts.some(a => a.attemptIndex === 1 && a.ok === true)).toBe(true);
+	});
+
+	it("multi-attempt schema exhaustion accumulates all attempt outputs in Layer4 receipt", async () => {
+		const schema = {
+			type: "object",
+			required: ["summary"],
+			properties: { summary: { type: "string" } },
+		};
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async () => {
+			calls += 1;
+			return {
+				result: {
+					id: `bad-${calls}`,
+					structuredOutput: {
+						status: "invalid",
+						error: `missing required field: summary (try ${calls})`,
+					},
+					rawOutput: `{"other":${calls}}`,
+					exitCode: 1,
+				},
+			};
+		});
+		let thrown: { kind?: string; details?: { schemaRepairReceipt?: Record<string, unknown> } } | undefined;
+		try {
+			await adapter.run({
+				workflowId: "wf",
+				attemptId: "att",
+				role: "implementer",
+				profile: {
+					...DEFAULT_MODEL_PROFILES.grok_implementer,
+					outputStrategy: {
+						retryOnSchemaViolation: { enabled: true, maxRetries: 1, includeErrorInRetry: true },
+					},
+				},
+				assignment: "always invalid",
+				session: fakeSession(),
+				outputSchema: schema,
+			} satisfies WorkflowAgentRequest);
+		} catch (e) {
+			thrown = e as typeof thrown;
+		}
+		expect(calls).toBe(2); // 1 + maxRetries
+		expect(thrown?.kind).toBe("schema_violation");
+		const receipt = thrown?.details?.schemaRepairReceipt as {
+			finalStatus: string;
+			modelCalls: number;
+			maxRetries: number;
+			layer3RetryCount: number;
+			totalAttempts: number;
+			budgetExhausted: boolean;
+			violationHistory: Array<{ attemptIndex: number; error: string; outputPreview?: string }>;
+			attempts: Array<{ attemptIndex: number; outputPreview?: string; ok: boolean }>;
+		};
+		expect(receipt).toBeDefined();
+		expect(receipt.finalStatus).toBe("schema_error");
+		expect(receipt.modelCalls).toBe(2);
+		expect(receipt.maxRetries).toBe(1);
+		expect(receipt.layer3RetryCount).toBe(1);
+		expect(receipt.budgetExhausted).toBe(false);
+		expect(receipt.totalAttempts).toBeGreaterThanOrEqual(2);
+		// Both outer attempts present — not only the last L1-only overwrite.
+		const idxs = new Set(receipt.attempts.map(a => a.attemptIndex));
+		expect(idxs.has(0)).toBe(true);
+		expect(idxs.has(1)).toBe(true);
+		expect(receipt.violationHistory.length).toBeGreaterThanOrEqual(2);
+		expect(receipt.attempts.some(a => a.outputPreview?.includes('"other":1'))).toBe(true);
+		expect(receipt.attempts.some(a => a.outputPreview?.includes('"other":2'))).toBe(true);
+	});
+
+	it("budget exhausted (maxRequests=1) skips model retry after first schema failure", async () => {
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async () => {
+			calls += 1;
+			return {
+				result: {
+					id: "bad",
+					structuredOutput: { status: "invalid", error: "bad schema" },
+					rawOutput: "not json at all",
+					exitCode: 1,
+				},
+			};
+		});
+		let thrown:
+			| { kind?: string; details?: { schemaRepairReceipt?: { budgetExhausted?: boolean; modelCalls?: number } } }
+			| undefined;
+		try {
+			await adapter.run({
+				workflowId: "wf",
+				attemptId: "att",
+				role: "implementer",
+				profile: {
+					...DEFAULT_MODEL_PROFILES.grok_implementer,
+					maxRequests: 1,
+					outputStrategy: {
+						retryOnSchemaViolation: { enabled: true, maxRetries: 3, includeErrorInRetry: true },
+					},
+				},
+				assignment: "impl",
+				session: fakeSession(),
+				outputSchema: { type: "object", required: ["summary"], properties: { summary: { type: "string" } } },
+			} satisfies WorkflowAgentRequest);
+		} catch (e) {
+			thrown = e as typeof thrown;
+		}
+		expect(calls).toBe(1);
+		expect(thrown?.kind).toBe("schema_violation");
+		expect(thrown?.details?.schemaRepairReceipt?.budgetExhausted).toBe(true);
+		expect(thrown?.details?.schemaRepairReceipt?.modelCalls).toBe(1);
+	});
 });
 
 describe("P2 assembled prompt + transformTools on production runner path", () => {
@@ -635,6 +907,34 @@ describe("AC6 default-path budget + multi-runtime + real AgentTool transform", (
 		);
 	});
 
+	it("forwards explicit toolStrategy scheduling fields onto session optimization", () => {
+		const base = DEFAULT_MODEL_PROFILES.grok_implementer;
+		const profile = {
+			...base,
+			toolStrategy: {
+				...base.toolStrategy,
+				maxConcurrentTools: 4,
+				remainingToolCalls: 12,
+				remainingStageTimeMs: 60_000,
+				resourceConflictMode: "serialize" as const,
+			},
+		};
+		const prepared = prepareWorkflowInvocation({
+			workflowId: "wf",
+			attemptId: "att",
+			role: "implementer",
+			profile,
+			assignment: "impl",
+			session: fakeSession(),
+			outputSchema: {},
+		} satisfies WorkflowAgentRequest);
+		const opt = prepared.session.workflowToolOptimization;
+		expect(opt?.maxConcurrentTools).toBe(4);
+		expect(opt?.remainingToolCalls).toBe(12);
+		expect(opt?.remainingStageTimeMs).toBe(60_000);
+		expect(opt?.resourceConflictMode).toBe("serialize");
+	});
+
 	it("createDefaultRuntimeAdapter returns embedded RuntimeAdapter only", () => {
 		const adapter = createDefaultRuntimeAdapter();
 		expect(adapter).toBeInstanceOf(RuntimeAdapter);
@@ -702,10 +1002,28 @@ describe("AC6 default-path budget + multi-runtime + real AgentTool transform", (
 	});
 });
 
-describe("benchmark quality gate hard_fail", () => {
-	it("evaluateBenchmarkQualityGate fails when optimized scopeStatus is hard_fail", async () => {
+describe("benchmark quality gate scope violation", () => {
+	it("evaluateBenchmarkQualityGate fails when optimized scopeStatus is violation", async () => {
 		const suite = buildDefaultBenchmarkSuite();
 		const caseId = suite.cases[0]!.id;
+		const results = await runBenchmarkSuite({
+			suite: { ...suite, cases: suite.cases.slice(0, 1) },
+			runtime: async req => ({
+				passed: true,
+				qualityScore: 100,
+				scopeStatus: req.variant === "optimized" ? "violation" : "adhered",
+				durationMs: 1,
+			}),
+			minRepetitions: 1,
+		});
+		const scorecard = buildScorecard(suite, results);
+		const gate = evaluateBenchmarkQualityGate(scorecard);
+		expect(gate.passed).toBe(false);
+		expect(gate.reasons.some(r => r.includes("violation") && r.includes(caseId))).toBe(true);
+	});
+
+	it("legacy hard_fail scopeStatus still fails quality gate (dual-read)", async () => {
+		const suite = buildDefaultBenchmarkSuite();
 		const results = await runBenchmarkSuite({
 			suite: { ...suite, cases: suite.cases.slice(0, 1) },
 			runtime: async req => ({
@@ -719,6 +1037,28 @@ describe("benchmark quality gate hard_fail", () => {
 		const scorecard = buildScorecard(suite, results);
 		const gate = evaluateBenchmarkQualityGate(scorecard);
 		expect(gate.passed).toBe(false);
-		expect(gate.reasons.some(r => r.includes("hard_fail") && r.includes(caseId))).toBe(true);
+		expect(gate.reasons.some(r => r.includes("violation"))).toBe(true);
+	});
+
+	it("scope warning alone does not fail quality gate (tests pass + unplanned distinguishable)", async () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const results = await runBenchmarkSuite({
+			suite: { ...suite, cases: suite.cases.slice(0, 1) },
+			runtime: async req => ({
+				passed: true,
+				qualityScore: 100,
+				// optimized has warning scope creep; baseline adhered — gate still passes quality thresholds
+				scopeStatus: req.variant === "optimized" ? "warning" : "adhered",
+				durationMs: 1,
+			}),
+			minRepetitions: 1,
+		});
+		const scorecard = buildScorecard(suite, results);
+		const gate = evaluateBenchmarkQualityGate(scorecard);
+		// pass rates equal and no hard violation → gate passes; warning visible on run
+		expect(gate.passed).toBe(true);
+		const warningRuns = results.filter(r => r.scopeStatus === "warning");
+		expect(warningRuns.length).toBeGreaterThan(0);
+		expect(warningRuns.some(r => r.passed && r.scopeStatus === "warning")).toBe(true);
 	});
 });

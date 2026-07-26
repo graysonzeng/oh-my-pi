@@ -4,6 +4,11 @@ import type { ToolSession } from "../tools";
 import { abortRegisteredWorkflow, registerWorkflowAbort, unregisterWorkflowAbort } from "./abort-registry";
 import { resolveArtifactInclusion } from "./artifact-inclusion";
 import { ArtifactStore } from "./artifact-store";
+import {
+	assertRequiredRolesAvailable,
+	runAvailabilityPreflight,
+	skippedAvailabilityReport,
+} from "./availability-preflight";
 import { BudgetLedger, type BudgetSnapshot } from "./budget-ledger";
 import { ContextBuilder } from "./context-builder";
 import { getDefaultConfig, type WorkflowDefaultConfig } from "./default-config";
@@ -29,9 +34,9 @@ import type { PersistedWorkflowSnapshot } from "./sqlite-store";
 import { WorkflowStore } from "./sqlite-store";
 import {
 	buildImplementerToReviewerHandoff,
+	buildKeepAllHandoff,
 	buildPlannerToImplementerHandoff,
 	buildReviewerToRepairHandoff,
-	type StageHandoffV1,
 } from "./stage-handoff";
 import { CodeReviewStage } from "./stages/code-review";
 import { FinalVerifyStage } from "./stages/final-verify";
@@ -42,14 +47,19 @@ import { PlanReviewStage } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
 import type {
+	Artifact,
 	ImplementationArtifactV1,
 	ModelProfile,
 	PlanArtifactV1,
 	ReviewArtifactV1,
 	ReviewFindingV1,
 	RuntimePort,
+	StageHandoffArtifactRef,
+	StageHandoffV1,
 	VerificationArtifactV1,
 	VerifierPort,
+	WorkflowAvailabilityPort,
+	WorkflowAvailabilityReport,
 	WorkflowRequest,
 	WorkflowRole,
 	WorkflowRuntimeEvidence,
@@ -64,6 +74,8 @@ export interface WorkflowEngineOptions {
 	store?: WorkflowStore;
 	router?: ModelRouter;
 	adapter?: RuntimePort;
+	/** Dedicated availability probe port (not RuntimePort). Optional: skips live preflight when absent. */
+	availability?: WorkflowAvailabilityPort;
 	verifier?: VerifierPort;
 	budgetLedger?: BudgetLedger;
 	findingTracker?: FindingTracker;
@@ -76,6 +88,11 @@ export interface WorkflowEngineOptions {
 	ownsStore?: boolean;
 }
 
+export interface WorkflowStartResult {
+	workflowId: string;
+	availability: WorkflowAvailabilityReport;
+}
+
 export interface WorkflowRunResult {
 	state: WorkflowState;
 	plan?: PlanArtifactV1;
@@ -85,6 +102,8 @@ export interface WorkflowRunResult {
 	codeReview?: ReviewArtifactV1;
 	finalVerification?: VerificationArtifactV1;
 	routingAudit: Array<Record<string, unknown>>;
+	/** Preflight report from this start/resume invocation (when availability port is configured). */
+	availability?: WorkflowAvailabilityReport;
 }
 
 /**
@@ -97,6 +116,7 @@ export class WorkflowEngine {
 	readonly #budgetLedger: BudgetLedger;
 	readonly #findingTracker: FindingTracker;
 	readonly #adapter: RuntimePort;
+	readonly #availability: WorkflowAvailabilityPort | undefined;
 	readonly #verifier: VerifierPort;
 	readonly #artifactStore: ArtifactStore;
 	readonly #contextBuilder = new ContextBuilder();
@@ -109,6 +129,8 @@ export class WorkflowEngine {
 	#controller: AbortController | undefined;
 	/** Active abort signal for the current run/resume (may be overridden per resume call). */
 	#signal: AbortSignal | undefined;
+	/** Last preflight report from start/resume (for tool surfacing / tests). */
+	#lastAvailability: WorkflowAvailabilityReport | undefined;
 
 	// In-memory artifact cache for the current process (also persisted to store)
 	#plan: PlanArtifactV1 | undefined;
@@ -117,6 +139,14 @@ export class WorkflowEngine {
 	#verification: VerificationArtifactV1 | undefined;
 	#codeReview: ReviewArtifactV1 | undefined;
 	#finalVerification: VerificationArtifactV1 | undefined;
+	/** Durable refs for stage-handoff sizing / recovery (source artifacts never deleted). */
+	#planArtifactRef: StageHandoffArtifactRef | undefined;
+	#planReviewArtifactRef: StageHandoffArtifactRef | undefined;
+	#implementationArtifactRef: StageHandoffArtifactRef | undefined;
+	#verificationArtifactRef: StageHandoffArtifactRef | undefined;
+	#codeReviewArtifactRef: StageHandoffArtifactRef | undefined;
+	/** Real patch content persisted for implement→review handoff recovery. */
+	#patchArtifactRef: StageHandoffArtifactRef | undefined;
 	#plannerProfileId: string | undefined;
 	#plannerVendor: string | undefined;
 	#implementerVendor: string | undefined;
@@ -140,6 +170,7 @@ export class WorkflowEngine {
 					hint: "Pass adapter or use createDefaultRuntimeAdapter()",
 				});
 			});
+		this.#availability = options.availability;
 		this.#session = options.session;
 		this.#signal = options.signal;
 		const cwd = options.session?.cwd ?? process.cwd();
@@ -180,16 +211,49 @@ export class WorkflowEngine {
 		}
 	}
 
-	async startWorkflow(
+	/**
+	 * Create workflow, run readiness preflight, return id + availability report.
+	 * Does not execute stages (existing create-without-run semantics).
+	 */
+	async start(
 		request: WorkflowRequest | Record<string, unknown>,
 		policyOverrides: Record<string, unknown> = {},
-	): Promise<string> {
+	): Promise<WorkflowStartResult> {
 		const policy = {
 			degradedMode: this.#config.degradedMode,
 			requireIndependentReview: this.#config.requireIndependentReview,
 			...policyOverrides,
 		};
-		return this.#store.createWorkflow(request, policy);
+		const workflowId = await this.#store.createWorkflow(request, policy);
+		const availability = await this.#runPreflight({
+			workflowId,
+			operation: "start",
+			status: "created",
+			singleStep: false,
+			session: this.#session,
+			signal: this.#signal,
+			// start is diagnostic only — never fail-closed into a stage transition
+			failClosed: false,
+		});
+		this.#lastAvailability = availability;
+		return { workflowId, availability };
+	}
+
+	/**
+	 * Create workflow and run preflight; returns workflow id only (compat).
+	 * Prefer `start()` when the caller needs the availability report.
+	 */
+	async startWorkflow(
+		request: WorkflowRequest | Record<string, unknown>,
+		policyOverrides: Record<string, unknown> = {},
+	): Promise<string> {
+		const result = await this.start(request, policyOverrides);
+		return result.workflowId;
+	}
+
+	/** Most recent preflight report from start/resume on this engine instance. */
+	getLastAvailabilityReport(): WorkflowAvailabilityReport | undefined {
+		return this.#lastAvailability;
 	}
 
 	async getState(workflowId: string): Promise<WorkflowState | null> {
@@ -295,6 +359,9 @@ export class WorkflowEngine {
 
 		let steps = 0;
 		const maxSteps = singleStep ? 1 : 32;
+		/** Preflight once per resume/run invocation, under the runner lock. */
+		let preflightDone = false;
+		let availability: WorkflowAvailabilityReport | undefined;
 
 		try {
 			while (steps < maxSteps) {
@@ -319,6 +386,21 @@ export class WorkflowEngine {
 
 				try {
 					state = await this.#requireState(workflowId);
+
+					// Availability preflight before any stage attempt or model work.
+					if (!preflightDone) {
+						preflightDone = true;
+						availability = await this.#runPreflight({
+							workflowId,
+							operation: "resume",
+							status: state.status,
+							singleStep,
+							session,
+							signal: this.#controller.signal,
+							failClosed: true,
+						});
+						this.#lastAvailability = availability;
+					}
 
 					// Advance created → planning without budget/provider (no external call)
 					if (state.status === "created") {
@@ -445,10 +527,50 @@ export class WorkflowEngine {
 				codeReview: this.#codeReview,
 				finalVerification: this.#finalVerification,
 				routingAudit: [...this.#routingAudit],
+				availability: availability ?? this.#lastAvailability,
 			};
 		} finally {
 			unregisterWorkflowAbort(workflowId, this.#controller);
 		}
+	}
+
+	/**
+	 * Run availability preflight (or skipped report when port/session absent).
+	 * When failClosed and required roles have no available route: throw without creating attempts.
+	 */
+	async #runPreflight(options: {
+		workflowId: string;
+		operation: "start" | "resume";
+		status: WorkflowStatus;
+		singleStep: boolean;
+		session: ToolSession | undefined;
+		signal?: AbortSignal;
+		failClosed: boolean;
+	}): Promise<WorkflowAvailabilityReport> {
+		if (!this.#availability || !options.session) {
+			return skippedAvailabilityReport({
+				workflowId: options.workflowId,
+				operation: options.operation,
+				singleStep: options.singleStep,
+				reason: !this.#availability ? "availability_port_not_configured" : "session_required",
+			});
+		}
+
+		const report = await runAvailabilityPreflight({
+			port: this.#availability,
+			router: this.#router,
+			workflowId: options.workflowId,
+			operation: options.operation,
+			status: options.status,
+			singleStep: options.singleStep,
+			session: options.session,
+			signal: options.signal,
+		});
+
+		if (options.failClosed) {
+			assertRequiredRolesAvailable(report);
+		}
+		return report;
 	}
 
 	async #executeCurrentStage(workflowId: string, state: WorkflowState, session: ToolSession): Promise<void> {
@@ -493,7 +615,7 @@ export class WorkflowEngine {
 					});
 				});
 				this.#plan = plan;
-				await this.#persistArtifact(workflowId, attemptId, "plan", plan);
+				this.#planArtifactRef = await this.#persistArtifact(workflowId, attemptId, "plan", plan);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
 					optimizationReceipts,
@@ -533,7 +655,7 @@ export class WorkflowEngine {
 						}),
 				);
 				this.#planReview = review;
-				await this.#persistArtifact(workflowId, attemptId, "review", review);
+				this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
 					optimizationReceipts,
@@ -567,12 +689,21 @@ export class WorkflowEngine {
 			}
 			case "implementing": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
-				// Deterministic planner→implementer handoff from typed plan (+ optional plan review).
-				const plannerHandoff = buildPlannerToImplementerHandoff({
-					plan: this.#plan,
-					planReview: this.#planReview,
-				});
-				await this.#persistArtifact(workflowId, attemptId, "stage-handoff", plannerHandoff);
+				// Deterministic planner→implementer handoff (success path into implement only).
+				const plannerHandoff = await this.#buildAndPersistHandoff(
+					workflowId,
+					attemptId,
+					"planning",
+					"implementing",
+					() =>
+						buildPlannerToImplementerHandoff({
+							plan: this.#plan!,
+							planReview: this.#planReview,
+							planRef: this.#planArtifactRef,
+							planReviewRef: this.#planReviewArtifactRef,
+						}),
+					[this.#planArtifactRef, this.#planReviewArtifactRef],
+				);
 				const {
 					artifact: impl,
 					usage,
@@ -605,7 +736,12 @@ export class WorkflowEngine {
 					});
 				});
 				this.#implementation = impl;
-				await this.#persistArtifact(workflowId, attemptId, "implementation", impl);
+				this.#implementationArtifactRef = await this.#persistArtifact(
+					workflowId,
+					attemptId,
+					"implementation",
+					impl,
+				);
 				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, impl);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					resolvedProvider,
@@ -634,7 +770,12 @@ export class WorkflowEngine {
 					cwd,
 				});
 				this.#verification = verification;
-				await this.#persistArtifact(workflowId, attemptId, "verification", verification);
+				this.#verificationArtifactRef = await this.#persistArtifact(
+					workflowId,
+					attemptId,
+					"verification",
+					verification,
+				);
 				const decision = verification.passed ? "passed" : "failed";
 				const next = getNextStage("implementation_verify", decision);
 				// Budget repairCycles counts completed repair attempts, not transitions into repairing.
@@ -653,12 +794,29 @@ export class WorkflowEngine {
 					throw new WorkflowPolicyError("missing_artifacts_for_code_review", { workflowId });
 				}
 				this.#budgetLedger.recordReviewerCycle();
-				const reviewerHandoff = buildImplementerToReviewerHandoff({
-					implementation: this.#implementation,
-					plan: this.#plan,
-					verification: this.#verification,
-				});
-				await this.#persistArtifact(workflowId, attemptId, "stage-handoff", reviewerHandoff);
+				const patchRef = await this.#ensurePatchArtifactRef(
+					workflowId,
+					attemptId,
+					this.#implementation.patchPath,
+					cwd,
+				);
+				const reviewerHandoff = await this.#buildAndPersistHandoff(
+					workflowId,
+					attemptId,
+					"implementing",
+					"code_review",
+					() =>
+						buildImplementerToReviewerHandoff({
+							implementation: this.#implementation!,
+							plan: this.#plan,
+							verification: this.#verification,
+							implRef: this.#implementationArtifactRef,
+							planRef: this.#planArtifactRef,
+							verificationRef: this.#verificationArtifactRef,
+							patchRef,
+						}),
+					[this.#implementationArtifactRef, this.#planArtifactRef, this.#verificationArtifactRef, patchRef],
+				);
 				const {
 					artifact: review,
 					usage,
@@ -705,7 +863,7 @@ export class WorkflowEngine {
 					f.blocking = blocking;
 					this.#findingTracker.add(f, { blocking });
 				}
-				await this.#persistArtifact(workflowId, attemptId, "review", review);
+				this.#codeReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
 				await this.#persistFindingsState(workflowId, attemptId);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
@@ -762,15 +920,30 @@ export class WorkflowEngine {
 				}
 				const primary = open[0];
 				const repairHandoff = this.#codeReview
-					? buildReviewerToRepairHandoff({
-							review: this.#codeReview,
-							verification: this.#verification,
-							implementation: this.#implementation,
-						})
+					? await this.#buildAndPersistHandoff(
+							workflowId,
+							attemptId,
+							"code_review",
+							"repairing",
+							() => {
+								const repairHistory = open.map(f => ({
+									findingId: f.id,
+									fingerprint: FindingTracker.fingerprint(f),
+									cycles: this.#findingTracker.cycleCount(FindingTracker.fingerprint(f)),
+								}));
+								return buildReviewerToRepairHandoff({
+									review: this.#codeReview!,
+									verification: this.#verification,
+									implementation: this.#implementation,
+									repairHistory,
+									reviewRef: this.#codeReviewArtifactRef,
+									verificationRef: this.#verificationArtifactRef,
+									implRef: this.#implementationArtifactRef,
+								});
+							},
+							[this.#codeReviewArtifactRef, this.#verificationArtifactRef, this.#implementationArtifactRef],
+						)
 					: undefined;
-				if (repairHandoff) {
-					await this.#persistArtifact(workflowId, attemptId, "stage-handoff", repairHandoff);
-				}
 				const {
 					artifact: repaired,
 					usage,
@@ -839,7 +1012,12 @@ export class WorkflowEngine {
 						this.#findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
 					}
 				}
-				await this.#persistArtifact(workflowId, attemptId, "implementation", this.#implementation);
+				this.#implementationArtifactRef = await this.#persistArtifact(
+					workflowId,
+					attemptId,
+					"implementation",
+					this.#implementation,
+				);
 				await this.#persistFindingsState(workflowId, attemptId);
 				if (this.#plan) {
 					await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, this.#implementation);
@@ -911,8 +1089,10 @@ export class WorkflowEngine {
 	}
 
 	/**
-	 * Scope metrics from real patch/git evidence when available.
-	 * Prefer unified-diff paths over model-reported changedFiles; git worktree next; model last.
+	 * Scope metrics from real patch/git evidence only.
+	 * Prefer unified-diff paths (filesystem artifact); else git worktree.
+	 * Never trust model-reported impl.changedFiles as sole actual changes.
+	 * Git/collection failure → status indeterminate (not silent empty pass).
 	 */
 	async #persistScopeMetrics(
 		workflowId: string,
@@ -930,12 +1110,13 @@ export class WorkflowEngine {
 				const text = await Bun.file(resolved).text();
 				changedFromPatch = changedFilesFromPatch(text);
 			} catch {
-				// missing patch is handled by verify; scope degrades gracefully
+				// missing patch is handled by verify; scope falls through to git
 			}
 		}
 
 		let metrics: ScopeMetricsV1;
 		if (changedFromPatch.length > 0) {
+			// Patch is filesystem evidence (not model prose). Infer deletes from /dev/null headers not needed here.
 			metrics = buildScopeMetrics({
 				plannedFiles: planned,
 				forbiddenFiles: forbidden,
@@ -948,21 +1129,16 @@ export class WorkflowEngine {
 					plannedFiles: planned,
 					forbiddenFiles: forbidden,
 				});
-			} catch {
+			} catch (err) {
 				metrics = buildScopeMetrics({
 					plannedFiles: planned,
 					forbiddenFiles: forbidden,
 					changedFiles: [],
+					indeterminate: true,
+					indeterminateReason: err instanceof Error ? err.message : "git collection threw",
 				});
 			}
-			// Only fall back to model files when no patch/git evidence exists.
-			if (metrics.changedFiles.length === 0 && impl.changedFiles.length > 0) {
-				metrics = buildScopeMetrics({
-					plannedFiles: planned,
-					forbiddenFiles: forbidden,
-					changedFiles: impl.changedFiles,
-				});
-			}
+			// Intentionally do NOT fall back to impl.changedFiles (model self-report).
 		}
 
 		this.#lastScopeMetrics = metrics;
@@ -1129,7 +1305,16 @@ export class WorkflowEngine {
 		return narrowed.length > 0 ? narrowed : [...trusted];
 	}
 
-	async #persistArtifact(workflowId: string, attemptId: string, kind: string, artifact: object): Promise<void> {
+	/**
+	 * Persist artifact to disk + sqlite. Returns a durable handoff ref (id + bytes + recovery URI).
+	 * Source artifacts are never deleted by handoff construction.
+	 */
+	async #persistArtifact(
+		workflowId: string,
+		attemptId: string,
+		kind: string,
+		artifact: object,
+	): Promise<StageHandoffArtifactRef> {
 		// Secret-safe: never persist raw secret-like values in durable artifacts.
 		const content = redactSecretsInText(JSON.stringify(artifact));
 		const stored = await this.#artifactStore.store({
@@ -1149,6 +1334,97 @@ export class WorkflowEngine {
 			sha256: stored.sha256,
 			content,
 		});
+		return this.#toHandoffRef(stored);
+	}
+
+	#toHandoffRef(stored: Artifact): StageHandoffArtifactRef {
+		const content = stored.content ?? "";
+		return {
+			artifactId: stored.id,
+			bytes: Buffer.byteLength(content, "utf-8"),
+			recoveryUri: `artifact://${stored.relativePath}`,
+		};
+	}
+
+	/** Build a durable handoff ref from sqlite meta + loaded content (resume path). */
+	#refFromMeta(meta: { id: string; relativePath: string }, content: string): StageHandoffArtifactRef {
+		// Prefer filesystem id encoded in relativePath so it matches ArtifactStore.store ids.
+		const fromPath = path.basename(meta.relativePath, path.extname(meta.relativePath));
+		return {
+			artifactId: fromPath || meta.id,
+			bytes: Buffer.byteLength(content, "utf-8"),
+			recoveryUri: `artifact://${meta.relativePath}`,
+		};
+	}
+
+	/**
+	 * Persist real patch bytes as a durable artifact for implement→review handoff sizing/recovery.
+	 * Reuses #patchArtifactRef when already hydrated or stored in this process.
+	 */
+	async #ensurePatchArtifactRef(
+		workflowId: string,
+		attemptId: string,
+		patchPath: string | undefined,
+		cwd: string,
+	): Promise<StageHandoffArtifactRef | undefined> {
+		if (this.#patchArtifactRef) return this.#patchArtifactRef;
+		if (!patchPath) return undefined;
+		const abs = path.isAbsolute(patchPath) ? patchPath : path.join(cwd, patchPath);
+		try {
+			const content = await Bun.file(abs).text();
+			const stored = await this.#artifactStore.store({
+				workflowId,
+				attemptId,
+				kind: "patch",
+				schemaVersion: 1,
+				relativePath: "",
+				content,
+			});
+			await this.#store.addArtifact({
+				workflowId,
+				attemptId,
+				kind: "patch",
+				schemaVersion: 1,
+				relativePath: stored.relativePath,
+				sha256: stored.sha256,
+				content,
+			});
+			this.#patchArtifactRef = this.#toHandoffRef(stored);
+			return this.#patchArtifactRef;
+		} catch {
+			// Patch unreadable — leave undefined so builder can fall back to path-only metadata.
+			return undefined;
+		}
+	}
+
+	/**
+	 * Build + persist stage handoff on success-path stage entry only.
+	 * Construction failure degrades to keep-all (full source refs) and never blocks the workflow.
+	 */
+	async #buildAndPersistHandoff(
+		workflowId: string,
+		attemptId: string,
+		fromStage: WorkflowStatus,
+		toStage: WorkflowStatus,
+		build: () => StageHandoffV1,
+		sourceRefs: Array<StageHandoffArtifactRef | undefined>,
+	): Promise<StageHandoffV1 | undefined> {
+		const sources = sourceRefs.filter((r): r is StageHandoffArtifactRef => Boolean(r));
+		try {
+			const handoff = build();
+			await this.#persistArtifact(workflowId, attemptId, "stage-handoff", handoff);
+			return handoff;
+		} catch {
+			// Keep-all degrade: do not block workflow; inject recoverable full-source handoff when possible.
+			if (sources.length === 0) return undefined;
+			try {
+				const keepAll = buildKeepAllHandoff({ fromStage, toStage, sources });
+				await this.#persistArtifact(workflowId, attemptId, "stage-handoff", keepAll);
+				return keepAll;
+			} catch {
+				return undefined;
+			}
+		}
 	}
 
 	async #persistFindingsState(workflowId: string, attemptId: string): Promise<void> {
@@ -1177,17 +1453,29 @@ export class WorkflowEngine {
 		for (const meta of artifacts) {
 			const loaded = await this.#artifactStore.load(meta.relativePath, meta.sha256);
 			if (!loaded?.content) continue;
+			// Raw patch body (not JSON) — restore handoff sizing/recovery ref for implement→review.
+			if (meta.kind === "patch") {
+				this.#patchArtifactRef = this.#refFromMeta(meta, loaded.content);
+				continue;
+			}
 			try {
 				const parsed = JSON.parse(loaded.content) as { kind?: string; findings?: ReviewFindingV1[] };
+				const ref = this.#refFromMeta(meta, loaded.content);
 				if (parsed.kind === "plan") {
 					this.#plan = parsed as PlanArtifactV1;
+					this.#planArtifactRef = ref;
 					// Restore planner route context for plan_review diversity across Engine resume.
 					if (this.#plan.modelProfileId) this.#plannerProfileId = this.#plan.modelProfileId;
 					if (this.#plan.provider) this.#plannerVendor = this.#plan.provider;
 				} else if (parsed.kind === "review") {
 					const review = parsed as ReviewArtifactV1;
-					if (review.subject === "plan") this.#planReview = review;
-					else this.#codeReview = review;
+					if (review.subject === "plan") {
+						this.#planReview = review;
+						this.#planReviewArtifactRef = ref;
+					} else {
+						this.#codeReview = review;
+						this.#codeReviewArtifactRef = ref;
+					}
 					for (const f of review.findings ?? []) {
 						const blocking =
 							review.subject === "implementation"
@@ -1210,11 +1498,15 @@ export class WorkflowEngine {
 					}
 				} else if (parsed.kind === "implementation") {
 					this.#implementation = parsed as ImplementationArtifactV1;
+					this.#implementationArtifactRef = ref;
 					this.#implementerVendor = this.#implementation.provider;
 				} else if (parsed.kind === "verification") {
 					const v = parsed as VerificationArtifactV1;
 					if (v.stage === "final_verify") this.#finalVerification = v;
-					else this.#verification = v;
+					else {
+						this.#verification = v;
+						this.#verificationArtifactRef = ref;
+					}
 				}
 			} catch {
 				// ignore corrupt bodies; hash already verified

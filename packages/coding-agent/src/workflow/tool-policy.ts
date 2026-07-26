@@ -62,7 +62,11 @@ export const READONLY_WORKFLOW_ROLES: ReadonlySet<WorkflowRole> = new Set([
 /** Mirrors task structured-subagent PLAN_MODE_TOOLS (+ optional ast_grep). */
 export const READONLY_TOOLS = ["read", "grep", "glob", "web_search", "ast_grep"] as const;
 
-/** Scoped implementation tools — no package/lock/CI/release mutation surface. */
+/** Scoped implementation tools — no package/lock/CI/release mutation surface.
+ * `yield` is required: structured subagents terminate via yield, and catalog
+ * presentation filters tools through this allowlist (optimized live). Omitting
+ * it produces "Tool yield not found" after the model finishes the work.
+ */
 export const SCOPED_IMPLEMENTATION_TOOLS = [
 	"read",
 	"grep",
@@ -72,6 +76,7 @@ export const SCOPED_IMPLEMENTATION_TOOLS = [
 	"write",
 	"bash",
 	"todo",
+	"yield",
 ] as const;
 
 /** Scoped repair — same as implement, no task spawn / package managers via tools list. */
@@ -116,7 +121,10 @@ export class ToolPolicyFactory {
 				policyId: "scoped-implementation",
 				allowedTools: SCOPED_IMPLEMENTATION_TOOLS,
 				forbiddenPaths: ["package.json", "bun.lock", "Cargo.lock", "lockfiles", "scripts/"],
-				allowedCommands: ["bun test", "bun check", "biome check"],
+				// Prefix allowlist: `bun test test/foo.test.ts` is permitted; shell chaining is rejected.
+				// No bare `find`: prefix match would allow `find . -delete` / `-exec` and bypass path policy.
+				// Prefer glob/read for discovery; cat/head for small file peeks.
+				allowedCommands: ["bun test", "bun check", "biome check", "pwd", "ls", "cat", "head"],
 			};
 		}
 		if (role === "repair") {
@@ -125,7 +133,7 @@ export class ToolPolicyFactory {
 				policyId: "scoped-repair",
 				allowedTools: SCOPED_REPAIR_TOOLS,
 				forbiddenPaths: ["package.json", "bun.lock", "Cargo.lock"],
-				allowedCommands: ["bun test", "bun check"],
+				allowedCommands: ["bun test", "bun check", "pwd", "ls", "cat", "head"],
 			};
 		}
 		return {

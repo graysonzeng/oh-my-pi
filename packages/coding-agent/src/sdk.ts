@@ -2812,10 +2812,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const workflowOpt = options.workflowToolOptimization;
 		const workflowMaxConcurrent = workflowOpt?.maxConcurrentTools;
 		const workflowRemaining = workflowOpt?.remainingToolCalls;
-		const workflowConflict = workflowOpt?.resourceConflictMode ?? "conservative";
+		const workflowStageTime = workflowOpt?.remainingStageTimeMs;
+		const workflowConflict = workflowOpt?.resourceConflictMode ?? "serialize";
+		// Opt in when profile sets concurrency, hard budget, stage time, or an
+		// explicit conflict mode. processResult-only optimization must not flip
+		// the agent into scheduled mode (preserves legacy completion ordering).
 		const hasWorkflowScheduling =
 			(typeof workflowMaxConcurrent === "number" && workflowMaxConcurrent > 0) ||
-			(typeof workflowRemaining === "number" && workflowRemaining >= 0);
+			(typeof workflowRemaining === "number" && workflowRemaining >= 0) ||
+			(typeof workflowStageTime === "number" && Number.isFinite(workflowStageTime));
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
@@ -2849,7 +2854,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 								? workflowMaxConcurrent
 								: undefined,
 						remainingToolCalls: typeof workflowRemaining === "number" ? workflowRemaining : null,
+						remainingStageTimeMs: typeof workflowStageTime === "number" ? workflowStageTime : null,
 						resourceConflictMode: workflowConflict,
+						orderedResultWriteback: true,
 					}
 				: undefined,
 			thinkingBudgets: settings.getGroup("thinkingBudgets"),

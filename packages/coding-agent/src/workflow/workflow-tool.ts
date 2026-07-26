@@ -6,7 +6,7 @@ import { ToolError } from "../tools/tool-errors";
 import { WorkflowEngine } from "./engine";
 import { WorkflowPolicyError } from "./errors";
 import { WorkflowStore } from "./sqlite-store";
-import type { WorkflowStatus } from "./types";
+import type { WorkflowAvailabilityReport, WorkflowStatus } from "./types";
 
 const workflowSchema = type({
 	op: type("'start' | 'status' | 'resume' | 'cancel'").describe("workflow operation"),
@@ -25,6 +25,7 @@ export type WorkflowToolDetails = {
 	workflowId?: string;
 	status?: WorkflowStatus;
 	approvalTier: "read" | "write";
+	availability?: WorkflowAvailabilityReport;
 };
 
 /**
@@ -98,17 +99,28 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			if (params.op === "start") {
 				const request = params.request?.trim();
 				if (!request) throw new ToolError("request is required when op=start");
-				const workflowId = await engine.startWorkflow(
+				const started = await engine.start(
 					{ request, constraints: params.constraints },
 					{ degradedMode: params.degradedMode === true },
 				);
+				const workflowId = started.workflowId;
 				activeWorkflowId = workflowId;
 				const state = await engine.getState(workflowId);
+				const availabilityText = formatAvailabilitySummary(started.availability);
 				return {
 					content: [
-						{ type: "text", text: `Workflow started: ${workflowId}\nStatus: ${state?.status ?? "created"}` },
+						{
+							type: "text",
+							text: `Workflow started: ${workflowId}\nStatus: ${state?.status ?? "created"}\n${availabilityText}`,
+						},
 					],
-					details: { op: "start", workflowId, status: state?.status, approvalTier: tier },
+					details: {
+						op: "start",
+						workflowId,
+						status: state?.status,
+						approvalTier: tier,
+						availability: started.availability,
+					},
 				};
 			}
 
@@ -148,11 +160,12 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 					signal,
 					forceUnlock: params.forceUnlock === true,
 				});
+				const availabilityText = result.availability ? `\n${formatAvailabilitySummary(result.availability)}` : "";
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Workflow resumed: ${workflowId}\nStatus: ${result.state.status}\nStage: ${result.state.currentStage}`,
+							text: `Workflow resumed: ${workflowId}\nStatus: ${result.state.status}\nStage: ${result.state.currentStage}${availabilityText}`,
 						},
 					],
 					details: {
@@ -160,6 +173,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 						workflowId,
 						status: result.state.status,
 						approvalTier: tier,
+						availability: result.availability,
 					},
 				};
 			}
@@ -183,4 +197,26 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			engine.dispose?.();
 		}
 	}
+}
+
+function formatAvailabilitySummary(report: WorkflowAvailabilityReport): string {
+	const lines = [`Availability: ${report.status} (scope=${report.scope}, wall=${report.wallLatencyMs}ms)`];
+	for (const row of report.profiles) {
+		const id = `${row.role}/${row.profileId}`;
+		if (row.status === "available") {
+			const identity =
+				row.actualProvider && row.actualModel ? `${row.actualProvider}/${row.actualModel}` : "(identity missing)";
+			const cost = row.reportedCostUsd === undefined ? "" : ` cost=${row.reportedCostUsd ?? "unknown"}`;
+			lines.push(`  - ${id}: available ${identity} ${row.latencyMs ?? "?"}ms${cost} [${row.requirement}]`);
+		} else {
+			const err = row.errorKind ? ` ${row.errorKind}` : "";
+			const latency = row.latencyMs === undefined ? "" : ` ${row.latencyMs}ms`;
+			const cost = row.reportedCostUsd === undefined ? "" : ` cost=${row.reportedCostUsd ?? "unknown"}`;
+			lines.push(`  - ${id}: ${row.status}${err}${latency}${cost} [${row.requirement}]`);
+		}
+	}
+	if (report.blockedRoles && report.blockedRoles.length > 0) {
+		lines.push(`  blocked roles: ${report.blockedRoles.join(", ")}`);
+	}
+	return lines.join("\n");
 }

@@ -1035,6 +1035,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 								if (!name) {
 									throw new ToolError(`Cannot write to xd:// itself — pick a device:\n${registry.listing()}`);
 								}
+								// Restricted workflow children: catalog/xd dispatch never elevates past allowlist.
+								const presentationAllow = this.session.workflowToolOptimization?.presentationAllowedTools;
+								if (presentationAllow && !presentationAllow.includes(name)) {
+									throw new ToolError(
+										`Tool "${name}" is outside the role allowlist; catalog expand/dispatch refused.`,
+									);
+								}
 								const { result, xdev } = await registry.dispatch(
 									name,
 									deviceContent,

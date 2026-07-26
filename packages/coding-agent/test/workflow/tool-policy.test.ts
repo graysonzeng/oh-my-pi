@@ -154,6 +154,10 @@ describe("Workflow tool policy (readonly planning)", () => {
 		const impl = factory.getPolicyForRole("implementer");
 		expect(impl.readonly).toBe(false);
 		expect(factory.allowedToolsForRole("implementer")).toContain("edit");
+		// Structured implement/repair children must expose yield so catalog
+		// presentation + restrictToolNames cannot strip the termination tool.
+		expect(factory.allowedToolsForRole("implementer")).toContain("yield");
+		expect(factory.allowedToolsForRole("repair")).toContain("yield");
 		expect(factory.allowedToolsForRole("implementer")).not.toContain("task");
 		expect(factory.allowedToolsForRole("planner")).toBeUndefined(); // plan-mode owns readonly
 	});
@@ -184,6 +188,7 @@ describe("Workflow tool policy (readonly planning)", () => {
 		expect(seenTools).toBeDefined();
 		expect(seenTools).toContain("edit");
 		expect(seenTools).toContain("write");
+		expect(seenTools).toContain("yield");
 		expect(seenTools).not.toContain("task");
 	});
 
@@ -226,5 +231,22 @@ describe("Workflow tool policy (readonly planning)", () => {
 				allowedCommands: ["bun test"],
 			}),
 		).not.toThrow();
+	});
+
+	it("implementer/repair command allowlist excludes bare find (no -delete/-exec escape)", () => {
+		const factory = new ToolPolicyFactory();
+		for (const role of ["implementer", "repair"] as const) {
+			const policy = factory.getPolicyForRole(role);
+			expect(policy.allowedCommands).not.toContain("find");
+			// Even if a caller re-adds find later, destructive forms must not sneak in via
+			// current implementer allowlist (regression for scoped write path).
+			expect(() => assertWorkflowCommandAllowed("find . -delete", policy)).toThrow(/forbidden|workflow|policy/i);
+			expect(() => assertWorkflowCommandAllowed("find . -exec rm -rf {} +", policy)).toThrow(
+				/forbidden|workflow|policy/i,
+			);
+			// Safe discovery still available via glob/read tools; pwd/ls remain allowed.
+			expect(() => assertWorkflowCommandAllowed("pwd", policy)).not.toThrow();
+			expect(() => assertWorkflowCommandAllowed("ls src", policy)).not.toThrow();
+		}
 	});
 });

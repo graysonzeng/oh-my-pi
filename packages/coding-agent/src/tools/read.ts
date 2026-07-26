@@ -3171,6 +3171,21 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				read: async name => {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
 					if (name && isResolutionDeviceName(name)) return resolutionDeviceUsage(name);
+					// Catalog presentation expand: full schema for allowlisted tools even when
+					// the wire surface stubbed parameters (non-essential catalog mode).
+					const opt = this.session.workflowToolOptimization;
+					if (name && opt?.presentationToolSchemas?.has(name)) {
+						const allow = opt.presentationAllowedTools;
+						if (allow && !allow.includes(name)) {
+							throw new ToolError(`Tool "${name}" is outside the role allowlist; catalog expand refused.`);
+						}
+						const schema = opt.presentationToolSchemas.get(name);
+						return typeof schema === "string" ? schema : JSON.stringify(schema, null, 2);
+					}
+					if (name && opt?.presentationAllowedTools && !opt.presentationAllowedTools.includes(name)) {
+						// Restricted child: refuse expand for tools outside allowlist even if mounted.
+						throw new ToolError(`Tool "${name}" is outside the role allowlist; catalog expand refused.`);
+					}
 					const registry = this.session.xdevRegistry;
 					if (!registry || registry.size === 0) throw new ToolError("xd:// is not mounted in this session.");
 					return name === null ? registry.listing() : registry.docs(name);

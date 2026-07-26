@@ -4,7 +4,7 @@ import { WorkflowPolicyError } from "../errors";
 import { ImplementationArtifactJsonSchema } from "../json-schemas";
 import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { ImplementationArtifactSchema } from "../schemas";
-import type { ImplementationArtifactV1, ModelProfile, RuntimePort } from "../types";
+import type { ImplementationArtifactV1, ModelProfile, PromptAssemblyReceiptV1, RuntimePort } from "../types";
 
 export interface ImplementStageInput {
 	workflowId: string;
@@ -24,7 +24,7 @@ export interface ImplementStageResult {
 	resolvedProvider?: string;
 	resolvedModel?: string;
 	toolCalls?: number;
-	promptAssemblyReceipt?: unknown;
+	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	optimizationReceipts?: unknown[];
 }
 

@@ -124,10 +124,12 @@ export interface ToolSchedulingConfig {
 	 */
 	remainingStageTimeMs?: number | null;
 	/**
-	 * When "conservative" (default), tools with unknown resource claims serialize
-	 * against writes. Does not infer cross-turn dependencies.
+	 * Resource conflict handling within a single tool batch (no cross-turn DAG):
+	 * - "serialize" / "conservative" (default): conflicting tools run serially
+	 * - "fail": later conflicting tool is skipped with an error result
+	 * - "permissive": only explicit exclusive flags / same-path write pairs conflict
 	 */
-	resourceConflictMode?: "conservative" | "permissive";
+	resourceConflictMode?: "serialize" | "fail" | "conservative" | "permissive";
 	/**
 	 * When true (default when toolScheduling is set), buffer concurrent tool
 	 * results and emit toolResult messages in original call order.

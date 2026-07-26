@@ -192,6 +192,13 @@ export function resolveTruncationRule(
 const PROGRESS_NOISE_RE =
 	/^\s*(?:✓|✔|√|●|○|◌|·|\*|[-|\\/])\s|^\s*\d+%|\b(?:PASS(?:ED)?|ok)\b.*\b(?:ms|s)\b|Downloading|Installing|Compiling|Building\s+\.\.\./i;
 
+/** Pass/ok line shapes used to count successful tests for compressed success summaries. */
+const PASS_LINE_RE =
+	/^\s*(?:✓|✔|√|●)\s|\b(?:PASS(?:ED)?|pass(?:ed)?|ok)\b.*\b(?:ms|s)\b|^\s*(?:pass|ok|passed)\b|\(\s*pass\s*\)/i;
+
+/** Lines that name a failed test case (not just any ERROR log). */
+const FAILED_TEST_LINE_RE = /\b(?:FAIL|failed|×|✗)\b/i;
+
 function resolveExitCode(output: string, args?: unknown, hadErrors = false): number {
 	const exitFromArgs =
 		args && typeof args === "object" && args !== null && "exitCode" in args
@@ -199,6 +206,43 @@ function resolveExitCode(output: string, args?: unknown, hadErrors = false): num
 			: undefined;
 	const exitMatch = output.match(/exit\s*code[:\s]+(-?\d+)/i);
 	return exitFromArgs ?? (exitMatch ? Number(exitMatch[1]) : hadErrors ? 1 : 0);
+}
+
+function resolveCommand(args?: unknown): string | undefined {
+	if (!args || typeof args !== "object") return undefined;
+	const rec = args as { command?: unknown; cmd?: unknown };
+	const raw = rec.command ?? rec.cmd;
+	if (typeof raw !== "string") return undefined;
+	const trimmed = raw.trim();
+	if (!trimmed) return undefined;
+	// Bound so a multi-kilobyte command string does not explode the summary.
+	return trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed;
+}
+
+function extractFailedTestNames(lines: string[]): string[] {
+	const names: string[] = [];
+	const seen = new Set<string>();
+	for (const line of lines) {
+		if (!FAILED_TEST_LINE_RE.test(line)) continue;
+		// Prefer lines that look like test identity (path, suite, it/describe, (fail)).
+		const looksLikeTest =
+			/test|spec|it\(|describe|\(fail\)|›|>|::|\.ts|\.js|\.py/i.test(line) || /^\s*(?:×|✗|FAIL)\b/i.test(line);
+		if (!looksLikeTest) continue;
+		const key = line.trim();
+		if (!key || seen.has(key)) continue;
+		seen.add(key);
+		names.push(key);
+		if (names.length >= 8) break;
+	}
+	return names;
+}
+
+function countPassedTests(lines: string[]): number {
+	let n = 0;
+	for (const line of lines) {
+		if (line.trim() && PASS_LINE_RE.test(line)) n++;
+	}
+	return n;
 }
 
 /** Summarize bash while keeping failure blocks + recovery footer intact via processToolOutput. */
@@ -210,18 +254,18 @@ function summarizeBash(output: string, _tool: string, args?: unknown): string {
 	const timedOut =
 		(args && typeof args === "object" && args !== null && (args as { timedOut?: boolean }).timedOut === true) ||
 		/timed out|timeout/i.test(body);
+	const command = resolveCommand(args);
 
 	if (errorLines.length > 0 || exitCode !== 0 || timedOut) {
-		// Failure: exit code, first failure block, tail errors, failed test names, recovery.
+		// Failure: exit code, first failure block, tail errors, failed test names, reproduce cmd.
 		const firstFailIdx = lines.findIndex(l => FAILURE_SIGNAL_RE.test(l));
 		const firstBlock =
 			firstFailIdx >= 0 ? lines.slice(firstFailIdx, Math.min(lines.length, firstFailIdx + 8)).join("\n") : "";
 		const tailErrors = errorLines.slice(-5).join("\n");
-		const failedTests = lines
-			.filter(l => /\b(?:FAIL|failed|×|✗)\b/i.test(l) && /test|spec|it\(|describe/i.test(l))
-			.slice(0, 8);
+		const failedTests = extractFailedTestNames(lines);
 		const parts = [
 			`Exit code: ${exitCode}${timedOut ? " (timeout)" : ""}`,
+			command ? `Reproduce: ${command}` : "",
 			firstBlock ? `First failure:\n${firstBlock}` : "",
 			tailErrors && tailErrors !== firstBlock ? `Tail errors:\n${tailErrors}` : "",
 			failedTests.length > 0 ? `Failed tests:\n${failedTests.join("\n")}` : "",
@@ -230,18 +274,27 @@ function summarizeBash(output: string, _tool: string, args?: unknown): string {
 		return footer ? `${summary}\n${footer}` : summary;
 	}
 
-	// Success: RTK-style drop progress/pass noise; keep short head+tail of signal.
-	const signal = lines.filter(l => l.trim() && !PROGRESS_NOISE_RE.test(l));
+	// Success: compress pass lists to "N tests passed"; keep short head+tail of remaining signal.
+	const passCount = countPassedTests(lines);
+	const signal = lines.filter(l => l.trim() && !PROGRESS_NOISE_RE.test(l) && !PASS_LINE_RE.test(l));
 	const dropped = lines.length - signal.length;
+
 	if (signal.length === 0) {
-		const empty = `Exit code: ${exitCode}, ${lines.length} lines output (noise stripped)`;
+		const empty =
+			passCount > 0
+				? `Exit code: ${exitCode}, ${passCount} tests passed`
+				: `Exit code: ${exitCode}, ${lines.length} lines output (noise stripped)`;
 		return footer ? `${empty}\n${footer}` : empty;
 	}
+
 	const head = signal.slice(0, 8);
 	const tail = signal.length > 12 ? signal.slice(-4) : [];
 	const bodyLines =
 		tail.length > 0 ? [...head, `... [${signal.length - 12} signal lines omitted] ...`, ...tail] : head;
-	const suffix = dropped > 0 ? `\n(${dropped} progress/pass lines stripped)` : "";
+	const passNote = passCount > 0 ? `${passCount} tests passed` : undefined;
+	const stripNote = dropped > 0 ? `${dropped} progress/pass lines stripped` : undefined;
+	const notes = [passNote, stripNote].filter(Boolean).join("; ");
+	const suffix = notes ? `\n(${notes})` : "";
 	const summary = `Exit code: ${exitCode}\n${bodyLines.join("\n")}${suffix}`;
 	return footer ? `${summary}\n${footer}` : summary;
 }

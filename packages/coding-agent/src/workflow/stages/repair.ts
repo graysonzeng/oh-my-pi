@@ -4,7 +4,13 @@ import { WorkflowPolicyError } from "../errors";
 import { ImplementationArtifactJsonSchema } from "../json-schemas";
 import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { ImplementationArtifactSchema } from "../schemas";
-import type { ImplementationArtifactV1, ModelProfile, ReviewFindingV1, RuntimePort } from "../types";
+import type {
+	ImplementationArtifactV1,
+	ModelProfile,
+	PromptAssemblyReceiptV1,
+	ReviewFindingV1,
+	RuntimePort,
+} from "../types";
 
 export interface RepairStageInput {
 	workflowId: string;
@@ -26,7 +32,7 @@ export interface RepairStageResult {
 	resolvedProvider?: string;
 	resolvedModel?: string;
 	toolCalls?: number;
-	promptAssemblyReceipt?: unknown;
+	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	optimizationReceipts?: unknown[];
 }
 

@@ -633,6 +633,11 @@ export interface WorkflowDefaultConfig {
 	verificationCommands: string[];
 	forbiddenPaths: string[];
 	profiles: typeof DEFAULT_MODEL_PROFILES | Record<string, ModelProfile>;
+	/**
+	 * Settings gate for lazy tool/skill presentation. Default false.
+	 * Profiles keep presentationPolicy.enabled = false; only enable after quality holds.
+	 */
+	presentationOptimizationEnabled: boolean;
 }
 
 export function getDefaultConfig(): WorkflowDefaultConfig {
@@ -651,6 +656,7 @@ export function getDefaultConfig(): WorkflowDefaultConfig {
 		verificationCommands: ["git diff --check", "bun check"],
 		forbiddenPaths: ["node_modules", "dist", "build", ".git"],
 		profiles: DEFAULT_MODEL_PROFILES,
+		presentationOptimizationEnabled: false,
 	};
 }
 

@@ -419,4 +419,42 @@ describe("RuntimeAdapter", () => {
 		).rejects.toMatchObject({ kind: "schema_violation" });
 		expect(calls).toBe(1);
 	});
+
+	it("Layer1 fence repair returns schemaRepairReceipt without extra model call", async () => {
+		const fenced = `\uFEFF\`\`\`json\n{"summary":"from-layer1"}\n\`\`\``;
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async () => {
+			calls += 1;
+			return {
+				result: {
+					id: "raw",
+					structuredOutput: { status: "invalid", error: "parse failed", data: fenced },
+					rawOutput: fenced,
+					exitCode: 1,
+				},
+			};
+		});
+		const result = await adapter.run(
+			baseRequest(undefined, {
+				outputSchema: {
+					type: "object",
+					required: ["summary"],
+					properties: { summary: { type: "string" } },
+				},
+				profile: {
+					...DEFAULT_MODEL_PROFILES.grok_implementer,
+					outputStrategy: {
+						retryOnSchemaViolation: { enabled: true, maxRetries: 2, includeErrorInRetry: true },
+					},
+				},
+			}),
+		);
+		expect(calls).toBe(1);
+		expect(result.artifact).toEqual({ summary: "from-layer1" });
+		expect(result.schemaRepairReceipt).toMatchObject({
+			modelCalls: 0,
+			layer1Success: true,
+			finalStatus: "repaired_layer1",
+		});
+	});
 });

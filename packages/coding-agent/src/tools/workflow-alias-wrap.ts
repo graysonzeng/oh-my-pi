@@ -7,6 +7,7 @@
  * to internal names (path). Kept out of workflow/tool-optimization so pure
  * workflow unit tests never load pi-ai/schema or pi_natives.
  */
+import { formatToolCatalogSummary, toolSchemaLocator } from "../workflow/presentation-policy";
 import {
 	type JsonSchemaObject,
 	remapSchemaProperties,
@@ -21,15 +22,25 @@ export interface WorkflowAliasSession {
 		argumentAliases?: Record<string, Record<string, string>>;
 		/** Catalog / alias transform applied after tools are built. */
 		transformTools?: (tools: ToolDescriptor[]) => ToolDescriptor[];
+		/** Full schemas for xd://tools expand after catalog stubbing. */
+		presentationToolSchemas?: Map<string, unknown>;
+		/** Role allowlist for expand refusal. */
+		presentationAllowedTools?: readonly string[];
 	};
 }
 
-/** Minimal empty object schema when catalog mode drops full parameters. */
+/**
+ * Open object schema when catalog mode drops full parameter docs from the wire.
+ * Must allow additional properties so post-discovery calls (after `xd://tools/{name}`
+ * expand) pass real args through validateToolArguments to execute. A closed
+ * `additionalProperties: false` stub would strip args to {}.
+ */
 const CATALOG_STUB_PARAMETERS: JsonSchemaObject = {
 	type: "object",
 	properties: {},
-	additionalProperties: false,
-	description: "Schema omitted (catalog mode). Use schemaLocator to load full schema.",
+	additionalProperties: true,
+	description:
+		"Schema omitted (catalog mode). Read full schema via schemaLocator (xd://tools/{name}), then call with real arguments.",
 };
 
 /**
@@ -164,15 +175,32 @@ export function applyWorkflowTransformTools<T extends object>(tools: T[], sessio
 	}
 
 	const transformed = transform(descriptors);
+	// Capture full schemas before catalog stubbing so xd://tools/{name} expand works.
+	const opt = session.workflowToolOptimization;
+	if (opt) {
+		const catalog = opt.presentationToolSchemas ?? new Map<string, unknown>();
+		for (const d of descriptors) {
+			if (d.schema !== undefined) catalog.set(d.name, d.schema);
+		}
+		opt.presentationToolSchemas = catalog;
+	}
+
 	const out: T[] = [];
-	for (const d of transformed) {
+	// Stable name order independent of catalog/direct (transform should already sort;
+	// re-sort for wire determinism).
+	const ordered = [...transformed].sort((a, b) => a.name.localeCompare(b.name));
+	for (const d of ordered) {
 		const base = toolByName.get(d.name);
 		if (!base) continue;
 		// Schema dropped by catalog presentation — stub parameters on the wire.
 		if (d.schema === undefined) {
-			const locator = typeof d.schemaLocator === "string" ? d.schemaLocator : `xd://tools/${d.name}`;
-			const summary = typeof d.description === "string" ? d.description : d.name;
-			const desc = `${summary} [schema: ${locator}]`;
+			const locator = typeof d.schemaLocator === "string" ? d.schemaLocator : toolSchemaLocator(d.name);
+			const oneLine = typeof d.description === "string" ? d.description : d.name;
+			// Avoid double-wrapping if description already has the catalog format.
+			const desc = oneLine.includes(locator)
+				? oneLine
+				: formatToolCatalogSummary(d.name, oneLine.replace(new RegExp(`^${d.name}:\\s*`), ""));
+			const summary = oneLine.includes(locator) ? oneLine.split(" [Read full schema:")[0]! : oneLine;
 			out.push(
 				new Proxy(base, {
 					get(target, prop) {

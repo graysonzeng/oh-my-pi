@@ -7,12 +7,26 @@ import {
 	WorkflowSchemaError,
 	WorkflowTimeoutError,
 } from "./errors";
-import { prepareWorkflowInvocation } from "./runtime-invocation";
+import { sha256Hex } from "./optimization-receipt";
+import { withProviderCacheMetrics } from "./prompt-assembly";
+import { type PreparedWorkflowInvocation, prepareWorkflowInvocation } from "./runtime-invocation";
 import type { ToolDescriptor } from "./schema-enhancer";
 import {
+	boundOutputFragment,
+	budgetBlockReason,
+	budgetFromProfileUsage,
 	defaultSchemaValidator,
 	renderSchemaRetryPrompt,
 	repairStructuredOutput,
+	SCHEMA_REPAIR_RECEIPT_KIND,
+	SCHEMA_REPAIR_RECEIPT_VERSION,
+	type SchemaRepairAttempt,
+	type SchemaRepairFinalStatus,
+	type SchemaRepairReceiptV1,
+	type SchemaViolationRecord,
+	type StructuredRepairBudget,
+	schemaFieldsSummary,
+	schemaTypeName,
 	totalSchemaModelAttempts,
 } from "./structured-output-repair";
 import type {
@@ -125,35 +139,158 @@ export class RuntimeAdapter implements RuntimePort {
 		const maxAttempts = retry?.enabled ? totalSchemaModelAttempts(maxRetries) : 1;
 		let working: WorkflowAgentRequest = request;
 		let lastSchemaError: WorkflowSchemaError | undefined;
+		/** Accumulates L1 per-invocation receipts across outer model attempts (Layer 3/4). */
+		let accumulated = emptySchemaRepairReceipt(maxRetries);
+		let usedCostUsd = 0;
+		const startedAt = Date.now();
 
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			try {
-				return await this.#runOnce<TArtifact>(working);
+				const result = await this.#runOnce<TArtifact>(working, {
+					schemaRetryMaxRetries: maxRetries,
+				});
+				// Layer1 deterministic success on this invocation.
+				if (result.schemaRepairReceipt) {
+					const r = result.schemaRepairReceipt as SchemaRepairReceiptV1;
+					if (r.finalStatus === "repaired_layer1" || r.layer1Success) {
+						// First-call L1 only: no prior schema failures, zero model-retry calls.
+						if (attempt === 0) {
+							return {
+								...result,
+								schemaRepairReceipt: finalizeSchemaRepairReceipt(r, {
+									maxRetries,
+									modelCalls: 0,
+									finalStatus: "repaired_layer1",
+									repaired: true,
+									layer1Success: true,
+									layer3RetryCount: 0,
+								}),
+							};
+						}
+						// Prior failures + this invocation fixed via L1 (fence/BOM/prose):
+						// keep accumulated violation history; status is layer3 path (model retries ran).
+						const merged = mergeSchemaRepairReceipt(accumulated, r, attempt, maxRetries, {
+							modelCalls: attempt + 1,
+							finalStatus: "repaired_layer3",
+							repaired: true,
+						});
+						return {
+							...result,
+							schemaRepairReceipt: finalizeSchemaRepairReceipt(merged, {
+								maxRetries,
+								modelCalls: attempt + 1,
+								finalStatus: "repaired_layer3",
+								repaired: true,
+								// Final fix was deterministic extract on the latest raw.
+								layer1Success: true,
+								layer3RetryCount: attempt,
+							}),
+						};
+					}
+				}
+				// Structured-valid success after prior schema failures (no L1 receipt on this call).
+				// modelCalls = total runner invocations on the schema path (first + retries).
+				if (attempt > 0) {
+					return {
+						...result,
+						schemaRepairReceipt: finalizeSchemaRepairReceipt(accumulated, {
+							maxRetries,
+							modelCalls: attempt + 1,
+							finalStatus: "repaired_layer3",
+							repaired: true,
+							layer1Success: false,
+							layer3RetryCount: attempt,
+						}),
+					};
+				}
+				return result;
 			} catch (error) {
 				const normalized = this.#normalizeError(error);
 				if (!(normalized instanceof WorkflowSchemaError)) {
 					throw normalized;
 				}
 				lastSchemaError = normalized;
+				const details = normalized.details as
+					| { schemaRepairReceipt?: SchemaRepairReceiptV1; usage?: Usage; rawOutput?: string }
+					| undefined;
+				// Fold this invocation's L1 receipt (or synthetic failure) into multi-attempt history.
+				accumulated = mergeSchemaRepairReceipt(accumulated, details?.schemaRepairReceipt, attempt, maxRetries, {
+					modelCalls: attempt + 1,
+					finalStatus: "schema_error",
+					repaired: false,
+					fallbackError: normalized.message,
+					fallbackRaw:
+						typeof details?.rawOutput === "string" && details.rawOutput.length > 0
+							? details.rawOutput
+							: normalized.message,
+				});
+				const usageCost = details?.usage?.cost?.total;
+				if (typeof usageCost === "number") usedCostUsd += usageCost;
 
-				// Deterministic extract/repair on the error message body when it embeds raw JSON.
-				// Full raw capture is owned by the runner; here we only re-prompt for retries.
+				// No more additional model attempts left → Layer 4 full receipt.
 				if (attempt >= maxAttempts - 1) {
-					throw normalized;
+					throw withSchemaRepairDetails(
+						normalized,
+						finalizeSchemaRepairReceipt(accumulated, {
+							maxRetries,
+							modelCalls: attempt + 1,
+							finalStatus: "schema_error",
+							repaired: false,
+							layer3RetryCount: Math.max(0, attempt),
+						}),
+					);
 				}
 
-				// Budget check before scheduling another model call.
-				const remainingModelCalls = maxAttempts - attempt - 1;
-				if (remainingModelCalls <= 0) {
-					throw normalized;
+				// Layer 2: budget check before every model retry (request / cost / runtime).
+				const budget = budgetFromProfileUsage({
+					maxRequests: Math.min(request.profile.maxRequests, maxAttempts),
+					maxCostUsd: request.profile.maxCostUsd,
+					maxRuntimeMs: request.profile.maxRuntimeMs,
+					usedRequests: attempt + 1,
+					usedCostUsd,
+					elapsedMs: Date.now() - startedAt,
+				});
+				const remainingSchemaSlots = maxAttempts - attempt - 1;
+				const effectiveBudget: StructuredRepairBudget = {
+					...budget,
+					remainingModelCalls:
+						typeof budget.remainingModelCalls === "number"
+							? Math.min(budget.remainingModelCalls, remainingSchemaSlots)
+							: remainingSchemaSlots,
+				};
+				const blocked = budgetBlockReason(effectiveBudget);
+				if (blocked) {
+					const exhausted = finalizeSchemaRepairReceipt(accumulated, {
+						maxRetries,
+						modelCalls: attempt + 1,
+						finalStatus: "budget_exhausted",
+						repaired: false,
+						budgetExhausted: true,
+						budgetExhaustedReason: blocked,
+						layer3RetryCount: Math.max(0, attempt),
+						extraAttempt: {
+							attemptIndex: attempt,
+							phase: "model_retry",
+							inputSha256: sha256Hex(normalized.message),
+							ok: false,
+							error: `budget exhausted before retry: ${blocked}`,
+							outputPreview: boundOutputFragment(normalized.message),
+						},
+					});
+					throw withSchemaRepairDetails(normalized, exhausted);
 				}
 
 				if (retry?.includeErrorInRetry) {
-					const fragment = normalized.message.slice(0, 2000);
+					const rawPreview =
+						typeof details?.rawOutput === "string" && details.rawOutput.length > 0
+							? details.rawOutput
+							: normalized.message;
 					const hint = renderSchemaRetryPrompt({
-						violations: normalized.message,
-						schemaSummary: schemaSummaryForRetry(working.outputSchema),
-						previousOutput: fragment,
+						violation: normalized.message,
+						schemaTypeName: schemaTypeName(working.outputSchema),
+						schemaFields: schemaFieldsSummary(working.outputSchema),
+						previousOutputPreview: boundOutputFragment(rawPreview),
+						attemptNumber: attempt + 1,
 					});
 					working = {
 						...working,
@@ -163,7 +300,15 @@ export class RuntimeAdapter implements RuntimePort {
 			}
 		}
 
-		throw lastSchemaError ?? new WorkflowSchemaError("schema retry exhausted");
+		throw withSchemaRepairDetails(
+			lastSchemaError ?? new WorkflowSchemaError("schema retry exhausted"),
+			finalizeSchemaRepairReceipt(accumulated, {
+				maxRetries,
+				modelCalls: maxAttempts,
+				finalStatus: "schema_error",
+				repaired: false,
+			}),
+		);
 	}
 
 	/**
@@ -177,6 +322,8 @@ export class RuntimeAdapter implements RuntimePort {
 			maxRetries?: number;
 			retryWithModel?: (prompt: string) => Promise<string>;
 			remainingModelCalls?: number;
+			remainingCostUsd?: number | null;
+			remainingTimeMs?: number | null;
 		},
 	) {
 		return repairStructuredOutput(raw, {
@@ -184,11 +331,22 @@ export class RuntimeAdapter implements RuntimePort {
 			schema,
 			validate: defaultSchemaValidator,
 			retryWithModel: options?.retryWithModel,
-			budget: { remainingModelCalls: options?.remainingModelCalls },
+			budget: {
+				remainingModelCalls: options?.remainingModelCalls,
+				remainingCostUsd: options?.remainingCostUsd,
+				remainingTimeMs: options?.remainingTimeMs,
+			},
 		});
 	}
 
-	async #runOnce<TArtifact>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>> {
+	async #runOnce<TArtifact>(
+		request: WorkflowAgentRequest,
+		hooks?: {
+			onSchemaRepairReceipt?: (receipt: SchemaRepairReceiptV1) => void;
+			/** Profile maxRetries for receipt metadata (L1 still uses no model retry here). */
+			schemaRetryMaxRetries?: number;
+		},
+	): Promise<WorkflowAgentResult<TArtifact>> {
 		const prepared = prepareWorkflowInvocation(request);
 		// strictMode:true → strict; strictMode:false → permissive; omitted → strict (safe default).
 		const schemaMode =
@@ -247,12 +405,25 @@ export class RuntimeAdapter implements RuntimePort {
 						prepared,
 						request,
 						result.changesApplied ?? null,
+						hooks,
 					);
 					if (repaired) return repaired;
+					const failedReceipt = await captureFailedRepairReceipt(
+						body,
+						prepared.outputSchema ?? request.outputSchema,
+						hooks?.schemaRetryMaxRetries ?? 0,
+					);
+					if (failedReceipt) hooks?.onSchemaRepairReceipt?.(failedReceipt);
 					// Fall through to schema error so the outer retry loop can re-prompt.
 					throw new WorkflowSchemaError(
 						structuredFail.error ?? "Workflow subagent did not return a valid structured artifact",
-						{ status: structuredFail.status, rawOutput: body.rawOutput, exitCode: body.exitCode },
+						{
+							status: structuredFail.status,
+							rawOutput: body.rawOutput ?? extractInvalidRaw(body),
+							exitCode: body.exitCode,
+							usage: body.usage,
+							schemaRepairReceipt: failedReceipt,
+						},
 					);
 				}
 				throw new WorkflowError(`Workflow subagent exited with code ${body.exitCode}`, "tool_failure", {
@@ -277,14 +448,28 @@ export class RuntimeAdapter implements RuntimePort {
 					prepared,
 					request,
 					result.changesApplied ?? null,
+					hooks,
 				);
 				if (repaired) return repaired;
+				const failedReceipt = await captureFailedRepairReceipt(
+					body,
+					prepared.outputSchema ?? request.outputSchema,
+					hooks?.schemaRetryMaxRetries ?? 0,
+				);
+				if (failedReceipt) hooks?.onSchemaRepairReceipt?.(failedReceipt);
 				throw new WorkflowSchemaError(
 					structured?.error ?? "Workflow subagent did not return a valid structured artifact",
-					{ status: structured?.status, rawOutput: body.rawOutput },
+					{
+						status: structured?.status,
+						rawOutput: body.rawOutput ?? extractInvalidRaw(body),
+						usage: body.usage,
+						schemaRepairReceipt: failedReceipt,
+					},
 				);
 			}
 			const resolved = parseResolvedModel(body.resolvedModel);
+			// Merge provider cache counters after usage is known (prepare-time receipt is unobservable).
+			const promptAssemblyReceipt = withProviderCacheMetrics(prepared.promptAssemblyReceipt, body.usage);
 			return {
 				artifact: structured.data as TArtifact,
 				rawResultId: body.id,
@@ -297,7 +482,7 @@ export class RuntimeAdapter implements RuntimePort {
 				resolvedModel: resolved?.model,
 				toolCalls: body.toolCalls,
 				// After the live tool path finishes, optimization receipts (if any) sit on the shared array.
-				promptAssemblyReceipt: prepared.promptAssemblyReceipt,
+				promptAssemblyReceipt,
 				optimizationReceipts:
 					prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
 			};
@@ -313,20 +498,35 @@ export class RuntimeAdapter implements RuntimePort {
 	async #tryRepairStructured<TArtifact>(
 		body: StructuredRunnerResult["result"],
 		schema: unknown,
-		prepared: ReturnType<typeof prepareWorkflowInvocation>,
+		prepared: PreparedWorkflowInvocation,
 		request: WorkflowAgentRequest,
 		changesApplied: boolean | null,
+		hooks?: {
+			onSchemaRepairReceipt?: (receipt: SchemaRepairReceiptV1) => void;
+			schemaRetryMaxRetries?: number;
+		},
 	): Promise<WorkflowAgentResult<TArtifact> | undefined> {
 		const raw = extractInvalidRaw(body);
 		if (!raw) return undefined;
+		// L1 only (no retryWithModel). maxRetries is profile metadata for the receipt.
 		const repaired = await repairStructuredOutput(raw, {
-			maxRetries: 0,
+			maxRetries: hooks?.schemaRetryMaxRetries ?? 0,
 			schema,
 			validate: defaultSchemaValidator,
 			budget: { remainingModelCalls: 0 },
 		});
+		hooks?.onSchemaRepairReceipt?.(repaired.receipt);
 		if (!repaired.ok || repaired.value === undefined) return undefined;
 		const resolved = parseResolvedModel(body.resolvedModel);
+		const receipt = finalizeSchemaRepairReceipt(repaired.receipt, {
+			maxRetries: hooks?.schemaRetryMaxRetries ?? repaired.receipt.maxRetries,
+			// Deterministic L1 only — no model-retry calls.
+			modelCalls: 0,
+			finalStatus: "repaired_layer1",
+			repaired: true,
+			layer1Success: true,
+			layer3RetryCount: 0,
+		});
 		return {
 			artifact: repaired.value as TArtifact,
 			rawResultId: body.id,
@@ -338,10 +538,10 @@ export class RuntimeAdapter implements RuntimePort {
 			resolvedProvider: resolved?.provider,
 			resolvedModel: resolved?.model,
 			toolCalls: body.toolCalls,
-			promptAssemblyReceipt: prepared.promptAssemblyReceipt,
+			promptAssemblyReceipt: withProviderCacheMetrics(prepared.promptAssemblyReceipt, body.usage),
 			optimizationReceipts:
 				prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
-			schemaRepairReceipt: repaired.receipt,
+			schemaRepairReceipt: receipt,
 		};
 	}
 
@@ -392,13 +592,163 @@ function extractInvalidRaw(body: StructuredRunnerResult["result"]): string | und
 	return undefined;
 }
 
-function schemaSummaryForRetry(schema: unknown): string {
-	try {
-		const s = JSON.stringify(schema ?? {});
-		return s.length > 800 ? `${s.slice(0, 800)}…` : s;
-	} catch {
-		return "{}";
+function withSchemaRepairDetails(
+	error: WorkflowSchemaError,
+	receipt: SchemaRepairReceiptV1 | undefined,
+): WorkflowSchemaError {
+	if (!receipt) return error;
+	const prev = error.details && typeof error.details === "object" ? (error.details as Record<string, unknown>) : {};
+	return new WorkflowSchemaError(error.message, { ...prev, schemaRepairReceipt: receipt });
+}
+
+function emptySchemaRepairReceipt(maxRetries: number): SchemaRepairReceiptV1 {
+	return {
+		schemaVersion: SCHEMA_REPAIR_RECEIPT_VERSION,
+		kind: SCHEMA_REPAIR_RECEIPT_KIND,
+		attempts: [],
+		modelCalls: 0,
+		maxRetries,
+		repaired: false,
+		totalAttempts: 0,
+		layer1Success: false,
+		layer3RetryCount: 0,
+		finalStatus: "schema_error",
+		budgetExhausted: false,
+		violationHistory: [],
+	};
+}
+
+/**
+ * Merge a per-invocation L1 receipt into the outer multi-attempt accumulator.
+ * Remaps attemptIndex to the outer model-invocation index so Layer4 history is complete.
+ */
+function mergeSchemaRepairReceipt(
+	acc: SchemaRepairReceiptV1,
+	incoming: SchemaRepairReceiptV1 | undefined,
+	outerAttemptIndex: number,
+	maxRetries: number,
+	opts: {
+		modelCalls: number;
+		finalStatus: SchemaRepairFinalStatus;
+		repaired: boolean;
+		fallbackError?: string;
+		fallbackRaw?: string;
+	},
+): SchemaRepairReceiptV1 {
+	const remapped: SchemaRepairAttempt[] = (incoming?.attempts ?? []).map(a => ({
+		...a,
+		attemptIndex: outerAttemptIndex,
+	}));
+	const remappedViolations: SchemaViolationRecord[] = (incoming?.violationHistory ?? []).map(v => ({
+		...v,
+		attemptIndex: outerAttemptIndex,
+	}));
+
+	// No L1 receipt (e.g. invalid structured with empty raw) → synthetic failure record.
+	if (remapped.length === 0) {
+		const raw = opts.fallbackRaw ?? opts.fallbackError ?? "schema validation failed";
+		const err = opts.fallbackError ?? "schema validation failed";
+		remapped.push({
+			attemptIndex: outerAttemptIndex,
+			phase: "validate",
+			inputSha256: sha256Hex(raw),
+			outputPreview: boundOutputFragment(raw),
+			ok: false,
+			error: err,
+		});
+		remappedViolations.push({
+			attemptIndex: outerAttemptIndex,
+			phase: "validate",
+			error: err,
+			outputPreview: boundOutputFragment(raw),
+		});
 	}
+
+	const attempts = [...acc.attempts, ...remapped];
+	const violationHistory = [...acc.violationHistory, ...remappedViolations];
+	return {
+		schemaVersion: SCHEMA_REPAIR_RECEIPT_VERSION,
+		kind: SCHEMA_REPAIR_RECEIPT_KIND,
+		attempts,
+		modelCalls: opts.modelCalls,
+		maxRetries,
+		repaired: opts.repaired,
+		totalAttempts: attempts.length,
+		layer1Success: acc.layer1Success || (incoming?.layer1Success ?? false),
+		layer3RetryCount: Math.max(0, opts.modelCalls - 1),
+		finalStatus: opts.finalStatus,
+		budgetExhausted: false,
+		violationHistory,
+	};
+}
+
+function finalizeSchemaRepairReceipt(
+	base: SchemaRepairReceiptV1,
+	opts: {
+		maxRetries: number;
+		modelCalls: number;
+		finalStatus: SchemaRepairFinalStatus;
+		repaired: boolean;
+		layer1Success?: boolean;
+		layer3RetryCount?: number;
+		budgetExhausted?: boolean;
+		budgetExhaustedReason?: SchemaRepairReceiptV1["budgetExhaustedReason"];
+		extraAttempt?: SchemaRepairAttempt;
+	},
+): SchemaRepairReceiptV1 {
+	const attempts = opts.extraAttempt ? [...base.attempts, opts.extraAttempt] : base.attempts;
+	const violationHistory =
+		opts.extraAttempt && !opts.extraAttempt.ok && opts.extraAttempt.error
+			? [
+					...base.violationHistory,
+					{
+						attemptIndex: opts.extraAttempt.attemptIndex,
+						phase: opts.extraAttempt.phase,
+						error: opts.extraAttempt.error,
+						outputPreview: opts.extraAttempt.outputPreview,
+					},
+				]
+			: base.violationHistory;
+	return {
+		...base,
+		attempts,
+		violationHistory,
+		schemaVersion: SCHEMA_REPAIR_RECEIPT_VERSION,
+		kind: SCHEMA_REPAIR_RECEIPT_KIND,
+		maxRetries: opts.maxRetries,
+		modelCalls: opts.modelCalls,
+		repaired: opts.repaired,
+		totalAttempts: attempts.length,
+		layer1Success: opts.layer1Success ?? base.layer1Success,
+		// Additional model calls after the first invocation (0 for pure L1).
+		layer3RetryCount: opts.layer3RetryCount ?? Math.max(0, opts.modelCalls - 1),
+		finalStatus: opts.finalStatus,
+		budgetExhausted: opts.budgetExhausted ?? false,
+		budgetExhaustedReason: opts.budgetExhaustedReason,
+	};
+}
+
+async function captureFailedRepairReceipt(
+	body: StructuredRunnerResult["result"],
+	schema: unknown,
+	schemaRetryMaxRetries = 0,
+): Promise<SchemaRepairReceiptV1 | undefined> {
+	const raw = extractInvalidRaw(body);
+	if (!raw) return undefined;
+	const repaired = await repairStructuredOutput(raw, {
+		// Metadata only — no retryWithModel, so no model calls; budget blocks retries.
+		maxRetries: schemaRetryMaxRetries,
+		schema,
+		validate: defaultSchemaValidator,
+		budget: { remainingModelCalls: 0 },
+	});
+	return finalizeSchemaRepairReceipt(repaired.receipt, {
+		maxRetries: schemaRetryMaxRetries,
+		modelCalls: 0,
+		finalStatus: repaired.ok ? "repaired_layer1" : "schema_error",
+		repaired: repaired.ok,
+		layer1Success: repaired.ok,
+	});
 }
 
 function parseResolvedModel(value: string | undefined): { provider: string; model: string } | undefined {

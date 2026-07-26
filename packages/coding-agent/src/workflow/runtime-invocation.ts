@@ -15,39 +15,101 @@ import type {
 } from "./optimization-receipt";
 import {
 	applyPresentationPolicy,
+	formatToolCatalogSummary,
 	resolveWorkflowPresentation,
+	toolSchemaLocator,
 	type WorkflowPresentationPolicy,
 } from "./presentation-policy";
 import { assemblePrompt, type PromptAssemblyReceiptV1 } from "./prompt-assembly";
-import { applyPromptStrategy } from "./prompt-strategy";
+import { applyPromptStrategy, buildStablePromptSections } from "./prompt-strategy";
 import { enhanceSchemaForProfile, type ToolDescriptor, transformToolsForProfile } from "./schema-enhancer";
 import { applyContextStrategyEviction } from "./tool-optimization";
 import { processToolOutputDetailed } from "./tool-output-manager";
 import { isReadonlyWorkflowRole, ToolPolicyFactory, wrapSessionForWorkflowRole } from "./tool-policy";
 import type { ModelProfile, WorkflowAgentRequest, WorkflowIsolationControls } from "./types";
 
-/** Sync artifact adapter for processResult (lossy tool output recovery). */
+/** Sanitize tool name for the middle segment of `${id}.${tool}.log`. */
+function sanitizeArtifactToolName(toolName: string): string {
+	return toolName.replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 64) || "tool";
+}
+
+/** True when any file in `dir` already claims this numeric artifact id. */
+function artifactIdTaken(dir: string, id: string): boolean {
+	try {
+		return fs.readdirSync(dir).some(f => f.startsWith(`${id}.`));
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Highest numeric id among `N.*.log` files, or -1 when dir is empty/missing.
+ * Mirrors ArtifactManager.#scanExistingIds so fallback ids share the same space.
+ */
+function maxExistingArtifactId(dir: string): number {
+	try {
+		let maxId = -1;
+		for (const file of fs.readdirSync(dir)) {
+			const match = file.match(/^(\d+)\..*\.log$/);
+			if (!match) continue;
+			const id = Number.parseInt(match[1], 10);
+			if (id > maxId) maxId = id;
+		}
+		return maxId;
+	} catch {
+		return -1;
+	}
+}
+
+/**
+ * Allocate a free numeric artifact id without racing resume-session files.
+ *
+ * When a manager is present: advance allocateId() past any on-disk ids so bare
+ * counters left at 0 after resume cannot clobber `0.*.log` (Blocker 1).
+ * Without a manager: disk max+1 — always numeric so artifact:// can resolve (Blocker 2).
+ */
+function allocateFreeArtifactId(dir: string, manager?: { allocateId(): number }): string {
+	if (manager) {
+		// ponytail: linear skip of taken ids; switch to exclusive alloc if id space thrash matters
+		for (let n = 0; n < 100_000; n++) {
+			const id = String(manager.allocateId());
+			if (!artifactIdTaken(dir, id)) return id;
+		}
+		throw new Error("artifact id space exhausted");
+	}
+	return String(maxExistingArtifactId(dir) + 1);
+}
+
+/**
+ * Sync artifact adapter for processResult (lossy tool output recovery).
+ * processToolOutputDetailed only honors sync saveRaw returns (Promise is ignored),
+ * so we stay sync: readdirSync + exclusive create, never invent non-numeric ids.
+ */
 function createSessionArtifactAdapter(session: ToolSession): ToolOutputArtifactAdapter {
 	return {
 		saveRaw: (toolName: string, fullText: string): string | undefined => {
 			try {
 				const manager = session.getArtifactManager?.();
-				if (manager) {
-					const id = String(manager.allocateId());
-					const safe = toolName.replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 64) || "tool";
-					const filePath = path.join(manager.dir, `${id}.${safe}.log`);
-					fs.mkdirSync(manager.dir, { recursive: true });
-					fs.writeFileSync(filePath, fullText, "utf-8");
-					return id;
-				}
-				const dir = session.getArtifactsDir?.();
+				const dir = manager?.dir ?? session.getArtifactsDir?.() ?? undefined;
 				if (!dir) return undefined;
-				const id = `wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-				const safe = toolName.replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 64) || "tool";
-				const filePath = path.join(dir, `${id}.${safe}.log`);
+
+				const safe = sanitizeArtifactToolName(toolName);
 				fs.mkdirSync(dir, { recursive: true });
-				fs.writeFileSync(filePath, fullText, "utf-8");
-				return id;
+
+				// wx + retry: exclusive create so concurrent/fallback alloc never overwrites.
+				for (let attempt = 0; attempt < 32; attempt++) {
+					const id = allocateFreeArtifactId(dir, manager ?? undefined);
+					const filePath = path.join(dir, `${id}.${safe}.log`);
+					try {
+						fs.writeFileSync(filePath, fullText, { encoding: "utf-8", flag: "wx" });
+						return id;
+					} catch (err) {
+						const code = (err as NodeJS.ErrnoException).code;
+						if (code === "EEXIST") continue;
+						throw err;
+					}
+				}
+				return undefined;
 			} catch {
 				return undefined;
 			}
@@ -63,6 +125,41 @@ export const WORKFLOW_PROMPTS: Readonly<Record<string, string>> = {
 	"code-reviewer": codeReviewerPrompt,
 	repair: repairPrompt,
 };
+
+/**
+ * Split a prepared context blob into dynamic assembly sections without inventing content.
+ * Recognizes optional markdown markers for repo-map and history; everything else is handoff.
+ * Missing markers leave those sections empty (skipped by assemblePrompt).
+ */
+export function splitDynamicContextSections(context: string): {
+	repoMap: string;
+	history: string;
+	handoff: string;
+} {
+	const text = context.trim();
+	if (!text) return { repoMap: "", history: "", handoff: "" };
+
+	// Prefer explicit section headers when stages inject them; otherwise whole body is handoff.
+	const repoMapRe = /(?:^|\n)(##\s*Repo(?:\s*map)?\b[^\n]*\n[\s\S]*?)(?=\n##\s|\s*$)/i;
+	const historyRe = /(?:^|\n)(##\s*(?:Conversation\s*)?History\b[^\n]*\n[\s\S]*?)(?=\n##\s|\s*$)/i;
+
+	let repoMap = "";
+	let history = "";
+	let remainder = text;
+
+	const repoMatch = remainder.match(repoMapRe);
+	if (repoMatch?.[1]) {
+		repoMap = repoMatch[1].trim();
+		remainder = remainder.replace(repoMatch[0], "\n").trim();
+	}
+	const historyMatch = remainder.match(historyRe);
+	if (historyMatch?.[1]) {
+		history = historyMatch[1].trim();
+		remainder = remainder.replace(historyMatch[0], "\n").trim();
+	}
+
+	return { repoMap, history, handoff: remainder };
+}
 
 /**
  * Inject static role prompt into the request sent to the runner.
@@ -176,31 +273,30 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 
 	const enhancedSchema = enhanceSchemaForProfile(request.outputSchema, request.profile);
 
-	const injected = injectWorkflowPrompt(
-		request.profile.promptTemplate,
-		request.assignment,
-		request.context,
-		request.profile,
-		request.role,
-		enhancedSchema,
-	);
+	// Stable style + role (no assignment / stage handoff) for cache-friendly prefix.
+	const rolePromptBody = WORKFLOW_PROMPTS[request.profile.promptTemplate]?.trim() ?? "";
+	const stableParts = buildStablePromptSections({
+		profile: request.profile,
+		role: request.role,
+		rolePrompt: rolePromptBody,
+		outputSchema: enhancedSchema,
+	});
+	const styleMarker = stableParts.styleMarker;
+
+	// Dynamic-only body: stage handoff / repo notes from the request — never re-inject style or role.
 	const maxBytes = request.profile.contextPolicy?.maxArtifactBytes ?? Number.POSITIVE_INFINITY;
-	let context = injected.context;
+	let dynamicContext = request.context?.trim() ?? "";
 	const outputPrefix = request.profile.outputStrategy?.outputPrefixPrompt?.trim();
-	if (outputPrefix && context) {
-		context = `${context.trim()}\n\n${outputPrefix}`;
-	} else if (outputPrefix) {
-		context = outputPrefix;
-	}
-	if (context && context.length > maxBytes) {
-		context = `${context.slice(0, Math.max(0, maxBytes - 32))}\n/* truncated by contextPolicy */`;
+	// outputPrefix is profile-stable but short; keep it with role policy rather than dynamic body.
+	const rolePolicyWithPrefix = [stableParts.rolePolicy, outputPrefix].filter(Boolean).join("\n\n");
+	if (dynamicContext && dynamicContext.length > maxBytes) {
+		dynamicContext = `${dynamicContext.slice(0, Math.max(0, maxBytes - 32))}\n/* truncated by contextPolicy */`;
 	}
 
-	// Optional repo-map / contextStrategy artifact cap is applied when contextStrategy is present
-	// and context already includes a map (stages may inject via ContextBuilder).
+	// Optional repo-map / contextStrategy artifact cap on dynamic handoff only.
 	const strategyMax = request.profile.contextStrategy?.artifactInclusion?.maxArtifactBytes;
-	if (strategyMax && context && context.length > strategyMax) {
-		context = `${context.slice(0, Math.max(0, strategyMax - 32))}\n/* truncated by contextStrategy */`;
+	if (strategyMax && dynamicContext && dynamicContext.length > strategyMax) {
+		dynamicContext = `${dynamicContext.slice(0, Math.max(0, strategyMax - 32))}\n/* truncated by contextStrategy */`;
 	}
 
 	// CWL-style eviction under utilization pressure (production call site for evictContext).
@@ -208,7 +304,7 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 		request.profile.contextStrategy?.artifactInclusion?.maxArtifactBytes ??
 		request.profile.contextPolicy?.maxArtifactBytes ??
 		maxBytes;
-	context = applyContextStrategyEviction(context, request.profile.contextStrategy, evictionBudget);
+	dynamicContext = applyContextStrategyEviction(dynamicContext, request.profile.contextStrategy, evictionBudget) ?? "";
 
 	let session = wrapSessionForWorkflowRole(request.session, request.role);
 	session = wrapSessionForWorkflowIsolation(session, isolationRequested);
@@ -229,25 +325,79 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 	const disabled = new Set(request.profile.disabledTools ?? []);
 	let effectiveTools = allowedTools && disabled.size > 0 ? allowedTools.filter(t => !disabled.has(t)) : allowedTools;
 
+	// Settings gate: workflow.presentationOptimization.enabled (default false).
+	// When true, catalog mode can enable without hand-editing every profile.
+	const settingsEnabled =
+		request.session.settings?.get?.("workflow.presentationOptimization.enabled" as never) === true;
+
 	// Gated presentation policy (default: direct / disabled). Restricted children never
 	// discover tools outside the role allowlist — presentation further narrows the surface.
-	const presentationPolicy = resolveWorkflowPresentation(request.profile.presentationPolicy);
+	const presentationPolicy = resolveWorkflowPresentation(request.profile.presentationPolicy, {
+		settingsEnabled,
+	});
+
+	// Skill catalog: only when presentation optimization is enabled.
+	// Feature-off must not read/inline skill bodies into skill_catalog (default path stays lean).
+	// Feature-on: autoload skills get full body in the prompt; others get name+desc+xd://skills locator;
+	// readable bodies land in presentationSkillBodies for one-hop xd://skills expand.
+	const sessionSkills = (
+		request.session as {
+			skills?: Array<{ name: string; description?: string; filePath?: string; content?: string }>;
+		}
+	).skills;
+	const autoloadSet = new Set(presentationPolicy.autoloadSkills);
+	const presentationSkillBodies = new Map<string, string>();
+	const skillInputs =
+		sessionSkills?.map(s => {
+			const isAutoload = autoloadSet.has(s.name);
+			let body: string | undefined;
+			if (presentationPolicy.enabled) {
+				// Prefer in-memory content; otherwise load SKILL.md for autoload / expand catalog.
+				body = typeof s.content === "string" && s.content.length > 0 ? s.content : undefined;
+				if (!body && typeof s.filePath === "string" && s.filePath.length > 0) {
+					try {
+						if (fs.existsSync(s.filePath)) {
+							body = fs.readFileSync(s.filePath, "utf-8");
+						}
+					} catch {
+						body = undefined;
+					}
+				}
+				if (body !== undefined) presentationSkillBodies.set(s.name, body);
+			}
+			return {
+				name: s.name,
+				summary: s.description?.trim() || s.name,
+				// Body only supplied when feature is on; policy decides surface vs expand-map only.
+				body,
+				autoload: isAutoload,
+			};
+		}) ?? [];
+
+	let presentedSkillsText = "";
 	if (effectiveTools) {
 		const presented = applyPresentationPolicy({
 			policy: presentationPolicy,
 			allowedToolNames: effectiveTools,
 			tools: effectiveTools.map(name => ({ name, summary: name })),
+			skills: skillInputs,
 			role: request.role,
 		});
 		// Catalog mode still lists non-essential tools (with locators); hard filter only drops
 		// tools outside the allowlist. Keep presented.toolOrder as the prepared allowlist.
 		effectiveTools = presented.toolOrder;
+		presentedSkillsText = presented.skillPresentationText;
+		// Ensure presented autoload bodies are registered for expand even if file load failed earlier.
+		for (const sk of presented.skills) {
+			if (sk.body) presentationSkillBodies.set(sk.name, sk.body);
+		}
 	}
 
 	const toolStrategy = request.profile.toolStrategy;
 	// Shared mutable log — live bash/read/grep processResult appends here.
 	const optimizationReceipts: ToolOptimizationReceiptV1[] = [];
 	const artifactAdapter = createSessionArtifactAdapter(session);
+	const presentationToolSchemas = new Map<string, unknown>();
 
 	const processToolResultDetailed = (
 		toolName: string,
@@ -269,21 +419,35 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 
 	const transformTools = (tools: ToolDescriptor[]) => {
 		const aliased = transformToolsForProfile(tools, request.profile);
-		if (!presentationPolicy.enabled || presentationPolicy.mode !== "catalog") return aliased;
+		// Always capture full schemas for expand (even in direct mode — no harm).
+		for (const t of aliased) {
+			if (t.schema !== undefined) presentationToolSchemas.set(t.name, t.schema);
+		}
+		if (!presentationPolicy.enabled || presentationPolicy.mode !== "catalog") {
+			// Direct: stable name order, full schemas retained.
+			return [...aliased].sort((a, b) => a.name.localeCompare(b.name));
+		}
 		const essential = new Set(presentationPolicy.essentialTools);
 		const allow = effectiveTools ? new Set(effectiveTools) : null;
-		return aliased
-			.filter(t => !allow || allow.has(t.name))
-			.map(t => {
-				if (essential.has(t.name) || t.essential === true) return t;
-				// Catalog: drop full schema; keep name + short description + locator.
-				const { schema: _schema, ...rest } = t;
-				return {
-					...rest,
-					description: t.description ?? t.name,
-					schemaLocator: `xd://tools/${t.name}`,
-				} as ToolDescriptor;
-			});
+		return (
+			aliased
+				// Never drop yield: structured children require it to terminate even when
+				// the role allowlist was authored without an explicit yield entry.
+				.filter(t => t.name === "yield" || !allow || allow.has(t.name))
+				.map(t => {
+					if (t.name === "yield" || essential.has(t.name) || t.essential === true) return t;
+					// Catalog: drop full schema; keep name + short description + locator.
+					const { schema: _schema, ...rest } = t;
+					const oneLine = t.description ?? t.name;
+					const locator = toolSchemaLocator(t.name);
+					return {
+						...rest,
+						description: formatToolCatalogSummary(t.name, oneLine),
+						schemaLocator: locator,
+					} as ToolDescriptor;
+				})
+				.sort((a, b) => a.name.localeCompare(b.name))
+		);
 	};
 
 	const toolAliases = {
@@ -295,30 +459,47 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 		...(request.profile.argumentAliases ?? {}),
 	};
 
-	// Prompt assembly receipt on the real prepared path (stable prefix vs dynamic handoff).
-	const rolePromptBody = WORKFLOW_PROMPTS[request.profile.promptTemplate]?.trim() ?? "";
-	const toolPresentationText = (effectiveTools ?? ["*"]).join(",");
+	// Prompt assembly on the real prepared path (stable prefix vs dynamic handoff).
+	// Fixed order: system → role/policy → tools → skills | assignment → repo-map → handoff → history.
+	// Unstable runtime ids (workflowId, attemptId), wall-clock, and live budget stay out of sections.
+	// Stable tool presentation: name-sorted comma list (presentation policy already ordered tools).
+	const toolNames = [...(effectiveTools ?? ["*"])].sort((a, b) => a.localeCompare(b));
+	const toolPresentationText = toolNames.join(",");
+	// Split dynamic-only body: style/role must NOT appear here (they live in stable sections only).
+	const { repoMap, history, handoff: handoffRaw } = splitDynamicContextSections(dynamicContext);
+	const handoff = handoffRaw && !/^##\s/m.test(handoffRaw.trimStart()) ? `## Context\n${handoffRaw}` : handoffRaw;
 	const assembled = assemblePrompt({
 		sections: [
 			{
 				id: "system_static",
-				content: injected.styleMarker ? `style:${injected.styleMarker}` : "",
+				// Full style template body (stable vars only) — not a tiny marker.
+				content: stableParts.systemStatic,
 				stable: true,
 			},
-			{ id: "role_policy", content: rolePromptBody, stable: true },
+			{ id: "role_policy", content: rolePolicyWithPrefix, stable: true },
 			{ id: "tool_presentation", content: toolPresentationText, stable: true },
-			{ id: "assignment", content: injected.assignment, stable: false },
-			{ id: "handoff", content: context ?? "", stable: false },
+			{ id: "skill_catalog", content: presentedSkillsText, stable: true },
+			{ id: "assignment", content: request.assignment, stable: false },
+			{ id: "repo_map", content: repoMap, stable: false },
+			{ id: "handoff", content: handoff, stable: false },
+			{ id: "history", content: history, stable: false },
 		],
 		// Provider cache counters not available at prepare time — never invent zeros.
+		// RuntimeAdapter merges usage.cacheRead/cacheWrite after the model responds.
 		cacheObservable: false,
 	});
 
 	// remainingToolCalls is a hard agent-loop execution budget (skip after N calls).
 	// Do NOT map contextStrategy.toolHistory.maxToolCalls here — that field only
 	// tightens eviction keepRecentN via withToolHistoryEviction (default 5–15).
-	// Hard budget stays null (unlimited) unless an explicit stage budget is added later.
-	const remainingToolCalls: number | null = null;
+	// Prefer explicit toolStrategy.remainingToolCalls; otherwise unlimited (null).
+	const remainingToolCalls: number | null =
+		typeof toolStrategy?.remainingToolCalls === "number" ? toolStrategy.remainingToolCalls : null;
+	const remainingStageTimeMs: number | null =
+		typeof toolStrategy?.remainingStageTimeMs === "number" ? toolStrategy.remainingStageTimeMs : null;
+	// Only set conflict mode when scheduling is opted in via maxConcurrent / budget /
+	// explicit mode — avoid forcing toolScheduling on every structured subagent.
+	const resourceConflictMode = toolStrategy?.resourceConflictMode;
 
 	const workflowToolOptimization: WorkflowToolOptimization = {
 		processResult: processToolResult,
@@ -326,16 +507,20 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 		argumentAliases: Object.keys(argumentAliases).length > 0 ? argumentAliases : undefined,
 		maxConcurrentTools: toolStrategy?.maxConcurrentTools,
 		remainingToolCalls,
-		resourceConflictMode: "conservative",
+		remainingStageTimeMs,
+		resourceConflictMode: resourceConflictMode ?? "serialize",
 		transformTools,
 		optimizationReceipts,
+		presentationAllowedTools: effectiveTools ? [...effectiveTools] : undefined,
+		presentationToolSchemas,
+		presentationSkillBodies,
 	};
 
 	// Always install optimization on the session so bash/read/grep honor processResult
 	// and customWireName on the real tool path (not only via PreparedWorkflowInvocation helpers).
 	// Runner-facing context is the assembled prompt (stable prefix + dynamic handoff),
 	// then clamped by contextPolicy.maxArtifactBytes so pre-P2 budget contracts hold.
-	let assembledContext = assembled.text || context || "";
+	let assembledContext = assembled.text || dynamicContext || "";
 	if (assembledContext.length > maxBytes) {
 		assembledContext = `${assembledContext.slice(0, Math.max(0, maxBytes - 32))}\n/* truncated by contextPolicy */`;
 	}
@@ -352,14 +537,14 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 
 	return {
 		request,
-		assignment: injected.assignment,
+		assignment: request.assignment,
 		context: assembledContext,
 		readonly: readonlyRole,
 		isolation,
 		isolationRequested,
 		allowedTools: effectiveTools ? [...effectiveTools] : undefined,
 		session,
-		styleMarker: injected.styleMarker,
+		styleMarker,
 		outputSchema: enhancedSchema,
 		processToolResult,
 		processToolResultDetailed,

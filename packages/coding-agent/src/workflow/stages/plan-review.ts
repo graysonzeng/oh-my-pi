@@ -3,7 +3,7 @@ import type { ToolSession } from "../../tools";
 import { ReviewArtifactJsonSchema } from "../json-schemas";
 import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { ReviewArtifactSchema } from "../schemas";
-import type { ModelProfile, ReviewArtifactV1, RuntimePort } from "../types";
+import type { ModelProfile, PromptAssemblyReceiptV1, ReviewArtifactV1, RuntimePort } from "../types";
 
 export interface PlanReviewStageInput {
 	workflowId: string;
@@ -18,7 +18,7 @@ export interface PlanReviewStageInput {
 export interface PlanReviewStageResult {
 	artifact: ReviewArtifactV1;
 	usage?: Usage;
-	promptAssemblyReceipt?: unknown;
+	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	optimizationReceipts?: unknown[];
 }
 

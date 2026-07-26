@@ -68,5 +68,9 @@ export function buildWorkflowConfigFromSessionSettings(
 		verificationTimeoutMs: asNumber("workflow.verificationTimeoutMs", defaults.verificationTimeoutMs),
 		verificationCommands: asStringArray("workflow.verificationCommands", defaults.verificationCommands),
 		profiles: resolveWorkflowProfilesFromSettings(get("workflow.profiles"), defaults.profiles),
+		presentationOptimizationEnabled: asBool(
+			"workflow.presentationOptimization.enabled",
+			defaults.presentationOptimizationEnabled,
+		),
 	};
 }

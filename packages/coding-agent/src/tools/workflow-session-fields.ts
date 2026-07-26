@@ -20,8 +20,13 @@ export type WorkflowToolOptimization = {
 	 * null/undefined = unlimited. Forwarded to Agent.toolScheduling.
 	 */
 	remainingToolCalls?: number | null;
-	/** Resource conflict mode for concurrent tools. Default conservative. */
-	resourceConflictMode?: "conservative" | "permissive";
+	/** Remaining stage wall time ms; forwarded when set. */
+	remainingStageTimeMs?: number | null;
+	/**
+	 * Resource conflict mode for concurrent tools.
+	 * serialize/conservative (default), fail, or permissive.
+	 */
+	resourceConflictMode?: "serialize" | "fail" | "conservative" | "permissive";
 	/**
 	 * Catalog / alias transform applied to model-visible tool descriptors.
 	 * Production runner and createAgentSession consume this.
@@ -34,6 +39,21 @@ export type WorkflowToolOptimization = {
 	optimizationReceipts?: ToolOptimizationReceiptV1[];
 	/** Last receipt (if any) for quick access without scanning the log. */
 	lastOptimizationReceipt?: ToolOptimizationReceiptV1;
+	/**
+	 * Role allowlist used by catalog presentation expand (`xd://tools/{name}`).
+	 * Expand refuses tools not in this set — catalog never elevates privileges.
+	 */
+	presentationAllowedTools?: readonly string[];
+	/**
+	 * Full tool schemas captured before catalog stubbing, keyed by tool name.
+	 * Used by one-hop `xd://tools/{name}` expand on the real path.
+	 */
+	presentationToolSchemas?: Map<string, unknown>;
+	/**
+	 * Full skill bodies for catalog-only presentation, keyed by skill name.
+	 * Used by one-hop `xd://skills/{name}` expand when bodies are omitted from the prompt.
+	 */
+	presentationSkillBodies?: Map<string, string>;
 };
 
 /** Optional durable attempt evidence attached on prepared workflow sessions. */

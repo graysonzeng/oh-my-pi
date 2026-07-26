@@ -32,7 +32,7 @@ import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/type
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
 import { WorkflowEngine } from "../workflow/engine";
-import { createDefaultRuntimeAdapter } from "../workflow/runtime-default";
+import { createDefaultAvailabilityPort, createDefaultRuntimeAdapter } from "../workflow/runtime-default";
 import { buildWorkflowConfigFromSessionSettings } from "../workflow/session-config";
 import { WorkflowStore } from "../workflow/sqlite-store";
 import { WorkflowTool } from "../workflow/workflow-tool";
@@ -403,6 +403,7 @@ function createEngineFromSessionSettings(session: ToolSession): WorkflowEngine {
 		ownsStore: true,
 		session,
 		adapter: createDefaultRuntimeAdapter(),
+		availability: createDefaultAvailabilityPort(),
 		config: buildWorkflowConfigFromSessionSettings(raw),
 	});
 }

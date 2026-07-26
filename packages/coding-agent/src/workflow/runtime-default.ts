@@ -8,7 +8,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { runStructuredSubagent } from "../task/structured-subagent";
 import { defaultWorkflowArtifactDir } from "./artifact-store";
+import { EmbeddedWorkflowAvailabilityPort } from "./availability-adapter";
 import { RuntimeAdapter, type StructuredRunner, type StructuredRunnerRequest } from "./runtime-adapter";
+import type { WorkflowAvailabilityPort } from "./types";
 
 async function preservePatchArtifact(
 	patchPath: string | undefined,
@@ -43,6 +45,7 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 						argumentAliases: baseOpt?.argumentAliases,
 						maxConcurrentTools: baseOpt?.maxConcurrentTools,
 						remainingToolCalls: baseOpt?.remainingToolCalls,
+						remainingStageTimeMs: baseOpt?.remainingStageTimeMs,
 						resourceConflictMode: baseOpt?.resourceConflictMode,
 						transformTools: request.transformTools ?? baseOpt?.transformTools,
 						optimizationReceipts: baseOpt?.optimizationReceipts,
@@ -107,4 +110,14 @@ export interface DefaultRuntimeDependencies {
 export function createDefaultRuntimeAdapter(dependencies: DefaultRuntimeDependencies = {}): RuntimeAdapter {
 	const embeddedRunner = dependencies.embeddedRunner ?? productionRunner;
 	return new RuntimeAdapter(embeddedRunner);
+}
+
+/**
+ * Dedicated availability probe port (not RuntimePort.run).
+ * Shares the same embedded runner as the production adapter.
+ */
+export function createDefaultAvailabilityPort(
+	_dependencies: DefaultRuntimeDependencies = {},
+): WorkflowAvailabilityPort {
+	return new EmbeddedWorkflowAvailabilityPort();
 }

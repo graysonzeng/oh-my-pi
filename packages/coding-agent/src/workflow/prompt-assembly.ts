@@ -1,6 +1,12 @@
 /**
  * Cache-friendly stable prompt prefix assembly + receipt.
- * Dynamic IDs / timestamps / budget must not enter the stable prefix.
+ *
+ * Stable (fixed order): system_static → role_policy → tool_presentation → skill_catalog
+ * Dynamic (fixed order): assignment → repo_map → handoff → history
+ *
+ * Workflow ID, attempt ID, wall-clock timestamps, and real-time budget hints must not
+ * enter the stable prefix. Hash equality of the stable prefix is NOT proof of a provider
+ * prompt-cache hit — SSOT for cache hits is provider-reported usage counters only.
  */
 
 import { sha256Hex } from "./optimization-receipt";
@@ -26,6 +32,14 @@ export interface PromptSection {
 	stable: boolean;
 }
 
+/**
+ * Durable receipt for one prompt assembly.
+ *
+ * `cacheReadTokens` / `cacheWriteTokens` hold provider-reported cache counters when
+ * observable (null when unknown — never invent zeros). Design-doc aliases
+ * `providerCacheReadTokens` / `providerCacheWriteTokens` are optional mirrors set only
+ * when cache is observable so consumers can read either name.
+ */
 export interface PromptAssemblyReceiptV1 {
 	schemaVersion: typeof PROMPT_ASSEMBLY_RECEIPT_VERSION;
 	kind: typeof PROMPT_ASSEMBLY_RECEIPT_KIND;
@@ -37,12 +51,16 @@ export interface PromptAssemblyReceiptV1 {
 	totalBytes: number;
 	/**
 	 * Provider cache counters when observable; null when provider does not expose them.
-	 * Never invent zeros.
+	 * Never invent zeros when unobservable.
 	 */
 	cacheReadTokens: number | null;
 	cacheWriteTokens: number | null;
 	/** Explicit observability flag — false means treat cache* as unknown. */
 	cacheObservable: boolean;
+	/** Alias of cacheReadTokens when observable (design-doc field name). */
+	providerCacheReadTokens?: number | null;
+	/** Alias of cacheWriteTokens when observable (design-doc field name). */
+	providerCacheWriteTokens?: number | null;
 }
 
 export interface AssemblePromptInput {
@@ -61,11 +79,63 @@ export interface AssembledPrompt {
 	receipt: PromptAssemblyReceiptV1;
 }
 
-const STABLE_ORDER: PromptSectionId[] = ["system_static", "role_policy", "tool_presentation", "skill_catalog"];
-const DYNAMIC_ORDER: PromptSectionId[] = ["assignment", "repo_map", "handoff", "history"];
+/** Provider usage shapes that may carry cache counters (pi-ai Usage + raw Anthropic-style). */
+export type ProviderCacheUsageLike = {
+	cacheRead?: number | null;
+	cacheWrite?: number | null;
+	cache_read_input_tokens?: number | null;
+	cache_creation_input_tokens?: number | null;
+	providerCacheReadTokens?: number | null;
+	providerCacheWriteTokens?: number | null;
+};
+
+export const STABLE_SECTION_ORDER: readonly PromptSectionId[] = [
+	"system_static",
+	"role_policy",
+	"tool_presentation",
+	"skill_catalog",
+] as const;
+
+export const DYNAMIC_SECTION_ORDER: readonly PromptSectionId[] = [
+	"assignment",
+	"repo_map",
+	"handoff",
+	"history",
+] as const;
+
+const STABLE_ORDER = STABLE_SECTION_ORDER;
+const DYNAMIC_ORDER = DYNAMIC_SECTION_ORDER;
+
+function buildReceiptFields(
+	sectionOrder: PromptSectionId[],
+	stablePrefix: string,
+	dynamicSuffix: string,
+	text: string,
+	cache: { cacheReadTokens: number | null; cacheWriteTokens: number | null; cacheObservable: boolean },
+): PromptAssemblyReceiptV1 {
+	const receipt: PromptAssemblyReceiptV1 = {
+		schemaVersion: PROMPT_ASSEMBLY_RECEIPT_VERSION,
+		kind: PROMPT_ASSEMBLY_RECEIPT_KIND,
+		sectionOrder,
+		stableSha256: sha256Hex(stablePrefix),
+		dynamicSha256: sha256Hex(dynamicSuffix),
+		stableBytes: Buffer.byteLength(stablePrefix, "utf-8"),
+		dynamicBytes: Buffer.byteLength(dynamicSuffix, "utf-8"),
+		totalBytes: Buffer.byteLength(text, "utf-8"),
+		cacheReadTokens: cache.cacheObservable ? cache.cacheReadTokens : null,
+		cacheWriteTokens: cache.cacheObservable ? cache.cacheWriteTokens : null,
+		cacheObservable: cache.cacheObservable,
+	};
+	if (cache.cacheObservable) {
+		receipt.providerCacheReadTokens = cache.cacheReadTokens;
+		receipt.providerCacheWriteTokens = cache.cacheWriteTokens;
+	}
+	return receipt;
+}
 
 /**
  * Assemble prompt with fixed section order.
+ * Empty optional sections are skipped without reordering survivors.
  * Stable: static system → role/policy → tool presentation → skill catalog.
  * Dynamic: assignment → repo-map → handoff → history.
  */
@@ -93,21 +163,73 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 	const text = [stablePrefix, dynamicSuffix].filter(Boolean).join("\n\n");
 
 	const cacheObservable = input.cacheObservable === true;
-	const receipt: PromptAssemblyReceiptV1 = {
-		schemaVersion: PROMPT_ASSEMBLY_RECEIPT_VERSION,
-		kind: PROMPT_ASSEMBLY_RECEIPT_KIND,
-		sectionOrder,
-		stableSha256: sha256Hex(stablePrefix),
-		dynamicSha256: sha256Hex(dynamicSuffix),
-		stableBytes: Buffer.byteLength(stablePrefix, "utf-8"),
-		dynamicBytes: Buffer.byteLength(dynamicSuffix, "utf-8"),
-		totalBytes: Buffer.byteLength(text, "utf-8"),
+	const receipt = buildReceiptFields(sectionOrder, stablePrefix, dynamicSuffix, text, {
+		cacheObservable,
 		cacheReadTokens: cacheObservable ? (input.cacheReadTokens ?? null) : null,
 		cacheWriteTokens: cacheObservable ? (input.cacheWriteTokens ?? null) : null,
-		cacheObservable,
-	};
+	});
 
 	return { text, stablePrefix, dynamicSuffix, receipt };
+}
+
+/**
+ * Extract provider cache counters from a usage object without inventing zeros.
+ * Observable only when at least one known cache field is present as a finite number.
+ * Missing / non-object usage → unobservable (nulls).
+ */
+export function extractProviderCacheMetrics(usage: unknown): {
+	cacheReadTokens: number | null;
+	cacheWriteTokens: number | null;
+	cacheObservable: boolean;
+} {
+	if (usage === null || usage === undefined || typeof usage !== "object") {
+		return { cacheReadTokens: null, cacheWriteTokens: null, cacheObservable: false };
+	}
+	const u = usage as ProviderCacheUsageLike;
+	const readRaw = u.cacheRead ?? u.cache_read_input_tokens ?? u.providerCacheReadTokens ?? undefined;
+	const writeRaw = u.cacheWrite ?? u.cache_creation_input_tokens ?? u.providerCacheWriteTokens ?? undefined;
+
+	const hasRead = typeof readRaw === "number" && Number.isFinite(readRaw);
+	const hasWrite = typeof writeRaw === "number" && Number.isFinite(writeRaw);
+	if (!hasRead && !hasWrite) {
+		return { cacheReadTokens: null, cacheWriteTokens: null, cacheObservable: false };
+	}
+	return {
+		cacheReadTokens: hasRead ? (readRaw as number) : null,
+		cacheWriteTokens: hasWrite ? (writeRaw as number) : null,
+		cacheObservable: true,
+	};
+}
+
+/**
+ * Attach provider-reported cache counters onto an existing assembly receipt.
+ * Prepare-time receipts start unobservable; call this after a real usage object exists.
+ * Does not invent zeros when usage has no cache fields.
+ */
+export function withProviderCacheMetrics(receipt: PromptAssemblyReceiptV1, usage: unknown): PromptAssemblyReceiptV1 {
+	const metrics = extractProviderCacheMetrics(usage);
+	if (!metrics.cacheObservable) {
+		// Preserve existing observability if already set; otherwise keep nulls.
+		if (!receipt.cacheObservable) {
+			return {
+				...receipt,
+				cacheReadTokens: null,
+				cacheWriteTokens: null,
+				cacheObservable: false,
+				providerCacheReadTokens: undefined,
+				providerCacheWriteTokens: undefined,
+			};
+		}
+		return receipt;
+	}
+	return {
+		...receipt,
+		cacheReadTokens: metrics.cacheReadTokens,
+		cacheWriteTokens: metrics.cacheWriteTokens,
+		cacheObservable: true,
+		providerCacheReadTokens: metrics.cacheReadTokens,
+		providerCacheWriteTokens: metrics.cacheWriteTokens,
+	};
 }
 
 /**
@@ -119,11 +241,39 @@ export function cacheMetricsFromReceipt(receipt: PromptAssemblyReceiptV1): {
 	cacheWriteTokens: number | null;
 	cacheObservable: boolean;
 	stableSha256: string;
+	stableBytes: number;
+	dynamicBytes: number;
 } {
 	return {
 		cacheReadTokens: receipt.cacheObservable ? receipt.cacheReadTokens : null,
 		cacheWriteTokens: receipt.cacheObservable ? receipt.cacheWriteTokens : null,
 		cacheObservable: receipt.cacheObservable,
 		stableSha256: receipt.stableSha256,
+		stableBytes: receipt.stableBytes,
+		dynamicBytes: receipt.dynamicBytes,
 	};
+}
+
+/**
+ * Locate UTF-8 byte offsets for each included section in the assembled text.
+ * Useful for tests and analysis of the stable/dynamic boundary.
+ */
+export function sectionByteBoundaries(
+	assembled: AssembledPrompt,
+	sections: PromptSection[],
+): Array<{ id: PromptSectionId; start: number; end: number; bytes: number }> {
+	const byId = new Map(sections.map(s => [s.id, s]));
+	const out: Array<{ id: PromptSectionId; start: number; end: number; bytes: number }> = [];
+	let cursor = 0;
+	let first = true;
+	for (const id of assembled.receipt.sectionOrder) {
+		const s = byId.get(id);
+		if (!s?.content) continue;
+		if (!first) cursor += Buffer.byteLength("\n\n", "utf-8");
+		first = false;
+		const bytes = Buffer.byteLength(s.content, "utf-8");
+		out.push({ id, start: cursor, end: cursor + bytes, bytes });
+		cursor += bytes;
+	}
+	return out;
 }

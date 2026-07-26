@@ -3,7 +3,7 @@ import type { ToolSession } from "../../tools";
 import { PlanArtifactJsonSchema } from "../json-schemas";
 import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { PlanArtifactSchema } from "../schemas";
-import type { ModelProfile, PlanArtifactV1, RuntimePort } from "../types";
+import type { ModelProfile, PlanArtifactV1, PromptAssemblyReceiptV1, RuntimePort } from "../types";
 
 export interface PlanStageInput {
 	workflowId: string;
@@ -18,7 +18,7 @@ export interface PlanStageInput {
 export interface PlanStageResult {
 	artifact: PlanArtifactV1;
 	usage?: Usage;
-	promptAssemblyReceipt?: unknown;
+	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	optimizationReceipts?: unknown[];
 }
 

@@ -1996,6 +1996,10 @@ async function executeToolCalls(
 		stream.push({ type: "message_end", message: toolResultMessage });
 	};
 
+	// Filled once scheduling opts are known; runTool reads this after validation to
+	// commit remainingToolCalls without racing concurrent starts in the same batch.
+	const budgetGateRef: { current: { tryCommit: () => boolean } | null } = { current: null };
+
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
 		if (interruptState.triggered) {
 			// Skip both span emission and the collector orphan record here. The
@@ -2078,9 +2082,13 @@ async function executeToolCalls(
 			return;
 		}
 		// Commit one tool-call from the shared remaining budget (cross-batch).
-		// Budget-skipped tools never reach here; abort-before-start does not consume.
-		if (config.toolScheduling && typeof config.toolScheduling.remainingToolCalls === "number") {
-			config.toolScheduling.remainingToolCalls = Math.max(0, config.toolScheduling.remainingToolCalls - 1);
+		// Abort-before-start does not consume. Exhausted budget → ordered skip result.
+		if (budgetGateRef.current) {
+			if (!budgetGateRef.current.tryCommit()) {
+				record.skipped = true;
+				record.budgetSkipped = true;
+				return;
+			}
 		}
 		record.started = true;
 		stream.push({
@@ -2266,11 +2274,29 @@ async function executeToolCalls(
 	// handshake-safe. Scheduling features must not force-serialize unknown tools.
 	const scheduling = config.toolScheduling;
 	const maxConcurrent = scheduling?.maxConcurrentTools;
-	const conflictMode = scheduling?.resourceConflictMode ?? "conservative";
-	const limiter =
-		scheduling && typeof maxConcurrent === "number" && maxConcurrent > 0 && Number.isFinite(maxConcurrent)
-			? createConcurrencyLimiter(Math.max(1, Math.floor(maxConcurrent)))
+	const conflictMode = normalizeResourceConflictMode(scheduling?.resourceConflictMode);
+	// Effective concurrent cap also respects remaining tool-call budget: when only
+	// N calls remain, at most N tools may run concurrently (and at most N total).
+	const remainingBudgetAtBatch =
+		typeof scheduling?.remainingToolCalls === "number" && scheduling.remainingToolCalls >= 0
+			? scheduling.remainingToolCalls
 			: null;
+	const effectiveMax =
+		scheduling && typeof maxConcurrent === "number" && maxConcurrent > 0 && Number.isFinite(maxConcurrent)
+			? Math.max(1, Math.floor(maxConcurrent))
+			: remainingBudgetAtBatch !== null
+				? Math.max(1, remainingBudgetAtBatch)
+				: null;
+	const cappedMax =
+		effectiveMax !== null && remainingBudgetAtBatch !== null
+			? Math.max(1, Math.min(effectiveMax, Math.max(1, remainingBudgetAtBatch || 1)))
+			: effectiveMax;
+	const limiter =
+		scheduling && cappedMax !== null && remainingBudgetAtBatch !== 0
+			? createConcurrencyLimiter(cappedMax)
+			: scheduling && cappedMax !== null
+				? createConcurrencyLimiter(cappedMax)
+				: null;
 	// Cross-batch budget: remainingToolCalls on the config object is mutated after
 	// each committed start so later batches/stages see the reduced remaining count.
 	// Stage deadline: skip all when remainingStageTimeMs ≤ 0 or absolute deadline passed.
@@ -2284,16 +2310,21 @@ async function executeToolCalls(
 			record.budgetSkipped = true;
 		}
 	}
-	const remainingBudget = scheduling?.remainingToolCalls;
-	if (typeof remainingBudget === "number" && remainingBudget >= 0 && !deadlinePassed) {
-		const canRun = Math.min(records.length, remainingBudget);
-		for (let i = canRun; i < records.length; i++) {
-			const record = records[i]!;
-			record.skipped = true;
-			record.budgetSkipped = true;
-		}
-		// Reserve the slots we plan to start; commit happens on start below.
-		// Over-budget slots are not reserved.
+	// Budget gate: permanent consume on start; unstarted tools never reserve.
+	// Pipeline: tools wait on the concurrency limiter and only start while
+	// remainingToolCalls > 0; when remaining is 0 at start attempt → budget skip.
+	// (Do not pre-skip the whole tail at plan time so abort of a not-yet-started
+	// tool cannot "leak" a reserved slot that was never held.)
+	if (scheduling && typeof scheduling.remainingToolCalls === "number" && !deadlinePassed) {
+		budgetGateRef.current = createToolCallBudgetGate(
+			() => {
+				const n = scheduling.remainingToolCalls;
+				return typeof n === "number" ? n : null;
+			},
+			next => {
+				scheduling.remainingToolCalls = next;
+			},
+		);
 	}
 
 	type ResourceClaim = { paths: string[]; access: "read" | "write" | "unknown"; exclusive?: boolean };
@@ -2331,13 +2362,18 @@ async function executeToolCalls(
 		}
 
 		// Resource conflict only when toolScheduling is opted in.
+		let conflictFail = false;
 		if (claims) {
 			const claim = claims[index]!;
 			let forceExclusive = claim.exclusive === true;
 			if (!forceExclusive && concurrency === "shared") {
 				for (let j = 0; j < index; j++) {
-					if (records[j]?.skipped) continue;
+					if (records[j]?.skipped || records[j]?.budgetSkipped) continue;
 					if (resourceClaimsConflict(claims[j]!, claim, conflictMode)) {
+						if (conflictMode === "fail") {
+							conflictFail = true;
+							break;
+						}
 						forceExclusive = true;
 						break;
 					}
@@ -2346,10 +2382,53 @@ async function executeToolCalls(
 			if (forceExclusive) concurrency = "exclusive";
 		}
 
+		if (conflictFail) {
+			record.skipped = true;
+			record.budgetSkipped = false;
+			const failTask = (async () => {
+				emitToolResult(
+					record,
+					{
+						content: [
+							{
+								type: "text" as const,
+								text: "Skipped: resource conflict with an earlier tool call in this batch",
+							},
+						],
+						details: {},
+					},
+					true,
+				);
+			})();
+			tasks.push(failTask);
+			// Conflict-failed tools do not take exclusive barriers or limiter slots.
+			continue;
+		}
+
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
 		const task = start.then(async () => {
+			// Acquire concurrency slot first; abort while waiting releases via finally
+			// (no budget reservation is held while queued — only committed on start).
 			const release = limiter ? await limiter.acquire() : () => {};
 			try {
+				if (record.signal.aborted) {
+					// Steering/IRC abort: do not emit here. Mirror runTool's early
+					// return so the tail sweep is the single path for
+					// createSkippedToolResult wording + recordSkippedTool once.
+					if (interruptState.triggered) {
+						record.skipped = true;
+						return;
+					}
+					// True external abort / user cancel — generic aborted wording.
+					record.skipped = true;
+					recordSkippedTool(telemetry, {
+						toolCallId: record.toolCall.id,
+						toolName: record.toolCall.name,
+						status: "aborted",
+					});
+					emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
+					return;
+				}
 				await runTool(record, index);
 			} finally {
 				release();
@@ -2419,36 +2498,79 @@ async function executeToolCalls(
 }
 
 /** Semaphore for max concurrent shared tools within one batch. */
-function createConcurrencyLimiter(max: number): { acquire: () => Promise<() => void> } {
+function createConcurrencyLimiter(max: number): {
+	acquire: () => Promise<() => void>;
+	/** Active count for tests/diagnostics; not a public API. */
+	activeCount: () => number;
+} {
 	let active = 0;
 	const waiters: Array<() => void> = [];
+	const releaseOne = () => {
+		active = Math.max(0, active - 1);
+		const next = waiters.shift();
+		if (next) next();
+	};
 	return {
 		async acquire() {
 			if (active < max) {
 				active++;
-				return () => {
-					active = Math.max(0, active - 1);
-					const next = waiters.shift();
-					if (next) next();
-				};
+				return releaseOne;
 			}
 			const { promise, resolve } = Promise.withResolvers<void>();
 			waiters.push(resolve);
 			await promise;
 			active++;
-			return () => {
-				active = Math.max(0, active - 1);
-				const next = waiters.shift();
-				if (next) next();
-			};
+			return releaseOne;
+		},
+		activeCount: () => active,
+	};
+}
+
+/**
+ * Synchronous permanent budget commit gate (JS single-threaded → atomic enough
+ * for concurrent tool starts that only call tryCommit between awaits).
+ */
+function createToolCallBudgetGate(
+	getRemaining: () => number | null,
+	setRemaining: (n: number) => void,
+): { tryCommit: () => boolean } {
+	return {
+		tryCommit() {
+			const n = getRemaining();
+			if (n === null) return true;
+			if (n <= 0) return false;
+			setRemaining(n - 1);
+			return true;
 		},
 	};
 }
 
 type LoopResourceClaim = { paths: string[]; access: "read" | "write" | "unknown"; exclusive?: boolean };
+type LoopConflictMode = "serialize" | "fail" | "permissive";
 
-const WRITE_TOOL_NAMES = new Set(["write", "edit", "apply_patch", "MultiEdit", "str_replace"]);
+const WRITE_TOOL_NAMES = new Set(["write", "edit", "apply_patch", "MultiEdit", "str_replace", "patch"]);
 const READ_TOOL_NAMES = new Set(["read", "grep", "ls", "glob", "search"]);
+
+/** Heuristic: bash/shell command likely mutates the workspace (conservative FP ok). */
+function bashLikelyMutatesWorkspace(command: string): boolean {
+	const c = command.trim();
+	if (!c) return true;
+	if (/(?:^|[^0-9])>(?:$|[^>])/.test(c)) return true;
+	if (/(?:^|&&|\|\||;|\n)\s*(?:sudo\s+)?(?:rm|mv|cp|install|dd|truncate|tee|chmod|chown)\b/.test(c)) return true;
+	if (/\b(?:rm|mv|cp)\s+/.test(c)) return true;
+	if (/\b(?:npm|pnpm|bun|yarn)\s+(?:install|add|remove|unlink)\b/.test(c)) return true;
+	if (/\bgit\s+(?:checkout|reset|clean|rebase|merge|apply|am)\b/.test(c)) return true;
+	return false;
+}
+
+function normalizeResourceConflictMode(
+	mode: "serialize" | "fail" | "conservative" | "permissive" | undefined,
+): LoopConflictMode {
+	if (mode === "fail") return "fail";
+	if (mode === "permissive") return "permissive";
+	// serialize | conservative | undefined → serialize
+	return "serialize";
+}
 
 function inferDefaultResourceClaim(toolName: string, args: Record<string, unknown>): LoopResourceClaim {
 	const paths: string[] = [];
@@ -2463,16 +2585,19 @@ function inferDefaultResourceClaim(toolName: string, args: Record<string, unknow
 		return { paths, access: "read" };
 	}
 	if (toolName === "bash" || toolName === "run_command" || toolName === "shell") {
-		return { paths, access: "unknown", exclusive: true };
+		const cmd = typeof args.command === "string" ? args.command : typeof args.cmd === "string" ? args.cmd : "";
+		if (!cmd || bashLikelyMutatesWorkspace(cmd)) {
+			return { paths, access: "unknown", exclusive: true };
+		}
+		return { paths, access: "read", exclusive: false };
 	}
 	return { paths, access: "unknown" };
 }
 
-function resourceClaimsConflict(
-	a: LoopResourceClaim,
-	b: LoopResourceClaim,
-	mode: "conservative" | "permissive",
-): boolean {
+function resourceClaimsConflict(a: LoopResourceClaim, b: LoopResourceClaim, mode: LoopConflictMode): boolean {
+	// Exclusive tools already take the exclusive barrier via claim.exclusive →
+	// concurrency force. Pairwise conflict only needs exclusive vs write/unknown
+	// so pure reads after an exclusive tool can still share once the barrier lifts.
 	if (a.exclusive && b.exclusive) return true;
 	if (a.exclusive && (b.access === "write" || b.access === "unknown")) return true;
 	if (b.exclusive && (a.access === "write" || a.access === "unknown")) return true;
