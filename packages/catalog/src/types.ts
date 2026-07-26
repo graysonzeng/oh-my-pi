@@ -359,6 +359,17 @@ export interface OpenAICompat {
 	strictResponsesPairing?: boolean;
 	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: auto-detected (false for GitHub Copilot, which rejects it with a 400). */
 	supportsImageDetailOriginal?: boolean;
+	/**
+	 * Which Responses path `openai-codex-responses` appends for both WebSocket
+	 * and HTTP/SSE transport.
+	 *
+	 * - `"codex"` (default): `/codex/responses` — official ChatGPT Codex backend.
+	 * - `"standard"`: `/responses` — generic OpenAI Responses gateways that 404
+	 *   on `/codex/responses`.
+	 *
+	 * Never inferred from hostnames; set explicitly on custom models.
+	 */
+	codexResponsesEndpoint?: "codex" | "standard";
 	/** Whether streamed reasoning deltas for the same field may repeat the full cumulative text snapshot. Default: false. */
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
@@ -596,6 +607,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "thinkingKeep"
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
+			| "codexResponsesEndpoint"
 			| "enableGeminiThinkingLoopGuard"
 			| "whenThinking"
 		>
@@ -619,6 +631,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	strictResponsesPairing: boolean;
 	supportsImageDetailOriginal: boolean;
 	supportsObfuscationOptOut: boolean;
+	/** See {@link OpenAICompat.codexResponsesEndpoint}. Undefined uses the Codex endpoint. */
+	codexResponsesEndpoint?: "codex" | "standard";
 	streamIdleTimeoutMs?: number;
 }
 

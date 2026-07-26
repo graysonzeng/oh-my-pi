@@ -694,6 +694,8 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		alwaysSendMaxTokens: spec.id ? isKimiModelId(spec.id) : false,
 		enableGeminiThinkingLoopGuard: modelFamilyToken(spec.id ?? "") === "gemini",
 		supportsObfuscationOptOut: isOpenAIUrl || spec.provider === "openai",
+		// Declared so applyCompatOverrides can opt custom Codex transports into the standard path.
+		codexResponsesEndpoint: undefined,
 		stripDeepseekSpecialTokens:
 			Boolean(id) && isDeepseekModelIdOrName(id) && (spec.provider === "nvidia" || spec.provider === "deepseek"),
 		streamMarkupHealingPattern: id ? detectStreamMarkupHealingPattern(spec.provider, id, baseUrl) : undefined,
@@ -724,6 +726,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		strictResponsesPairing: compat.strictResponsesPairing,
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
+		codexResponsesEndpoint: compat.codexResponsesEndpoint,
 	} satisfies ResponsesOnlyCompat;
 }
 

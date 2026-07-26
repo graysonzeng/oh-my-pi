@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `codexResponsesEndpoint` compatibility setting for custom Codex Responses gateways that expose standard `/responses` instead of `/codex/responses`.
+
 ## [17.0.6] - 2026-07-20
 
 ### Added

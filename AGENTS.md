@@ -210,6 +210,9 @@ For the bash tool specifically:
 
 - NEVER commit unless asked.
 - Never use `tsc`/`npx tsc` — always `bun check`.
+- For this workstation, updating `omp` defaults to building the current checkout and installing `packages/coding-agent/dist/omp` by following [`docs/local-build-install.md`](docs/local-build-install.md). Do not use the official curl installer, Homebrew upgrade, or registry global upgrade unless the user explicitly requests an official release.
+- A matching `omp --version` is not proof of a local install. Verify the installed file is the compiled binary, its checksum matches the build artifact, and the installed path passes `omp --smoke-test`.
+- After a successful local install, update the verified-baseline section in `docs/local-build-install.md` with the commit, checksum, installed path, backup path, and gates actually run.
 
 ## Testing Guidance
 

@@ -607,6 +607,7 @@ describe("ModelRegistry", () => {
 						api: "openai-codex-responses",
 						compat: {
 							supportsImageDetailOriginal: false,
+							codexResponsesEndpoint: "standard",
 						},
 						remoteCompaction: {
 							enabled: true,
@@ -696,6 +697,7 @@ describe("ModelRegistry", () => {
 			const model = customResponsesCompat.find("cc-switch", "gpt-5.5");
 			const compat = getOpenAICompat(model);
 			expect(compat?.supportsImageDetailOriginal).toBe(false);
+			expect(compat?.codexResponsesEndpoint).toBe("standard");
 		});
 
 		test("custom Responses providers preserve compaction config", () => {

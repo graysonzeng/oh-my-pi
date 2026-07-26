@@ -6,6 +6,9 @@
 - Removed workflow multi-vendor CLI runtimes (`codex_cli` / `claude_cli` adapters, process runner, CLI isolation, and runtime dispatcher). Multi-model workflows use the embedded `RuntimeAdapter` → `runStructuredSubagent` path only (omp provider models + `ModelProfile` strategies). Legacy `profile.runtime` in settings fails closed. Worker host (`__omp_worker_*`), task/structured-subagent isolation, and provider OAuth CLIs are unchanged.
 
 ### Added
+- Added custom-model validation for `compat.codexResponsesEndpoint`, enabling standard `/responses` WebSocket-to-SSE fallback on compatible gateways.
+- Added opt-in model optimization profiles for ordinary coding-agent sessions, with model-resolver-compatible matching and model-switch-safe prompt/tool scheduling updates that remain separate from workflow roles, permissions, aliases, budgets, and output schemas.
+- Added explicit MCP server `lazy: true` configuration: cached tools remain discoverable at startup while the server transport opens only on first tool use or manual reconnect.
 - Documented multi-model workflow live full-path verification, profile field support matrix (including tool/argument aliases vs rejected token caps), timeout-vs-cancel mapping, and default role preference order in `docs/workflow.md`; linked `workflow/` from DEVELOPMENT and `workflow.*` from settings docs.
 - Wired P0–P2 optimization into production paths: live tool `processToolOutputDetailed` + session receipts, engine stage-handoff/scope-metrics/prompt-assembly artifacts, gated presentation policy on prepare, catalog `transformTools` applied to real AgentTool descriptors in `createTools`, and `omp workflow-bench` thin CLI over `runBenchmarkSuite`.
 - Per-model optimization P0–P2: recoverable tool-output receipts (read body retained, `artifact://` footers preserved, no false recovery URIs), fixed-task benchmark suite/runner/scorecard with fake-runtime paired smoke, deterministic stage-boundary handoffs, layered structured-output repair (BOM/fence/JSON extract + static schema-retry prompt; `maxRetries` = additional model calls), git-diff scope metrics, gated `xd://` presentation policy, stable prompt-assembly receipts with cache observability, and `ToolStrategy.maxConcurrentTools` wiring into agent tool scheduling.
@@ -21,6 +24,7 @@
 - Live provider smoke is opt-in and cost-bearing; automated tests use injectable runners only.
 
 ### Fixed
+- Fixed Codex MCP discovery ignoring `enabled = false` in `~/.codex/config.toml`, which caused disabled servers such as Computer Use to be spawned during OMP startup.
 - Map wall-clock `maxRuntimeMs` / "runtime limit exceeded" subagent aborts to retryable `WorkflowTimeoutError` (not hard `cancelled`); raise plan/code reviewer default `maxRuntimeMs` to 300s so slow gateway reviews can fall through profiles instead of terminal-cancelling the workflow.
 - Workflow tool alias Proxies no longer pass the Proxy as `Reflect.get` receiver, which broke class private-field getters (e.g. `BashTool.#asyncEnabled` via `description`) and blocked implement stages with a configuration TypeError.
 - Coerce model-supplied workflow artifact `createdAt` values to ISO-8601 UTC before Zod `.datetime()` validation so date-only / missing-`Z` timestamps from live models do not fail plan/review/implement stages closed.

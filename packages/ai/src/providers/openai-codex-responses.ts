@@ -1217,7 +1217,7 @@ async function buildCodexRequestContext(
 
 	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
-	const url = resolveCodexResponsesUrl(baseUrl);
+	const url = resolveCodexResponsesUrl(baseUrl, model.compat?.codexResponsesEndpoint);
 	const promptCacheKey = normalizeOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
@@ -2578,7 +2578,7 @@ export async function prewarmOpenAICodexResponses(
 	if (!apiKey) return;
 	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
-	const url = resolveCodexResponsesUrl(baseUrl);
+	const url = resolveCodexResponsesUrl(baseUrl, model.compat?.codexResponsesEndpoint);
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const promptCacheKey = transportSessionId;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
@@ -3913,10 +3913,28 @@ function redactHeaders(headers: Headers): Record<string, string> {
 	return redacted;
 }
 
-/** Resolve a Codex Responses endpoint exactly as the chat and compaction transports do. */
-export function resolveCodexResponsesUrl(baseUrl: string | undefined): string {
+/**
+ * Resolve a Codex Responses endpoint exactly as the chat and compaction
+ * transports do. `endpoint` selects the path mode from model.compat:
+ * - `"codex"` (default): `/codex/responses`
+ * - `"standard"`: `/responses` for generic Responses gateways
+ */
+export function resolveCodexResponsesUrl(
+	baseUrl: string | undefined,
+	endpoint: "codex" | "standard" = "codex",
+): string {
 	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : CODEX_BASE_URL;
 	const normalized = raw.replace(/\/+$/, "");
+	if (endpoint === "standard") {
+		if (normalized.endsWith("/codex/responses")) {
+			return `${normalized.slice(0, -"/codex/responses".length)}/responses`;
+		}
+		if (normalized.endsWith("/responses")) return normalized;
+		if (normalized.endsWith("/codex")) {
+			return `${normalized.slice(0, -"/codex".length)}/responses`;
+		}
+		return `${normalized}/responses`;
+	}
 	if (normalized.endsWith("/codex/responses")) return normalized;
 	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
 	return `${normalized}/codex/responses`;

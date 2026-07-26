@@ -2460,7 +2460,7 @@ describe("openai-codex streaming", () => {
 
 		const fetchMock = vi.fn(async (input: string | URL) => {
 			const url = typeof input === "string" ? input : input.toString();
-			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+			if (url === "https://gateway.example.com/v1/responses") {
 				return new Response(sse, {
 					status: 200,
 					headers: { "content-type": "text/event-stream" },
@@ -2471,6 +2471,7 @@ describe("openai-codex streaming", () => {
 		class FailingWebSocket extends MockWebSocket {
 			constructor(url: string, options?: { headers?: WsHeaders }) {
 				super(url, options);
+				expect(url).toBe("wss://gateway.example.com/v1/responses");
 				setTimeout(() => {
 					expect(this.options?.headers?.["OpenAI-Beta"] ?? this.options?.headers?.["openai-beta"]).toStartWith(
 						"responses_websockets=",
@@ -2487,8 +2488,9 @@ describe("openai-codex streaming", () => {
 			id: "gpt-5.3-codex-spark",
 			name: "GPT-5.3 Codex Spark",
 			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
+			provider: "responses-gateway",
+			baseUrl: "https://gateway.example.com/v1",
+			compat: { codexResponsesEndpoint: "standard" },
 			reasoning: true,
 			preferWebsockets: true,
 			input: ["text"],
@@ -2509,7 +2511,7 @@ describe("openai-codex streaming", () => {
 		});
 		const result = await streamResult.result();
 		expect(result.role).toBe("assistant");
-		expect(fetchMock).toHaveBeenCalled();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 		const fallbackDetails = getOpenAICodexTransportDetails(model, { sessionId: "ws-session", providerSessionState });
 		expect(fallbackDetails.lastTransport).toBe("sse");
 		expect(fallbackDetails.websocketDisabled).toBe(true);

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added an explicit standard `/responses` endpoint mode for Codex Responses transports so custom gateways can use WebSockets and fall back to HTTP/SSE on the same URL.
+
+### Added
+
+- `GET /v1/models` on `startAuthGateway()` now includes `supported_endpoint_types` derived from each model's `api` (`anthropic-messages` → `["anthropic"]`; OpenAI chat-compatible APIs served by `/v1/chat/completions` → `["openai"]`; unrelated APIs stay empty). Existing catalog fields (`id`, `object`, `owned_by`, `api`) are preserved so dual-protocol clients and proxy discovery can route Claude vs OpenAI wire formats correctly.
+
 ## [17.0.6] - 2026-07-20
 
 ### Fixed

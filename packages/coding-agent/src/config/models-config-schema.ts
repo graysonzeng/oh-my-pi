@@ -59,6 +59,8 @@ const OpenAICompatFields = {
 	"alwaysSendMaxTokens?": "boolean",
 	"strictResponsesPairing?": "boolean",
 	"supportsImageDetailOriginal?": "boolean",
+	// openai-codex-responses: official Codex path vs standard /responses gateway
+	"codexResponsesEndpoint?": '"codex" | "standard"',
 	// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
 	"supportsEagerToolInputStreaming?": "boolean",
 	"allowAnthropicHeaderOverrides?": "boolean",
