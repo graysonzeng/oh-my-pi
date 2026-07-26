@@ -106,6 +106,13 @@ import {
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import {
+	buildResolvedModelOptimization,
+	type ModelOptimizationProfile,
+	mergeModelOptimizationProfiles,
+	type ResolvedModelOptimization,
+	resolveModelOptimizationProfile,
+} from "./model-optimization";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -2483,6 +2490,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		// Mutable holder updated by reconcileModelOptimization / session apply.
+		const modelOptimizationRuntime: { resolved: ResolvedModelOptimization } = { resolved: {} };
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -2573,16 +2582,65 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				activeRepoContext,
 			});
 
+			const withModelOpt = (blocks: string[]): string[] => {
+				const block = modelOptimizationRuntime.resolved.promptBlock;
+				if (!block?.trim()) return blocks;
+				// Independent replaceable block — rebuild replaces it; never stack prior profiles.
+				return [...blocks, block];
+			};
+
 			if (options.systemPrompt === undefined) {
-				return defaultPrompt;
+				return {
+					systemPrompt: withModelOpt(defaultPrompt.systemPrompt),
+				};
 			}
 			const customPrompt =
 				typeof options.systemPrompt === "function"
 					? options.systemPrompt(defaultPrompt.systemPrompt)
 					: options.systemPrompt;
+			const customBlocks = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
 			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				systemPrompt: withModelOpt(customBlocks),
 			};
+		};
+
+		const reconcileModelOptimization = async (activeModel: Model): Promise<ResolvedModelOptimization> => {
+			// Workflow stages own their optimization via workflowToolOptimization; do not layer ordinary profiles.
+			if (options.workflowToolOptimization) {
+				return {};
+			}
+			if (settings.get("modelOptimization.enabled") !== true) {
+				return {};
+			}
+
+			const rawUserProfiles = settings.get("modelOptimization.profiles");
+			const profiles = mergeModelOptimizationProfiles(
+				rawUserProfiles && typeof rawUserProfiles === "object"
+					? (rawUserProfiles as Record<string, Partial<ModelOptimizationProfile>>)
+					: undefined,
+			);
+			const available = modelRegistry.getAvailable();
+			// Ensure the active model is visible to the matcher.
+			const availableWithActive = available.some(m => m.provider === activeModel.provider && m.id === activeModel.id)
+				? available
+				: [...available, activeModel];
+			const matchPreferences = getModelMatchPreferences(settings);
+			const { profile, ambiguous } = resolveModelOptimizationProfile({
+				model: activeModel,
+				profiles,
+				availableModels: availableWithActive,
+				preferences: matchPreferences,
+			});
+			if (ambiguous || !profile) {
+				return {};
+			}
+			const resolved = buildResolvedModelOptimization(profile);
+			logger.debug("Applied model optimization profile", {
+				profileId: profile.id,
+				provider: activeModel.provider,
+				model: activeModel.id,
+			});
+			return resolved;
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
@@ -3006,6 +3064,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			// Workflow stages install their own toolScheduling / processResult; skip ordinary profiles.
+			reconcileModelOptimization: options.workflowToolOptimization ? undefined : reconcileModelOptimization,
+			applyModelOptimization: resolved => {
+				modelOptimizationRuntime.resolved = resolved;
+			},
 			getXdevToolEntries: () => toolSession.xdevRegistry?.entries() ?? [],
 			xdevRegistry: toolSession.xdevRegistry,
 			initialMountedXdevToolNames,
@@ -3038,6 +3101,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		// Apply ordinary-session model optimization for the initial model (feature-flag gated inside).
+		await session.ensureModelOptimization();
 		if (asyncJobManager) {
 			session.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),

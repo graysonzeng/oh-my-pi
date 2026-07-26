@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL_OPTIMIZATION_PROFILES } from "../model-optimization/default-profiles";
 import { DEFAULT_TRUNCATION_RULES } from "./tool-output-manager";
 import type { ContextStrategy, ModelProfile, OutputStrategy, PromptStrategy, ToolStrategy } from "./types";
 
@@ -24,8 +25,8 @@ const baseContext = {
 } as const;
 
 const conciseClaudePrompt: PromptStrategy = {
+	...DEFAULT_MODEL_OPTIMIZATION_PROFILES.claude.promptStrategy,
 	kind: "concise",
-	systemPromptTemplate: "concise-claude",
 	// ponytail: few-shot bank not shipped — keep policy off so config does not pretend otherwise
 	fewShotPolicy: { enabled: false, maxExamples: 1, dynamicSelection: false },
 	thinkingPrompt: { enabled: true, style: "scratchpad" },
@@ -34,16 +35,16 @@ const conciseClaudePrompt: PromptStrategy = {
 };
 
 const structuredGptPrompt: PromptStrategy = {
+	...DEFAULT_MODEL_OPTIMIZATION_PROFILES["gpt-5"].promptStrategy,
 	kind: "structured",
-	systemPromptTemplate: "structured-gpt",
 	fewShotPolicy: { enabled: false, maxExamples: 2, dynamicSelection: false },
 	roleEmphasis: "medium",
 	instructionFormat: "numbered",
 };
 
 const explicitGrokPrompt: PromptStrategy = {
+	...DEFAULT_MODEL_OPTIMIZATION_PROFILES.grok.promptStrategy,
 	kind: "verbose",
-	systemPromptTemplate: "explicit-grok",
 	fewShotPolicy: { enabled: false, maxExamples: 3, dynamicSelection: false },
 	thinkingPrompt: { enabled: true, style: "step-by-step" },
 	roleEmphasis: "heavy",
@@ -137,7 +138,7 @@ const grokOutput: OutputStrategy = {
  *
  * Existing profile ids (claude_planner, grok_implementer, …) are preserved for engine tests.
  */
-export const DEFAULT_MODEL_PROFILES = {
+const WORKFLOW_MODEL_PROFILES = {
 	// --- Quality-first primaries (registration order = router preference) ---
 	claude_planner: {
 		id: "claude_planner",
@@ -616,6 +617,23 @@ export const DEFAULT_MODEL_PROFILES = {
 		},
 	},
 } satisfies Record<string, ModelProfile>;
+
+const OPTIMIZATION_PROFILE_BY_VENDOR: Record<string, string> = {
+	anthropic: "claude",
+	openai: "gpt-5",
+	xai: "grok",
+	zhipu: "glm",
+	deepseek: "deepseek",
+};
+
+export const DEFAULT_MODEL_PROFILES: Record<string, ModelProfile> = {};
+for (const [id, profile] of Object.entries(WORKFLOW_MODEL_PROFILES)) {
+	const optimizationProfileId = OPTIMIZATION_PROFILE_BY_VENDOR[profile.vendor];
+	DEFAULT_MODEL_PROFILES[id] = {
+		...profile,
+		...(optimizationProfileId ? { optimizationProfileId } : {}),
+	};
+}
 
 /** Explicit config shape — never infer via ReturnType (AGENTS.md ban). */
 export interface WorkflowDefaultConfig {

@@ -273,11 +273,21 @@ export interface OutputStrategy {
 	};
 }
 
-export interface ModelProfile {
+/**
+ * Workflow model profile: role/budget/schema binding plus optional model optimization.
+ * Shared model-level strategies may also be referenced via optimizationProfileId.
+ */
+export interface WorkflowModelProfile {
 	id: string;
 	vendor: "anthropic" | "openai" | "xai" | string;
 	modelPattern: string | string[];
 	roles: WorkflowRole[];
+	/**
+	 * Optional reference to a shared ModelOptimizationProfile id.
+	 * When set with inline strategy fields, inline fields override the referenced profile
+	 * for workflow-local use (normalizer materializes the merge).
+	 */
+	optimizationProfileId?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	promptTemplate: string;
 	promptVersion: string;
@@ -324,6 +334,11 @@ export interface ModelProfile {
 		maxArtifactBytes: number;
 	};
 }
+
+/**
+ * @deprecated Use {@link WorkflowModelProfile}. Alias retained for one release cycle.
+ */
+export type ModelProfile = WorkflowModelProfile;
 
 export interface WorkflowAgentRequest {
 	workflowId: string;

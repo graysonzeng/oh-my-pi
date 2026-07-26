@@ -15,6 +15,8 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { buildResolvedModelOptimization } from "../src/model-optimization";
+import type { ModelOptimizationProfile, ResolvedModelOptimization } from "../src/model-optimization/types";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -44,7 +46,7 @@ function getLastAssistantMessage(session: AgentSession): AssistantMessage {
 	return lastMessage;
 }
 
-function createFallbackAgent(primaryModel: Model, requestedModels: string[]): Agent {
+function createFallbackAgent(primaryModel: Model, requestedModels: string[], requestedPrompts?: string[]): Agent {
 	const mock = createMockModel();
 	let primaryAttempts = 0;
 	return new Agent({
@@ -57,6 +59,7 @@ function createFallbackAgent(primaryModel: Model, requestedModels: string[]): Ag
 		},
 		streamFn: (model, context, options) => {
 			requestedModels.push(`${model.provider}/${model.id}`);
+			requestedPrompts?.push(context.systemPrompt?.join("\n") ?? "");
 			if (model.provider === primaryModel.provider && model.id === primaryModel.id && primaryAttempts === 0) {
 				primaryAttempts += 1;
 				mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
@@ -2088,7 +2091,19 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const requestedPrompts: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, requestedPrompts);
+		const runtime: { resolved: ResolvedModelOptimization } = { resolved: {} };
+		const claudeProfile: ModelOptimizationProfile = {
+			id: "retry-claude",
+			modelPattern: "claude-*",
+			promptStrategy: { kind: "concise", systemPromptTemplate: "concise-claude" },
+		};
+		const openaiProfile: ModelOptimizationProfile = {
+			id: "retry-openai",
+			modelPattern: "gpt-*",
+			promptStrategy: { kind: "structured", systemPromptTemplate: "structured-gpt" },
+		};
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -2105,6 +2120,14 @@ describe("AgentSession retry fallback", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
+			reconcileModelOptimization: async model =>
+				buildResolvedModelOptimization(model.provider === "anthropic" ? claudeProfile : openaiProfile),
+			applyModelOptimization: resolved => {
+				runtime.resolved = resolved;
+			},
+			rebuildSystemPrompt: async () => ({
+				systemPrompt: runtime.resolved.promptBlock ? ["Test", runtime.resolved.promptBlock] : ["Test"],
+			}),
 		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -2117,6 +2140,8 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(requestedPrompts[1]).toContain("structured-gpt");
+		expect(requestedPrompts[1]).not.toContain("concise-claude");
 
 		await session.prompt("Immediate second prompt should stay on fallback");
 		await session.waitForIdle();
@@ -2139,6 +2164,8 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(primaryModel.provider);
 		expect(session.model?.id).toBe(primaryModel.id);
+		expect(requestedPrompts[3]).toContain("concise-claude");
+		expect(requestedPrompts[3]).not.toContain("structured-gpt");
 	});
 
 	it("restores routed fallback primaries after cooldown expiry", async () => {

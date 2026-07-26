@@ -4160,6 +4160,30 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Ordinary-session model optimization (workflow uses its own profiles independently)
+	"modelOptimization.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Model",
+			label: "Model Optimization",
+			description:
+				"When enabled, ordinary coding sessions apply model-family prompt/tool/context optimization for the active model. Off preserves baseline behavior. Workflow profiles are unaffected.",
+		},
+	},
+	"modelOptimization.profiles": {
+		type: "record",
+		default: {} as Record<string, unknown>,
+		ui: {
+			tab: "model",
+			group: "Model",
+			label: "Model Optimization Profiles",
+			description:
+				"Optional map of model optimization profiles by id (empty uses built-in claude/gpt-5/grok/glm family profiles). Same id overrides a built-in. Does not accept workflow role profiles.",
+		},
+	},
+
 	"title.refreshOnReplan": {
 		type: "boolean",
 		default: true,

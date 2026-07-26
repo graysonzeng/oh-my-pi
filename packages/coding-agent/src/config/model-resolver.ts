@@ -894,6 +894,32 @@ export function parseModelPattern(
 	);
 }
 
+/**
+ * Stable “does this selector match the active model?” entry for profile resolution.
+ * Reuses the same matching pipeline as model selection:
+ * - glob selectors (`*`, `?`, `[…]`) via {@link matchingGlobModels}
+ * - otherwise {@link parseModelPattern} + {@link modelsAreEqual}
+ *
+ * Callers must pass an `availableModels` list that includes the active model
+ * (or an equivalent identity) so fuzzy/exact resolution can see it.
+ */
+export function modelMatchesSelector(
+	model: Model<Api>,
+	selector: string,
+	availableModels: Model<Api>[],
+	preferences?: ModelMatchPreferences,
+): boolean {
+	const trimmed = selector.trim();
+	if (!trimmed) return false;
+
+	if (trimmed.includes("*") || trimmed.includes("?") || trimmed.includes("[")) {
+		return matchingGlobModels(trimmed, availableModels).some(candidate => modelsAreEqual(candidate, model));
+	}
+
+	const matched = parseModelPattern(trimmed, availableModels, preferences).model;
+	return matched !== undefined && modelsAreEqual(matched, model);
+}
+
 const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 

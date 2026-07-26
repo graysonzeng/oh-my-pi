@@ -23,4 +23,28 @@ describe("normalizeModelProfile", () => {
 			expect((err as WorkflowPolicyError).message).toContain("workflow_cli_runtime_removed");
 		}
 	});
+
+	it("materializes a referenced shared optimization while preserving workflow-only policy", () => {
+		const base = DEFAULT_MODEL_PROFILES.gpt_planner!;
+		const normalized = normalizeModelProfile({
+			...base,
+			id: "referenced_gpt",
+			optimizationProfileId: "gpt-5",
+			promptStrategy: undefined,
+			toolStrategy: undefined,
+			contextStrategy: undefined,
+		});
+
+		expect(normalized.promptStrategy?.systemPromptTemplate).toBe("structured-gpt");
+		expect(normalized.toolStrategy?.maxConcurrentTools).toBe(6);
+		expect(normalized.contextStrategy?.targetUtilization).toBe(0.75);
+		expect(normalized.roles).toEqual(["planner"]);
+		expect(normalized.toolPolicyId).toBe("readonly-planning");
+		expect(normalized.outputStrategy).toBe(base.outputStrategy);
+	});
+
+	it("rejects an unknown shared optimization reference", () => {
+		const base = DEFAULT_MODEL_PROFILES.gpt_planner!;
+		expect(() => normalizeModelProfile({ ...base, optimizationProfileId: "missing" })).toThrow(WorkflowPolicyError);
+	});
 });

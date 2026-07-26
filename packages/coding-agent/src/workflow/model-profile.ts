@@ -1,1 +1,1 @@
-export type { ModelProfile } from "./types";
+export type { ModelProfile, WorkflowModelProfile } from "./types";

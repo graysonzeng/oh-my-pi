@@ -254,6 +254,7 @@ import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
+import type { ResolvedModelOptimization, SessionContextStrategy } from "../model-optimization/types";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
@@ -955,6 +956,15 @@ export interface AgentSessionConfig {
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. Returns ordered provider-facing blocks. */
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	/**
+	 * Re-resolve ordinary-session model optimization for the active model.
+	 * SDK owns profile registry / tool-session mutation; session applies
+	 * scheduling + prompt refresh on the model-change seam.
+	 * Must return an empty policy (not throw) when feature is off / no match.
+	 */
+	reconcileModelOptimization?: (model: Model) => Promise<ResolvedModelOptimization>;
+	/** Apply or clear SDK-owned runtime adapters after resolution succeeds or fails. */
+	applyModelOptimization?: (resolved: ResolvedModelOptimization) => void;
 	/** Local calendar date provider used by prompt-cache invalidation. Defaults to the host local date. */
 	getLocalCalendarDate?: () => string;
 	/** Entries of tools mounted under `xd://` (name + one-line summary), for /tools display. */
@@ -2073,6 +2083,12 @@ export class AgentSession {
 	#rebuildSystemPrompt:
 		| ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>)
 		| undefined;
+	#reconcileModelOptimization: ((model: Model) => Promise<ResolvedModelOptimization>) | undefined;
+	#applyModelOptimizationRuntime: ((resolved: ResolvedModelOptimization) => void) | undefined;
+	/** Active ordinary-session model optimization (cleared on miss / feature off / reconcile failure). */
+	#activeModelOptimization: ResolvedModelOptimization = {};
+	/** Dirty after any model identity change; reconciled before next provider dispatch. */
+	#modelOptimizationDirty = true;
 	#getLocalCalendarDate: () => string;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#setActiveToolNames: ((names: Iterable<string>) => void) | undefined;
@@ -2811,7 +2827,7 @@ export class AgentSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-				await this.agent.prompt(messages.length === 1 ? first : messages);
+				await this.#promptAgent(messages.length === 1 ? first : messages);
 			},
 			scheduleIdleFlush: run => {
 				this.#schedulePostPromptTask(
@@ -2840,6 +2856,8 @@ export class AgentSession {
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
+		this.#reconcileModelOptimization = config.reconcileModelOptimization;
+		this.#applyModelOptimizationRuntime = config.applyModelOptimization;
 		this.#getLocalCalendarDate = config.getLocalCalendarDate ?? formatLocalCalendarDate;
 		this.#getMcpServerInstructions = config.getMcpServerInstructions;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
@@ -5245,11 +5263,12 @@ export class AgentSession {
 				this.#beginInFlight();
 				try {
 					await this.#maybeRestoreRetryFallbackPrimary();
+					await this.#ensureModelOptimizationReconciled();
 					if (signal.aborted || this.#isDisposed) {
 						this.#skipAgentContinue("post-restore-unavailable", options);
 						return;
 					}
-					await this.agent.continue();
+					await this.#continueAgent();
 				} catch (error) {
 					logger.warn("agent.continue failed after scheduling", {
 						error: error instanceof Error ? error.message : String(error),
@@ -5851,7 +5870,7 @@ export class AgentSession {
 					this.#markTtsrInjected(details.rules);
 				}
 				try {
-					await this.agent.continue();
+					await this.#continueAgent();
 				} catch {
 					this.#resolveTtsrResume();
 				}
@@ -6073,7 +6092,7 @@ export class AgentSession {
 			});
 			this.sessionManager.appendCustomMessageEntry(GEMINI_TOOL_REMINDER_TYPE, content, false, details, "agent");
 			try {
-				await this.agent.continue();
+				await this.#continueAgent();
 			} catch (err) {
 				logger.warn("gemini tool-call reminder continue failed", { error: String(err) });
 			}
@@ -7229,12 +7248,76 @@ export class AgentSession {
 	}
 
 	async #syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
+		await this.#ensureModelOptimizationReconciled();
 		const currentEditMode = this.#resolveActiveEditMode();
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
 		if (editModeChanged || modelChanged) {
 			await this.refreshBaseSystemPrompt();
+		}
+	}
+
+	/** Active model optimization profile id (diagnostic; not a persistence SSOT). */
+	get activeModelOptimizationProfileId(): string | undefined {
+		return this.#activeModelOptimization.profile?.id;
+	}
+
+	/** Provider-derived context strategy only (never mutates transcript). */
+	get modelOptimizationContextStrategy(): SessionContextStrategy | undefined {
+		return this.#activeModelOptimization.contextStrategy;
+	}
+
+	/** Force reconcile for the current model (session start / tests). */
+	async ensureModelOptimization(): Promise<void> {
+		this.#modelOptimizationDirty = true;
+		await this.#ensureModelOptimizationReconciled();
+	}
+
+	/**
+	 * Resolve and atomically apply model optimization for the current model.
+	 * On reconcile failure: clear optimization (never retain prior model policy).
+	 * No-op when feature is off / callback absent (baseline behavior).
+	 */
+	async #ensureModelOptimizationReconciled(): Promise<void> {
+		if (!this.#reconcileModelOptimization) {
+			this.#modelOptimizationDirty = false;
+			return;
+		}
+		if (!this.#modelOptimizationDirty) return;
+		this.#modelOptimizationDirty = false;
+
+		const model = this.model;
+		if (!model) {
+			await this.#applyModelOptimization({});
+			return;
+		}
+
+		try {
+			const resolved = await this.#reconcileModelOptimization(model);
+			await this.#applyModelOptimization(resolved);
+		} catch (error) {
+			logger.warn("Model optimization reconcile failed; clearing optimization", {
+				provider: model.provider,
+				model: model.id,
+				error: String(error),
+			});
+			await this.#applyModelOptimization({});
+		}
+	}
+
+	async #applyModelOptimization(resolved: ResolvedModelOptimization): Promise<void> {
+		const prevFingerprint = this.#activeModelOptimization.promptBlockFingerprint;
+		this.#activeModelOptimization = resolved;
+		this.#applyModelOptimizationRuntime?.(resolved);
+		// Scheduling: undefined restores legacy barrier-only behavior.
+		this.agent.setToolScheduling(resolved.toolScheduling);
+		if (prevFingerprint !== resolved.promptBlockFingerprint) {
+			this.#clearInheritedProviderPromptCacheKey();
+			// Prompt block changed — force rebuild when a builder is available.
+			if (this.#rebuildSystemPrompt) {
+				await this.refreshBaseSystemPrompt();
+			}
 		}
 	}
 
@@ -8663,6 +8746,9 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		// Cover fallback/restore paths that set the model without #syncAfterModelChange.
+		await this.#ensureModelOptimizationReconciled();
+
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 
 		// Handle extension commands first (execute immediately, even during streaming)
@@ -8870,6 +8956,7 @@ export class AgentSession {
 			this.#acceptTerminalEmptyStopForPrompt = options?.acceptTerminalEmptyStop === true;
 
 			await this.#maybeRestoreRetryFallbackPrimary();
+			await this.#ensureModelOptimizationReconciled();
 
 			// Validate model
 			if (!this.model) {
@@ -9439,7 +9526,7 @@ export class AgentSession {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#acceptTerminalEmptyStopForPrompt = acceptTerminalEmptyStop;
-			await this.agent.prompt(message);
+			await this.#promptAgent(message);
 			await this.#waitForPostPromptRecovery();
 		} finally {
 			this.#acceptTerminalEmptyStopForPrompt = false;
@@ -12974,6 +13061,8 @@ export class AgentSession {
 			}
 		}
 		this.agent.setModel(model);
+		// All model-change paths go through here; reconcile before next dispatch.
+		this.#modelOptimizationDirty = true;
 
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);
@@ -15660,7 +15749,7 @@ export class AgentSession {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
 			try {
-				await this.agent.prompt(messages, options);
+				await this.#promptAgent(messages, options);
 				return;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {
@@ -15672,6 +15761,18 @@ export class AgentSession {
 				await this.agent.waitForIdle();
 			}
 		}
+	}
+
+	async #promptAgent(messages: AgentMessage | AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+		// Provider dispatch is the final authority: reconcile even if a caller changed
+		// the core Agent model without going through an AgentSession model command.
+		await this.ensureModelOptimization();
+		await this.agent.prompt(messages, options);
+	}
+
+	async #continueAgent(): Promise<void> {
+		await this.ensureModelOptimization();
+		await this.agent.continue();
 	}
 
 	/** Whether auto-retry is currently in progress */

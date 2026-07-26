@@ -1,5 +1,7 @@
+import { DEFAULT_MODEL_OPTIMIZATION_PROFILES } from "../model-optimization/default-profiles";
+import type { ModelOptimizationProfile } from "../model-optimization/types";
 import { WorkflowPolicyError } from "./errors";
-import type { ModelProfile } from "./types";
+import type { ContextStrategy, ModelProfile, PromptStrategy, ToolStrategy } from "./types";
 
 /**
  * Fields accepted on ModelProfile but not yet wired through the structured runner.
@@ -12,6 +14,37 @@ const UNSUPPORTED_RUNTIME_FIELDS = ["maxInputTokens", "maxOutputTokens"] as cons
  * Legacy `runtime` (codex_cli / claude_cli / embedded) is rejected — multi-model is
  * embedded only via provider models + profile strategies.
  */
+function referencedOptimization(profile: ModelProfile): ModelOptimizationProfile | undefined {
+	const reference = profile.optimizationProfileId;
+	if (!reference) return undefined;
+	const optimization = DEFAULT_MODEL_OPTIMIZATION_PROFILES[reference];
+	if (!optimization) {
+		throw new WorkflowPolicyError("unknown_model_optimization_profile", {
+			profileId: profile.id,
+			optimizationProfileId: reference,
+		});
+	}
+	return optimization;
+}
+
+function workflowContextStrategy(optimization: ModelOptimizationProfile | undefined): ContextStrategy | undefined {
+	const strategy = optimization?.contextStrategy;
+	if (!strategy || strategy.targetUtilization === undefined) return undefined;
+	return {
+		targetUtilization: strategy.targetUtilization,
+		eviction: strategy.eviction,
+		toolHistory: strategy.toolHistory,
+	};
+}
+
+function workflowPromptStrategy(optimization: ModelOptimizationProfile | undefined): PromptStrategy | undefined {
+	return optimization?.promptStrategy ? { ...optimization.promptStrategy } : undefined;
+}
+
+function workflowToolStrategy(optimization: ModelOptimizationProfile | undefined): ToolStrategy | undefined {
+	return optimization?.toolStrategy ? { ...optimization.toolStrategy } : undefined;
+}
+
 export function normalizeModelProfile(profile: ModelProfile): ModelProfile {
 	// Settings/JSON may still carry removed field; fail closed at the trust boundary.
 	const legacy = profile as ModelProfile & { runtime?: unknown };
@@ -21,7 +54,23 @@ export function normalizeModelProfile(profile: ModelProfile): ModelProfile {
 			hint: "Multi-model workflows use embedded RuntimeAdapter + omp provider models only; remove profile.runtime (codex_cli/claude_cli backends removed)",
 		});
 	}
-	return profile;
+	const optimization = referencedOptimization(profile);
+	if (!optimization) return profile;
+	const promptStrategy = workflowPromptStrategy(optimization);
+	const toolStrategy = workflowToolStrategy(optimization);
+	const contextStrategy = workflowContextStrategy(optimization);
+	const mergedPromptStrategy = profile.promptStrategy
+		? { ...promptStrategy, ...profile.promptStrategy }
+		: promptStrategy;
+	const mergedContextStrategy = profile.contextStrategy
+		? { ...contextStrategy, ...profile.contextStrategy }
+		: contextStrategy;
+	return {
+		...profile,
+		promptStrategy: mergedPromptStrategy,
+		toolStrategy: toolStrategy || profile.toolStrategy ? { ...toolStrategy, ...profile.toolStrategy } : undefined,
+		contextStrategy: mergedContextStrategy,
+	};
 }
 
 /**
