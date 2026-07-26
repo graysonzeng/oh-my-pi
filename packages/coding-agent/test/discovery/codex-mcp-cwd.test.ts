@@ -17,23 +17,28 @@ import * as path from "node:path";
 import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 let tempHome = "";
 let tempCwd = "";
 let originalHome: string | undefined;
+let originalAgentDir = "";
 
 beforeEach(async () => {
+	originalAgentDir = getAgentDir();
 	originalHome = process.env.HOME;
 	tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-codex-mcp-home-"));
 	tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-codex-mcp-cwd-"));
 	process.env.HOME = tempHome;
 	vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+	setAgentDir(path.join(tempHome, ".omp", "agent"));
 	await fs.mkdir(path.join(tempHome, ".codex"), { recursive: true });
 });
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	setAgentDir(originalAgentDir);
 	if (originalHome === undefined) delete process.env.HOME;
 	else process.env.HOME = originalHome;
 	await removeWithRetries(tempHome);
@@ -93,4 +98,39 @@ test("path-like command resolves against a subdirectory cwd, not the config dire
 	// resolve to <codexDir>/server/bin/mcp, not <codexDir>/bin/mcp.
 	expect(nested?.cwd).toBe(path.join(codexDir, "server"));
 	expect(nested?.command).toBe(path.join(codexDir, "server", "bin", "mcp"));
+});
+
+test("enabled=false from config.toml is preserved and excluded by MCP config filter", async () => {
+	const codexDir = path.join(tempHome, ".codex");
+	await fs.writeFile(
+		path.join(codexDir, "config.toml"),
+		[
+			"[mcp_servers.disabled-server]",
+			'command = "npx"',
+			'args = ["-y", "@disabled/mcp"]',
+			"enabled = false",
+			"",
+			"[mcp_servers.enabled-server]",
+			'command = "npx"',
+			'args = ["-y", "@enabled/mcp"]',
+			"enabled = true",
+			"",
+			"[mcp_servers.default-server]",
+			'command = "npx"',
+			'args = ["-y", "@default/mcp"]',
+			"",
+		].join("\n"),
+	);
+
+	// Discovery must surface the flag so the existing loadAllMCPConfigs filter can apply.
+	const discovered = await loadCodexServers();
+	expect(discovered.find(s => s.name === "disabled-server")?.enabled).toBe(false);
+	expect(discovered.find(s => s.name === "enabled-server")?.enabled).toBe(true);
+	expect(discovered.find(s => s.name === "default-server")?.enabled).toBeUndefined();
+
+	// Contract: disabled servers are not started; enabled/unspecified remain discoverable.
+	const { configs } = await loadAllMCPConfigs(tempCwd, { filterExa: false });
+	expect(configs["disabled-server"]).toBeUndefined();
+	expect(configs["enabled-server"]).toBeDefined();
+	expect(configs["default-server"]).toBeDefined();
 });

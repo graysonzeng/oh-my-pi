@@ -125,6 +125,7 @@ async function loadTomlConfig(_ctx: LoadContext, path: string): Promise<Record<s
 
 /** Codex MCP server config format (from config.toml) */
 interface CodexMCPConfig {
+	enabled?: boolean;
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -159,6 +160,8 @@ function extractMCPServersFromToml(
 		// command="./bin/mcp" resolves to <configDir>/server/bin/mcp.
 		const rooted = resolvePluginStdioPaths({ command: config.command, cwd: config.cwd }, configDir, "cwd");
 		const server: Partial<MCPServer> = {
+			// Preserve Codex `enabled` so loadAllMCPConfigs can skip disabled servers.
+			...(typeof config.enabled === "boolean" && { enabled: config.enabled }),
 			...(rooted.command !== undefined && { command: rooted.command }),
 			args: config.args,
 			url: config.url,
