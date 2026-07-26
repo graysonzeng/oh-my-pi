@@ -35,11 +35,14 @@ const CATALOG_STUB_PARAMETERS: JsonSchemaObject = {
 /**
  * Read a property from a tool through a Proxy trap.
  * Always use the real tool instance as Reflect's receiver so class private-field
- * getters (e.g. BashTool `#asyncEnabled`) keep a valid brand. Passing the Proxy
- * as receiver throws TypeError: Cannot access invalid private field.
+ * getters (e.g. BashTool `#asyncEnabled`) keep a valid brand. Bind execute methods
+ * to that same instance because calling an unbound method through the Proxy would
+ * otherwise make the Proxy its `this` receiver and fail the private-field brand check.
  */
 function getToolProp(target: object, prop: PropertyKey): unknown {
-	return Reflect.get(target, prop, target);
+	const value = Reflect.get(target, prop, target);
+	if (prop === "execute" && typeof value === "function") return value.bind(target);
+	return value;
 }
 
 /**

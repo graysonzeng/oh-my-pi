@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "arktype";
-import { parametersToJsonSchema, wrapAgentToolWithWorkflowAliases } from "../../src/tools/workflow-alias-wrap";
+import { wrapToolWithMetaNotice } from "../../src/tools/output-meta";
+import {
+	applyWorkflowTransformTools,
+	parametersToJsonSchema,
+	wrapAgentToolWithWorkflowAliases,
+} from "../../src/tools/workflow-alias-wrap";
 import { applyWorkflowToolSessionFields, pickWorkflowToolSessionFields } from "../../src/tools/workflow-session-fields";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { RuntimeAdapter, type StructuredRunnerRequest } from "../../src/workflow/runtime-adapter";
@@ -59,6 +64,78 @@ describe("live tool path helpers for workflowToolOptimization", () => {
 		});
 		expect((wrapped as { customWireName?: string }).customWireName).toBe("run_command");
 		expect((wrapped as { description: string }).description).toBe("async-on");
+	});
+
+	it("toolAliases Proxy executes class methods with the underlying private-field receiver", async () => {
+		class PrivateFieldTool {
+			name = "bash";
+			parameters = { type: "object", properties: {} };
+			#result = "executed";
+			async execute(): Promise<string> {
+				return this.#result;
+			}
+		}
+
+		const wrapped = wrapAgentToolWithWorkflowAliases(new PrivateFieldTool(), {
+			workflowToolOptimization: { toolAliases: { bash: "run_command" } },
+		});
+
+		expect(await wrapped.execute()).toBe("executed");
+	});
+
+	it("catalog schema-drop Proxy executes class methods with the underlying private-field receiver", async () => {
+		class PrivateFieldTool {
+			name = "read";
+			description = "read a file";
+			parameters = { type: "object", properties: { path: { type: "string" } } };
+			#result = "catalog-executed";
+			async execute(): Promise<string> {
+				return this.#result;
+			}
+		}
+
+		const [wrapped] = applyWorkflowTransformTools([new PrivateFieldTool()], {
+			workflowToolOptimization: {
+				transformTools: tools => tools.map(tool => ({ ...tool, schema: undefined })),
+			},
+		});
+
+		expect(await wrapped?.execute()).toBe("catalog-executed");
+	});
+
+	it("composed production Proxies preserve the private-field execute receiver", async () => {
+		const parameters = type({});
+		class PrivateFieldTool {
+			name = "read";
+			label = "Read";
+			description = "read a private result";
+			parameters = parameters;
+			#result = "composed-executed";
+			get customWireName(): string | undefined {
+				return undefined;
+			}
+			async execute(_toolCallId: string, _args: unknown) {
+				return {
+					content: [{ type: "text" as const, text: this.#result }],
+					details: { result: this.#result },
+				};
+			}
+		}
+
+		const metaWrapped = wrapToolWithMetaNotice(new PrivateFieldTool());
+		const aliasWrapped = wrapAgentToolWithWorkflowAliases(metaWrapped, {
+			workflowToolOptimization: { toolAliases: { read: "read_file" } },
+		});
+		const [wrapped] = applyWorkflowTransformTools([aliasWrapped], {
+			workflowToolOptimization: {
+				transformTools: tools => tools.map(tool => ({ ...tool, customWireName: "read_file" })),
+			},
+		});
+
+		expect(wrapped?.customWireName).toBe("read_file");
+		expect(wrapped?.parameters).toBe(parameters);
+		const result = await wrapped?.execute("call-composed", {});
+		expect(result?.details).toEqual({ result: "composed-executed" });
 	});
 
 	it("applySessionToolOutput shortens oversized bash via session processResult", () => {

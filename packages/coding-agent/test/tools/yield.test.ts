@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { arrayValuedLabels } from "../../src/task/yield-assembly";
+import { wrapAgentToolWithWorkflowAliases } from "../../src/tools/workflow-alias-wrap";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -57,6 +58,15 @@ describe("YieldTool", () => {
 		const tool = new YieldTool(createSession());
 		expect(tool.strict).toBe(false);
 		const result = await tool.execute("call-1", { result: { data: { ok: true } } } as never);
+		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
+	});
+
+	it("toolAliases-only Proxy preserves the real YieldTool execute receiver", async () => {
+		const wrapped = wrapAgentToolWithWorkflowAliases(new YieldTool(createSession()), {
+			workflowToolOptimization: { toolAliases: { yield: "submit_result" } },
+		});
+
+		const result = await wrapped.execute("call-aliased", { result: { data: { ok: true } } } as never);
 		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
 	});
 
