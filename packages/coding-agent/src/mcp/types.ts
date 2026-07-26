@@ -63,6 +63,13 @@ export interface MCPAuthConfig {
 interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
+	/**
+	 * When true, do not connect at startup. Tools are mounted from the tool
+	 * cache as deferred handles; the real transport is opened on first tool
+	 * execute or manual `/mcp reconnect`. Unrelated to tool `loadMode` /
+	 * discoverable presentation.
+	 */
+	lazy?: boolean;
 	/** MCP request timeout in milliseconds (default: 30000, 0 to disable) */
 	timeout?: number;
 	/** Authentication configuration (optional) */

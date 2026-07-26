@@ -44,8 +44,19 @@ function toHex(buffer: ArrayBuffer): string {
 	return output;
 }
 
+/**
+ * Endpoint identity for the tool cache. `lazy` only controls when OMP opens
+ * the transport — not which tools the server exposes — so toggling it must
+ * not invalidate an existing cache entry for the same endpoint.
+ */
+function configIdentityForCache(config: MCPServerConfig): MCPServerConfig {
+	if (!("lazy" in config)) return config;
+	const { lazy: _lazy, ...rest } = config;
+	return rest;
+}
+
 async function hashConfig(config: MCPServerConfig): Promise<string> {
-	const stable = stableStringify(config);
+	const stable = stableStringify(configIdentityForCache(config));
 	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stable));
 	return toHex(digest);
 }

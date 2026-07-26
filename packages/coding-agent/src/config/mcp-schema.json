@@ -113,6 +113,10 @@
           "type": "boolean",
           "description": "Whether OMP should try to connect this server."
         },
+        "lazy": {
+          "type": "boolean",
+          "description": "When true, skip connecting at startup. Cached tools are registered as deferred handles and the real transport opens on first tool call or manual /mcp reconnect. Not related to tool loadMode/discoverable presentation."
+        },
         "timeout": {
           "type": "number",
           "minimum": 0,
