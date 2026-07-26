@@ -725,6 +725,29 @@ async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal)
 	return json(200, { generatedAt: Date.now(), credentials });
 }
 
+/**
+ * Map a model's native {@link Api} onto the new-api / one-api style
+ * `supported_endpoint_types` tags advertised on `GET /v1/models`.
+ *
+ * Clients (proxy discovery, dual-protocol SDKs) use these tags to pick a wire
+ * against this gateway:
+ *   - `"anthropic"` → `POST /v1/messages`
+ *   - `"openai"`    → `POST /v1/chat/completions`
+ *
+ * Only APIs whose natural gateway route is one of those two are tagged.
+ * Responses-family and unrelated transports stay empty — the gateway can still
+ * translate them via any format route, but we don't over-claim tags the proxy
+ * discovery contract would mis-map.
+ */
+function supportedEndpointTypes(api: Api): string[] {
+	if (api === "anthropic-messages") return ["anthropic"];
+	// OpenAI chat-compatible APIs the `/v1/chat/completions` route services.
+	if (api === "openai-completions" || api === "openrouter" || api === "ollama-chat") {
+		return ["openai"];
+	}
+	return [];
+}
+
 function handleModelsList(opts: AuthGatewayBootOptions): Response {
 	const list = opts.listModels ? Array.from(opts.listModels()) : [];
 	const data = list.map(model => ({
@@ -732,6 +755,7 @@ function handleModelsList(opts: AuthGatewayBootOptions): Response {
 		object: "model" as const,
 		owned_by: model.provider,
 		api: model.api,
+		supported_endpoint_types: supportedEndpointTypes(model.api),
 	}));
 	return json(200, { object: "list", data });
 }
