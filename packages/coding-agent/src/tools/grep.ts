@@ -90,10 +90,10 @@ export type GrepToolInput = typeof searchSchema.infer;
 
 /** Maximum number of distinct files surfaced in a single response. The
  * agent paginates further pages via `skip`. */
-export const DEFAULT_FILE_LIMIT = 20;
+export const DEFAULT_FILE_LIMIT = 8;
 /** Per-file match cap for multi-file searches — keeps a single hot file
  * from crowding out diverse hits. Applied in JS after grep returns. */
-export const MULTI_FILE_PER_FILE_MATCHES = 20;
+export const MULTI_FILE_PER_FILE_MATCHES = 8;
 /** Per-file match cap for single-file searches — there's no diversity
  * concern when the scope is one file. */
 export const SINGLE_FILE_MATCHES = 200;

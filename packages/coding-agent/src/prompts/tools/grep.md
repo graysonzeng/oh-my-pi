@@ -3,6 +3,8 @@ Greps files using regex (Rust regex + PCRE2).
 <instruction>
 - `path`: scope to known path (e.g. `src`); pass several as delimited list (`src; tests`).
   Line selector on one file (`src/foo.ts:50-100`); selectors never choose search root.
+- Start narrow. Unknown target? Inspect the first page, then narrow; paginate only if needed.
+- `ssh://` search targets files, not directories. Read the directory, then grep selected files.
 - Cross-line patterns from literal `\n` or `\\n` in `pattern`.
 </instruction>
 

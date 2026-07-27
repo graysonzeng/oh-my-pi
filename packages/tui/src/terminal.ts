@@ -1451,14 +1451,18 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#resizeHandler = undefined;
 
-		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
-		// re-interpreted after raw mode is disabled. This fixes a race condition
-		// where Ctrl+D could close the parent shell over SSH.
-		process.stdin.pause();
+		// A disconnected stdin may already have a closed descriptor. There is no
+		// raw mode left to restore, and touching it can throw EBADF during teardown.
+		if (!this.#dead) {
+			// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
+			// re-interpreted after raw mode is disabled. This fixes a race condition
+			// where Ctrl+D could close the parent shell over SSH.
+			process.stdin.pause();
 
-		// Restore raw mode state
-		if (process.stdin.setRawMode) {
-			process.stdin.setRawMode(this.#wasRaw);
+			// Restore raw mode state
+			if (process.stdin.setRawMode) {
+				process.stdin.setRawMode(this.#wasRaw);
+			}
 		}
 		this.#stdoutErrorCleanup?.();
 		this.#stdoutErrorCleanup = undefined;

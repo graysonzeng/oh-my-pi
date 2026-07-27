@@ -93,4 +93,30 @@ describe("ProcessTerminal headless suppression", () => {
 			setTerminalHeadless(previous);
 		}
 	});
+
+	it("does not restore raw mode after stdin disconnects", () => {
+		const previous = setTerminalHeadless(false);
+		const setRawMode = vi.fn((enabled: boolean) => {
+			if (!enabled) {
+				throw Object.assign(new Error("setRawMode failed with errno: 9"), { code: "EBADF" });
+			}
+			return process.stdin;
+		});
+		Object.defineProperty(process.stdin, "setRawMode", { value: setRawMode, configurable: true });
+		const terminal = new ProcessTerminal();
+		try {
+			terminal.start(
+				() => {},
+				() => {},
+				() => terminal.stop(),
+			);
+
+			expect(() => process.stdin.emit("end")).not.toThrow();
+			expect(setRawMode).toHaveBeenCalledTimes(1);
+		} finally {
+			setRawMode.mockImplementation(() => process.stdin);
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
 });

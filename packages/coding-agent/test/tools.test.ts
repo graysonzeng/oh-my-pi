@@ -2013,6 +2013,27 @@ function b() {
 			expect(result.details?.perFileLimitReached).toBe(MULTI_FILE_PER_FILE_MATCHES);
 		});
 
+		it("should bound the first broad-search page before pagination", async () => {
+			const progressiveDir = path.join(testDir, "progressive-search-dir");
+			fs.mkdirSync(progressiveDir, { recursive: true });
+			for (let file = 0; file < 12; file++) {
+				fs.writeFileSync(
+					path.join(progressiveDir, `f-${String(file).padStart(2, "0")}.txt`),
+					Array.from({ length: 12 }, (_, line) => `needle ${file}-${line}`).join("\n"),
+				);
+			}
+
+			const result = await searchTool.execute("test-call-progressive-page", {
+				pattern: "needle",
+				path: progressiveDir,
+			});
+
+			const output = getTextOutput(result);
+			expect(result.details?.fileCount).toBeLessThanOrEqual(8);
+			expect(result.details?.matchCount).toBeLessThanOrEqual(64);
+			expect(output).toContain("Use skip=8");
+		});
+
 		it("should let a single-file scope exceed the multi-file per-file cap", async () => {
 			const single = path.join(testDir, "single-file.txt");
 			const count = MULTI_FILE_PER_FILE_MATCHES + 30;
