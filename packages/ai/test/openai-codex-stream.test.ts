@@ -2518,6 +2518,83 @@ describe("openai-codex streaming", () => {
 		expect(fallbackDetails.fallbackCount).toBe(1);
 	});
 
+	it("falls back to SSE when proxy reports unsupported websocket URL scheme", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_sse", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello SSE" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_sse", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello SSE" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_sse", status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://gateway.example.com/v1/responses") {
+				return new Response(sse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+		class SchemeErrorWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				expect(url).toBe("wss://gateway.example.com/v1/responses");
+				this.scheduleOpen();
+				setTimeout(() => {
+					this.sendJson({
+						type: "error",
+						code: "internal_server_error",
+						message: 'codex websockets executor: unsupported responses websocket URL scheme ""',
+						error: {
+							code: "internal_server_error",
+							message: 'codex websockets executor: unsupported responses websocket URL scheme ""',
+						},
+					});
+				}, 0);
+			}
+		}
+
+		global.WebSocket = SchemeErrorWebSocket as unknown as typeof WebSocket;
+		const model: Model<"openai-codex-responses"> = buildModel({
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			api: "openai-codex-responses",
+			provider: "gateway",
+			baseUrl: "https://gateway.example.com/v1",
+			compat: { codexResponsesEndpoint: "standard" },
+			reasoning: true,
+			preferWebsockets: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 128000,
+		});
+		const context = createCodexTestContext();
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const streamResult = streamOpenAICodexResponses(model, context, {
+			fetch: fetchMock as FetchImpl,
+			apiKey: token,
+			sessionId: "ws-scheme-session",
+			providerSessionState,
+		});
+		const result = await streamResult.result();
+		expect(result.role).toBe("assistant");
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.some(block => block.type === "text" && block.text === "Hello SSE")).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const fallbackDetails = getOpenAICodexTransportDetails(model, {
+			sessionId: "ws-scheme-session",
+			providerSessionState,
+		});
+		expect(fallbackDetails.lastTransport).toBe("sse");
+		expect(fallbackDetails.websocketDisabled).toBe(true);
+		expect(fallbackDetails.fallbackCount).toBe(1);
+	});
+
 	it("carries fatal websocket fallback into isolated compaction transport", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

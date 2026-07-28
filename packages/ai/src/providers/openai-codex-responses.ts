@@ -246,6 +246,16 @@ const CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY = "ws_request_header_x_openai_
 const CODEX_MODERATION_METADATA_KEY = "openai_chatgpt_moderation_metadata";
 /** Connection-level websocket failures that should immediately fall back to SSE without retrying. */
 const CODEX_WEBSOCKET_FATAL_PATTERNS = ["websocket error:", "websocket closed before open", "connection timeout"];
+/**
+ * Permanent websocket-config failures reported by proxies/backends after the client
+ * WS is already open (e.g. empty/unsupported upstream scheme). These will never
+ * succeed on retry over websocket, so fall back to SSE immediately and disable WS.
+ */
+const CODEX_WEBSOCKET_CONFIG_FAILURE_PATTERNS = [
+	"unsupported responses websocket url scheme",
+	"responses websocket url host is empty",
+	"unsupported responses websocket url",
+];
 /** Max total time to spend retrying 429s with server-provided delays (5 minutes). */
 const CODEX_RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 const CODEX_ADDITIONAL_PROGRESS_EVENT_TYPES = new Set(["response.done", "response.incomplete"]);
@@ -2107,6 +2117,9 @@ class CodexStreamProcessor {
 		if (await this.#tryRecoverPreviousResponseNotFound(error)) {
 			return true;
 		}
+		if (await this.#tryFallbackWebsocketConfigFailure(error)) {
+			return true;
+		}
 		if (await this.#tryReplayWebsocketFailureOverSse(error)) {
 			return true;
 		}
@@ -2341,6 +2354,43 @@ class CodexStreamProcessor {
 		this.firstTokenTime = undefined;
 
 		await this.#reopenSseStream(state);
+		return true;
+	}
+
+	/**
+	 * Permanent websocket configuration failures returned by a proxy after the client
+	 * websocket is already open (e.g. `unsupported responses websocket URL scheme ""`).
+	 * Retrying the same websocket transport cannot recover; fall back to SSE once.
+	 */
+	async #tryFallbackWebsocketConfigFailure(error: unknown): Promise<boolean> {
+		if (!(error instanceof CodexProviderStreamError)) return false;
+		const websocketState = this.requestContext.websocketState;
+		if (
+			this.runtime.transport !== "websocket" ||
+			!websocketState ||
+			!this.runtime.canSafelyReplayWebsocketOverSse ||
+			this.runtime.sawTerminalEvent ||
+			this.options?.signal?.aborted
+		) {
+			return false;
+		}
+		const message = error.message.toLowerCase();
+		const isConfigFailure = CODEX_WEBSOCKET_CONFIG_FAILURE_PATTERNS.some(pattern =>
+			message.includes(pattern.toLowerCase()),
+		);
+		if (!isConfigFailure) return false;
+
+		recordCodexWebSocketFailure(websocketState, true);
+		CODEX_DEBUG &&
+			logger.debug("[codex] codex websocket config failure, falling back to SSE", {
+				error: error.message,
+				code: error.code,
+			});
+
+		this.runtime.resetAccumulators();
+		resetOutputState(this.output);
+		this.firstTokenTime = undefined;
+		await this.#reopenSseStream(websocketState);
 		return true;
 	}
 
