@@ -107,9 +107,11 @@ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } fr
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import {
+	applyProviderOnlyToolHistoryDetailed,
 	buildResolvedModelOptimization,
 	type ModelOptimizationProfile,
 	mergeModelOptimizationProfiles,
+	PROVIDER_ELISION_RECEIPT_KIND,
 	type ResolvedModelOptimization,
 	resolveModelOptimizationProfile,
 } from "./model-optimization";
@@ -2492,6 +2494,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
 		// Mutable holder updated by reconcileModelOptimization / session apply.
 		const modelOptimizationRuntime: { resolved: ResolvedModelOptimization } = { resolved: {} };
+		const providerElisionReceiptFingerprints = new Set<string>();
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -2789,7 +2792,33 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
-			return wrapSteeringForModel(withContext);
+			const steered = wrapSteeringForModel(withContext);
+			// Provider-only tool-history elision from ordinary modelOptimization profile.
+			// Never mutates SessionManager JSONL / input message objects.
+			const strategy = modelOptimizationRuntime.resolved.contextStrategy;
+			const window = agent?.state.model?.contextWindow;
+			if (!strategy || !window || window <= 0) return steered;
+			const detailed = applyProviderOnlyToolHistoryDetailed(steered, {
+				contextWindow: window,
+				strategy,
+			});
+			// Observation-only receipts: write failure must not change provider content.
+			if (
+				detailed.fingerprint &&
+				detailed.receipts.length > 0 &&
+				!providerElisionReceiptFingerprints.has(detailed.fingerprint)
+			) {
+				providerElisionReceiptFingerprints.add(detailed.fingerprint);
+				try {
+					sessionManager.appendCustomEntry(PROVIDER_ELISION_RECEIPT_KIND, {
+						fingerprint: detailed.fingerprint,
+						receipts: detailed.receipts,
+					});
+				} catch {
+					// leave provider messages unchanged
+				}
+			}
+			return detailed.messages;
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames, then

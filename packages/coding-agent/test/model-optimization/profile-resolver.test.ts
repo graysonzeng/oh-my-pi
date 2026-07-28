@@ -96,4 +96,12 @@ describe("ordinary-session model optimization resolver", () => {
 		expect("toolOptimization" in resolved).toBe(false);
 		expect(applySessionToolOutput({}, "bash", output, { exitCode: 1 })).toBe(output);
 	});
+
+	it("built-in profiles keep deterministic truncation with summarizer disabled", () => {
+		const resolved = buildResolvedModelOptimization(DEFAULT_MODEL_OPTIMIZATION_PROFILES.claude);
+		expect(resolved.profile?.toolStrategy?.resultSummarization?.enabled).toBe(false);
+		expect(resolved.profile?.toolStrategy?.outputTruncation?.enabled).toBe(true);
+		expect(resolved.contextStrategy?.eviction?.preserveUserTurns).toBe(true);
+		expect(resolved.contextStrategy?.eviction?.evictPersisted).toBe(false);
+	});
 });

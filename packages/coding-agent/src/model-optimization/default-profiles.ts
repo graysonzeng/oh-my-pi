@@ -25,7 +25,9 @@ function toolStrategy(opts?: { maxBytes?: number; maxLines?: number; maxConcurre
 				{ toolName: "*", strategy: "head", maxBytes: Math.min(2000, maxBytes), maxLines: 50 },
 			],
 		},
-		resultSummarization: { enabled: true, summarizerKeys: ["bash", "read", "grep", "ls", "test", "*"] },
+		// P3 keeps LLM summarizer off; deterministic truncation remains available.
+		// Explicit user profile overrides may re-enable summarization.
+		resultSummarization: { enabled: false, summarizerKeys: ["bash", "read", "grep", "ls", "test", "*"] },
 		maxConcurrentTools: opts?.maxConcurrent ?? 8,
 		resourceConflictMode: "serialize",
 	};

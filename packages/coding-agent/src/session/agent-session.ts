@@ -254,7 +254,11 @@ import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
-import type { ResolvedModelOptimization, SessionContextStrategy } from "../model-optimization/types";
+import type {
+	ResolvedModelOptimization,
+	SessionContextStrategy,
+	SessionToolStrategy,
+} from "../model-optimization/types";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
@@ -349,6 +353,12 @@ import { formatLocalCalendarDate } from "../utils/local-date";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
+import {
+	TOOL_OPTIMIZATION_RECEIPT_KIND,
+	type ToolOptimizationReceiptV1,
+	type ToolOutputArtifactAdapter,
+} from "../workflow/optimization-receipt";
+import { processToolOutputDetailedAsync } from "../workflow/tool-output-manager";
 import type { AuthStorage } from "./auth-storage";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
@@ -5488,7 +5498,7 @@ export class AgentSession {
 		}
 	}
 
-	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+	async #afterToolCall(ctx: AfterToolCallContext): Promise<AfterToolCallResult | undefined> {
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -5500,7 +5510,99 @@ export class AgentSession {
 			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 		}
-		return this.#ttsrAfterToolCall(ctx);
+
+		const optimized = await this.#optimizeOrdinaryToolResult(ctx);
+		// Fold TTSR reminder onto the post-optimization content so both land in one result.
+		const ttsr = this.#ttsrAfterToolCall(
+			optimized
+				? {
+						...ctx,
+						result: {
+							...ctx.result,
+							content: optimized.content ?? ctx.result.content,
+						},
+					}
+				: ctx,
+		);
+		return ttsr ?? optimized;
+	}
+
+	/**
+	 * Ordinary-session deterministic tool-output transform with artifact recovery.
+	 * Text-only; images preserved. Failures keep original text (no irreversible shrink).
+	 * Runs when either outputTruncation or resultSummarization is enabled (not truncation-only).
+	 */
+	async #optimizeOrdinaryToolResult(ctx: AfterToolCallContext): Promise<AfterToolCallResult | undefined> {
+		if (ctx.isError) return undefined;
+		const toolStrategy = this.#activeModelOptimization.profile?.toolStrategy as SessionToolStrategy | undefined;
+		if (!toolStrategy) return undefined;
+		const truncationOn = toolStrategy.outputTruncation?.enabled === true;
+		const summarizationOn = toolStrategy.resultSummarization?.enabled === true;
+		if (!truncationOn && !summarizationOn) return undefined;
+
+		const originalContent = ctx.result.content;
+		if (!Array.isArray(originalContent) || originalContent.length === 0) return undefined;
+
+		const textParts: string[] = [];
+		const nonText: typeof originalContent = [];
+		for (const block of originalContent) {
+			if (block?.type === "text" && typeof block.text === "string") {
+				textParts.push(block.text);
+			} else {
+				nonText.push(block);
+			}
+		}
+		if (textParts.length === 0) return undefined;
+
+		const originalText = textParts.join("\n");
+		const artifact: ToolOutputArtifactAdapter = {
+			saveRaw: async (toolName, fullText) => {
+				try {
+					return await this.sessionManager.saveArtifact(fullText, toolName);
+				} catch {
+					return undefined;
+				}
+			},
+		};
+
+		let detailed: { text: string; receipt?: ToolOptimizationReceiptV1 };
+		try {
+			detailed = await processToolOutputDetailedAsync(
+				originalText,
+				ctx.toolCall.name,
+				toolStrategy,
+				ctx.args,
+				artifact,
+			);
+		} catch (error) {
+			logger.debug("Ordinary tool-output optimization failed; keeping original", {
+				tool: ctx.toolCall.name,
+				error: String(error),
+			});
+			return undefined;
+		}
+
+		if (detailed.text === originalText) return undefined;
+
+		if (detailed.receipt) {
+			try {
+				this.sessionManager.appendCustomEntry(TOOL_OPTIMIZATION_RECEIPT_KIND, {
+					...detailed.receipt,
+					toolCallId: ctx.toolCall.id,
+				});
+			} catch (error) {
+				// Receipt persistence failure must not cause irreversible visible loss.
+				logger.debug("Failed to persist tool optimization receipt; keeping original text", {
+					tool: ctx.toolCall.name,
+					error: String(error),
+				});
+				return undefined;
+			}
+		}
+
+		return {
+			content: [{ type: "text", text: detailed.text }, ...nonText],
+		};
 	}
 
 	/** `afterToolCall` hook: fold any per-tool TTSR reminders into the result. */
@@ -10801,13 +10903,6 @@ export class AgentSession {
 		if (result.prunedCount === 0) {
 			return undefined;
 		}
-
-		await this.sessionManager.rewriteEntries();
-		const sessionContext = this.buildDisplaySessionContext();
-		this.agent.replaceMessages(sessionContext.messages);
-		this.#resetAllAdvisorRuntimes();
-		this.#syncTodoPhasesFromBranch();
-		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return result;
 	}
 
@@ -10819,10 +10914,8 @@ export class AgentSession {
 	 * provider prompt cache is cold), so it is cheap to run every turn. Gated
 	 * on the `compaction.supersedeReads` and `compaction.dropUseless` settings.
 	 *
-	 * Persists via `rewriteEntries` like every other history rewrite — the
-	 * session file must match the live (pruned) context or file-based forks
-	 * (`/fork`, `/tan`) and resume rebuild a divergent prefix and cold-miss the
-	 * provider prompt cache.
+	 * Mutates branch entries in place; caller commits via a single
+	 * `rewriteEntries` in the maintenance transaction.
 	 */
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.settings.getGroup("compaction");
@@ -10844,14 +10937,76 @@ export class AgentSession {
 		if (result.prunedCount === 0) {
 			return undefined;
 		}
-
-		await this.sessionManager.rewriteEntries();
-		const sessionContext = this.buildDisplaySessionContext();
-		this.agent.replaceMessages(sessionContext.messages);
-		this.#resetAllAdvisorRuntimes();
-		this.#syncTodoPhasesFromBranch();
-		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return result;
+	}
+
+	/**
+	 * Single history-maintenance transaction: supersede/useless + age prune
+	 * share one rewriteEntries so the warm prefix is rewritten at most once.
+	 * Any prune/rewrite exception restores branch tool-result messages and live agent view.
+	 */
+	async #runHistoryMaintenancePrunes(opts?: { includeAgePrune?: boolean }): Promise<{
+		supersede?: { prunedCount: number; tokensSaved: number };
+		age?: { prunedCount: number; tokensSaved: number };
+	}> {
+		type ToolResultMessage = Extract<AgentMessage, { role: "toolResult" }> & { prunedAt?: number };
+		const branchEntries = this.sessionManager.getBranch();
+		const snapshots: Array<{
+			message: ToolResultMessage;
+			content: ToolResultMessage["content"];
+			prunedAt: number | undefined;
+		}> = [];
+		for (const entry of branchEntries) {
+			if (entry.type !== "message") continue;
+			const message = entry.message;
+			if (!message || typeof message !== "object" || message.role !== "toolResult") continue;
+			const toolResult = message as ToolResultMessage;
+			snapshots.push({
+				message: toolResult,
+				content: toolResult.content,
+				prunedAt: toolResult.prunedAt,
+			});
+		}
+
+		const restoreSnapshots = () => {
+			for (const snap of snapshots) {
+				snap.message.content = snap.content;
+				if (snap.prunedAt === undefined) {
+					delete snap.message.prunedAt;
+				} else {
+					snap.message.prunedAt = snap.prunedAt;
+				}
+				invalidateMessageCache(snap.message);
+			}
+			const sessionContext = this.buildDisplaySessionContext();
+			this.agent.replaceMessages(sessionContext.messages);
+		};
+
+		try {
+			const supersedeResult = await this.#pruneStaleToolResults();
+			const ageResult = opts?.includeAgePrune ? await this.#pruneToolOutputs() : undefined;
+
+			if ((supersedeResult?.prunedCount ?? 0) === 0 && (ageResult?.prunedCount ?? 0) === 0) {
+				return {};
+			}
+
+			await this.sessionManager.rewriteEntries();
+			const sessionContext = this.buildDisplaySessionContext();
+			this.agent.replaceMessages(sessionContext.messages);
+			this.#resetAllAdvisorRuntimes();
+			this.#syncTodoPhasesFromBranch();
+			this.#closeCodexProviderSessionsForHistoryRewrite();
+			return {
+				supersede: supersedeResult,
+				age: ageResult,
+			};
+		} catch (error) {
+			restoreSnapshots();
+			logger.debug("History maintenance prune failed; restored branch tool results", {
+				error: String(error),
+			});
+			throw error;
+		}
 	}
 
 	/**
@@ -11947,18 +12102,20 @@ export class AgentSession {
 			return COMPACTION_CHECK_NONE;
 		}
 
-		// Stale-result pass runs every turn, before any threshold gating: it is
-		// cheap (bails when no candidate) and independent of the compaction
-		// setting.
-		const supersedeResult = await this.#pruneStaleToolResults();
-
+		// Stale + age prune share one rewriteEntries transaction (cache-stable).
+		// Supersede/useless always runs; age prune only when compaction is active
+		// and the turn is not a bare error without usable context pressure.
 		const compactionSettings = this.settings.getGroup("compaction");
+		const ageEligible =
+			compactionSettings.enabled && compactionSettings.strategy !== "off" && assistantMessage.stopReason !== "error";
+		const maintenance = await this.#runHistoryMaintenancePrunes({ includeAgePrune: ageEligible });
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 
 		// Case 4: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
-		const pruneResult = await this.#pruneToolOutputs();
+		const supersedeResult = maintenance.supersede;
+		const pruneResult = maintenance.age;
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,

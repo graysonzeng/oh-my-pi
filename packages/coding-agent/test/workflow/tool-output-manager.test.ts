@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { DEFAULT_MODEL_OPTIMIZATION_PROFILES } from "../../src/model-optimization/default-profiles";
 import {
 	buildToolOptimizationReceipt,
 	sha256Hex,
@@ -11,6 +12,7 @@ import {
 	DEFAULT_TRUNCATION_RULES,
 	processToolOutput,
 	processToolOutputDetailed,
+	processToolOutputDetailedAsync,
 	summarizeToolOutput,
 	truncateToolOutput,
 	utf8ByteLength,
@@ -378,5 +380,81 @@ describe("buildToolOptimizationReceipt", () => {
 		});
 		expect(preserve.reversible).toBe(true);
 		expect(preserve.recoveryUri).toBeUndefined();
+	});
+});
+
+describe("processToolOutputDetailedAsync + ordinary defaults", () => {
+	it("awaits saveRaw and attaches recovery URI", async () => {
+		const huge = `${"noise line\n".repeat(100)}ERROR: compile failed\n`;
+		const saved = new Map<string, string>();
+		const adapter: ToolOutputArtifactAdapter = {
+			saveRaw: async (tool, text) => {
+				const id = `async-${tool}`;
+				saved.set(id, text);
+				return id;
+			},
+		};
+		const detailed = await processToolOutputDetailedAsync(huge, "bash", strategy, { exitCode: 1 }, adapter);
+		expect(detailed.text).toContain("[raw output: artifact://async-bash]");
+		expect(detailed.receipt?.recoveryUri).toBe("artifact://async-bash");
+		expect(detailed.receipt?.reversible).toBe(true);
+		expect(saved.get("async-bash")).toBe(huge);
+	});
+
+	it("fails closed to original text when lossy without recovery", async () => {
+		const huge = `${"noise line\n".repeat(100)}ERROR: compile failed\n`;
+		const detailed = await processToolOutputDetailedAsync(
+			huge,
+			"bash",
+			strategy,
+			{ exitCode: 1 },
+			{
+				saveRaw: async () => undefined,
+			},
+		);
+		expect(detailed.text).toBe(huge);
+		expect(detailed.receipt).toBeUndefined();
+	});
+
+	it("built-in ordinary profiles disable resultSummarization by default", () => {
+		for (const profile of Object.values(DEFAULT_MODEL_OPTIMIZATION_PROFILES)) {
+			expect(profile.toolStrategy?.resultSummarization?.enabled).toBe(false);
+			expect(profile.toolStrategy?.outputTruncation?.enabled).toBe(true);
+		}
+	});
+
+	it("ordinary default profile truncation still works without summarizer", async () => {
+		const profile = DEFAULT_MODEL_OPTIMIZATION_PROFILES.claude;
+		const huge = Array.from({ length: 200 }, (_, i) => `line ${i} content body`).join("\n");
+		const detailed = await processToolOutputDetailedAsync(
+			huge,
+			"read",
+			profile.toolStrategy,
+			{ path: "src/x.ts" },
+			{ saveRaw: async () => "ord-1" },
+		);
+		expect(detailed.text.length).toBeLessThan(huge.length);
+		expect(detailed.text).toContain("[raw output: artifact://ord-1]");
+		expect(detailed.receipt?.recoveryUri).toBe("artifact://ord-1");
+		// Without summarizer, body content remains (not metadata-only).
+		expect(detailed.text).toContain("line 0 content body");
+	});
+
+	it("summarization-only strategy still transforms when truncation is disabled", async () => {
+		const huge = Array.from({ length: 80 }, (_, i) => `noise line ${i} ok 12ms`).join("\n");
+		const strategy: ToolStrategy = {
+			outputTruncation: { enabled: false, rules: [] },
+			resultSummarization: { enabled: true, summarizerKeys: ["bash", "*"] },
+		};
+		const detailed = await processToolOutputDetailedAsync(
+			huge,
+			"bash",
+			strategy,
+			{ exitCode: 0, command: "echo ok" },
+			{ saveRaw: async () => "sum-only" },
+		);
+		expect(detailed.text).not.toBe(huge);
+		expect(detailed.receipt?.transform).toBe("summarize");
+		expect(detailed.receipt?.recoveryUri).toBe("artifact://sum-only");
 	});
 });

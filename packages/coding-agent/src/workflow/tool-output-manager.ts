@@ -368,8 +368,53 @@ export function processToolOutputDetailed(
 	args?: unknown,
 	artifact?: ToolOutputArtifactAdapter,
 ): WorkflowToolOptimizationResult {
+	return finalizeToolOutput(processToolOutputCore(output, toolName, toolStrategy, args), artifact, toolName, {
+		awaitSave: false,
+		failClosedWithoutRecovery: false,
+	}) as WorkflowToolOptimizationResult;
+}
+
+/**
+ * Awaitable ordinary-session path: same deterministic transforms as
+ * {@link processToolOutputDetailed}, but awaits `artifact.saveRaw` and fails closed
+ * (returns original text, no irreversible shrink) when a lossy transform cannot
+ * obtain a real recovery URI.
+ */
+export async function processToolOutputDetailedAsync(
+	output: string,
+	toolName: string,
+	toolStrategy: ToolStrategy | undefined,
+	args?: unknown,
+	artifact?: ToolOutputArtifactAdapter,
+): Promise<WorkflowToolOptimizationResult> {
+	return finalizeToolOutput(processToolOutputCore(output, toolName, toolStrategy, args), artifact, toolName, {
+		awaitSave: true,
+		failClosedWithoutRecovery: true,
+	});
+}
+
+interface ToolOutputCoreResult {
+	original: string;
+	result: string;
+	transform: ToolOptimizationTransform;
+	didSummarize: boolean;
+	didTruncate: boolean;
+}
+
+function processToolOutputCore(
+	output: string,
+	toolName: string,
+	toolStrategy: ToolStrategy | undefined,
+	args?: unknown,
+): ToolOutputCoreResult {
 	if (!output || !toolStrategy) {
-		return { text: output };
+		return {
+			original: output,
+			result: output,
+			transform: "none",
+			didSummarize: false,
+			didTruncate: false,
+		};
 	}
 
 	const original = output;
@@ -413,47 +458,93 @@ export function processToolOutputDetailed(
 	// Defense in depth: re-attach original recovery footer if any transform dropped it.
 	result = preserveRawOutputFooter(original, result);
 
+	let transform: ToolOptimizationTransform = "none";
 	if (!didSummarize && !didTruncate && result === original) {
-		return { text: result };
+		transform = "none";
+	} else if (toolName === "read" && !didSummarize && didTruncate) {
+		transform = "truncate";
+	} else if (toolName === "read" && !didSummarize && !didTruncate) {
+		transform = "preserve_body";
+	} else if (didSummarize && didTruncate) {
+		transform = "summarize+truncate";
+	} else if (didSummarize) {
+		transform = "summarize";
+	} else if (didTruncate) {
+		transform = "truncate";
 	}
 
-	let transform: ToolOptimizationTransform = "none";
-	if (toolName === "read" && !didSummarize && didTruncate) transform = "truncate";
-	else if (toolName === "read" && !didSummarize && !didTruncate) transform = "preserve_body";
-	else if (didSummarize && didTruncate) transform = "summarize+truncate";
-	else if (didSummarize) transform = "summarize";
-	else if (didTruncate) transform = "truncate";
+	return { original, result, transform, didSummarize, didTruncate };
+}
+
+function finalizeToolOutput(
+	core: ToolOutputCoreResult,
+	artifact: ToolOutputArtifactAdapter | undefined,
+	toolName: string,
+	opts: { awaitSave: false; failClosedWithoutRecovery: boolean },
+): WorkflowToolOptimizationResult;
+function finalizeToolOutput(
+	core: ToolOutputCoreResult,
+	artifact: ToolOutputArtifactAdapter | undefined,
+	toolName: string,
+	opts: { awaitSave: true; failClosedWithoutRecovery: boolean },
+): Promise<WorkflowToolOptimizationResult>;
+function finalizeToolOutput(
+	core: ToolOutputCoreResult,
+	artifact: ToolOutputArtifactAdapter | undefined,
+	toolName: string,
+	opts: { awaitSave: boolean; failClosedWithoutRecovery: boolean },
+): WorkflowToolOptimizationResult | Promise<WorkflowToolOptimizationResult> {
+	const { original, transform } = core;
+	let result = core.result;
+
+	if (transform === "none" && result === original) {
+		return opts.awaitSave ? Promise.resolve({ text: result }) : { text: result };
+	}
 
 	const existing = extractRawOutputFooter(result);
 	let recoveryUri = existing.artifactId ? `artifact://${existing.artifactId}` : undefined;
-
-	// Lossy + no pre-existing footer → try to persist original before the model sees the shrink.
 	const lossy = result !== original || transform !== "none";
-	if (lossy && !recoveryUri && artifact?.saveRaw) {
-		const saved = artifact.saveRaw(toolName, original);
-		// Sync path only — ignore Promise (processResult is sync).
-		if (typeof saved === "string" && saved.length > 0) {
-			const footer = `[raw output: artifact://${saved}]`;
+
+	const finish = (savedId: string | undefined): WorkflowToolOptimizationResult => {
+		if (lossy && !recoveryUri && savedId) {
+			const footer = `[raw output: artifact://${savedId}]`;
 			const sep = result.endsWith("\n") ? "" : "\n";
 			result = `${result}${sep}${footer}`;
-			recoveryUri = `artifact://${saved}`;
+			recoveryUri = `artifact://${savedId}`;
+		}
+
+		// Ordinary sessions: never ship irreversible loss without recovery.
+		if (opts.failClosedWithoutRecovery && lossy && !recoveryUri) {
+			return { text: original };
+		}
+
+		const receipt: ToolOptimizationReceiptV1 = buildToolOptimizationReceipt({
+			tool: toolName,
+			transform,
+			original,
+			visible: result,
+			recoveryUri,
+		});
+
+		if ((utf8ByteLength(result) < utf8ByteLength(original) || lossy) && !recoveryUri) {
+			receipt.reversible = false;
+		}
+
+		return { text: result, receipt };
+	};
+
+	if (lossy && !recoveryUri && artifact?.saveRaw) {
+		const saved = artifact.saveRaw(toolName, original);
+		if (opts.awaitSave) {
+			return Promise.resolve(saved).then(id => finish(typeof id === "string" && id.length > 0 ? id : undefined));
+		}
+		// Sync path only — ignore Promise (processResult is sync).
+		if (typeof saved === "string" && saved.length > 0) {
+			return finish(saved);
 		}
 	}
 
-	const receipt: ToolOptimizationReceiptV1 = buildToolOptimizationReceipt({
-		tool: toolName,
-		transform,
-		original,
-		visible: result,
-		recoveryUri,
-	});
-
-	// If lossy and no recovery URI, mark non-reversible (conservative truncate already applied).
-	if ((utf8ByteLength(result) < utf8ByteLength(original) || lossy) && !recoveryUri) {
-		receipt.reversible = false;
-	}
-
-	return { text: result, receipt };
+	return opts.awaitSave ? Promise.resolve(finish(undefined)) : finish(undefined);
 }
 
 /**
