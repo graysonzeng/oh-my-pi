@@ -60,6 +60,34 @@ export interface BenchmarkRunOptions {
 	liveQualityUnknown?: boolean;
 	/** Optional notes appended to the scorecard. */
 	notes?: string[];
+	/** Exact provider identity — null/omit when unknown. */
+	provider?: string | null;
+	model?: string | null;
+	checkpoint?: string | null;
+	/** API / transport id. */
+	api?: string | null;
+	/** Host adapter id / version. */
+	adapter?: string | null;
+	/** Stream / event parser id / version. */
+	parser?: string | null;
+	/** ModelFactsV1 fingerprint when compiled policy is in play. */
+	modelFactsFingerprint?: string | null;
+	taskPolicyFingerprint?: string | null;
+	sessionStateFingerprint?: string | null;
+	/** Compiled policy content hash (receipt-level). */
+	compiledPolicyFingerprint?: string | null;
+	/** Durable compiled policy receipt id when available. */
+	compiledPolicyReceiptId?: string | null;
+	/**
+	 * Ordinary paired ablation: at most one lever (string or single-element array).
+	 * Combination runs: multi-element array with combinationRun=true.
+	 */
+	activeLever?: string | readonly string[] | null;
+	/**
+	 * Explicit flag for multi-lever combination runs.
+	 * Required when activeLever lists more than one lever. Never mutates production profiles.
+	 */
+	combinationRun?: boolean;
 }
 
 function unknownMetric<T>(): MetricValue<T> {
@@ -115,12 +143,68 @@ export function caseFingerprint(c: BenchmarkCase): string {
 	return sha256Hex(payload);
 }
 
-function buildFingerprint(
+function nullableIdentity(value: string | null | undefined): string | null {
+	if (value === undefined || value === null || value === "") return null;
+	return value;
+}
+
+/**
+ * Normalize active lever for fingerprints.
+ * Ordinary paired runs accept at most one lever; multi-lever requires combinationRun.
+ */
+export function resolveActiveLever(
+	activeLever: string | readonly string[] | null | undefined,
+	combinationRun: boolean | undefined,
+): string | null {
+	if (activeLever === undefined || activeLever === null) return null;
+	const levers = (Array.isArray(activeLever) ? [...activeLever] : [activeLever])
+		.map(v => String(v).trim())
+		.filter(v => v.length > 0 && v !== "none");
+	if (levers.length === 0) return null;
+	const unique = [...new Set(levers)].sort();
+	if (unique.length === 1) return unique[0]!;
+	if (!combinationRun) {
+		throw new Error(
+			`single-lever invariant: ordinary paired runs allow at most one active lever; got [${unique.join(", ")}]. ` +
+				`Set combinationRun=true with an explicit variant/flag for multi-lever combination runs. ` +
+				`This does not mutate production profiles.`,
+		);
+	}
+	return `combo:${unique.join("+")}`;
+}
+
+/** Stable JSON fingerprint of identity + policy stamps (no timestamps). */
+export function fingerprintIdentity(fp: BenchmarkRunFingerprint): string {
+	const payload = JSON.stringify({
+		suiteId: fp.suiteId,
+		caseId: fp.caseId,
+		variant: fp.variant,
+		caseFingerprint: fp.caseFingerprint,
+		profileId: fp.profileId ?? null,
+		strategyFingerprint: fp.strategyFingerprint ?? null,
+		provider: fp.provider,
+		model: fp.model,
+		checkpoint: fp.checkpoint,
+		api: fp.api,
+		adapter: fp.adapter,
+		parser: fp.parser,
+		modelFactsFingerprint: fp.modelFactsFingerprint,
+		taskPolicyFingerprint: fp.taskPolicyFingerprint,
+		sessionStateFingerprint: fp.sessionStateFingerprint,
+		compiledPolicyFingerprint: fp.compiledPolicyFingerprint,
+		compiledPolicyReceiptId: fp.compiledPolicyReceiptId,
+		activeLever: fp.activeLever,
+	});
+	return sha256Hex(payload);
+}
+
+export function buildFingerprint(
 	suite: BenchmarkSuite,
 	c: BenchmarkCase,
 	variant: BenchmarkVariantKind,
 	opts: BenchmarkRunOptions,
 ): BenchmarkRunFingerprint {
+	const activeLever = resolveActiveLever(opts.activeLever, opts.combinationRun);
 	return {
 		suiteId: suite.id,
 		caseId: c.id,
@@ -128,6 +212,18 @@ function buildFingerprint(
 		caseFingerprint: caseFingerprint(c),
 		profileId: variant === "optimized" ? opts.optimizedProfileId : "baseline",
 		strategyFingerprint: variant === "optimized" ? opts.optimizedStrategyFingerprint : "none",
+		provider: nullableIdentity(opts.provider),
+		model: nullableIdentity(opts.model),
+		checkpoint: nullableIdentity(opts.checkpoint),
+		api: nullableIdentity(opts.api),
+		adapter: nullableIdentity(opts.adapter),
+		parser: nullableIdentity(opts.parser),
+		modelFactsFingerprint: nullableIdentity(opts.modelFactsFingerprint),
+		taskPolicyFingerprint: nullableIdentity(opts.taskPolicyFingerprint),
+		sessionStateFingerprint: nullableIdentity(opts.sessionStateFingerprint),
+		compiledPolicyFingerprint: nullableIdentity(opts.compiledPolicyFingerprint),
+		compiledPolicyReceiptId: nullableIdentity(opts.compiledPolicyReceiptId),
+		activeLever,
 	};
 }
 
@@ -160,9 +256,11 @@ export async function runBenchmarkSuite(opts: BenchmarkRunOptions): Promise<Benc
 
 	for (const c of opts.suite.cases) {
 		const reps = Math.max(c.repetitions, opts.minRepetitions ?? 0, 1);
-		for (const variant of variants) {
-			const fingerprint = buildFingerprint(opts.suite, c, variant, opts);
-			for (let repetition = 1; repetition <= reps; repetition++) {
+		for (let repetition = 1; repetition <= reps; repetition++) {
+			// Counterbalance each adjacent pair while keeping runs reproducible.
+			const repetitionVariants = repetition % 2 === 1 ? variants : [...variants].reverse();
+			for (const variant of repetitionVariants) {
+				const fingerprint = buildFingerprint(opts.suite, c, variant, opts);
 				const started = performance.now();
 				try {
 					const response = await opts.runtime({
@@ -258,18 +356,54 @@ export function summarizeResults(results: BenchmarkRunResult[], suite?: Benchmar
 	return summaries.sort((a, b) => a.caseId.localeCompare(b.caseId) || a.variant.localeCompare(b.variant));
 }
 
+function sharedFingerprintField(
+	results: BenchmarkRunResult[],
+	pick: (fp: BenchmarkRunFingerprint) => string | null,
+): string | null {
+	if (results.length === 0) return null;
+	const values = new Set(results.map(r => pick(r.fingerprint)));
+	if (values.size !== 1) return null;
+	return [...values][0] ?? null;
+}
+
 export function buildScorecard(
 	suite: BenchmarkSuite,
 	results: BenchmarkRunResult[],
-	opts?: { liveQualityUnknown?: boolean; notes?: string[] },
+	opts?: {
+		liveQualityUnknown?: boolean;
+		notes?: string[];
+		combinationRun?: boolean;
+	},
 ): BenchmarkScorecard {
 	const liveQualityUnknown = opts?.liveQualityUnknown ?? true;
+	const compiledPolicyReceiptId = sharedFingerprintField(results, fp => fp.compiledPolicyReceiptId);
+	const compiledPolicyFingerprint = sharedFingerprintField(results, fp => fp.compiledPolicyFingerprint);
+	const activeLever = sharedFingerprintField(results, fp => fp.activeLever);
+	const combinationRun =
+		opts?.combinationRun === true || (typeof activeLever === "string" && activeLever.startsWith("combo:"));
 	const notes = [
 		...(liveQualityUnknown
 			? ["Live provider quality not measured; fake-runtime scorecard only.", "live quality unknown"]
 			: ["Live provider quality included for selected cases."]),
 		...(opts?.notes ?? []),
 	];
+	if (compiledPolicyReceiptId) {
+		notes.push(`compiledPolicyReceiptId=${compiledPolicyReceiptId}`);
+	}
+	if (compiledPolicyFingerprint) {
+		notes.push(`compiledPolicyFingerprint=${compiledPolicyFingerprint}`);
+	}
+	if (activeLever) {
+		notes.push(`activeLever=${activeLever}`);
+	}
+	if (combinationRun) {
+		notes.push("combinationRun=true (explicit multi-lever; production profiles unchanged)");
+	}
+	// Cache facts remain unknown when no provider counters were observed.
+	const anyCacheObservable = results.some(r => r.tokens.cacheObservable);
+	if (!anyCacheObservable) {
+		notes.push("cache facts unknown (no provider cache counters observed)");
+	}
 	return {
 		schemaVersion: 1,
 		suiteId: suite.id,
@@ -278,6 +412,10 @@ export function buildScorecard(
 		summaries: summarizeResults(results, suite),
 		liveQualityUnknown,
 		notes,
+		compiledPolicyReceiptId,
+		compiledPolicyFingerprint,
+		activeLever,
+		combinationRun,
 	};
 }
 
@@ -349,11 +487,13 @@ export function buildBenchmarkReport(
 		liveQualityUnknown?: boolean;
 		notes?: string[];
 		gate?: BenchmarkQualityGate;
+		combinationRun?: boolean;
 	},
 ): BenchmarkReport {
 	const scorecard = buildScorecard(suite, results, {
 		liveQualityUnknown: opts?.liveQualityUnknown,
 		notes: opts?.notes,
+		combinationRun: opts?.combinationRun,
 	});
 	const gate = evaluateBenchmarkQualityGate(scorecard, opts?.gate);
 	const comparison = buildComparisonRows(scorecard, gate);
@@ -367,6 +507,10 @@ export function buildBenchmarkReport(
 		comparison,
 		gate,
 		notes: scorecard.notes,
+		compiledPolicyReceiptId: scorecard.compiledPolicyReceiptId ?? null,
+		compiledPolicyFingerprint: scorecard.compiledPolicyFingerprint ?? null,
+		activeLever: scorecard.activeLever ?? null,
+		combinationRun: scorecard.combinationRun ?? false,
 	};
 }
 

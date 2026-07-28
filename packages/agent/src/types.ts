@@ -332,8 +332,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Strip tool descriptions (top-level + nested schema annotations) from the
 	 * provider-bound tool specs. Use when the full catalog is rendered into the
 	 * system prompt instead, so descriptions are not duplicated on the wire.
+	 * Accepts a live getter so mid-session model switches can refresh the decision.
 	 */
-	pruneToolDescriptions?: boolean;
+	pruneToolDescriptions?: boolean | (() => boolean);
 	/**
 	 * Owned tool calling dialect.
 	 *

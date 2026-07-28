@@ -251,8 +251,9 @@ export interface AgentOptions {
 	 * Strip tool descriptions from provider-bound tool specs (top-level + nested
 	 * schema annotations). Use when the full catalog is rendered into the system
 	 * prompt so descriptions are not duplicated on the wire. Native tool calling only.
+	 * Accepts a live getter so mid-session model switches can refresh the decision.
 	 */
-	pruneToolDescriptions?: boolean;
+	pruneToolDescriptions?: boolean | (() => boolean);
 	/** Owned tool-calling dialect. Undefined keeps provider-native tool calling. */
 	dialect?: Dialect;
 	/**
@@ -384,7 +385,7 @@ export class Agent {
 	#preferWebsockets?: boolean;
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	#intentTracing: boolean;
-	#pruneToolDescriptions: boolean;
+	#pruneToolDescriptions: boolean | (() => boolean);
 	#dialect?: Dialect;
 	#abortOnFabricatedToolResult?: boolean;
 	#getToolChoice?: () => ToolChoiceDirective | undefined;
@@ -465,7 +466,7 @@ export class Agent {
 		this.#preferWebsockets = opts.preferWebsockets;
 		this.#transformToolCallArguments = opts.transformToolCallArguments;
 		this.#intentTracing = opts.intentTracing === true;
-		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
+		this.#pruneToolDescriptions = opts.pruneToolDescriptions ?? false;
 		this.#dialect = opts.dialect;
 		this.#abortOnFabricatedToolResult = opts.abortOnFabricatedToolResult;
 		this.#getToolChoice = opts.getToolChoice;
@@ -745,7 +746,9 @@ export class Agent {
 					this.#toolsForModel(model),
 					this.#intentTracing,
 					preferredDialect(model.id),
-					this.#pruneToolDescriptions,
+					typeof this.#pruneToolDescriptions === "function"
+						? this.#pruneToolDescriptions()
+						: this.#pruneToolDescriptions,
 				) ?? []);
 		let context: Context = { systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
@@ -859,6 +862,20 @@ export class Agent {
 
 	getToolScheduling(): ToolSchedulingConfig | undefined {
 		return this.#toolScheduling;
+	}
+
+	/**
+	 * Live prune decision for provider tool schemas. Boolean freezes the value;
+	 * a getter re-evaluates on every provider request / side request.
+	 */
+	setPruneToolDescriptions(value: boolean | (() => boolean)): void {
+		this.#pruneToolDescriptions = value;
+	}
+
+	getPruneToolDescriptions(): boolean {
+		return typeof this.#pruneToolDescriptions === "function"
+			? this.#pruneToolDescriptions()
+			: this.#pruneToolDescriptions;
 	}
 
 	setTools(t: AgentTool<any>[]) {

@@ -1046,6 +1046,7 @@ export class WorkflowEngine {
 					forbiddenPaths: this.#config.forbiddenPaths,
 					implementation: this.#implementation,
 					openFindings,
+					scopeStatus: this.#lastScopeMetrics?.status,
 					signal,
 					timeoutMs: this.#config.verificationTimeoutMs,
 					cwd,

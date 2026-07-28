@@ -1,5 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+	type AdaptedCompiledPolicy,
+	compileFromWorkflowRequestFields,
+	profileIdentityFromWorkflowProfile,
+} from "../model-policy/adapters";
+import type { CompiledModelPolicyReceiptV1, CompiledModelPolicyV1 } from "../model-policy/types";
 import codeReviewerPrompt from "../prompts/workflow/code-reviewer.md" with { type: "text" };
 import implementerPrompt from "../prompts/workflow/implementer.md" with { type: "text" };
 import planReviewerPrompt from "../prompts/workflow/plan-reviewer.md" with { type: "text" };
@@ -248,6 +254,13 @@ export interface PreparedWorkflowInvocation {
 	presentationPolicy: WorkflowPresentationPolicy;
 	/** Shared receipt log also referenced from session.workflowToolOptimization. */
 	optimizationReceipts: ToolOptimizationReceiptV1[];
+	/**
+	 * Capability-compiled policy (shadow by default). Does not replace role
+	 * allowlist / presentation / existing profile execution.
+	 */
+	compiledPolicy?: CompiledModelPolicyV1;
+	/** Deterministic receipt for the compiled policy. */
+	compiledReceipt?: CompiledModelPolicyReceiptV1;
 }
 
 /**
@@ -324,6 +337,22 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 	const allowedTools = policyFactory.allowedToolsForRole(request.role);
 	const disabled = new Set(request.profile.disabledTools ?? []);
 	let effectiveTools = allowedTools && disabled.size > 0 ? allowedTools.filter(t => !disabled.has(t)) : allowedTools;
+
+	// Capability compile (shadow by default). Role allowlist already computed;
+	// compiler never expands it. Existing profile/presentation/schema stay authoritative.
+	const adaptedPolicy: AdaptedCompiledPolicy = compileFromWorkflowRequestFields({
+		role: request.role,
+		assignment: request.assignment,
+		allowedToolIds: effectiveTools,
+		outputSchema: enhancedSchema,
+		profileIdentity: profileIdentityFromWorkflowProfile(request.profile),
+		model: request.model,
+		modelFacts: request.modelFacts,
+		sessionPolicyState: request.sessionPolicyState,
+		modelPolicyFeatureGates: request.modelPolicyFeatureGates,
+		semanticTools: request.semanticTools,
+		turnOrStageId: `${request.workflowId}:${request.attemptId}:${request.role}`,
+	});
 
 	// Settings gate: workflow.presentationOptimization.enabled (default false).
 	// When true, catalog mode can enable without hand-editing every profile.
@@ -553,5 +582,7 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 		assembledPromptText: assembledContext,
 		presentationPolicy,
 		optimizationReceipts,
+		compiledPolicy: adaptedPolicy.compiledPolicy,
+		compiledReceipt: adaptedPolicy.receipt,
 	};
 }

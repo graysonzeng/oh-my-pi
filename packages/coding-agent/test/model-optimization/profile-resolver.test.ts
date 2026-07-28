@@ -104,4 +104,13 @@ describe("ordinary-session model optimization resolver", () => {
 		expect(resolved.contextStrategy?.eviction?.preserveUserTurns).toBe(true);
 		expect(resolved.contextStrategy?.eviction?.evictPersisted).toBe(false);
 	});
+
+	it("GLM and DeepSeek built-ins have no Grok prompt inheritance", () => {
+		const glm = buildResolvedModelOptimization(DEFAULT_MODEL_OPTIMIZATION_PROFILES.glm);
+		const deepseek = buildResolvedModelOptimization(DEFAULT_MODEL_OPTIMIZATION_PROFILES.deepseek);
+		expect(DEFAULT_MODEL_OPTIMIZATION_PROFILES.glm.promptStrategy).toBeUndefined();
+		expect(DEFAULT_MODEL_OPTIMIZATION_PROFILES.deepseek.promptStrategy).toBeUndefined();
+		expect(glm.promptBlock).toBeUndefined();
+		expect(deepseek.promptBlock).toBeUndefined();
+	});
 });

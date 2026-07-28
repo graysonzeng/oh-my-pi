@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { evaluateWorkflowFinalCompletion } from "../../model-policy/completion";
+import type { ScopeStatus } from "../scope-metrics";
 import type { ImplementationArtifactV1, ReviewFindingV1, VerificationArtifactV1, VerifierPort } from "../types";
 import { changedFilesFromPatch } from "./implementation-verify";
 
@@ -13,6 +15,8 @@ export interface FinalVerifyInput {
 	forbiddenPaths?: string[];
 	implementation?: ImplementationArtifactV1 | null;
 	openFindings?: ReviewFindingV1[];
+	/** Existing scope metrics status from engine (typed artifact, not model self-report). */
+	scopeStatus?: ScopeStatus;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	cwd?: string;
@@ -69,9 +73,32 @@ export class FinalVerifyStage {
 			});
 		}
 
+		// Shared pure completion gate — implementation missing/unresolved, open
+		// blocking findings, verification fail, and scope violation all block completed.
+		const completion = evaluateWorkflowFinalCompletion({
+			implementation: impl ?? null,
+			openBlockingFindings: openBlocking.map(f => ({ id: f.id, summary: f.summary })),
+			verification: {
+				passed: checks.every(c => c.status !== "failed"),
+				checks,
+			},
+			scopeStatus: input.scopeStatus,
+		});
+
+		if (!completion.passed) {
+			const reasonSummary = completion.reasons.join("; ") || completion.decision;
+			if (!checks.some(c => c.id === "completion-gate")) {
+				checks.push({
+					id: "completion-gate",
+					status: "failed",
+					summary: `Completion gate ${completion.decision}: ${reasonSummary}`,
+				});
+			}
+		}
+
 		return {
 			...base,
-			passed: checks.every(c => c.status !== "failed"),
+			passed: completion.passed && checks.every(c => c.status !== "failed"),
 			checks,
 		};
 	}

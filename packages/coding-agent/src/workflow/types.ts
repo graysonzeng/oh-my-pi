@@ -1,4 +1,11 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
+import type { ModelFactsSource } from "../model-policy/adapters";
+import type {
+	ModelFactsV1,
+	ModelPolicyFeatureGates,
+	SemanticToolContract,
+	SessionPolicyStateV1,
+} from "../model-policy/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ToolSession } from "../tools";
 import type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
@@ -351,6 +358,20 @@ export interface WorkflowAgentRequest {
 	isolation?: WorkflowIsolationControls;
 	session: ToolSession;
 	signal?: AbortSignal;
+	/**
+	 * Optional exact model facts for capability compilation.
+	 * When omitted, prepareWorkflowInvocation derives facts from `model` or
+	 * conservative shadow identity from the profile.
+	 */
+	modelFacts?: ModelFactsV1;
+	/** Catalog model used to derive facts when modelFacts is absent. */
+	model?: ModelFactsSource;
+	/** Optional session seed for policy compilation. */
+	sessionPolicyState?: Partial<SessionPolicyStateV1>;
+	/** Optional feature gates (default: compiler shadow on, active off). */
+	modelPolicyFeatureGates?: ModelPolicyFeatureGates;
+	/** Optional semantic tools for descriptor compilation (never expands role allowlist). */
+	semanticTools?: SemanticToolContract[];
 }
 
 export interface WorkflowAgentResult<TArtifact = unknown> {

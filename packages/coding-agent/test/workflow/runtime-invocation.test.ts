@@ -77,4 +77,46 @@ describe("prepareWorkflowInvocation", () => {
 		expect(prepared.context?.length ?? 0).toBeLessThan(200);
 		expect(prepared.context).toContain("truncated by contextPolicy");
 	});
+
+	it("attaches deterministic compiled policy without expanding role allowlist", () => {
+		const prepared = prepareWorkflowInvocation(baseRequest());
+		expect(prepared.compiledPolicy).toBeDefined();
+		expect(prepared.compiledReceipt).toBeDefined();
+		expect(prepared.compiledReceipt?.schemaVersion).toBe(1);
+		expect(prepared.compiledPolicy?.guards.hard.length).toBeGreaterThan(0);
+		// Role allowlist still owns tools — compiler does not inject extras
+		expect(prepared.allowedTools).not.toContain("todo");
+		expect(prepared.allowedTools).toContain("edit");
+		// Shadow identity facts → no invented reasoning wire params
+		expect(Object.keys(prepared.compiledPolicy?.reasoningAndSampling.wireParameters ?? {})).toEqual([]);
+
+		const again = prepareWorkflowInvocation(baseRequest());
+		expect(again.compiledReceipt?.modelFactsFingerprint).toBe(prepared.compiledReceipt?.modelFactsFingerprint);
+		expect(again.compiledReceipt?.taskPolicyFingerprint).toBe(prepared.compiledReceipt?.taskPolicyFingerprint);
+		expect(again.compiledReceipt?.promptStableHash).toBe(prepared.compiledReceipt?.promptStableHash);
+	});
+
+	it("does not widen allowlist when semanticTools include extra tools", () => {
+		const prepared = prepareWorkflowInvocation(
+			baseRequest({
+				semanticTools: [
+					{
+						id: "todo",
+						description: "todo",
+						parametersSchema: { type: "object" },
+						permission: "write",
+					},
+					{
+						id: "edit",
+						description: "edit",
+						parametersSchema: { type: "object" },
+						permission: "write",
+					},
+				],
+			}),
+		);
+		expect(prepared.allowedTools).not.toContain("todo");
+		const compiledIds = prepared.compiledPolicy?.tools.descriptors.map(d => d.id) ?? [];
+		expect(compiledIds).not.toContain("todo");
+	});
 });

@@ -328,6 +328,18 @@ export function formatComparisonMarkdown(report: BenchmarkReport): string {
 	lines.push(`- suiteVersion: \`${report.suiteVersion}\``);
 	lines.push(`- generatedAt: \`${report.generatedAt}\``);
 	lines.push(`- liveQualityUnknown: \`${report.liveQualityUnknown}\``);
+	if (report.compiledPolicyReceiptId) {
+		lines.push(`- compiledPolicyReceiptId: \`${report.compiledPolicyReceiptId}\``);
+	}
+	if (report.compiledPolicyFingerprint) {
+		lines.push(`- compiledPolicyFingerprint: \`${report.compiledPolicyFingerprint}\``);
+	}
+	if (report.activeLever) {
+		lines.push(`- activeLever: \`${report.activeLever}\``);
+	}
+	if (report.combinationRun) {
+		lines.push(`- combinationRun: \`true\` (explicit multi-lever; production profiles unchanged)`);
+	}
 	if (report.liveQualityUnknown) {
 		lines.push(`- **live quality unknown** (fake runtime / no live model run)`);
 	}

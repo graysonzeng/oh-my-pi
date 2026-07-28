@@ -251,14 +251,21 @@ import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
+import { parseMCPToolName } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
-import type {
-	ResolvedModelOptimization,
-	SessionContextStrategy,
-	SessionToolStrategy,
-} from "../model-optimization/types";
+import {
+	buildOrdinaryDecisionReceipt,
+	type DescriptorPlacementDecision,
+	evaluateOrdinaryContinuation,
+	formatCompletionDiagnostic,
+	ORDINARY_DECISION_RECEIPT_KIND,
+	type OrdinaryTaskObligation,
+	type ResolvedModelOptimization,
+	type SessionContextStrategy,
+	type SessionToolStrategy,
+} from "../model-optimization";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
@@ -285,6 +292,9 @@ import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.
 import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import ordinaryObligationContinuationPrompt from "../prompts/system/ordinary-obligation-continuation.md" with {
+	type: "text",
+};
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
@@ -412,6 +422,7 @@ import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-
 import { YieldQueue } from "./yield-queue";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
+const ORDINARY_OBLIGATION_CONTINUATION_CAP = 3;
 const PLAN_MODE_REMINDER_MAX = 3;
 
 type BashAppendDestination =
@@ -975,6 +986,11 @@ export interface AgentSessionConfig {
 	reconcileModelOptimization?: (model: Model) => Promise<ResolvedModelOptimization>;
 	/** Apply or clear SDK-owned runtime adapters after resolution succeeds or fails. */
 	applyModelOptimization?: (resolved: ResolvedModelOptimization) => void;
+	/**
+	 * Recompute live `inlineToolDescriptors` for the active model.
+	 * `auto` follows Gemini family; explicit on/off stay fixed.
+	 */
+	resolveInlineToolDescriptors?: (modelId: string | undefined) => boolean;
 	/** Local calendar date provider used by prompt-cache invalidation. Defaults to the host local date. */
 	getLocalCalendarDate?: () => string;
 	/** Entries of tools mounted under `xd://` (name + one-line summary), for /tools display. */
@@ -990,8 +1006,18 @@ export interface AgentSessionConfig {
 	 * `rebuildSystemPrompt`-skip optimization to detect server-side instruction
 	 * changes (e.g. an MCP server upgrade) that would otherwise pass the tool-set
 	 * signature comparison and silently keep a stale prompt cached.
+	 *
+	 * Callers that implement session-local instruction activation MUST return only
+	 * instructions from servers already activated in this session so the signature
+	 * matches the prompt body built by `rebuildSystemPrompt`.
 	 */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/**
+	 * Mark an MCP server as instruction-active for this session (first tool attempt).
+	 * Wired by the SDK; used when deferred/live MCP tools are registered via
+	 * {@link refreshMCPTools} so top-level and `xd://` dispatches share one path.
+	 */
+	activateMcpInstructionServer?: (serverName: string) => void;
 	/** TTSR manager for time-traveling stream rules */
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for deobfuscating streaming edit content */
@@ -1056,8 +1082,8 @@ export interface AgentSessionConfig {
 	advisorConfigs?: AdvisorConfig[];
 	/**
 	 * Strip tool descriptions from provider-bound tool specs on side requests
-	 * (handoff). Must match the session-start value used to build the system
-	 * prompt so inline descriptors are not also sent through provider schemas.
+	 * (handoff). Must track the live `inlineToolDescriptors` decision so system
+	 * inventory and provider schema pruning stay aligned after model switches.
 	 */
 	pruneToolDescriptions?: boolean;
 	/**
@@ -2095,12 +2121,14 @@ export class AgentSession {
 		| undefined;
 	#reconcileModelOptimization: ((model: Model) => Promise<ResolvedModelOptimization>) | undefined;
 	#applyModelOptimizationRuntime: ((resolved: ResolvedModelOptimization) => void) | undefined;
+	#resolveInlineToolDescriptors: ((modelId: string | undefined) => boolean) | undefined;
 	/** Active ordinary-session model optimization (cleared on miss / feature off / reconcile failure). */
 	#activeModelOptimization: ResolvedModelOptimization = {};
 	/** Dirty after any model identity change; reconciled before next provider dispatch. */
 	#modelOptimizationDirty = true;
 	#getLocalCalendarDate: () => string;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
+	#activateMcpInstructionServer: ((serverName: string) => void) | undefined;
 	#setActiveToolNames: ((names: Iterable<string>) => void) | undefined;
 	#ensureWriteRegistered: (() => Promise<boolean>) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
@@ -2199,7 +2227,7 @@ export class AgentSession {
 	// unchanged — otherwise a mid-turn estimate would survive into idle.
 	#contextUsageRevision = 0;
 	#obfuscator: SecretObfuscator | undefined;
-	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
+	/** Live `inlineToolDescriptors` decision; refreshed on model switch / reconcile. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
 	#pendingRewindReport: string | undefined = undefined;
@@ -2214,6 +2242,9 @@ export class AgentSession {
 	 */
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
+	/** Explicit extension-registered ordinary obligations (no NLP). */
+	#ordinaryTaskObligations: OrdinaryTaskObligation[] = [];
+	#ordinaryObligationContinuationCount = 0;
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
@@ -2753,6 +2784,8 @@ export class AgentSession {
 		this.#advisorConfigs = config.advisorConfigs;
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#pruneToolDescriptions = config.pruneToolDescriptions === true;
+		// Live getter so handoff/side-request prune tracks model-switch updates.
+		this.agent.setPruneToolDescriptions(() => this.#pruneToolDescriptions);
 		this.#validateRetryFallbackChains();
 		this.#toolRegistry = config.toolRegistry ?? new Map();
 		this.#createVibeTools = config.createVibeTools;
@@ -2868,8 +2901,10 @@ export class AgentSession {
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#reconcileModelOptimization = config.reconcileModelOptimization;
 		this.#applyModelOptimizationRuntime = config.applyModelOptimization;
+		this.#resolveInlineToolDescriptors = config.resolveInlineToolDescriptors;
 		this.#getLocalCalendarDate = config.getLocalCalendarDate ?? formatLocalCalendarDate;
 		this.#getMcpServerInstructions = config.getMcpServerInstructions;
+		this.#activateMcpInstructionServer = config.activateMcpInstructionServer;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		this.#xdevRegistry = config.xdevRegistry;
 		this.#mountedXdevToolNames = new Set(config.initialMountedXdevToolNames ?? []);
@@ -5156,6 +5191,11 @@ export class AgentSession {
 					return;
 				}
 			}
+			const obligationContinuationScheduled = msg.stopReason !== "error" && this.#enforceOrdinaryTaskObligations();
+			if (obligationContinuationScheduled) {
+				await emitAgentEndNotification({ willContinue: true });
+				return;
+			}
 			// A pending async wake means this settle is a scheduling pause, not
 			// the terminal stop: the async-result delivery continues the loop and
 			// the real stop settles later. Defer the session_stop hook pass until
@@ -5597,6 +5637,28 @@ export class AgentSession {
 					error: String(error),
 				});
 				return undefined;
+			}
+			// Complementary ordinary decision receipt (model/profile/applied fields).
+			// Does not replace ToolOptimizationReceiptV1.
+			try {
+				const decision = buildOrdinaryDecisionReceipt({
+					provider: this.model?.provider,
+					model: this.model?.id,
+					resolved: this.#activeModelOptimization,
+					descriptorPlacement: this.#descriptorPlacementDecision(),
+					toolCallId: ctx.toolCall.id,
+					tool: ctx.toolCall.name,
+					toolTransform: detailed.receipt.transform,
+					originalBytes: detailed.receipt.originalBytes,
+					visibleBytes: detailed.receipt.visibleBytes,
+					recoveryUri: detailed.receipt.recoveryUri,
+				});
+				this.sessionManager.appendCustomEntry(ORDINARY_DECISION_RECEIPT_KIND, decision);
+			} catch (error) {
+				logger.debug("Failed to persist ordinary decision receipt", {
+					tool: ctx.toolCall.name,
+					error: String(error),
+				});
 			}
 		}
 
@@ -6532,12 +6594,12 @@ export class AgentSession {
 			session_file: this.sessionFile,
 			stop_hook_active: this.#sessionStopHookActive,
 		});
+		const continuationContext = this.#sessionStopContinuationContext(result);
 		if (this.#promptGeneration !== generation || this.#abortInProgress || this.#isDisposed) {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}
-		const additionalContext = this.#sessionStopContinuationContext(result);
-		if (!additionalContext) {
+		if (continuationContext === undefined) {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}
@@ -6545,6 +6607,13 @@ export class AgentSession {
 			logger.warn("session_stop continuation cap reached", {
 				sessionId: this.sessionId,
 				cap: SESSION_STOP_CONTINUATION_CAP,
+			});
+			this.#emitOrdinaryCompletionDiagnostic({
+				sessionStop: {
+					continuationCount: this.#sessionStopContinuationCount,
+					cap: SESSION_STOP_CONTINUATION_CAP,
+					wantsContinuation: true,
+				},
 			});
 			this.#resetSessionStopContinuationState();
 			return false;
@@ -6555,7 +6624,7 @@ export class AgentSession {
 			{
 				role: "custom",
 				customType: "session-stop-continuation",
-				content: additionalContext,
+				content: continuationContext,
 				display: false,
 				attribution: "agent",
 				timestamp: Date.now(),
@@ -7289,6 +7358,37 @@ export class AgentSession {
 		return Array.from(this.#toolRegistry.keys());
 	}
 
+	/**
+	 * On first execute of an MCP tool (top-level or `xd://` dispatch), mark that
+	 * server's instructions active for this session. The SDK rebuild path only
+	 * appends activated-server instructions.
+	 */
+	#wrapMcpInstructionActivation(tool: AgentTool): AgentTool {
+		const activate = this.#activateMcpInstructionServer;
+		if (!activate || !isMCPToolName(tool.name)) return tool;
+		const serverName =
+			(tool as AgentTool & { mcpServerName?: string }).mcpServerName ?? parseMCPToolName(tool.name)?.serverName;
+		if (!serverName) return tool;
+		const originalExecute = tool.execute.bind(tool);
+		return Object.defineProperties(tool, {
+			execute: {
+				value: async (
+					toolCallId: string,
+					params: unknown,
+					signal?: AbortSignal,
+					onUpdate?: Parameters<AgentTool["execute"]>[3],
+					context?: Parameters<AgentTool["execute"]>[4],
+				) => {
+					activate(serverName);
+					return originalExecute(toolCallId, params as never, signal, onUpdate, context);
+				},
+				enumerable: false,
+				configurable: true,
+				writable: true,
+			},
+		});
+	}
+
 	#wrapRuntimeTool(tool: AgentTool): AgentTool {
 		const wrapped = wrapToolWithMetaNotice(tool);
 		return this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped;
@@ -7350,12 +7450,16 @@ export class AgentSession {
 	}
 
 	async #syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
+		const previousInline = this.#pruneToolDescriptions;
+		// Descriptor placement must refresh with the active model before prompt rebuild.
+		this.#refreshInlineToolDescriptors();
+		const descriptorsChanged = previousInline !== this.#pruneToolDescriptions;
 		await this.#ensureModelOptimizationReconciled();
 		const currentEditMode = this.#resolveActiveEditMode();
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
-		if (editModeChanged || modelChanged) {
+		if (editModeChanged || modelChanged || descriptorsChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
 	}
@@ -7368,6 +7472,44 @@ export class AgentSession {
 	/** Provider-derived context strategy only (never mutates transcript). */
 	get modelOptimizationContextStrategy(): SessionContextStrategy | undefined {
 		return this.#activeModelOptimization.contextStrategy;
+	}
+
+	/** Live inline-tool-descriptors decision (system inventory + provider schema prune). */
+	get inlineToolDescriptors(): boolean {
+		return this.#pruneToolDescriptions;
+	}
+
+	/** Descriptor placement derived from live inline decision. */
+	get descriptorPlacement(): DescriptorPlacementDecision {
+		return this.#descriptorPlacementDecision();
+	}
+
+	/**
+	 * Update live inlineToolDescriptors decision after model switch / explicit refresh.
+	 * Keeps dump/handoff fields and Agent provider prune aligned.
+	 */
+	setInlineToolDescriptors(enabled: boolean): void {
+		this.#pruneToolDescriptions = enabled === true;
+		// Live getter so provider schema prune tracks mid-session model switches.
+		this.agent.setPruneToolDescriptions(() => this.#pruneToolDescriptions);
+	}
+
+	/**
+	 * Recompute auto/on/off descriptor placement for the active model and keep
+	 * dump/handoff + Agent provider pruning on the same decision.
+	 */
+	#refreshInlineToolDescriptors(): void {
+		if (!this.#resolveInlineToolDescriptors) {
+			// Still re-bind Agent to the live session field for dump/side-request parity.
+			this.agent.setPruneToolDescriptions(() => this.#pruneToolDescriptions);
+			return;
+		}
+		const next = this.#resolveInlineToolDescriptors(this.model?.id) === true;
+		this.setInlineToolDescriptors(next);
+	}
+
+	#descriptorPlacementDecision(): DescriptorPlacementDecision {
+		return this.#pruneToolDescriptions ? "system_inline" : "provider_schema";
 	}
 
 	/** Force reconcile for the current model (session start / tests). */
@@ -7883,9 +8025,11 @@ export class AgentSession {
 	 *   3. When MCP discovery is on, every registry tool's name+label+description+
 	 *      customWireName, since `rebuildSystemPrompt` summarizes discoverable MCP
 	 *      tools that are not in the active set.
-	 *   4. MCP server instructions text (per server), since `rebuildSystemPrompt`
-	 *      embeds these in the appended prompt under "## MCP Server Instructions".
-	 *      A server upgrade can change instructions while keeping tools identical.
+	 *   4. Activated MCP server instructions text (per server), since
+	 *      `rebuildSystemPrompt` embeds these in the appended prompt under
+	 *      "## MCP Server Instructions". Connected-but-unused servers are omitted;
+	 *      first tool attempt activates a server and rebuilds. A server upgrade can
+	 *      also change instructions while keeping tools identical.
 	 *
 	 * Settings-driven tool metadata is covered automatically: built-in tools that
 	 * depend on settings expose `description`/`label` via getters (see `TaskTool`,
@@ -7895,9 +8039,10 @@ export class AgentSession {
 	 * cache per-tool strings without preserving this property.
 	 *
 	 * Inputs NOT covered: tool input schemas; memory instructions read from disk;
-	 * and SDK-init-time closure constants in `sdk.ts` (`inlineToolDescriptors`,
-	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`, `secretsEnabled`). The
-	 * closure-captured ones cannot change at runtime regardless of skip behavior.
+	 * and SDK-init-time closure constants in `sdk.ts` (`eagerTasks`, `intentField`,
+	 * `mcpDiscoveryEnabled`, `secretsEnabled`). `inlineToolDescriptors` is NOT
+	 * among them: it is a live mutable decision refreshed on model switch and
+	 * read by `rebuildSystemPrompt` / Agent prune each request.
 	 * For everything else, callers must explicitly call `refreshBaseSystemPrompt()`
 	 * after side-effecting changes; see e.g. the memory hooks and
 	 * `#syncAfterModelChange`.
@@ -7969,8 +8114,9 @@ export class AgentSession {
 
 		for (const customTool of mcpTools) {
 			const wrapped = wrapToolWithMetaNotice(CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool);
+			const withActivation = this.#wrapMcpInstructionActivation(wrapped);
 			const finalTool = (
-				this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
+				this.#extensionRunner ? new ExtensionToolWrapper(withActivation, this.#extensionRunner) : withActivation
 			) as AgentTool;
 			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
@@ -12993,6 +13139,7 @@ export class AgentSession {
 		const remindersMax = this.settings.get("todo.remindersMax");
 		if (this.#todoReminderCount >= remindersMax) {
 			logger.debug("Todo completion: max reminders reached", { count: this.#todoReminderCount });
+			this.#emitOrdinaryCompletionDiagnostic({ todoReminderCapped: true });
 			return false;
 		}
 
@@ -13083,6 +13230,105 @@ export class AgentSession {
 		this.sessionManager.appendMessage(reminderMessage);
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 		return true;
+	}
+
+	#enforceOrdinaryTaskObligations(): boolean {
+		const blocked = this.#ordinaryTaskObligations.filter(item => item.status === "blocked");
+		if (blocked.length > 0) {
+			this.#emitOrdinaryCompletionDiagnostic();
+			return false;
+		}
+		const open = this.#ordinaryTaskObligations.filter(item => item.status === "open");
+		if (open.length === 0) {
+			this.#ordinaryObligationContinuationCount = 0;
+			return false;
+		}
+		if (this.#ordinaryObligationContinuationCount >= ORDINARY_OBLIGATION_CONTINUATION_CAP) {
+			this.#emitOrdinaryCompletionDiagnostic();
+			return false;
+		}
+
+		this.#ordinaryObligationContinuationCount++;
+		const content = prompt.render(ordinaryObligationContinuationPrompt, {
+			obligations: open.map(item => ({ id: item.id, label: item.label ?? item.id })),
+			attempt: this.#ordinaryObligationContinuationCount,
+			cap: ORDINARY_OBLIGATION_CONTINUATION_CAP,
+		});
+		this.#queueHiddenNextTurnMessage(
+			{
+				role: "custom",
+				customType: "ordinary-obligation-continuation",
+				content,
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+			true,
+		);
+		return true;
+	}
+
+	/**
+	 * Explicit ordinary completion sources only: Todo / Goal / required-yield / session_stop / extension.
+	 * Emits incomplete/blocked diagnostic when continuation is capped; plain Q&A is unaffected.
+	 */
+	#emitOrdinaryCompletionDiagnostic(overrides?: {
+		todoReminderCapped?: boolean;
+		sessionStop?: {
+			continuationCount: number;
+			cap: number;
+			wantsContinuation?: boolean;
+		};
+	}): void {
+		const goalState = this.#goalModeState;
+		const evaluation = evaluateOrdinaryContinuation({
+			todoPhases: this.getTodoPhases(),
+			goal: goalState
+				? {
+						id: goalState.goal.id,
+						status: goalState.goal.status,
+						objective: goalState.goal.objective,
+						enabled: goalState.enabled,
+					}
+				: null,
+			requiredYield: this.#yieldTerminationPending
+				? { required: false, satisfied: true }
+				: this.#lastSuccessfulYieldToolCallId
+					? { required: false, satisfied: true }
+					: null,
+			sessionStop: overrides?.sessionStop,
+			extensionObligations: this.#ordinaryTaskObligations,
+			todoReminderCapped: overrides?.todoReminderCapped === true,
+		});
+
+		if (!evaluation.active) {
+			return;
+		}
+
+		const message = formatCompletionDiagnostic(evaluation, "ordinary_completion");
+		logger.debug("Ordinary completion diagnostic", {
+			decision: evaluation.decision,
+			reasons: evaluation.reasons,
+			continuationCapped: evaluation.continuationCapped,
+			diagnostics: evaluation.diagnostics,
+		});
+
+		if (evaluation.decision === "blocked" || evaluation.continuationCapped) {
+			this.emitNotice("warning", message, "ordinary-completion");
+		}
+	}
+
+	/** Register an explicit ordinary obligation (extension / caller). No NLP guessing. */
+	registerOrdinaryTaskObligation(obligation: OrdinaryTaskObligation): void {
+		const next = this.#ordinaryTaskObligations.filter(item => item.id !== obligation.id);
+		next.push({ ...obligation, source: "extension" });
+		this.#ordinaryTaskObligations = next;
+		this.#ordinaryObligationContinuationCount = 0;
+	}
+
+	clearOrdinaryTaskObligation(id: string): void {
+		this.#ordinaryTaskObligations = this.#ordinaryTaskObligations.filter(item => item.id !== id);
+		this.#ordinaryObligationContinuationCount = 0;
 	}
 
 	/**

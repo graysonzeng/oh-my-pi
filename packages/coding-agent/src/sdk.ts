@@ -10,6 +10,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	AssistantMessage,
 	Context,
 	CredentialDisabledEvent,
 	Message,
@@ -58,6 +59,12 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
+import {
+	captureProviderOpaqueState,
+	fingerprintValue,
+	type ModelPolicyFeatureGates,
+	PROVIDER_OPAQUE_STATE_RECEIPT_KIND,
+} from "./model-policy";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
@@ -109,11 +116,13 @@ import type { MnemopiSessionState } from "./mnemopi/state";
 import {
 	applyProviderOnlyToolHistoryDetailed,
 	buildResolvedModelOptimization,
+	compileForOrdinaryReconcile,
 	type ModelOptimizationProfile,
 	mergeModelOptimizationProfiles,
 	PROVIDER_ELISION_RECEIPT_KIND,
 	type ResolvedModelOptimization,
 	resolveModelOptimizationProfile,
+	withOrdinaryCompiledPolicy,
 } from "./model-optimization";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
@@ -329,7 +338,7 @@ function buildMcpNotificationBatchMessage(entries: McpNotificationEntry[]): Agen
 	};
 }
 
-function createPendingMCPTool(name: string): Tool {
+function createPendingMCPTool(name: string, onAttempt?: (serverName: string) => void): Tool {
 	const parsed = parseMCPToolName(name);
 	const serverName = parsed?.serverName;
 	const mcpToolName = parsed?.toolName ?? name;
@@ -351,6 +360,9 @@ function createPendingMCPTool(name: string): Tool {
 		mcpServerName: serverName,
 		mcpToolName,
 		async execute() {
+			// Attempted invocation still activates the server so later prompts can
+			// include its instructions once discovery finishes.
+			if (serverName) onAttempt?.(serverName);
 			return {
 				content: [{ type: "text", text: message }],
 				details: { serverName, mcpToolName, isError: true },
@@ -411,6 +423,8 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Capability compiler rollout gates. Defaults to shadow-only. */
+	modelPolicyFeatureGates?: ModelPolicyFeatureGates;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
@@ -901,9 +915,63 @@ function isLegacyBuiltinToolDefinition(tool: CustomTool | ToolDefinition): boole
 }
 
 const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
-
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
+
+/**
+ * Session-local MCP instruction activation: connected server instructions are
+ * retained on the manager, but only servers whose tools have been attempted in
+ * THIS session are folded into `appendSystemPrompt` / the rebuild signature.
+ */
+function filterActivatedMcpServerInstructions(
+	raw: Map<string, string> | undefined,
+	activatedServers: ReadonlySet<string>,
+	opts?: { forPrompt?: boolean },
+): Map<string, string> | undefined {
+	if (!raw || raw.size === 0) return raw;
+	const out = new Map<string, string>();
+	for (const [name, text] of raw) {
+		if (!activatedServers.has(name)) continue;
+		const truncated = text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text;
+		// Prompt body marks truncation so the model knows text was cut; the
+		// signature hashes only the truncated payload (no marker) so changes
+		// past the boundary cannot thrash the cache.
+		out.set(
+			name,
+			opts?.forPrompt && text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? `${truncated}\n[truncated]` : truncated,
+		);
+	}
+	return out;
+}
+
+/**
+ * Wrap an MCP tool so the first execute attempt activates that server's
+ * instructions and rebuilds the base system prompt. Works for top-level tools
+ * and `xd://` device dispatches (both call `tool.execute`).
+ */
+function withMcpInstructionActivation<T extends AgentTool>(tool: T, activate: (serverName: string) => void): T {
+	if (!isMCPToolName(tool.name)) return tool;
+	const serverName = (tool as T & { mcpServerName?: string }).mcpServerName ?? parseMCPToolName(tool.name)?.serverName;
+	if (!serverName) return tool;
+	const originalExecute = tool.execute.bind(tool);
+	return Object.defineProperties(tool, {
+		execute: {
+			value: async (
+				toolCallId: string,
+				params: unknown,
+				signal?: AbortSignal,
+				onUpdate?: Parameters<AgentTool["execute"]>[3],
+				context?: Parameters<AgentTool["execute"]>[4],
+			) => {
+				activate(serverName);
+				return originalExecute(toolCallId, params as never, signal, onUpdate, context);
+			},
+			enumerable: false,
+			configurable: true,
+			writable: true,
+		},
+	});
+}
 
 let sshCleanupRegistered = false;
 
@@ -1832,6 +1900,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
+		// Session-local: connected MCP instructions stay on the manager, but only
+		// servers whose tools have been attempted in THIS session are appended to
+		// the system prompt (and participate in the rebuild signature).
+		const activatedMcpInstructionServers = new Set<string>();
+		const activateMcpInstructionServer = (serverName: string): void => {
+			if (!serverName || activatedMcpInstructionServers.has(serverName)) return;
+			activatedMcpInstructionServers.add(serverName);
+			if (!hasSession) return;
+			void session.refreshBaseSystemPrompt().catch(error => {
+				logger.warn("MCP instruction activation prompt rebuild failed", {
+					serverName,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		};
 		const customTools: CustomTool[] = [];
 		let startDeferredMCPDiscovery: ((liveSession: AgentSession) => void) | undefined;
 		const startupQuiet = settings.get("startup.quiet");
@@ -2413,13 +2496,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 		for (const tool of wrappedExtensionTools) {
-			toolRegistry.set(tool.name, tool);
+			// Startup (non-deferred) MCP tools land here via customTools; wrap so the
+			// first execute attempt activates their server instructions.
+			toolRegistry.set(tool.name, withMcpInstructionActivation(tool, activateMcpInstructionServer));
 			builtInRegistryToolNames.delete(tool.name);
 		}
 		if (deferMCPDiscoveryForUI && mcpManager) {
 			for (const name of collectPendingMCPToolNames(options.toolNames)) {
 				if (!toolRegistry.has(name)) {
-					toolRegistry.set(name, createPendingMCPTool(name));
+					toolRegistry.set(name, createPendingMCPTool(name, activateMcpInstructionServer));
 				}
 			}
 		}
@@ -2483,11 +2568,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			emitEvent: event => cursorEventEmitter?.(event),
 		});
 
-		// Resolve the inline-descriptors setting against the session-start model.
-		// `auto` enforces the per-model policy (inline for Gemini, off otherwise);
-		// like the rest of the prune machinery this is fixed for the session, so a
-		// mid-session model switch keeps the start-time decision.
-		const inlineToolDescriptors = shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), model?.id);
+		// Mutable active-model descriptor decision. `auto` re-evaluates for Gemini
+		// on model switch; explicit on/off stays fixed. System prompt inventory and
+		// Agent provider tool-schema pruning MUST share this same decision.
+		const inlineToolDescriptorsMode = settings.get("inlineToolDescriptors");
+		const inlineToolDescriptorsDecision = {
+			enabled: shouldInlineToolDescriptors(inlineToolDescriptorsMode, model?.id),
+		};
+		const resolveInlineToolDescriptors = (modelId: string | undefined): boolean =>
+			shouldInlineToolDescriptors(inlineToolDescriptorsMode, modelId);
 		const eagerTasks = settings.get("task.eager") !== "default";
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
@@ -2495,6 +2584,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Mutable holder updated by reconcileModelOptimization / session apply.
 		const modelOptimizationRuntime: { resolved: ResolvedModelOptimization } = { resolved: {} };
 		const providerElisionReceiptFingerprints = new Set<string>();
+		const providerOpaqueReceiptFingerprints = new Set<string>();
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -2507,12 +2597,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				: undefined;
 
 			// Build combined append prompt: memory instructions + auto-learn guidance
-			// + MCP server instructions. For UI sessions MCP discovery is deferred, so
-			// `getServerInstructions()` is empty until the background connect completes;
-			// the rebuild that `refreshMCPTools` triggers post-discovery then picks up
-			// the now-connected servers' instructions, so they join the prompt for the
-			// rest of the session.
-			const serverInstructions = mcpManager?.getServerInstructions();
+			// + activated MCP server instructions. Connected servers retain instructions
+			// on the manager; they stay out of appendSystemPrompt until a tool from that
+			// server is attempted in this session (then `refreshBaseSystemPrompt` rebuilds).
+			const serverInstructions = filterActivatedMcpServerInstructions(
+				mcpManager?.getServerInstructions(),
+				activatedMcpInstructionServers,
+				{ forPrompt: true },
+			);
 			// Drive guidance off the auto-learn BUILTINS that createTools actually built
 			// (provenance, not just an active name): `builtInToolNames` excludes a
 			// custom/extension tool that merely shares the name, and reflects the
@@ -2536,11 +2628,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
 				);
 				for (const [srvName, srvInstructions] of serverInstructions) {
-					const truncated =
-						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
-							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
-							: srvInstructions;
-					parts.push(`### ${srvName}\n${truncated}`);
+					parts.push(`### ${srvName}\n${srvInstructions}`);
 				}
 				appendPrompt = parts.join("\n\n");
 			}
@@ -2566,7 +2654,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				alwaysApplyRules,
 				resolvedAppendSystemPrompt: appendPrompt,
 				skillsSettings: settings.getGroup("skills"),
-				inlineToolDescriptors,
+				inlineToolDescriptors: inlineToolDescriptorsDecision.enabled,
 				nativeTools,
 				intentField,
 				eagerTasks,
@@ -2612,38 +2700,55 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (options.workflowToolOptimization) {
 				return {};
 			}
-			if (settings.get("modelOptimization.enabled") !== true) {
-				return {};
+			const profileOptimizationEnabled = settings.get("modelOptimization.enabled") === true;
+			let profile: ModelOptimizationProfile | undefined;
+			let ambiguous = false;
+			if (profileOptimizationEnabled) {
+				const rawUserProfiles = settings.get("modelOptimization.profiles");
+				const profiles = mergeModelOptimizationProfiles(
+					rawUserProfiles && typeof rawUserProfiles === "object"
+						? (rawUserProfiles as Record<string, Partial<ModelOptimizationProfile>>)
+						: undefined,
+				);
+				const available = modelRegistry.getAvailable();
+				const availableWithActive = available.some(
+					model => model.provider === activeModel.provider && model.id === activeModel.id,
+				)
+					? available
+					: [...available, activeModel];
+				const match = resolveModelOptimizationProfile({
+					model: activeModel,
+					profiles,
+					availableModels: availableWithActive,
+					preferences: getModelMatchPreferences(settings),
+				});
+				profile = match.profile;
+				ambiguous = match.ambiguous === true;
 			}
-
-			const rawUserProfiles = settings.get("modelOptimization.profiles");
-			const profiles = mergeModelOptimizationProfiles(
-				rawUserProfiles && typeof rawUserProfiles === "object"
-					? (rawUserProfiles as Record<string, Partial<ModelOptimizationProfile>>)
-					: undefined,
-			);
-			const available = modelRegistry.getAvailable();
-			// Ensure the active model is visible to the matcher.
-			const availableWithActive = available.some(m => m.provider === activeModel.provider && m.id === activeModel.id)
-				? available
-				: [...available, activeModel];
-			const matchPreferences = getModelMatchPreferences(settings);
-			const { profile, ambiguous } = resolveModelOptimizationProfile({
+			const resolved = buildResolvedModelOptimization(ambiguous ? undefined : profile);
+			// Shadow capability compile: profile execution stays authoritative; receipt is observable.
+			// Descriptor placement for facts uses live Gemini auto decision (mutable holder).
+			const descriptorPlacement = inlineToolDescriptorsDecision.enabled
+				? ("system_inline" as const)
+				: ("provider_schema" as const);
+			const adapted = compileForOrdinaryReconcile({
 				model: activeModel,
-				profiles,
-				availableModels: availableWithActive,
-				preferences: matchPreferences,
+				enabled:
+					options.modelPolicyFeatureGates?.compilerShadow !== false ||
+					options.modelPolicyFeatureGates?.compilerActive === true,
+				descriptorPlacement,
+				featureGates: options.modelPolicyFeatureGates,
 			});
-			if (ambiguous || !profile) {
-				return {};
-			}
-			const resolved = buildResolvedModelOptimization(profile);
-			logger.debug("Applied model optimization profile", {
-				profileId: profile.id,
+			const withCompiled = withOrdinaryCompiledPolicy(resolved, adapted);
+			logger.debug("Reconciled model optimization policy", {
+				profileId: ambiguous ? undefined : profile?.id,
+				profileAmbiguous: ambiguous,
 				provider: activeModel.provider,
 				model: activeModel.id,
+				compiled: Boolean(withCompiled.compiledReceipt),
+				compilerActive: withCompiled.compilerActive === true,
 			});
-			return resolved;
+			return withCompiled;
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
@@ -2793,6 +2898,34 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
 			const steered = wrapSteeringForModel(withContext);
+			const activeModel = agent?.state.model;
+			if (activeModel) {
+				try {
+					const assistantMessages = steered.filter(
+						(message): message is AssistantMessage => message.role === "assistant",
+					);
+					const opaqueState = captureProviderOpaqueState(assistantMessages, {
+						activeOwner: { provider: activeModel.provider, model: activeModel.id, api: activeModel.api },
+					});
+					if (opaqueState.receiptEntries.length > 0) {
+						const fingerprint = fingerprintValue({
+							activeOwner: { provider: activeModel.provider, model: activeModel.id, api: activeModel.api },
+							receiptEntries: opaqueState.receiptEntries,
+						});
+						if (!providerOpaqueReceiptFingerprints.has(fingerprint)) {
+							providerOpaqueReceiptFingerprints.add(fingerprint);
+							sessionManager.appendCustomEntry(PROVIDER_OPAQUE_STATE_RECEIPT_KIND, {
+								fingerprint,
+								continuation: opaqueState.continuation,
+								receiptEntries: opaqueState.receiptEntries,
+								notes: opaqueState.notes,
+							});
+						}
+					}
+				} catch (error) {
+					logger.debug("Provider opaque-state receipt capture failed", { error: String(error) });
+				}
+			}
 			// Provider-only tool-history elision from ordinary modelOptimization profile.
 			// Never mutates SessionManager JSONL / input message objects.
 			const strategy = modelOptimizationRuntime.resolved.contextStrategy;
@@ -2976,7 +3109,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getCursorTools: () => [...(toolSession.xdevRegistry?.list() ?? [])],
 			transformToolCallArguments,
 			intentTracing: !!intentField,
-			pruneToolDescriptions: inlineToolDescriptors,
+			pruneToolDescriptions: () => inlineToolDescriptorsDecision.enabled,
 			dialect: resolveDialect(settings.get("tools.format"), model),
 			abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
 			getToolChoice: () => session?.nextToolChoiceDirective(),
@@ -3053,7 +3186,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 			advisorConfigs: discoveredAdvisors.advisors,
 			agent,
-			pruneToolDescriptions: inlineToolDescriptors,
+			pruneToolDescriptions: inlineToolDescriptorsDecision.enabled,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			prewalk: options.prewalk,
 			planYolo: options.planYolo,
@@ -3098,6 +3231,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			applyModelOptimization: resolved => {
 				modelOptimizationRuntime.resolved = resolved;
 			},
+			resolveInlineToolDescriptors: modelId => {
+				const next = resolveInlineToolDescriptors(modelId);
+				inlineToolDescriptorsDecision.enabled = next;
+				return next;
+			},
 			getXdevToolEntries: () => toolSession.xdevRegistry?.entries() ?? [],
 			xdevRegistry: toolSession.xdevRegistry,
 			initialMountedXdevToolNames,
@@ -3105,19 +3243,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			setActiveToolNames,
 			ensureWriteRegistered,
 			getMcpServerInstructions: mcpManager
-				? () => {
-						const raw = mcpManager.getServerInstructions();
-						if (!raw || raw.size === 0) return raw;
-						const out = new Map<string, string>();
-						for (const [name, text] of raw) {
-							out.set(
-								name,
-								text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text,
-							);
-						}
-						return out;
-					}
+				? () =>
+						filterActivatedMcpServerInstructions(
+							mcpManager.getServerInstructions(),
+							activatedMcpInstructionServers,
+						)
 				: undefined,
+			activateMcpInstructionServer: enableMCP ? activateMcpInstructionServer : undefined,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,
@@ -3300,7 +3432,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					streamFn: settingsAwareStreamFn,
 					transformToolCallArguments,
 					intentTracing: !!intentField,
-					pruneToolDescriptions: inlineToolDescriptors,
+					pruneToolDescriptions: () => inlineToolDescriptorsDecision.enabled,
 					dialect: resolveDialect(settings.get("tools.format"), captureModel),
 					abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
 					appendOnlyContext: shouldEnableAppendOnlyContext(

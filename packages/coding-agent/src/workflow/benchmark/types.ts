@@ -49,6 +49,22 @@ export interface BenchmarkSuite {
 	cases: BenchmarkCase[];
 }
 
+/** Single ablation lever under test. Combo runs use fingerprint form `combo:a+b`. */
+export type BenchmarkActiveLever =
+	| "prompt_overlay"
+	| "thinking_sampling"
+	| "tool_surface"
+	| "structured_tier"
+	| "context_cache"
+	| "runtime_completion"
+	| "profile_strategy"
+	| "none"
+	| (string & {});
+
+/**
+ * Stable identity + policy stamp for one case×variant run.
+ * Optional fields stay null/unknown when not supplied — never invent timestamps.
+ */
 export interface BenchmarkRunFingerprint {
 	suiteId: string;
 	caseId: string;
@@ -59,6 +75,29 @@ export interface BenchmarkRunFingerprint {
 	profileId?: string;
 	/** sha256 of tool strategy JSON when optimized. */
 	strategyFingerprint?: string;
+	/** Exact provider identity — null when unknown. */
+	provider: string | null;
+	model: string | null;
+	checkpoint: string | null;
+	/** API / transport id (e.g. responses, messages, chat_completions). */
+	api: string | null;
+	/** Host adapter id / version. */
+	adapter: string | null;
+	/** Stream / event parser id / version. */
+	parser: string | null;
+	/** ModelFactsV1 fingerprint when compiled policy is in play. */
+	modelFactsFingerprint: string | null;
+	taskPolicyFingerprint: string | null;
+	sessionStateFingerprint: string | null;
+	/** Compiled policy content hash (receipt-level). */
+	compiledPolicyFingerprint: string | null;
+	/** Durable compiled policy receipt id when available. */
+	compiledPolicyReceiptId: string | null;
+	/**
+	 * Ordinary paired run: at most one lever name (or null/none).
+	 * Combination run: `combo:sorted+levers` when explicitly flagged.
+	 */
+	activeLever: string | null;
 }
 
 export interface StageRunMetrics {
@@ -170,6 +209,14 @@ export interface BenchmarkScorecard {
 	/** True when any live model quality is unknown (fake-runtime only). */
 	liveQualityUnknown: boolean;
 	notes: string[];
+	/** Associated compiled policy receipt id when runs share one. */
+	compiledPolicyReceiptId?: string | null;
+	/** Associated compiled policy fingerprint when runs share one. */
+	compiledPolicyFingerprint?: string | null;
+	/** Active lever stamp mirrored from run fingerprints when uniform. */
+	activeLever?: string | null;
+	/** True when this scorecard came from an explicit combination run. */
+	combinationRun?: boolean;
 }
 
 export interface BenchmarkQualityGate {
@@ -221,4 +268,10 @@ export interface BenchmarkReport {
 	comparison: BenchmarkComparisonRow[];
 	gate: BenchmarkGateResult;
 	notes: string[];
+	/** Associated compiled policy receipt id when present. */
+	compiledPolicyReceiptId?: string | null;
+	/** Associated compiled policy fingerprint when present. */
+	compiledPolicyFingerprint?: string | null;
+	activeLever?: string | null;
+	combinationRun?: boolean;
 }

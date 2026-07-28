@@ -41,6 +41,7 @@ import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
+import { filterProviderReplayMessages } from "./replay-policy";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
@@ -545,12 +546,13 @@ export function normalizeMessagesForProvider(
 	messages: Context["messages"],
 	model: AgentLoopConfig["model"],
 ): Context["messages"] {
+	const replayableMessages = filterProviderReplayMessages(messages, model);
 	if (model.provider !== "cerebras") {
-		return messages;
+		return replayableMessages;
 	}
 
 	let hasThinking = false;
-	for (const message of messages) {
+	for (const message of replayableMessages) {
 		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (const block of message.content) {
 			if (block.type === "thinking") {
@@ -560,9 +562,9 @@ export function normalizeMessagesForProvider(
 		}
 		if (hasThinking) break;
 	}
-	if (!hasThinking) return messages;
+	if (!hasThinking) return replayableMessages;
 
-	return messages.map(message => {
+	return replayableMessages.map(message => {
 		if (message.role !== "assistant" || !Array.isArray(message.content)) {
 			return message;
 		}
@@ -1244,7 +1246,11 @@ async function streamAssistantResponse(
 	const exampleDialect = ownedDialect ?? preferredDialect(model.id);
 	// Owned/in-band dialects carry the catalog in the prompt as text and send no
 	// native `tools`, so description pruning only applies to native tool calling.
-	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
+	const pruneRequested =
+		typeof config.pruneToolDescriptions === "function"
+			? config.pruneToolDescriptions()
+			: !!config.pruneToolDescriptions;
+	const pruneToolDescriptions = pruneRequested && !ownedDialect;
 	// Build LLM context — append-only mode caches system prompt + tools
 	// AND keeps an append-only message log so prior-turn bytes are stable.
 	let llmContext: Context;

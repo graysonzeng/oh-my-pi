@@ -93,12 +93,8 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		id: "glm",
 		modelPattern: ["glm-*", "zhipu/*"],
 		priority: 0,
-		promptStrategy: {
-			kind: "verbose",
-			systemPromptTemplate: "explicit-grok",
-			thinkingPrompt: { enabled: true, style: "step-by-step" },
-			instructionFormat: "numbered",
-		},
+		// No family prompt overlay until GLM-specific live ablation passes.
+		// Do not inherit explicit-grok / step-by-step.
 		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.7, keepRecentN: 10 }),
 	},
@@ -106,12 +102,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		id: "deepseek",
 		modelPattern: ["deepseek-*", "deepseek/*"],
 		priority: 0,
-		promptStrategy: {
-			kind: "verbose",
-			systemPromptTemplate: "explicit-grok",
-			thinkingPrompt: { enabled: true, style: "step-by-step" },
-			instructionFormat: "numbered",
-		},
+		// Shared baseline only; no Grok prompt inheritance or guessed step-by-step.
 		toolStrategy: toolStrategy({ maxBytes: 1500, maxLines: 30, maxConcurrent: 3 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.8, keepRecentN: 5 }),
 	},
