@@ -8,6 +8,7 @@
 ### Added
 - Added custom-model validation for `compat.codexResponsesEndpoint`, enabling standard `/responses` WebSocket-to-SSE fallback on compatible gateways.
 - Added opt-in model optimization profiles for ordinary coding-agent sessions, with model-resolver-compatible matching and model-switch-safe prompt/tool scheduling updates that remain separate from workflow roles, permissions, aliases, budgets, and output schemas.
+- Added direct Moonshot Kimi K3 capability facts for parallel tool calls, native MFJS structured output, complete reasoning replay, and exact-prefix caching while keeping proxy routes conservative.
 - Added explicit MCP server `lazy: true` configuration: cached tools remain discoverable at startup while the server transport opens only on first tool use or manual reconnect.
 - Documented multi-model workflow live full-path verification, profile field support matrix (including tool/argument aliases vs rejected token caps), timeout-vs-cancel mapping, and default role preference order in `docs/workflow.md`; linked `workflow/` from DEVELOPMENT and `workflow.*` from settings docs.
 - Wired P0–P2 optimization into production paths: live tool `processToolOutputDetailed` + session receipts, engine stage-handoff/scope-metrics/prompt-assembly artifacts, gated presentation policy on prepare, catalog `transformTools` applied to real AgentTool descriptors in `createTools`, and `omp workflow-bench` thin CLI over `runBenchmarkSuite`.

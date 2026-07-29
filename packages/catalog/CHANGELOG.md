@@ -6,6 +6,10 @@
 
 - Added a `codexResponsesEndpoint` compatibility setting for custom Codex Responses gateways that expose standard `/responses` instead of `/codex/responses`.
 
+### Fixed
+
+- Fixed direct Moonshot Kimi K3 compatibility metadata to omit unsupported sampling parameters without changing Kimi Code or third-party K3 routes.
+
 ## [17.0.6] - 2026-07-20
 
 ### Added

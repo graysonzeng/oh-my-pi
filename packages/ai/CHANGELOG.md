@@ -5,6 +5,7 @@
 ### Fixed
 
 - Added an explicit standard `/responses` endpoint mode for Codex Responses transports so custom gateways can use WebSockets and fall back to HTTP/SSE on the same URL.
+- Fixed Moonshot MFJS tool schemas that combine root object constraints with `anyOf`/`oneOf` by distributing compatible constraints into each object branch.
 
 ### Added
 
