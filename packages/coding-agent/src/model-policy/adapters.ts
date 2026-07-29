@@ -7,7 +7,8 @@
  */
 
 import type { Model } from "@oh-my-pi/pi-ai";
-import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
+import { isOfficialMoonshotEndpoint } from "@oh-my-pi/pi-catalog/compat/openai";
+import { isKimiK3ModelId, modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
 import { compileModelPolicy } from "./compiler";
 import { fingerprintModelFacts } from "./receipt";
 import type {
@@ -54,6 +55,7 @@ export type ModelFactsSource = Pick<
 	Model,
 	"id" | "provider" | "api" | "reasoning" | "contextWindow" | "supportsTools" | "thinking"
 > & {
+	baseUrl?: string;
 	compat?: unknown;
 	requestModelId?: string;
 	name?: string;
@@ -280,6 +282,32 @@ function deriveToolsFromModel(
 	};
 }
 
+function applyOfficialMoonshotK3Facts(facts: ModelFactsV1, model: ModelFactsSource): void {
+	if (
+		model.api !== "openai-completions" ||
+		model.provider !== "moonshot" ||
+		!isOfficialMoonshotEndpoint(model.provider, model.baseUrl ?? "") ||
+		!isKimiK3ModelId(model.id)
+	) {
+		return;
+	}
+
+	// Fill only unresolved catalog axes. Explicit catalog facts and caller
+	// overrides retain precedence over this first-party documented contract.
+	if (facts.reasoning.mode === "unknown") facts.reasoning.mode = "native_opaque";
+	if (facts.reasoning.replay === "unknown") facts.reasoning.replay = "reasoning_content";
+	if (facts.tools.transport === "native" && facts.tools.parallelCalls === null) {
+		facts.tools.parallelCalls = true;
+	}
+	if (facts.structuredOutput.tier === "unknown") {
+		facts.structuredOutput.tier = "native_json_schema";
+		if (facts.structuredOutput.constraints.length === 0) facts.structuredOutput.constraints = ["MFJS"];
+	}
+	if (facts.context.nativeStatefulContinuation === null) facts.context.nativeStatefulContinuation = false;
+	if (facts.cache.mode === "unknown") facts.cache.mode = "exact_prefix";
+	if (facts.cache.usageObservable === null) facts.cache.usageObservable = true;
+}
+
 /**
  * Derive ModelFactsV1 from a catalog Model.
  * Unproven capability axes remain unknown/null — never OpenAI-compatible defaults.
@@ -339,6 +367,7 @@ export function deriveModelFacts(model: ModelFactsSource, overrides?: DeriveMode
 			sourceVersion: MODEL_FACTS_ADAPTER_VERSION,
 		},
 	};
+	applyOfficialMoonshotK3Facts(base, model);
 
 	const partial = overrides?.facts;
 	if (!partial) return base;

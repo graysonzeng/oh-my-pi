@@ -66,6 +66,26 @@ describe("issue #5756 — moonshot kimi-k3 pricing and wire format", () => {
 		expect(model.compat.supportsReasoningEffort).toBe(true);
 	});
 
+	it("disables sampling only for K3 on the official Moonshot route", async () => {
+		const discovered = await discoverKimiK3();
+		const supportsSampling = (overrides: Partial<ModelSpec<"openai-completions">>): boolean =>
+			buildModel({ ...discovered, ...overrides }).compat.supportsSamplingParams;
+
+		expect(supportsSampling({})).toBe(false);
+		expect(supportsSampling({ baseUrl: "https://api.moonshot.cn/v1?region=cn" })).toBe(false);
+		// Other Moonshot generations retain the OpenAI-compatible default.
+		expect(supportsSampling({ id: "kimi-k2.7-code", name: "Kimi K2.7 Code" })).toBe(true);
+		// K3 served by third parties must not inherit a first-party API limitation.
+		expect(supportsSampling({ provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" })).toBe(true);
+		expect(supportsSampling({ provider: "custom", baseUrl: "https://api.moonshot.ai/v1" })).toBe(true);
+		// A Moonshot provider id redirected to a custom proxy is not the official route.
+		expect(supportsSampling({ baseUrl: "https://proxy.example/v1/api.moonshot.ai" })).toBe(true);
+		// Kimi Code remains independent from the Moonshot K3 API contract.
+		expect(
+			supportsSampling({ id: "kimi-for-coding", provider: "kimi-code", baseUrl: "https://api.kimi.com/coding/v1" }),
+		).toBe(true);
+	});
+
 	it("wire body carries reasoning_effort=max and omits the thinking block", async () => {
 		const model = buildModel(await discoverKimiK3());
 		let body: Record<string, unknown> = {};

@@ -462,7 +462,10 @@ function applyNodePostProcessing(schema: JsonObject, options: NormalizeSchemaWal
 		if (options.collapseMixedTypeCombiners) current = collapseMixedTypeCombinerVariants(current, combiner);
 		if (options.collapseSameTypeCombiners) current = collapseSameTypeCombinerVariants(current, combiner);
 	}
-	if (options.foldOneOfIntoAnyOf) current = foldOneOfIntoAnyOf(current);
+	if (options.foldOneOfIntoAnyOf) {
+		current = foldOneOfIntoAnyOf(current);
+		current = distributeMoonshotObjectAnyOfSiblings(current);
+	}
 	if (options.dropNonScalarEnum) current = dropNonScalarEnumForMfjs(current);
 	return current;
 }
@@ -474,6 +477,147 @@ function foldOneOfIntoAnyOf(schema: JsonObject): JsonObject {
 	const existing = Array.isArray(rest.anyOf) ? (rest.anyOf as unknown[]) : [];
 	rest.anyOf = [...existing, ...(schema.oneOf as unknown[])];
 	return rest;
+}
+
+const MOONSHOT_OBJECT_SIBLING_KEYS: Record<string, true> = {
+	type: true,
+	properties: true,
+	required: true,
+	additionalProperties: true,
+};
+const MOONSHOT_ANY_OF_ANNOTATION_KEYS: Record<string, true> = {
+	anyOf: true,
+	description: true,
+	default: true,
+};
+
+function flattenPureMoonshotAnyOfBranches(branches: unknown[]): JsonObject[] | undefined {
+	const flattened: JsonObject[] = [];
+	for (const entry of branches) {
+		if (!isJsonObject(entry)) return undefined;
+		if (!Array.isArray(entry.anyOf)) {
+			flattened.push(entry);
+			continue;
+		}
+		for (const key in entry) {
+			if (Object.hasOwn(entry, key) && !Object.hasOwn(MOONSHOT_ANY_OF_ANNOTATION_KEYS, key)) return undefined;
+		}
+		if (entry.anyOf.length === 0) return undefined;
+		const nested = flattenPureMoonshotAnyOfBranches(entry.anyOf);
+		if (nested === undefined) return undefined;
+		for (const branch of nested) {
+			const annotated = { ...branch };
+			if (entry.description !== undefined && annotated.description === undefined) {
+				annotated.description = entry.description;
+			}
+			if (entry.default !== undefined && annotated.default === undefined) annotated.default = entry.default;
+			flattened.push(annotated);
+		}
+	}
+	return flattened;
+}
+
+function mergeMoonshotAdditionalProperties(
+	parent: JsonObject,
+	branch: JsonObject,
+): { compatible: boolean; present: boolean; value?: unknown } {
+	const parentPresent = Object.hasOwn(parent, "additionalProperties");
+	const branchPresent = Object.hasOwn(branch, "additionalProperties");
+	if (!parentPresent) {
+		return branchPresent
+			? { compatible: true, present: true, value: branch.additionalProperties }
+			: { compatible: true, present: false };
+	}
+	if (!branchPresent) return { compatible: true, present: true, value: parent.additionalProperties };
+
+	const parentValue = parent.additionalProperties;
+	const branchValue = branch.additionalProperties;
+	if (parentValue === false || branchValue === false) return { compatible: true, present: true, value: false };
+	if (parentValue === true) return { compatible: true, present: true, value: branchValue };
+	if (branchValue === true) return { compatible: true, present: true, value: parentValue };
+	if (areJsonValuesEqual(parentValue, branchValue)) return { compatible: true, present: true, value: parentValue };
+	return { compatible: false, present: false };
+}
+
+function mergeMoonshotObjectBranch(parent: JsonObject, branch: JsonObject): JsonObject | undefined {
+	if (branch.type !== undefined && branch.type !== "object") return undefined;
+	if (branch.properties !== undefined && !isJsonObject(branch.properties)) return undefined;
+	if (branch.required !== undefined && !Array.isArray(branch.required)) return undefined;
+
+	const parentProperties = isJsonObject(parent.properties) ? parent.properties : undefined;
+	const branchProperties = isJsonObject(branch.properties) ? branch.properties : undefined;
+	if (parentProperties && branchProperties) {
+		for (const key in branchProperties) {
+			if (
+				Object.hasOwn(branchProperties, key) &&
+				Object.hasOwn(parentProperties, key) &&
+				!areJsonValuesEqual(parentProperties[key], branchProperties[key])
+			) {
+				return undefined;
+			}
+		}
+	}
+	if (
+		branchProperties &&
+		Object.hasOwn(parent, "additionalProperties") &&
+		parent.additionalProperties !== true &&
+		parent.additionalProperties !== undefined
+	) {
+		for (const key in branchProperties) {
+			if (Object.hasOwn(branchProperties, key) && !Object.hasOwn(parentProperties ?? {}, key)) return undefined;
+		}
+	}
+	if (
+		parentProperties &&
+		Object.hasOwn(branch, "additionalProperties") &&
+		branch.additionalProperties !== true &&
+		branch.additionalProperties !== undefined
+	) {
+		for (const key in parentProperties) {
+			if (Object.hasOwn(parentProperties, key) && !Object.hasOwn(branchProperties ?? {}, key)) return undefined;
+		}
+	}
+
+	const additionalProperties = mergeMoonshotAdditionalProperties(parent, branch);
+	if (!additionalProperties.compatible) return undefined;
+
+	const merged: JsonObject = { ...branch, type: branch.type ?? "object" };
+	if (parentProperties || branchProperties) merged.properties = { ...parentProperties, ...branchProperties };
+	const parentRequired = Array.isArray(parent.required) ? parent.required : [];
+	const branchRequired = Array.isArray(branch.required) ? branch.required : [];
+	if (parent.required !== undefined || branch.required !== undefined) {
+		merged.required = [...new Set([...parentRequired, ...branchRequired])];
+	}
+	if (additionalProperties.present) merged.additionalProperties = additionalProperties.value;
+	return merged;
+}
+
+/**
+ * MFJS rejects an object `anyOf` when object constraints remain beside the
+ * combiner. Distribute the representable conjunction into every object branch;
+ * leave mixed or lossy intersections untouched rather than changing meaning.
+ */
+function distributeMoonshotObjectAnyOfSiblings(schema: JsonObject): JsonObject {
+	if (schema.type !== "object" || !Array.isArray(schema.anyOf) || schema.anyOf.length === 0) return schema;
+	if (schema.properties !== undefined && !isJsonObject(schema.properties)) return schema;
+	if (schema.required !== undefined && !Array.isArray(schema.required)) return schema;
+
+	const flattened = flattenPureMoonshotAnyOfBranches(schema.anyOf);
+	if (flattened === undefined) return schema;
+	const distributed: JsonObject[] = [];
+	for (const branch of flattened) {
+		const merged = mergeMoonshotObjectBranch(schema, branch);
+		if (merged === undefined) return schema;
+		distributed.push(merged);
+	}
+
+	const result: JsonObject = {};
+	for (const key in schema) {
+		if (!Object.hasOwn(schema, key) || Object.hasOwn(MOONSHOT_OBJECT_SIBLING_KEYS, key) || key === "anyOf") continue;
+		result[key] = schema[key];
+	}
+	result.anyOf = distributed;
+	return result;
 }
 
 /** MFJS `enum` admits only string/number literals; drop an enum carrying other types, keeping the inferred `type`. */

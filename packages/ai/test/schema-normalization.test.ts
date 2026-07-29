@@ -1311,6 +1311,160 @@ describe("normalizeSchemaForMoonshot", () => {
 		expect(normalized.anyOf).toEqual([{ type: "boolean" }, { type: "string" }]);
 	});
 
+	it("distributes the issue #2531 root object constraints into each anyOf branch", () => {
+		const normalized = normalizeSchemaForMoonshot({
+			type: "object",
+			properties: {
+				route: { type: "string" },
+				file: { type: "string" },
+				method: { type: "string" },
+			},
+			required: [],
+			additionalProperties: false,
+			anyOf: [{ required: ["route"] }, { required: ["file"] }],
+		});
+
+		expect(normalized).toEqual({
+			anyOf: [
+				{
+					type: "object",
+					properties: {
+						route: { type: "string" },
+						file: { type: "string" },
+						method: { type: "string" },
+					},
+					required: ["route"],
+					additionalProperties: false,
+				},
+				{
+					type: "object",
+					properties: {
+						route: { type: "string" },
+						file: { type: "string" },
+						method: { type: "string" },
+					},
+					required: ["file"],
+					additionalProperties: false,
+				},
+			],
+		});
+		expect(() => assertMfjsValid(normalized)).not.toThrow();
+	});
+
+	it("folds oneOf and flattens pure nested unions before distributing object constraints", () => {
+		const normalized = normalizeSchemaForMoonshot({
+			type: "object",
+			properties: { left: { type: "string" }, right: { type: "string" } },
+			required: [],
+			oneOf: [
+				{
+					anyOf: [{ required: ["left"] }, { required: ["right"] }],
+				},
+			],
+		}) as Record<string, unknown>;
+
+		expect(normalized.oneOf).toBeUndefined();
+		expect(normalized.type).toBeUndefined();
+		expect(normalized.properties).toBeUndefined();
+		const variants = normalized.anyOf as Array<Record<string, unknown>>;
+		expect(variants).toEqual([
+			{
+				type: "object",
+				properties: { left: { type: "string" }, right: { type: "string" } },
+				required: ["left"],
+			},
+			{
+				type: "object",
+				properties: { left: { type: "string" }, right: { type: "string" } },
+				required: ["right"],
+			},
+		]);
+		expect(variants.every(variant => variant.anyOf === undefined)).toBe(true);
+	});
+
+	it("preserves compatible branch object constraints and deduplicates in source order", () => {
+		const normalized = normalizeSchemaForMoonshot({
+			type: "object",
+			properties: { shared: { type: "string" } },
+			required: ["shared"],
+			additionalProperties: true,
+			anyOf: [
+				{
+					type: "object",
+					properties: { shared: { type: "string" } },
+					required: ["shared", "shared"],
+					additionalProperties: false,
+				},
+				{
+					properties: { local: { type: "number" } },
+					required: ["local", "shared", "local"],
+					additionalProperties: true,
+				},
+			],
+		}) as Record<string, unknown>;
+		const variants = normalized.anyOf as Array<Record<string, unknown>>;
+
+		expect(variants[0]).toEqual({
+			type: "object",
+			properties: { shared: { type: "string" } },
+			required: ["shared"],
+			additionalProperties: false,
+		});
+		expect(variants[1]).toEqual({
+			type: "object",
+			properties: { shared: { type: "string" }, local: { type: "number" } },
+			required: ["shared", "local"],
+			additionalProperties: true,
+		});
+		expect(Object.keys(variants[1].properties as Record<string, unknown>)).toEqual(["shared", "local"]);
+	});
+
+	it("leaves mixed and incompatible object combiners unchanged", () => {
+		const mixed = {
+			type: "object",
+			properties: { value: { type: "string" } },
+			required: ["value"],
+			anyOf: [{ type: "string" }, { type: "object", required: ["value"] }],
+		};
+		const incompatibleProperties = {
+			type: "object",
+			properties: { value: { type: "string" } },
+			anyOf: [{ type: "object", properties: { value: { type: "number" } } }],
+		};
+
+		expect(normalizeSchemaForMoonshot(mixed)).toEqual(mixed);
+		expect(normalizeSchemaForMoonshot(incompatibleProperties)).toEqual(incompatibleProperties);
+	});
+
+	it("distributes object combiners recursively in property schemas", () => {
+		const normalized = normalizeSchemaForMoonshot({
+			type: "object",
+			properties: {
+				selector: {
+					type: "object",
+					properties: { route: { type: "string" }, file: { type: "string" } },
+					anyOf: [{ required: ["route"] }, { required: ["file"] }],
+				},
+			},
+		}) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, Record<string, unknown>>;
+
+		expect(properties.selector).toEqual({
+			anyOf: [
+				{
+					type: "object",
+					properties: { route: { type: "string" }, file: { type: "string" } },
+					required: ["route"],
+				},
+				{
+					type: "object",
+					properties: { route: { type: "string" }, file: { type: "string" } },
+					required: ["file"],
+				},
+			],
+		});
+	});
+
 	it("reduces a type array to a scalar and strips the nullable keyword", () => {
 		expect(normalizeSchemaForMoonshot({ type: ["string", "null"] })).toEqual({ type: "string" });
 		expect(normalizeSchemaForMoonshot({ type: "string", nullable: true })).toEqual({ type: "string" });

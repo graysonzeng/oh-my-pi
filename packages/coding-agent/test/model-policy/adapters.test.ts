@@ -64,6 +64,91 @@ describe("deriveModelFacts", () => {
 		});
 		expect(facts.tools.descriptorPlacement).toBe("system_inline");
 	});
+
+	it("adds documented capabilities only for first-party Moonshot K3", () => {
+		const facts = deriveModelFacts(requiredModel("moonshot", "kimi-k3"));
+
+		expect(facts.reasoning.mode).toBe("native_opaque");
+		expect(facts.reasoning.replay).toBe("reasoning_content");
+		expect(facts.tools.transport).toBe("native");
+		expect(facts.tools.parallelCalls).toBe(true);
+		expect(facts.structuredOutput).toEqual({ tier: "native_json_schema", constraints: ["MFJS"] });
+		expect(facts.context.nativeStatefulContinuation).toBe(false);
+		expect(facts.cache).toEqual({ mode: "exact_prefix", ordering: [], usageObservable: true });
+	});
+
+	it("keeps K3 facts conservative outside the first-party Moonshot route", () => {
+		const routes = [
+			{
+				id: "kimi-k3",
+				provider: "kimi-code",
+				api: "openai-completions",
+				baseUrl: "https://api.kimi.com/coding/v1",
+				reasoning: true,
+				contextWindow: 1_048_576,
+			},
+			{
+				id: "moonshotai/kimi-k3",
+				provider: "openrouter",
+				api: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				reasoning: true,
+				contextWindow: 1_048_576,
+			},
+			{
+				id: "kimi-k3",
+				provider: "moonshot",
+				api: "openai-completions",
+				baseUrl: "https://proxy.example/v1/api.moonshot.ai",
+				reasoning: true,
+				contextWindow: 1_048_576,
+			},
+		] as const;
+
+		for (const model of routes) {
+			const facts = deriveModelFacts(model);
+			expect(facts.tools.parallelCalls).toBeNull();
+			expect(facts.structuredOutput.tier).toBe("unknown");
+			expect(facts.context.nativeStatefulContinuation).toBeNull();
+			expect(facts.cache.mode).toBe("unknown");
+		}
+	});
+
+	it("preserves explicit facts over the first-party K3 fill", () => {
+		const facts = deriveModelFacts(
+			{
+				id: "kimi-k3",
+				provider: "moonshot",
+				api: "openai-completions",
+				baseUrl: "https://api.moonshot.cn/v1",
+				reasoning: false,
+				contextWindow: 1_048_576,
+				supportsTools: false,
+				compat: { supportsStrictMode: false },
+			},
+			{
+				facts: {
+					structuredOutput: { tier: "valid_json", constraints: ["catalog_constraint"] },
+					context: { nativeStatefulContinuation: true },
+					cache: { mode: "explicit", ordering: ["messages"], usageObservable: false },
+				},
+			},
+		);
+
+		expect(facts.reasoning).toEqual({
+			mode: "none",
+			replay: "none",
+			effortControl: "none",
+			supportedEfforts: [],
+			incompatibleParams: [],
+		});
+		expect(facts.tools.transport).toBe("text");
+		expect(facts.tools.parallelCalls).toBeNull();
+		expect(facts.tools.strictArguments).toBe(false);
+		expect(facts.structuredOutput).toEqual({ tier: "valid_json", constraints: ["catalog_constraint"] });
+		expect(facts.context.nativeStatefulContinuation).toBe(true);
+		expect(facts.cache).toEqual({ mode: "explicit", ordering: ["messages"], usageObservable: false });
+	});
 });
 
 describe("ordinary/workflow adapter parity", () => {

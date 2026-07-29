@@ -133,6 +133,17 @@ function isOfficialOpenAIEndpoint(provider: string, baseUrl: string): boolean {
 	}
 }
 
+/** Strict first-party Moonshot check; provider ids and URL markers alone also match configured proxies. */
+export function isOfficialMoonshotEndpoint(provider: string, baseUrl: string): boolean {
+	if (provider !== "moonshot") return false;
+	try {
+		const hostname = new URL(baseUrl).hostname.toLowerCase();
+		return hostname === "api.moonshot.ai" || hostname === "api.moonshot.cn";
+	} catch {
+		return false;
+	}
+}
+
 /**
  * OpenCode's gateways (https://opencode.ai/zen|go) gate `reasoning_content`
  * on the request's thinking state for every model they front (Kimi K2.x,
@@ -271,6 +282,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	// low/high/max thinking, not the K2.x binary `thinking: { type }` block.
 	const isKimiK3 = isKimiK3ModelId(spec.id);
 	const isMoonshotKimiK3 = isMoonshotKimi && isKimiK3;
+	// Sampling controls are rejected only by K3 on Moonshot's first-party
+	// OpenAI-completions route. Provider and official host must both match so a
+	// Kimi Code route, third-party host, or Moonshot-configured proxy keeps the
+	// generic OpenAI-compatible capability.
+	const isOfficialMoonshotKimiK3 = isMoonshotKimiK3 && isOfficialMoonshotEndpoint(provider, baseUrl);
 	const requiresEnabledThinking = isMoonshotKimi && matchesKimiK27CodeFamily(spec);
 	const usesMoonshotKimiPreservedThinking = isMoonshotKimi && isKimiK26ModelId(spec.id);
 	const isAnthropicModel =
@@ -446,8 +462,10 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
 		// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
-		// temperature/top_p/… with a 400 on every serving host (#5606).
-		supportsSamplingParams: !isOpenAISamplingRestrictedModelId(spec.id),
+		// temperature/top_p/… with a 400 on every serving host (#5606). Moonshot's
+		// official Kimi K3 route rejects the same sampling controls, while K2.7 and
+		// third-party K3 routes retain the OpenAI-compatible default.
+		supportsSamplingParams: !isOpenAISamplingRestrictedModelId(spec.id) && !isOfficialMoonshotKimiK3,
 		reasoningEffortMap: {},
 		supportsUsageInStreaming: !isCerebras,
 		// pi-ai's thinking-loop guard is gemini-only; default the flag from the
