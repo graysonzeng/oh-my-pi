@@ -147,7 +147,11 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
-			typeof options.toolChoice === "object" ? { type: "tool", name: options.toolChoice.name } : options.toolChoice;
+			typeof options.toolChoice !== "object"
+				? options.toolChoice
+				: "type" in options.toolChoice
+					? options.toolChoice
+					: { type: "tool", name: options.toolChoice.name };
 	}
 	if (options.reasoning !== undefined) opts.reasoning = options.reasoning;
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
@@ -155,6 +159,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
+	if (options.include !== undefined) opts.include = options.include;
 	// Client-supplied `prompt_cache_key` wins; otherwise derive a stable
 	// key from the model + system + tools so prefix caching engages on
 	// Codex-class backends across turns of the same logical conversation.
@@ -749,14 +754,26 @@ function supportedEndpointTypes(api: Api): string[] {
 }
 
 function handleModelsList(opts: AuthGatewayBootOptions): Response {
-	const list = opts.listModels ? Array.from(opts.listModels()) : [];
-	const data = list.map(model => ({
-		id: model.id,
-		object: "model" as const,
-		owned_by: model.provider,
-		api: model.api,
-		supported_endpoint_types: supportedEndpointTypes(model.api),
-	}));
+	const seen = new Set<string>();
+	const data: Array<{
+		id: string;
+		object: "model";
+		owned_by: string;
+		api: Api;
+		supported_endpoint_types: string[];
+	}> = [];
+	for (const model of opts.listModels?.() ?? []) {
+		const id = `${model.provider}/${model.id}`;
+		if (seen.has(id)) continue;
+		seen.add(id);
+		data.push({
+			id,
+			object: "model",
+			owned_by: model.provider,
+			api: model.api,
+			supported_endpoint_types: supportedEndpointTypes(model.api),
+		});
+	}
 	return json(200, { object: "list", data });
 }
 

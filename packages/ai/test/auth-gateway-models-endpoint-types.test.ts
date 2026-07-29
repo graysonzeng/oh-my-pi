@@ -76,14 +76,14 @@ describe("auth-gateway GET /v1/models supported_endpoint_types", () => {
 
 			const byId = new Map(body.data.map(entry => [entry.id, entry]));
 
-			const claude = byId.get("claude-sonnet-4");
+			const claude = byId.get("anthropic/claude-sonnet-4");
 			expect(claude).toBeDefined();
 			expect(claude?.object).toBe("model");
 			expect(claude?.owned_by).toBe("anthropic");
 			expect(claude?.api).toBe("anthropic-messages");
 			expect(claude?.supported_endpoint_types).toEqual(["anthropic"]);
 
-			const gpt = byId.get("gpt-5.2");
+			const gpt = byId.get("openai/gpt-5.2");
 			expect(gpt).toBeDefined();
 			expect(gpt?.object).toBe("model");
 			expect(gpt?.owned_by).toBe("openai");
@@ -93,11 +93,11 @@ describe("auth-gateway GET /v1/models supported_endpoint_types", () => {
 			// Unrelated / non-chat-gateway-native APIs: no anthropic/openai claim.
 			// Responses-family and Google are still reachable via gateway translation,
 			// but proxy discovery would mis-map invented tags — stay empty.
-			const gemini = byId.get("gemini-2.5-pro");
+			const gemini = byId.get("google/gemini-2.5-pro");
 			expect(gemini?.api).toBe("google-generative-ai");
 			expect(gemini?.supported_endpoint_types).toEqual([]);
 
-			const codex = byId.get("gpt-5.2-codex");
+			const codex = byId.get("openai-codex/gpt-5.2-codex");
 			expect(codex?.api).toBe("openai-codex-responses");
 			expect(codex?.supported_endpoint_types).toEqual([]);
 		} finally {
@@ -118,8 +118,8 @@ describe("auth-gateway GET /v1/models supported_endpoint_types", () => {
 			expect(res.status).toBe(200);
 			const body = (await res.json()) as ModelsListBody;
 			const byId = new Map(body.data.map(entry => [entry.id, entry]));
-			expect(byId.get("openrouter/auto")?.supported_endpoint_types).toEqual(["openai"]);
-			expect(byId.get("llama3.2")?.supported_endpoint_types).toEqual(["openai"]);
+			expect(byId.get("openrouter/openrouter/auto")?.supported_endpoint_types).toEqual(["openai"]);
+			expect(byId.get("ollama/llama3.2")?.supported_endpoint_types).toEqual(["openai"]);
 		} finally {
 			await gw.close();
 		}
