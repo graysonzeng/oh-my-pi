@@ -1,5 +1,6 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../tools";
+import { withContextProviderUsage } from "./context-ledger";
 import {
 	WorkflowCancelledError,
 	WorkflowError,
@@ -9,7 +10,11 @@ import {
 } from "./errors";
 import { sha256Hex } from "./optimization-receipt";
 import { withProviderCacheMetrics } from "./prompt-assembly";
-import { type PreparedWorkflowInvocation, prepareWorkflowInvocation } from "./runtime-invocation";
+import {
+	optimizeWorkflowRequestContext,
+	type PreparedWorkflowInvocation,
+	prepareWorkflowInvocation,
+} from "./runtime-invocation";
 import type { ToolDescriptor } from "./schema-enhancer";
 import {
 	boundOutputFragment,
@@ -347,7 +352,8 @@ export class RuntimeAdapter implements RuntimePort {
 			schemaRetryMaxRetries?: number;
 		},
 	): Promise<WorkflowAgentResult<TArtifact>> {
-		const prepared = prepareWorkflowInvocation(request);
+		const optimizedContext = await optimizeWorkflowRequestContext(request);
+		const prepared = prepareWorkflowInvocation(optimizedContext.request, optimizedContext);
 		// strictMode:true → strict; strictMode:false → permissive; omitted → strict (safe default).
 		const schemaMode =
 			request.profile.outputStrategy?.schemaEnhancement?.strictMode === false ? "permissive" : "strict";
@@ -483,6 +489,7 @@ export class RuntimeAdapter implements RuntimePort {
 				toolCalls: body.toolCalls,
 				// After the live tool path finishes, optimization receipts (if any) sit on the shared array.
 				promptAssemblyReceipt,
+				contextLedger: withContextProviderUsage(prepared.contextLedger, body.usage),
 				optimizationReceipts:
 					prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
 			};
@@ -539,6 +546,7 @@ export class RuntimeAdapter implements RuntimePort {
 			resolvedModel: resolved?.model,
 			toolCalls: body.toolCalls,
 			promptAssemblyReceipt: withProviderCacheMetrics(prepared.promptAssemblyReceipt, body.usage),
+			contextLedger: withContextProviderUsage(prepared.contextLedger, body.usage),
 			optimizationReceipts:
 				prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
 			schemaRepairReceipt: receipt,

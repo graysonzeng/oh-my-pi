@@ -422,7 +422,7 @@ export function buildScorecard(
 /** Compare optimized vs baseline pass rates; never mutates config. */
 export function evaluateBenchmarkQualityGate(
 	scorecard: BenchmarkScorecard,
-	gate: BenchmarkQualityGate = { minPassRate: 0, maxPassRateDropPp: 3, maxQualityDropPp: 3 },
+	gate: BenchmarkQualityGate = { minPassRate: 100, maxPassRateDropPp: 3, maxQualityDropPp: 3 },
 ): BenchmarkGateResult {
 	const reasons: string[] = [];
 	const byCase = new Map<string, { baseline?: BenchmarkVariantSummary; optimized?: BenchmarkVariantSummary }>();
@@ -446,17 +446,26 @@ export function evaluateBenchmarkQualityGate(
 			);
 			continue;
 		}
-		// Scope hard violation (canonical "violation" or legacy "hard_fail") fails the quality gate.
-		const hardFailRuns = opt.runs.filter(r => r.scopeStatus === "violation" || r.scopeStatus === "hard_fail");
-		if (hardFailRuns.length > 0) {
-			reasons.push(
-				`${caseId}: optimized run(s) reported scopeStatus=violation (${hardFailRuns.length}/${opt.runs.length})`,
+		for (const summary of [base, opt]) {
+			if (summary.passRate * 100 < gate.minPassRate) {
+				reasons.push(
+					`${caseId}: ${summary.variant} passRate ${(summary.passRate * 100).toFixed(1)}% below min ${gate.minPassRate}`,
+				);
+			}
+			const missingScopeRuns = summary.runs.filter(run => run.scopeStatus === null || run.scopeStatus === undefined);
+			if (missingScopeRuns.length > 0) {
+				reasons.push(
+					`${caseId}: ${summary.variant} run(s) missing scope evidence (${missingScopeRuns.length}/${summary.runs.length})`,
+				);
+			}
+			const hardFailRuns = summary.runs.filter(
+				run => run.scopeStatus === "violation" || run.scopeStatus === "hard_fail",
 			);
-		}
-		if (opt.passRate * 100 < gate.minPassRate) {
-			reasons.push(
-				`${caseId}: optimized passRate ${(opt.passRate * 100).toFixed(1)}% below min ${gate.minPassRate}`,
-			);
+			if (hardFailRuns.length > 0) {
+				reasons.push(
+					`${caseId}: ${summary.variant} run(s) reported scopeStatus=violation (${hardFailRuns.length}/${summary.runs.length})`,
+				);
+			}
 		}
 		const dropPp = (base.passRate - opt.passRate) * 100;
 		if (exceedsDropPp(dropPp, gate.maxPassRateDropPp)) {

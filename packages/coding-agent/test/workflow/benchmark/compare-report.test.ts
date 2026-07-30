@@ -63,6 +63,46 @@ describe("comparison report + quality gate markers", () => {
 		expect(report.gate.passed).toBe(true);
 	});
 
+	it("fails closed when paired acceptance has incomplete success or missing scope evidence", async () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const slim = { ...suite, cases: [{ ...suite.cases[0]!, repetitions: 1 }] };
+		const results = await runBenchmarkSuite({
+			suite: slim,
+			runtime: async req => ({
+				passed: req.variant === "baseline",
+				firstPassed: req.variant === "baseline",
+				qualityScore: req.variant === "baseline" ? 1 : 0,
+				scopeStatus: req.variant === "baseline" ? "adhered" : null,
+			}),
+			minRepetitions: 1,
+		});
+		const gate = evaluateBenchmarkQualityGate(buildScorecard(slim, results, { liveQualityUnknown: false }));
+		expect(gate.passed).toBe(false);
+		expect(gate.reasons).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("optimized passRate"),
+				expect.stringContaining("missing scope evidence"),
+			]),
+		);
+	});
+
+	it("fails when baseline has an explicit scope violation", async () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const slim = { ...suite, cases: [{ ...suite.cases[0]!, repetitions: 1 }] };
+		const results = await runBenchmarkSuite({
+			suite: slim,
+			runtime: async req => ({
+				passed: true,
+				firstPassed: true,
+				qualityScore: 1,
+				scopeStatus: req.variant === "baseline" ? "violation" : "adhered",
+			}),
+			minRepetitions: 1,
+		});
+		const gate = evaluateBenchmarkQualityGate(buildScorecard(slim, results, { liveQualityUnknown: false }));
+		expect(gate.passed).toBe(false);
+		expect(gate.reasons).toContain("bugfix-null-deref: baseline run(s) reported scopeStatus=violation (1/1)");
+	});
 	it("marks pass-rate drop >3pp as gate failure with red fail reason", async () => {
 		const suite = buildDefaultBenchmarkSuite();
 		const caseId = suite.cases[0]!.id;
@@ -156,6 +196,7 @@ describe("comparison report + quality gate markers", () => {
 					firstPassed: passed,
 					qualityScore: 100,
 					durationMs: 1,
+					scopeStatus: "adhered",
 					tokens: {
 						toolResultBytes: { value: 100, provenance: "exact" },
 						estimatedTotalTokens: { value: 25, provenance: "estimate" },
@@ -172,7 +213,11 @@ describe("comparison report + quality gate markers", () => {
 		// Prove the float trap still exists on raw arithmetic
 		expect((base.passRate - opt.passRate) * 100).toBeGreaterThan(3);
 
-		const gate = evaluateBenchmarkQualityGate(scorecard);
+		const gate = evaluateBenchmarkQualityGate(scorecard, {
+			minPassRate: 0,
+			maxPassRateDropPp: 3,
+			maxQualityDropPp: 3,
+		});
 		expect(gate.passed).toBe(true);
 		expect(gate.reasons.some(r => /passRate dropped/.test(r))).toBe(false);
 

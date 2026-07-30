@@ -13,11 +13,20 @@ import plannerPrompt from "../prompts/workflow/planner.md" with { type: "text" }
 import repairPrompt from "../prompts/workflow/repair.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import type { WorkflowToolOptimization } from "../tools/workflow-session-fields";
+import {
+	buildContextLedger,
+	type ContextArtifactAdapter,
+	type ContextEntry,
+	type ContextLedgerV1,
+	type ContextOptimizationReceiptV1,
+	optimizeContextEntries,
+} from "./context-ledger";
 import { WorkflowCancelledError, WorkflowPolicyError } from "./errors";
-import type {
-	ToolOptimizationReceiptV1,
-	ToolOutputArtifactAdapter,
-	WorkflowToolOptimizationResult,
+import {
+	sha256Hex,
+	type ToolOptimizationReceiptV1,
+	type ToolOutputArtifactAdapter,
+	type WorkflowToolOptimizationResult,
 } from "./optimization-receipt";
 import {
 	applyPresentationPolicy,
@@ -120,6 +129,55 @@ function createSessionArtifactAdapter(session: ToolSession): ToolOutputArtifactA
 				return undefined;
 			}
 		},
+	};
+}
+
+function createSessionContextArtifactAdapter(session: ToolSession): ContextArtifactAdapter | null {
+	const manager = session.getArtifactManager?.() ?? null;
+	const dir = manager?.dir ?? session.getArtifactsDir?.() ?? null;
+	if (!dir) return null;
+	const storedPaths = new Map<string, string>();
+	return {
+		async persist(entry, sha256) {
+			let id: string;
+			let filePath: string;
+			if (manager) {
+				const allocated = await manager.allocatePath(`context-${entry.kind}`);
+				id = allocated.id;
+				filePath = allocated.path;
+			} else {
+				fs.mkdirSync(dir, { recursive: true });
+				id = allocateFreeArtifactId(dir);
+				filePath = path.join(dir, `${id}.context-${sanitizeArtifactToolName(entry.kind)}.log`);
+			}
+			await Bun.write(filePath, entry.content);
+			const uri = `artifact://${id}`;
+			storedPaths.set(uri, filePath);
+			return { uri, sha256 };
+		},
+		async verify(uri, sha256) {
+			const filePath = storedPaths.get(uri);
+			if (!filePath) return false;
+			try {
+				return sha256Hex(await fs.promises.readFile(filePath, "utf8")) === sha256;
+			} catch {
+				return false;
+			}
+		},
+	};
+}
+
+export async function optimizeWorkflowRequestContext(request: WorkflowAgentRequest): Promise<{
+	request: WorkflowAgentRequest;
+	receipts: ContextOptimizationReceiptV1[];
+}> {
+	if (!request.contextEntries?.length) return { request, receipts: [] };
+	const artifact = createSessionContextArtifactAdapter(request.session);
+	if (!artifact) return { request, receipts: [] };
+	const optimized = await optimizeContextEntries(request.contextEntries, artifact);
+	return {
+		request: { ...request, contextEntries: optimized.entries },
+		receipts: optimized.receipts,
 	};
 }
 
@@ -245,6 +303,8 @@ export interface PreparedWorkflowInvocation {
 	transformTools: (tools: ToolDescriptor[]) => ToolDescriptor[];
 	/** Prompt assembly receipt for this invocation (always produced). */
 	promptAssemblyReceipt: PromptAssemblyReceiptV1;
+	/** Versioned per-request context bucket ledger; provider facts merge after response. */
+	contextLedger: ContextLedgerV1;
 	/**
 	 * Full assembled prompt text (stable prefix + dynamic suffix).
 	 * Production runner must send this as the model-facing context body.
@@ -263,12 +323,19 @@ export interface PreparedWorkflowInvocation {
 	compiledReceipt?: CompiledModelPolicyReceiptV1;
 }
 
+interface PreparedContextOptimization {
+	receipts: readonly ContextOptimizationReceiptV1[];
+}
+
 /**
  * Shared workflow-owned preparation before provider-specific execution.
  * Rejects aborted requests and readonly isolation; injects prompts/policy/tools;
  * applies per-model prompt, schema, and tool strategies.
  */
-export function prepareWorkflowInvocation(request: WorkflowAgentRequest): PreparedWorkflowInvocation {
+export function prepareWorkflowInvocation(
+	request: WorkflowAgentRequest,
+	contextOptimization: PreparedContextOptimization = { receipts: [] },
+): PreparedWorkflowInvocation {
 	if (request.signal?.aborted) {
 		throw new WorkflowCancelledError("aborted before runtime call");
 	}
@@ -497,6 +564,12 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 	// Split dynamic-only body: style/role must NOT appear here (they live in stable sections only).
 	const { repoMap, history, handoff: handoffRaw } = splitDynamicContextSections(dynamicContext);
 	const handoff = handoffRaw && !/^##\s/m.test(handoffRaw.trimStart()) ? `## Context\n${handoffRaw}` : handoffRaw;
+	const explicitContextEntries = request.contextEntries ?? [];
+	const explicitContextText = explicitContextEntries
+		.map(entry => entry.content)
+		.filter(Boolean)
+		.join("\n\n");
+	const historyWithExplicitEntries = [history, explicitContextText].filter(Boolean).join("\n\n");
 	const assembled = assemblePrompt({
 		sections: [
 			{
@@ -511,11 +584,31 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 			{ id: "assignment", content: request.assignment, stable: false },
 			{ id: "repo_map", content: repoMap, stable: false },
 			{ id: "handoff", content: handoff, stable: false },
-			{ id: "history", content: history, stable: false },
+			{ id: "history", content: historyWithExplicitEntries, stable: false },
 		],
 		// Provider cache counters not available at prepare time — never invent zeros.
 		// RuntimeAdapter merges usage.cacheRead/cacheWrite after the model responds.
 		cacheObservable: false,
+	});
+	const ledgerEntries: ContextEntry[] = [
+		{ id: "system_static", bucket: "system_static", kind: "other", content: stableParts.systemStatic },
+		{ id: "role_policy", bucket: "role_policy", kind: "other", content: rolePolicyWithPrefix },
+		{ id: "tool_schema", bucket: "tool_schema", kind: "tool_delta", content: toolPresentationText },
+		{ id: "skill_catalog", bucket: "skill_catalog", kind: "skill_delta", content: presentedSkillsText },
+		{ id: "assignment", bucket: "assignment", kind: "other", content: request.assignment },
+		{ id: "repo_map", bucket: "repo_map", kind: "other", content: repoMap },
+		{ id: "handoff", bucket: "handoff", kind: "other", content: handoff },
+		{ id: "history", bucket: "history", kind: "other", content: history },
+	];
+	ledgerEntries.push(...explicitContextEntries.map(entry => ({ ...entry })));
+	const contextLedger = buildContextLedger({
+		requestId: `${request.workflowId}:${request.attemptId}:${request.role}`,
+		provider: adaptedPolicy.modelFacts.identity.provider,
+		model: adaptedPolicy.modelFacts.identity.model,
+		api: adaptedPolicy.modelFacts.identity.api,
+		entries: ledgerEntries,
+		artifactRefs: contextOptimization.receipts.map(receipt => receipt.artifactRef),
+		optimizationReceipts: contextOptimization.receipts,
 	});
 
 	// remainingToolCalls is a hard agent-loop execution budget (skip after N calls).
@@ -561,6 +654,7 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 		workflowToolOptimization,
 		workflowAttemptEvidence: {
 			promptAssemblyReceipt: assembled.receipt,
+			contextLedger,
 		},
 	};
 
@@ -579,6 +673,7 @@ export function prepareWorkflowInvocation(request: WorkflowAgentRequest): Prepar
 		processToolResultDetailed,
 		transformTools,
 		promptAssemblyReceipt: assembled.receipt,
+		contextLedger,
 		assembledPromptText: assembledContext,
 		presentationPolicy,
 		optimizationReceipts,

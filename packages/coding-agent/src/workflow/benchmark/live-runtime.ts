@@ -42,6 +42,7 @@ export interface LiveBenchmarkAgentResult {
 	cacheWriteTokens: number;
 	cacheObservable: boolean;
 	costUsd: number;
+	usageObservable: boolean;
 	toolCalls: number;
 }
 
@@ -67,11 +68,16 @@ export function buildLiveBenchmarkProfileOverrides(
 	const modelPattern = model.includes("/") ? model : `${provider}/${model}`;
 	const profiles: Record<string, Partial<ModelProfile>> = {};
 	for (const [id] of Object.entries(getDefaultConfig().profiles)) {
+		const liveIdentity = {
+			vendor: provider,
+			modelPattern,
+			maxRuntimeMs: 600_000,
+			retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: [] },
+		};
 		profiles[id] =
 			variant === "baseline"
 				? {
-						vendor: provider,
-						modelPattern,
+						...liveIdentity,
 						promptStrategy: undefined,
 						toolStrategy: undefined,
 						contextStrategy: undefined,
@@ -80,7 +86,7 @@ export function buildLiveBenchmarkProfileOverrides(
 						argumentAliases: undefined,
 						presentationPolicy: { enabled: false, mode: "direct" },
 					}
-				: { vendor: provider, modelPattern };
+				: liveIdentity;
 	}
 	return profiles;
 }
@@ -95,24 +101,49 @@ async function runCommand(command: string, cwd: string): Promise<{ exitCode: num
 	return { exitCode, output: `${stdout}${stderr}` };
 }
 
-async function initializeParserFixture(root: string): Promise<void> {
-	await fs.mkdir(path.join(root, "src"), { recursive: true });
-	await fs.mkdir(path.join(root, "test"), { recursive: true });
-	await Bun.write(
-		path.join(root, "src/parser.ts"),
-		"export function parseValue(input: string | null): string {\n\treturn input.trim();\n}\n",
-	);
-	await Bun.write(
-		path.join(root, "test/parser.test.ts"),
-		'import { describe, expect, it } from "bun:test";\nimport { parseValue } from "../src/parser";\n\ndescribe("parseValue", () => {\n\tit("returns an empty value for null input", () => {\n\t\texpect(parseValue(null)).toBe("");\n\t});\n\tit("trims string input", () => {\n\t\texpect(parseValue(" value ")).toBe("value");\n\t});\n});\n',
-	);
+async function initializeFixtureRepository(
+	root: string,
+	benchmarkCase: BenchmarkRuntimeRequest["case"],
+): Promise<void> {
+	if (benchmarkCase.id === "bugfix-null-deref") {
+		await Bun.write(
+			path.join(root, "src/parser.ts"),
+			"export function parseValue(input: string | null): string {\n\treturn input.trim();\n}\n",
+		);
+		await Bun.write(
+			path.join(root, "test/parser.test.ts"),
+			'import { describe, expect, it } from "bun:test";\nimport { parseValue } from "../src/parser";\n\ndescribe("parseValue", () => {\n\tit("returns an empty value for null input", () => {\n\t\texpect(parseValue(null)).toBe("");\n\t});\n\tit("trims string input", () => {\n\t\texpect(parseValue(" value ")).toBe("value");\n\t});\n});\n',
+		);
+	} else {
+		for (const relativePath of benchmarkCase.allowedPaths) {
+			if (relativePath.endsWith(".test.ts")) {
+				await Bun.write(
+					path.join(root, relativePath),
+					`import { expect, test } from "bun:test";\n\ntest(${JSON.stringify(benchmarkCase.id)}, () => {\n\texpect("broken").toBe("fixed");\n});\n`,
+				);
+			} else if (/\.(?:ts|tsx|js|jsx)$/.test(relativePath)) {
+				await Bun.write(
+					path.join(root, relativePath),
+					`/** Synthetic live fixture for ${benchmarkCase.id}. */\nexport const fixtureState = "broken";\n`,
+				);
+			}
+		}
+	}
+
+	const hasTests = benchmarkCase.allowedPaths.some(relativePath => relativePath.endsWith(".test.ts"));
 	await Bun.write(
 		path.join(root, "package.json"),
-		`${JSON.stringify({ private: true, scripts: { check: "bun test test/parser.test.ts" } }, null, 2)}\n`,
+		`${JSON.stringify({ private: true, scripts: { check: hasTests ? "bun test" : "bun -e ''" } }, null, 2)}\n`,
 	);
 	await Bun.write(
 		path.join(root, "AGENTS.md"),
-		"Fix only the requested parser bug. Do not edit package.json or files outside src/parser.ts and test/parser.test.ts.\n",
+		[
+			benchmarkCase.request,
+			`Allowed paths: ${benchmarkCase.allowedPaths.join(", ")}.`,
+			"Do not edit package.json or files outside the allowed paths.",
+			"Run every configured verification command before finishing.",
+			"",
+		].join("\n"),
 	);
 	for (const command of [
 		"git init",
@@ -127,11 +158,11 @@ async function initializeParserFixture(root: string): Promise<void> {
 }
 
 async function prepareFixture(request: BenchmarkRuntimeRequest): Promise<string> {
-	if (request.case.repoFixture !== "synthetic-mini-parser") {
-		throw new Error(`Live benchmark fixture is not implemented: ${request.case.repoFixture ?? request.case.id}`);
+	if (!request.case.repoFixture) {
+		throw new Error(`Live benchmark fixture is not configured: ${request.case.id}`);
 	}
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), `omp-workflow-bench-${request.case.id}-`));
-	await initializeParserFixture(root);
+	await initializeFixtureRepository(root, request.case);
 	return root;
 }
 
@@ -194,7 +225,7 @@ async function runProductionWorkflow(
 	try {
 		const tool = session.getToolByName("workflow") as WorkflowToolPort | undefined;
 		if (!tool) throw new Error("Workflow tool is unavailable in the live benchmark session");
-		const terminalStatus = await executeWorkflow(tool, request, options.maxResumeSteps ?? 16);
+		const terminalStatus = await executeWorkflow(tool, request, options.maxResumeSteps ?? 32);
 		const stats = session.getSessionStats();
 		return {
 			terminalStatus,
@@ -202,8 +233,9 @@ async function runProductionWorkflow(
 			outputTokens: stats.tokens.output,
 			cacheReadTokens: stats.tokens.cacheRead,
 			cacheWriteTokens: stats.tokens.cacheWrite,
-			// Session aggregates do not expose whether zero means observed-zero or unavailable.
+			// Outer workflow sessions do not aggregate child-agent provider usage.
 			cacheObservable: false,
+			usageObservable: false,
 			costUsd: stats.cost,
 			toolCalls: stats.toolCalls,
 		};
@@ -244,15 +276,19 @@ async function runLiveCase(
 				? undefined
 				: `workflow=${agentResult.terminalStatus}; verification=${verification.map(v => v.exitCode).join(",")}; changed=${changedFiles.join(",")}`,
 			tokens: {
-				inputTokens: providerFact(agentResult.inputTokens),
-				outputTokens: providerFact(agentResult.outputTokens),
+				...(agentResult.usageObservable
+					? {
+							inputTokens: providerFact(agentResult.inputTokens),
+							outputTokens: providerFact(agentResult.outputTokens),
+							costUsd: providerFact(agentResult.costUsd),
+						}
+					: {}),
 				...(agentResult.cacheObservable
 					? {
 							cacheReadTokens: providerFact(agentResult.cacheReadTokens),
 							cacheWriteTokens: providerFact(agentResult.cacheWriteTokens),
 						}
 					: {}),
-				costUsd: providerFact(agentResult.costUsd),
 				cacheObservable: agentResult.cacheObservable,
 			},
 			stage: {

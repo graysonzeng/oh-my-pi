@@ -12,6 +12,7 @@ import { isKimiK3ModelId, modelFamilyToken } from "@oh-my-pi/pi-catalog/identity
 import { compileModelPolicy } from "./compiler";
 import { fingerprintModelFacts } from "./receipt";
 import type {
+	ActiveModelPolicyLever,
 	CompiledModelPolicyReceiptV1,
 	CompiledModelPolicyV1,
 	ModelFactsV1,
@@ -785,9 +786,10 @@ export function attachCompiledPolicyShadow<T extends object>(
 	compiledReceipt?: CompiledModelPolicyReceiptV1;
 	compiledModelFacts?: ModelFactsV1;
 	compilerActive: boolean;
+	activeLever?: ActiveModelPolicyLever;
 } {
 	if (!adapted) {
-		return { ...resolved, compilerActive: false };
+		return { ...resolved, compilerActive: false, activeLever: undefined };
 	}
 	const active = adapted.receipt.leverGates["compiler.active"] === true;
 	return {
@@ -796,6 +798,7 @@ export function attachCompiledPolicyShadow<T extends object>(
 		compiledReceipt: adapted.receipt,
 		compiledModelFacts: adapted.modelFacts,
 		compilerActive: active,
+		activeLever: active ? (adapted.receipt.activeLever ?? undefined) : undefined,
 	};
 }
 

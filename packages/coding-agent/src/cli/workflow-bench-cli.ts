@@ -117,6 +117,8 @@ export async function runWorkflowBenchCommand(
 		optimizedStrategyFingerprint: "workflow-bench-cli",
 		minRepetitions,
 		liveQualityUnknown,
+		provider: mode === "live" ? args.flags.provider : null,
+		model: mode === "live" ? args.flags.model : null,
 	});
 	const report = buildBenchmarkReport(suite, results, {
 		liveQualityUnknown,

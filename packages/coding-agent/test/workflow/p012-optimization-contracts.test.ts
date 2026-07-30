@@ -71,10 +71,10 @@ function samplePlan(): PlanArtifactV1 {
 }
 
 describe("P0 benchmark suite + fake runtime", () => {
-	it("runs paired baseline/optimized with ≥10 cases and ≥3 reps", async () => {
+	it("runs paired baseline/optimized with 30 cases and at least 5 reps", async () => {
 		const suite = buildDefaultBenchmarkSuite();
-		expect(suite.cases.length).toBeGreaterThanOrEqual(10);
-		expect(suite.cases.every(c => c.repetitions >= 3)).toBe(true);
+		expect(suite.cases.length).toBe(30);
+		expect(suite.cases.every(c => c.repetitions >= 5)).toBe(true);
 
 		const results = await runBenchmarkSuite({
 			suite,
@@ -82,8 +82,8 @@ describe("P0 benchmark suite + fake runtime", () => {
 			optimizedProfileId: "grok_implementer",
 			optimizedStrategyFingerprint: "smart-v1",
 		});
-		// N cases × 2 variants × 3 reps
-		expect(results.length).toBe(suite.cases.length * 2 * 3);
+		// N cases × 2 variants × 5 reps
+		expect(results.length).toBe(suite.cases.length * 2 * 5);
 		const scorecard = buildScorecard(suite, results);
 		expect(scorecard.liveQualityUnknown).toBe(true);
 		expect(scorecard.summaries.length).toBe(suite.cases.length * 2);

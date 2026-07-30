@@ -1,4 +1,9 @@
-import type { CompiledModelPolicyReceiptV1, CompiledModelPolicyV1, ModelFactsV1 } from "../model-policy/types";
+import type {
+	ActiveModelPolicyLever,
+	CompiledModelPolicyReceiptV1,
+	CompiledModelPolicyV1,
+	ModelFactsV1,
+} from "../model-policy/types";
 
 /**
  * Workflow-neutral model optimization types.
@@ -90,6 +95,7 @@ export interface ResolvedModelOptimization {
 	compiledModelFacts?: ModelFactsV1;
 	/** True only when featureGates.compilerActive applied compiled levers to live seams. */
 	compilerActive?: boolean;
+	activeLever?: ActiveModelPolicyLever;
 }
 
 /** Descriptor placement for Gemini auto refresh + explicit on/off. */

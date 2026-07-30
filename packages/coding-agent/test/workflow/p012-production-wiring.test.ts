@@ -15,6 +15,7 @@ import {
 	evaluateBenchmarkQualityGate,
 	runBenchmarkSuite,
 } from "../../src/workflow/benchmark";
+import { CONTEXT_ESTIMATE_VERSION, CONTEXT_LEDGER_KIND } from "../../src/workflow/context-ledger";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { sha256Hex } from "../../src/workflow/optimization-receipt";
@@ -158,6 +159,32 @@ describe("P2 presentation + prompt assembly on prepare path", () => {
 		expect(prepared.promptAssemblyReceipt.sectionOrder).toContain("role_policy");
 		expect(prepared.promptAssemblyReceipt.sectionOrder).toContain("assignment");
 		expect(prepared.session.workflowAttemptEvidence?.promptAssemblyReceipt?.kind).toBe(PROMPT_ASSEMBLY_RECEIPT_KIND);
+	});
+
+	it("builds a versioned context ledger from the real prepared prompt sections", () => {
+		const prepared = prepareWorkflowInvocation({
+			workflowId: "wf-ledger",
+			attemptId: "att-ledger",
+			role: "implementer",
+			profile: DEFAULT_MODEL_PROFILES.grok_implementer,
+			assignment: "implement ledger wiring",
+			context: "handoff body",
+			session: fakeSession(),
+			outputSchema: {},
+		} satisfies WorkflowAgentRequest);
+
+		expect(prepared.contextLedger.kind).toBe(CONTEXT_LEDGER_KIND);
+		expect(prepared.contextLedger.measurementVersion).toBe(CONTEXT_ESTIMATE_VERSION);
+		expect(prepared.contextLedger.requestId).toBe("wf-ledger:att-ledger:implementer");
+		expect(prepared.contextLedger.buckets.system_static.bytes).toBeGreaterThan(0);
+		expect(prepared.contextLedger.buckets.role_policy.bytes).toBeGreaterThan(0);
+		expect(prepared.contextLedger.buckets.assignment.bytes).toBeGreaterThan(0);
+		expect(prepared.contextLedger.buckets.handoff.bytes).toBeGreaterThan(0);
+		expect(prepared.contextLedger.providerUsage.cacheReadTokens).toEqual({
+			value: null,
+			provenance: "unknown",
+		});
+		expect(prepared.session.workflowAttemptEvidence?.contextLedger?.kind).toBe(CONTEXT_LEDGER_KIND);
 	});
 });
 

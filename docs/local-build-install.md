@@ -82,19 +82,21 @@ created by the current build; never delete pre-existing user files.
 
 ## Latest verified baseline
 
-Last updated: 2026-07-27 (Asia/Shanghai).
+Last updated: 2026-07-30 (Asia/Shanghai).
 
 | Item | Verified value |
 |---|---|
-| Source commit | `97b4f1af9684588f2269d63390c9ae24b643e464` plus the current uncommitted WS-to-SSE endpoint fix and MCP explicit-lazy loading changes |
-| Package version | `omp/17.0.7` |
+| Source commit | `e13a01e6d43e2a2c766ae254f4672c5bf690ceac` plus the current uncommitted quality-gated workflow optimization Phase 0-2 changes |
+| Package version | `omp/17.1.8` |
 | Artifact | `packages/coding-agent/dist/omp` |
 | Installed path | `/Users/sheng/.local/bin/omp` |
-| SHA-256 | `78fb02af0e5415d740b723b4c9c8c3611d1512c98fd1f9083f1311df996f8a0e` |
-| Rollback backup | `/Users/sheng/.local/bin/omp.pre-mcp-lazy-20260726` |
+| SHA-256 | `3cf6ecd3fc95597a5d530cdcf289428134bbd6a60e0ed510cfcc921082b51326` |
+| Native SHA-256 | `b429572e4544ab60e71063a3c8b6ec8bb70f3f1e5adeb4d693a8a9b4a9ba4964` (source and installed cache match) |
+| Rollback backup | `/Users/sheng/.local/bin/omp.pre-quality-gated-20260730` |
 | Artifact type | signed arm64 Mach-O executable |
-| Gates | 153 focused WS/SSE tests, 42 focused MCP tests, full `bun check`, coding-agent check, binary build, WS live probe, HTTP/SSE live probe, MCP lazy startup probe, pre-install smoke, checksum match, post-install smoke |
+| Gates | 192 focused Phase 0-2 tests / 2,020 assertions, full `bun check`, production binary build, all 30 live fixtures materialized with verifier and scope checks, fake CLI pipeline, artifact/install checksum match, installed `omp --smoke-test`; the first real-provider paired A/B exposed and rejected a false-positive gate, and the final bilateral hard-gate rerun was still running when this baseline row was written |
 
 The installed checksum matched the build artifact, and the installed
 `omp --smoke-test` returned `smoke-test: ok`. Existing worktree changes were
-preserved, and no commit or official upgrade command was run.
+preserved, no commit or official upgrade command was run, and the previous
+installed command remains available at the rollback path above.

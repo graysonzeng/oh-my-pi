@@ -334,9 +334,9 @@ function compileTools(
 		notes.push("tiny_local_minimal_tool_allowlist");
 	}
 
-	// toolSurface gate only controls catalog presentation elevation, not hard deny.
+	// Catalog is an evidence-gated reduction. Gate-off preserves the direct surface.
 	const presentationMode: CompiledModelPolicyV1["tools"]["presentationMode"] =
-		gates.toolSurface === false || selected.length > 12 || tiny ? "catalog" : "direct";
+		gates.toolSurface === true && (selected.length > 12 || tiny) ? "catalog" : "direct";
 
 	const descriptors: CompiledToolDescriptor[] = selected.map(tool => ({
 		id: tool.id,
@@ -577,9 +577,10 @@ function buildLeverGates(
 	const toolSurface = resolveCohortGate(gates.toolSurface, cohort);
 	const structuredOutput = resolveCohortGate(gates.structuredOutput, cohort);
 	const contextCache = resolveCohortGate(gates.contextCache, cohort);
+	const compilerActive = gates.compilerActive === true && gates.activeLever !== undefined;
 	const leverGates: Record<string, boolean> = {
 		"compiler.shadow": gates.compilerShadow === true,
-		"compiler.active": gates.compilerActive !== false,
+		"compiler.active": compilerActive,
 		"opaqueState.nativeReplay": gates.opaqueStateNativeReplay !== false,
 		toolSurface,
 		[`toolSurface.${cohort}`]: toolSurface,
@@ -589,6 +590,7 @@ function buildLeverGates(
 		[`contextCache.${cohort}`]: contextCache,
 		runtimeCompletionGate: gates.runtimeCompletionGate !== false,
 	};
+	if (gates.activeLever) leverGates[`activeLever.${gates.activeLever}`] = compilerActive;
 	if (overlayId) {
 		leverGates[`promptOverlay.${overlayId}`] = gates.promptOverlay?.[overlayId] === true;
 	}
@@ -617,6 +619,9 @@ export function compileModelPolicy(input: CompileModelPolicyInput): CompiledMode
 		structuredOutput: resolveCohortGate(featureGates.structuredOutput, cohort),
 		contextCache: resolveCohortGate(featureGates.contextCache, cohort),
 	};
+	if (featureGates.compilerActive === true && featureGates.activeLever === undefined) {
+		notes.push("compiler_active_without_single_lever:shadow");
+	}
 
 	if (factsUnknownHeavy(modelFacts)) {
 		notes.push("facts_unknown_heavy:conservative_fallback");
@@ -683,6 +688,7 @@ export function compileModelPolicy(input: CompileModelPolicyInput): CompiledMode
 		taskPolicyFingerprint,
 		sessionStateFingerprint,
 		overlayId: prompt.overlay ? overlayId : null,
+		activeLever: featureGates.compilerActive === true ? (featureGates.activeLever ?? null) : null,
 		leverGates,
 		promptStableHash,
 		promptDynamicHash,

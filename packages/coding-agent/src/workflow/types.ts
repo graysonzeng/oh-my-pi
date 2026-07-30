@@ -8,9 +8,11 @@ import type {
 } from "../model-policy/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ToolSession } from "../tools";
+import type { ContextEntry, ContextLedgerV1 } from "./context-ledger";
 import type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
 
 /** Re-export for consumers that import receipt types from workflow/types. */
+export type { ContextLedgerV1 } from "./context-ledger";
 export type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
 
 /** Isolation controls for write stages (mirrors task isolation without importing task). */
@@ -354,6 +356,8 @@ export interface WorkflowAgentRequest {
 	profile: ModelProfile;
 	assignment: string;
 	context?: string;
+	/** Explicit typed context eligible for deterministic dedupe or recoverable replacement. */
+	contextEntries?: ContextEntry[];
 	outputSchema?: unknown;
 	isolation?: WorkflowIsolationControls;
 	session: ToolSession;
@@ -391,6 +395,7 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	 * After a successful run, provider cache counters are merged when usage reports them.
 	 */
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
+	contextLedger?: ContextLedgerV1;
 	/** Tool optimization receipts accumulated on the live tool path during the attempt. */
 	optimizationReceipts?: unknown[];
 	/** Deterministic schema repair attempt receipt when raw repair ran. */
@@ -403,6 +408,7 @@ export interface WorkflowRuntimeEvidence {
 	resolvedModel?: string;
 	toolCalls?: number;
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
+	contextLedger?: ContextLedgerV1;
 	optimizationReceipts?: unknown[];
 	/** Relative artifact kind ref when scope-metrics was persisted. */
 	scopeMetricsKind?: string;

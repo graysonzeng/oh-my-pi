@@ -4,7 +4,13 @@ import { WorkflowPolicyError } from "../errors";
 import { ImplementationArtifactJsonSchema } from "../json-schemas";
 import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { ImplementationArtifactSchema } from "../schemas";
-import type { ImplementationArtifactV1, ModelProfile, PromptAssemblyReceiptV1, RuntimePort } from "../types";
+import type {
+	ContextLedgerV1,
+	ImplementationArtifactV1,
+	ModelProfile,
+	PromptAssemblyReceiptV1,
+	RuntimePort,
+} from "../types";
 
 export interface ImplementStageInput {
 	workflowId: string;
@@ -25,6 +31,7 @@ export interface ImplementStageResult {
 	resolvedModel?: string;
 	toolCalls?: number;
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
+	contextLedger?: ContextLedgerV1;
 	optimizationReceipts?: unknown[];
 }
 
@@ -99,6 +106,7 @@ export class ImplementStage {
 			resolvedModel: result.resolvedModel,
 			toolCalls: result.toolCalls,
 			promptAssemblyReceipt: result.promptAssemblyReceipt,
+			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,
 		};
 	}

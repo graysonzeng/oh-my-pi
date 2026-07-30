@@ -709,4 +709,47 @@ describe("compileModelPolicy", () => {
 		});
 		expect(policy.tools.descriptors.map(d => d.id).sort()).toEqual(["grep", "read"]);
 	});
+
+	it("keeps compiler shadowed unless one explicit supported lever is selected", () => {
+		const implicit = compile({ featureGates: { compilerActive: true } });
+		const concurrency = compile({
+			featureGates: { compilerActive: true, activeLever: "tool_concurrency_ceiling" },
+		});
+		const descriptor = compile({
+			featureGates: { compilerActive: true, activeLever: "descriptor_placement" },
+		});
+
+		expect(implicit.receipt.leverGates["compiler.active"]).toBe(false);
+		expect(implicit.receipt.activeLever).toBeNull();
+		expect(implicit.receipt.notes).toContain("compiler_active_without_single_lever:shadow");
+		expect(concurrency.receipt.leverGates["compiler.active"]).toBe(true);
+		expect(concurrency.receipt.activeLever).toBe("tool_concurrency_ceiling");
+		expect(descriptor.receipt.activeLever).toBe("descriptor_placement");
+	});
+
+	it("keeps catalog, overlay, and cache levers disabled when their gates lack evidence", () => {
+		const policy = compile({
+			taskPolicy: baseTask({
+				promptContract: {
+					goal: "Implement the feature",
+					constraints: [],
+					acceptance: [],
+					overlayId: "needs_explicit_completion",
+				},
+			}),
+			featureGates: {
+				compilerShadow: true,
+				compilerActive: false,
+				toolSurface: false,
+				contextCache: false,
+				promptOverlay: { needs_explicit_completion: false },
+			},
+		});
+
+		expect(policy.tools.presentationMode).toBe("direct");
+		expect(policy.prompt.overlay).toBeNull();
+		expect(policy.contextAndCache.cacheMode).toBe("none");
+		expect(policy.receipt.leverGates["toolSurface.openai/gpt-5"]).toBe(false);
+		expect(policy.receipt.leverGates["promptOverlay.needs_explicit_completion"]).toBe(false);
+	});
 });

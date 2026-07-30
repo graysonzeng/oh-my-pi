@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import {
 	RuntimeAdapter,
@@ -418,6 +421,81 @@ describe("RuntimeAdapter", () => {
 			),
 		).rejects.toMatchObject({ kind: "schema_violation" });
 		expect(calls).toBe(1);
+	});
+
+	it("optimizes explicit context entries on the real provider path with verified recovery refs", async () => {
+		const artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-context-opt-"));
+		let seenContext = "";
+		try {
+			const adapter = new RuntimeAdapter(async request => {
+				seenContext = request.context ?? "";
+				return okResult(implArtifact());
+			});
+			const result = await adapter.run(
+				baseRequest(undefined, {
+					session: fakeSession({ getArtifactsDir: () => artifactDir }),
+					contextEntries: [
+						{ id: "attachment-1", bucket: "artifacts", kind: "attachment", content: "same attachment" },
+						{ id: "attachment-2", bucket: "artifacts", kind: "attachment", content: "same attachment" },
+						{
+							id: "tool-old",
+							bucket: "tool_results",
+							kind: "tool_result",
+							content: "old tool body",
+							replaceable: true,
+						},
+						{
+							id: "tool-current",
+							bucket: "tool_results",
+							kind: "tool_result",
+							content: "current tool body",
+						},
+					],
+				}),
+			);
+
+			expect(seenContext).toContain("same attachment");
+			expect(seenContext).toContain("[context ref: artifact://");
+			expect(seenContext).not.toContain("old tool body");
+			expect(seenContext).toContain("current tool body");
+			expect(result.contextLedger?.optimizationReceipts).toHaveLength(2);
+			expect(result.contextLedger?.artifactRefs).toHaveLength(2);
+			expect(result.contextLedger?.buckets.tool_results.bytes).toBeGreaterThan(0);
+			for (const receipt of result.contextLedger?.optimizationReceipts ?? []) {
+				const id = receipt.artifactRef.replace("artifact://", "");
+				const file = (await fs.readdir(artifactDir)).find(name => name.startsWith(`${id}.`));
+				expect(file).toBeDefined();
+				const recovered = await Bun.file(path.join(artifactDir, file!)).text();
+				expect(["same attachment", "old tool body"]).toContain(recovered);
+			}
+		} finally {
+			await fs.rm(artifactDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps explicit context inline when no recoverable artifact store is available", async () => {
+		let seenContext = "";
+		const adapter = new RuntimeAdapter(async request => {
+			seenContext = request.context ?? "";
+			return okResult(implArtifact());
+		});
+		const result = await adapter.run(
+			baseRequest(undefined, {
+				contextEntries: [
+					{
+						id: "tool-old",
+						bucket: "tool_results",
+						kind: "tool_result",
+						content: "must stay inline",
+						replaceable: true,
+					},
+				],
+			}),
+		);
+
+		expect(seenContext).toContain("must stay inline");
+		expect(result.contextLedger?.optimizationReceipts).toEqual([]);
+		expect(result.contextLedger?.artifactRefs).toEqual([]);
 	});
 
 	it("Layer1 fence repair returns schemaRepairReceipt without extra model call", async () => {

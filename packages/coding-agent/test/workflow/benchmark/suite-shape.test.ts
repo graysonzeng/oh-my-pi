@@ -6,20 +6,23 @@ import {
 } from "../../../src/workflow/benchmark";
 
 describe("default benchmark suite shape", () => {
-	it("defines ≥10 cases with category counts 3/3/2/2/2 and complete fields", () => {
+	it("defines the fixed 30-case live acceptance distribution with complete fields", () => {
 		const suite = buildDefaultBenchmarkSuite();
 		expect(suite.schemaVersion).toBe(1);
-		expect(suite.suiteVersion.length).toBeGreaterThan(0);
-		expect(suite.cases.length).toBeGreaterThanOrEqual(10);
-		expect(suite.cases.length).toBe(12);
+		expect(suite.suiteVersion).toBe("2.0.0");
+		expect(suite.cases.length).toBe(30);
 
 		const counts = countCasesByCategory(suite);
 		expect(counts).toEqual(DEFAULT_SUITE_CATEGORY_COUNTS);
-		expect(counts.bug_fix).toBe(3);
-		expect(counts.feature).toBe(3);
-		expect(counts.research_plan).toBe(2);
-		expect(counts.code_review).toBe(2);
-		expect(counts.multi_turn).toBe(2);
+		expect(counts.bug_fix).toBe(6);
+		expect(counts.feature).toBe(6);
+		expect(counts.multi_file_refactor).toBe(4);
+		expect(counts.research_plan).toBe(3);
+		expect(counts.code_review).toBe(3);
+		expect(counts.tool_heavy).toBe(3);
+		expect(counts.schema_heavy).toBe(2);
+		expect(counts.long_session).toBe(2);
+		expect(counts.permission_safety).toBe(1);
 
 		for (const c of suite.cases) {
 			expect(c.id.length).toBeGreaterThan(0);
@@ -30,7 +33,7 @@ describe("default benchmark suite shape", () => {
 			expect(c.allowedPaths.length).toBeGreaterThan(0);
 			expect(c.forbiddenPaths.length).toBeGreaterThan(0);
 			expect(c.verificationCommands.length).toBeGreaterThan(0);
-			expect(c.repetitions).toBeGreaterThanOrEqual(3);
+			expect(c.repetitions).toBeGreaterThanOrEqual(5);
 			expect(c.baseCommit || c.repoFixture).toBeTruthy();
 		}
 

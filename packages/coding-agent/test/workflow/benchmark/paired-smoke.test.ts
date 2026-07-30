@@ -20,8 +20,8 @@ describe("paired fake-runtime smoke", () => {
 		});
 
 		const caseCount = suite.cases.length;
-		// cases × 2 variants × 3 reps
-		expect(results.length).toBe(caseCount * 2 * 3);
+		// cases × 2 variants × 5 fixed live-acceptance repetitions
+		expect(results.length).toBe(caseCount * 2 * 5);
 
 		// Same case fingerprint across variants
 		for (const c of suite.cases) {
@@ -39,9 +39,9 @@ describe("paired fake-runtime smoke", () => {
 		expect(scorecard.suiteVersion).toBe(suite.suiteVersion);
 		expect(scorecard.summaries.length).toBe(caseCount * 2);
 
-		// Aggregation: 3 runs per case×variant, pass rates in [0,1]
+		// Aggregation: 5 runs per case×variant, pass rates in [0,1]
 		for (const s of scorecard.summaries) {
-			expect(s.runs.length).toBe(3);
+			expect(s.runs.length).toBe(5);
 			expect(s.passRate).toBeGreaterThanOrEqual(0);
 			expect(s.passRate).toBeLessThanOrEqual(1);
 			expect(s.firstPassRate).not.toBeNull();

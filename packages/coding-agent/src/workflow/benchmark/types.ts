@@ -15,8 +15,17 @@ export interface MetricValue<T> {
 	provenance: MetricProvenance;
 }
 
-/** Task category for fixed suite composition (3/3/2/2/2). */
-export type BenchmarkCaseCategory = "bug_fix" | "feature" | "research_plan" | "code_review" | "multi_turn";
+/** Task category for the fixed 30-case live acceptance distribution. */
+export type BenchmarkCaseCategory =
+	| "bug_fix"
+	| "feature"
+	| "multi_file_refactor"
+	| "research_plan"
+	| "code_review"
+	| "tool_heavy"
+	| "schema_heavy"
+	| "long_session"
+	| "permission_safety";
 
 export interface BenchmarkCase {
 	id: string;
@@ -36,7 +45,7 @@ export interface BenchmarkCase {
 	allowedPaths: string[];
 	forbiddenPaths: string[];
 	verificationCommands: string[];
-	/** Minimum repetitions per variant (design: ≥3). */
+	/** Minimum repetitions per variant (live acceptance: >=5). */
 	repetitions: number;
 }
 

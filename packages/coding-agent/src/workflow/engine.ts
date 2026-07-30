@@ -591,6 +591,7 @@ export class WorkflowEngine {
 					artifact: plan,
 					usage,
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 				} = await this.#withProfileFallback("planner", {}, async profile => {
 					this.#plannerProfileId = profile.id;
@@ -618,6 +619,7 @@ export class WorkflowEngine {
 				this.#planArtifactRef = await this.#persistArtifact(workflowId, attemptId, "plan", plan);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 				});
 				const next = getNextStage("planning", "approved");
@@ -631,6 +633,7 @@ export class WorkflowEngine {
 					artifact: review,
 					usage,
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 				} = await this.#withProfileFallback(
 					"plan_reviewer",
@@ -658,6 +661,7 @@ export class WorkflowEngine {
 				this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 				});
 				const next = getNextStage("plan_review", review.decision);
@@ -711,6 +715,7 @@ export class WorkflowEngine {
 					resolvedModel,
 					toolCalls,
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 				} = await this.#withProfileFallback("implementer", {}, async profile => {
 					this.#implementerVendor = profile.vendor;
@@ -748,6 +753,7 @@ export class WorkflowEngine {
 					resolvedModel,
 					toolCalls,
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 				});
@@ -821,6 +827,7 @@ export class WorkflowEngine {
 					artifact: review,
 					usage,
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 				} = await this.#withProfileFallback(
 					"code_reviewer",
@@ -867,6 +874,7 @@ export class WorkflowEngine {
 				await this.#persistFindingsState(workflowId, attemptId);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 				});
 
@@ -951,6 +959,7 @@ export class WorkflowEngine {
 					resolvedModel,
 					toolCalls,
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 				} = await this.#withProfileFallback(
 					"repair",
@@ -1027,6 +1036,7 @@ export class WorkflowEngine {
 					resolvedModel,
 					toolCalls,
 					promptAssemblyReceipt,
+					contextLedger,
 					optimizationReceipts,
 					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 				});
@@ -1559,6 +1569,7 @@ export class WorkflowEngine {
 			resolvedModel: evidence?.resolvedModel ?? null,
 			scopeMetricsKind: evidence?.scopeMetricsKind ?? null,
 			promptAssemblyReceipt: evidence?.promptAssemblyReceipt ?? null,
+			contextLedger: evidence?.contextLedger ?? null,
 			optimizationReceiptCount: Array.isArray(evidence?.optimizationReceipts)
 				? evidence.optimizationReceipts.length
 				: 0,
@@ -1576,6 +1587,9 @@ export class WorkflowEngine {
 		});
 		if (evidence?.promptAssemblyReceipt) {
 			await this.#persistArtifact(workflowId, attemptId, "prompt-assembly-receipt", evidence.promptAssemblyReceipt);
+		}
+		if (evidence?.contextLedger) {
+			await this.#persistArtifact(workflowId, attemptId, "context-ledger", evidence.contextLedger);
 		}
 		if (evidence?.optimizationReceipts && evidence.optimizationReceipts.length > 0) {
 			await this.#persistArtifact(workflowId, attemptId, "tool-optimization-receipts", {

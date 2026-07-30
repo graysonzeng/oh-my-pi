@@ -5,6 +5,7 @@
  * embedded structured-subagent path.
  */
 
+import type { ContextLedgerV1 } from "../workflow/context-ledger";
 import type { ToolOptimizationReceiptV1 } from "../workflow/optimization-receipt";
 import type { PromptAssemblyReceiptV1 } from "../workflow/prompt-assembly";
 import type { ToolDescriptor } from "../workflow/schema-enhancer";
@@ -59,6 +60,7 @@ export type WorkflowToolOptimization = {
 /** Optional durable attempt evidence attached on prepared workflow sessions. */
 export type WorkflowAttemptEvidence = {
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
+	contextLedger?: ContextLedgerV1;
 };
 
 export type WorkflowWritePolicy = { repoRoot: string; forbiddenPaths: string[] };

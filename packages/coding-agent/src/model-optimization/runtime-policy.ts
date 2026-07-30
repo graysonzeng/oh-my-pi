@@ -88,29 +88,28 @@ export function withOrdinaryCompiledPolicy(
 		return attached;
 	}
 
-	// Known-safe active fields only: never invent wire params or prompts here.
-	const ceiling = attached.compiledPolicy.tools.maxConcurrentTools;
-	let toolScheduling = attached.toolScheduling;
-	if (toolScheduling) {
-		const current = toolScheduling.maxConcurrentTools;
-		toolScheduling = {
-			...toolScheduling,
-			maxConcurrentTools: typeof current === "number" ? Math.min(current, ceiling) : ceiling,
-		};
-	} else if (ceiling === 1) {
-		toolScheduling = {
-			maxConcurrentTools: 1,
-			remainingToolCalls: null,
-			remainingStageTimeMs: null,
-			resourceConflictMode: "serialize",
-			orderedResultWriteback: true,
-		};
+	if (attached.activeLever === "tool_concurrency_ceiling") {
+		const ceiling = attached.compiledPolicy.tools.maxConcurrentTools;
+		let toolScheduling = attached.toolScheduling;
+		if (toolScheduling) {
+			const current = toolScheduling.maxConcurrentTools;
+			toolScheduling = {
+				...toolScheduling,
+				maxConcurrentTools: typeof current === "number" ? Math.min(current, ceiling) : ceiling,
+			};
+		} else if (ceiling === 1) {
+			toolScheduling = {
+				maxConcurrentTools: 1,
+				remainingToolCalls: null,
+				remainingStageTimeMs: null,
+				resourceConflictMode: "serialize",
+				orderedResultWriteback: true,
+			};
+		}
+		return { ...attached, toolScheduling };
 	}
 
-	return {
-		...attached,
-		toolScheduling,
-	};
+	return attached;
 }
 
 /** Map compiled placement into ordinary decision when compiler is active. */
@@ -118,7 +117,9 @@ export function ordinaryDescriptorFromCompiled(
 	resolved: ResolvedModelOptimization,
 	liveDecision: DescriptorPlacementDecision,
 ): DescriptorPlacementDecision {
-	if (!resolved.compilerActive || !resolved.compiledPolicy) return liveDecision;
+	if (!resolved.compilerActive || resolved.activeLever !== "descriptor_placement" || !resolved.compiledPolicy) {
+		return liveDecision;
+	}
 	return compiledDescriptorToOrdinaryDecision(resolved.compiledPolicy.tools.descriptorPlacement);
 }
 

@@ -229,10 +229,13 @@ export interface SemanticToolContract {
  * Per-lever feature gates. Hard guards are never gated off.
  */
 export type CohortFeatureGate = boolean | Record<string, boolean>;
+export type ActiveModelPolicyLever = "tool_concurrency_ceiling" | "descriptor_placement";
 
 export interface ModelPolicyFeatureGates {
 	compilerShadow?: boolean;
 	compilerActive?: boolean;
+	/** Exactly one evidence-approved live lever; absent means shadow even when compilerActive is requested. */
+	activeLever?: ActiveModelPolicyLever;
 	opaqueStateNativeReplay?: boolean;
 	/** Overlay id → enabled. */
 	promptOverlay?: Record<string, boolean>;
@@ -299,6 +302,7 @@ export interface CompiledModelPolicyReceiptV1 {
 	taskPolicyFingerprint: string;
 	sessionStateFingerprint: string;
 	overlayId: string | null;
+	activeLever: ActiveModelPolicyLever | null;
 	leverGates: Record<string, boolean>;
 	promptStableHash: string;
 	promptDynamicHash: string;

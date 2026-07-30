@@ -3,7 +3,7 @@
 - Date: 2026-07-30
 - Design Doc: `docs/superpowers/specs/2026-07-30-quality-gated-multi-model-optimization-design.md`
 - Review Doc: `docs/superpowers/plans/2026-07-30-quality-gated-multi-model-optimization-design-review.md`
-- Status: Awaiting User Confirmation Before Code Implementation
+- Status: Phase 0-2 Implemented; Final Live Paired A/B Running
 
 ## 1. 评审意见处理摘要
 
@@ -20,7 +20,7 @@
 
 - 适用性：不适用。
 - 处理策略：沿用 `NOT_APPLICABLE`，修订事实边界后实施。
-- 结论：本方案是架构深化，不依赖单一故障根因；代码实现可以建立在当前实现盘点和质量门禁上。实现前仍需用户确认范围。
+- 结论：本方案是架构深化，不依赖单一故障根因；Phase 0-2 已在事实边界和 shadow/gated 门禁下实现。
 
 ### 2.1 消费的根因评审结论
 
@@ -45,50 +45,73 @@
 
 ## 4. 实现摘要
 
-当前只完成设计修订与实施准备，尚未修改生产代码。用户确认后按依赖顺序实施：
+Phase 0-2 已按依赖顺序实现：
 
-1. Phase 0 baseline：重新探测 unresolved paths；记录 HEAD、工作树分类及 package-local test/check/build/smoke 结果；建立 current implementation gap matrix。
-2. Phase 1 去重：按 content/artifact hash 检测重复 attachment/reminder/skill-tool delta，记录 dedupe receipt 与估算节省桶；不合并仅语义相似的内容。
-3. Phase 1 可恢复引用：将旧 tool result 正文替换为一跳 artifact ref；持久化或完整性失败时保留 inline 原文。
-4. Phase 1 ContextLedger 与评测：增加版本化 request bucket ledger、measurement/cache provenance、artifact/handoff refs；将 live suite 扩充到至少 30 个固定 case。
-5. Phase 2 单 lever：依次 shadow 评估 tool concurrency ceiling、descriptor placement；cache assembly、prompt overlay、tool catalog 分别等待 provider facts、5-case failure cluster、tool-selection held-out eval。
-6. Calibration 支撑：只实现版本化 calibration receipt 与离线评测合同；judge 不控制生产 gate，Phase 3 数据集与阈值验收留在对应阶段执行。
+1. Phase 0 baseline：最终 HEAD 为 `e13a01e6d43e2a2c766ae254f4672c5bf690ceac`；unresolved paths 为 0；保留全部用户 unstaged/untracked 改动，未清理或回退无关文件。
+2. Phase 1 typed context optimization：`WorkflowAgentRequest.contextEntries` 提供显式 typed 边界；只对 byte-identical attachment/reminder/skill/tool delta 去重；replaceable old tool result 仅在 session artifact 持久化及 SHA-256 读回验证成功后替换为 numeric `artifact://` ref。无 artifact store 或完整性失败时保留 inline 原文。
+3. Phase 1 ContextLedger：记录 11 个版本化 bucket、`estimate:utf8_bytes_div_4_v1`、provider facts/unknown cache counters、artifact/handoff refs 与 context optimization receipts；production RuntimeAdapter 在 provider response 后合并 observed usage，engine 持久化 ledger artifact。
+4. Phase 1 benchmark：默认 suite 固定为 30 cases × 每 variant 至少 5 repetitions；所有 30 个 descriptor 均能 materialize 独立 repo、执行配置 verifier 并进行 git scope 检查。Fake runtime 继续只验证管线并明确 `liveQualityUnknown=true`。
+5. Phase 2 single-lever shadow：compiler active 必须同时有显式 supported `activeLever`；只允许 `tool_concurrency_ceiling` 或 `descriptor_placement` 映射到 ordinary runtime。没有 lever 时保持 shadow。
+6. Phase 2 evidence gates：cache assembly 需要 observable provider facts；prompt overlay 需要至少 5 个独立 failure cases 与 held-out eval；tool catalog 需要 held-out tool-selection eval。即使 receipt eligible，缺 explicit rollout approval 也不应用。
+7. Benchmark provenance：live CLI 必须显式 provider/model，并把二者写入每个 run fingerprint；fake fingerprint 保持 unknown/null。
 
-拟涉及模块以代码定位结果为准，优先复用：
+实际涉及模块：
 
-- `packages/coding-agent/src/workflow/model-policy/`
-- `packages/coding-agent/src/workflow/prompt-assembly.ts`
-- `packages/coding-agent/src/workflow/optimization-receipt.ts`
-- `packages/coding-agent/src/workflow/stage-handoff.ts`
+- `packages/coding-agent/src/model-policy/`
+- `packages/coding-agent/src/model-optimization/`
+- `packages/coding-agent/src/workflow/context-ledger.ts`
+- `packages/coding-agent/src/workflow/policy-experiment.ts`
+- `packages/coding-agent/src/workflow/runtime-invocation.ts`
+- `packages/coding-agent/src/workflow/runtime-adapter.ts`
 - `packages/coding-agent/src/workflow/benchmark/`
-- 对应 `packages/coding-agent/test/workflow/` 合同测试
+- 对应 `packages/coding-agent/test/model-policy/`、`test/model-optimization/` 与 `test/workflow/` 合同测试
 
 ## 5. 验证结果
 
-- 文档事实探测：`git diff --name-only --diff-filter=U | wc -l` 返回 `0`。
-- 当前工作树分类：`git status --short` 报告 staged 1415、unstaged 0、untracked 4；这些是用户改动，不等于 unresolved conflict。
-- 设计文档修订：MEDIUM-1 至 MEDIUM-4 均已落盘。
-- 测试：未跑；尚未修改生产代码。
-- lint/typecheck：未跑；尚未修改生产代码。
-- 构建：未跑；尚未修改生产代码。
-- 功能验证：未跑；等待用户确认后进入实现。
-
-用户确认后的最低验证闭环：
-
-- 受影响 workflow 合同测试；新测试只覆盖 externally observable ledger、dedupe、overlay selection 与 calibration receipt 合同。
-- `packages/coding-agent` 执行 `bun check`。
-- `packages/coding-agent` 执行项目现有 build 命令。
-- 执行 workflow fake benchmark 验证管线；真实质量结论只接受 live paired A/B。
-- 若触及 worker/runtime 路径，追加 `omp --smoke-test`；否则运行受影响 CLI/workflow 的直接 smoke scenario。
+- 工作树事实：HEAD `e13a01e6d43e2a2c766ae254f4672c5bf690ceac`；`git diff --name-only --diff-filter=U` 无输出；目标改动为 unstaged/untracked，未改变用户 staged 状态。
+- 相关合同：`192 pass / 0 fail`，19 files，2,020 assertions。覆盖 production context optimization、fail-safe inline fallback、artifact byte recovery、ContextLedger、single-lever gates、30-case live fixture materialization、双方 absolute quality/scope gates、usage provenance、CLI identity fingerprint 与 benchmark reports。
+- 静态检查：`packages/coding-agent` 的 `bun check` 通过；root Biome 通过；修改文件 LSP diagnostics 为 0。
+- 构建：`packages/coding-agent` 的 `bun run build` 通过；build/install binary SHA-256 均为 `3cf6ecd3fc95597a5d530cdcf289428134bbd6a60e0ed510cfcc921082b51326`。
+- Native：source/cache addon SHA-256 均为 `b429572e4544ab60e71063a3c8b6ec8bb70f3f1e5adeb4d693a8a9b4a9ba4964`；本机 addon 由锁定 Rust toolchain 的 dev binding build 生成。Bazel shipping-native build 因 crate-universe dependency fetch 长时间无进展未作为通过证据。
+- Installed CLI：`omp/17.1.8`；`omp --smoke-test` 输出 `smoke-test: ok`。
+- Fake CLI：固定 parser case、baseline/optimized 各 5 次，共 10 results；gate passed，但报告明确 `liveQualityUnknown=true`，未作为真实质量验收。
+- 30-case executable contract：全部 descriptor materialize 后执行各自 verifier 与 scope check；benchmark suite 31 tests / 1,164 assertions 通过；未宣称执行了 300 次真实 provider acceptance runs。
+- 第一次真实 paired A/B：`/tmp/omp-verified-final-live` 完成 10 runs，但 baseline/optimized 均仅 60% pass、3 runs 缺 scope、outer usage 假 0，旧 gate 错误通过；该结果作为失败验收与修复证据，不计为通过。
+- 最终真实 paired A/B：双方 scope hard gate 修复制品正在运行 `gateway/gpt-5.6-sol`、`bugfix-null-deref`、baseline/optimized 各 5 次，输出到 `/tmp/omp-final-hard-gate-live`；要求双方 100% pass、全部 scope observed，outer usage 保持 unknown。
 
 ## 6. 已知限制与后续建议
 
-- 当前不是已实现状态；任何代码行为、测试通过或性能收益均未宣称。
-- `bytes / 4` 是跨 provider 可复现的估算，不是 tokenizer 真值或上界；model card 必须区分 `provider_fact`、`estimate`、`unknown`。
-- Judge calibration 阈值是最低准入线，不表示 judge 可替代 programmatic verifier 或人工判断。
-- 工作树包含大量用户 staged 改动。实现必须小范围编辑，不得清理、重排或回退这些改动。
-- 用户确认范围后才进入生产代码修改。
+- Context optimization 只处理调用方提供的 typed `contextEntries`；现有 untyped stage markdown 不做猜测分类。无 typed entries 时 production path no-op。
+- `bytes / 4` 是跨 provider 可复现估算，不是 tokenizer 真值或上界；provider/cache 缺失值保持 `unknown`。
+- 30-case materializer 证明 suite 可执行，不等于 30-case 全量真实 provider 质量结论。本次真实质量验收只运行一个固定 parser case 的 10 次 paired runs。
+- Judge calibration 属于 Phase 3；judge 分数未参与 Phase 0-2 生产 gate，也未改变默认路由。
+- 新策略保持 shadow/gated；未凭 estimate、fake benchmark 或 judge 分数改变生产默认 routing/profile。
+- 工作树包含大量用户改动；本次未清理、回退或提交无关文件。
 
-## 7. Handoff
+## 7. Code Review 与 Handoff
 
-代码实现尚未开始，因此本阶段不移交 `code-review`。用户确认后继续执行本实现文档 §4，并在完成验证后补充最终 code-review handoff。
+- Code review 文档：`docs/superpowers/plans/2026-07-30-quality-gated-multi-model-optimization-code-review.md`。
+- Code review 共发现 5 个 HIGH：production context 接线、30-case fixture 可执行性、live identity fingerprint、absolute quality/scope gate、live usage/fallback isolation；均已按 TDD 修复并进入最终复验。
+- 最终 review 结论待第二次 live paired A/B 完成后补充。
+
+同会话继续：
+
+```text
+继续读取 docs/superpowers/plans/2026-07-30-quality-gated-multi-model-optimization-implementation.md
+和 docs/superpowers/plans/2026-07-30-quality-gated-multi-model-optimization-code-review.md，
+检查 /tmp/omp-final-hard-gate-live 的最终真实 paired A/B 报告，
+确认 10 个 run、双方 100% pass、完整 scope、provider/model fingerprint、unknown outer usage 与 gate，
+然后完成最终 code review 结论和全套验证记录。
+```
+
+新会话恢复 prompt：
+
+```text
+请阅读设计输入 docs/superpowers/specs/2026-07-30-quality-gated-multi-model-optimization-design.md、
+实现文档 docs/superpowers/plans/2026-07-30-quality-gated-multi-model-optimization-implementation.md、
+代码审查文档 docs/superpowers/plans/2026-07-30-quality-gated-multi-model-optimization-code-review.md，
+以及本次 Phase 0-2 代码变更。
+检查 /tmp/omp-final-hard-gate-live 的最终真实 paired A/B 报告，
+重点核对五个已修复 HIGH、10 个 run、双方 100% pass、完整 scope、provider/model fingerprint、
+unknown outer usage、shadow/gated 默认行为与最终验证证据是否一致；发现问题时修复并重新完成全套验证。
+```

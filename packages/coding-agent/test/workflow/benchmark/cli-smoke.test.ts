@@ -47,8 +47,8 @@ describe("workflow-bench CLI adapter", () => {
 			gate: { passed: boolean };
 		};
 		expect(payload.caseCount).toBe(2);
-		// 2 cases × 2 variants × 3 reps
-		expect(payload.resultCount).toBe(12);
+		// 2 cases × 2 variants × 5 fixed repetitions
+		expect(payload.resultCount).toBe(20);
 		expect(payload.liveQualityUnknown).toBe(true);
 		expect(payload.scorecard.liveQualityUnknown).toBe(true);
 		expect(payload.scorecard.notes.some(n => /live quality unknown/i.test(n))).toBe(true);
@@ -85,8 +85,8 @@ describe("workflow-bench CLI adapter", () => {
 			scorecard: { summaries: unknown[]; notes: string[] };
 			gate: { passed: boolean; reasons: string[] };
 		};
-		// 1 case × 1 variant × max(case.reps=3, min=1) = 3
-		expect(payload.resultCount).toBe(3);
+		// 1 case × 1 variant × max(case.reps=5, min=1) = 5
+		expect(payload.resultCount).toBe(5);
 		expect(payload.scorecard.summaries.length).toBe(1);
 		expect(payload.gate.passed).toBe(false);
 		expect(payload.gate.reasons.some(r => /inconclusive/.test(r))).toBe(true);
@@ -118,6 +118,10 @@ describe("workflow-bench CLI adapter", () => {
 			);
 			expect(result.exitCode).toBe(0);
 			expect(result.report.liveQualityUnknown).toBe(false);
+			expect(result.report.scorecard.summaries[0]?.runs[0]?.fingerprint).toMatchObject({
+				provider: "fixture-provider",
+				model: "fixture-model",
+			});
 		} finally {
 			process.stdout.write = originalStdoutWrite;
 		}
