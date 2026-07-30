@@ -1019,6 +1019,74 @@ describe("ModelRegistry", () => {
 			expect(openaiGpt54Override.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
 		});
 
+		test("custom provider inherits missing metadata from its configured reference provider", () => {
+			writeRawModelsJson({
+				gateway: {
+					baseUrl: "https://gateway.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					referenceProvider: "openai-codex",
+					models: [{ id: "gpt-5.6-sol" }],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("gateway", "gpt-5.6-sol");
+
+			expect(registry.getError()).toBeUndefined();
+			expect(model?.contextWindow).toBe(372000);
+			expect(model?.maxTokens).toBe(128000);
+			expect(model?.provider).toBe("gateway");
+			expect(model?.api).toBe("openai-completions");
+			expect(model?.baseUrl).toBe("https://gateway.example.com/v1");
+		});
+
+		test("explicit custom model metadata overrides the configured reference provider", () => {
+			writeRawModelsJson({
+				gateway: {
+					baseUrl: "https://gateway.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					referenceProvider: "openai-codex",
+					models: [{ id: "gpt-5.6-sol", contextWindow: 400000, maxTokens: 64000 }],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("gateway", "gpt-5.6-sol");
+
+			expect(registry.getError()).toBeUndefined();
+			expect(model?.contextWindow).toBe(400000);
+			expect(model?.maxTokens).toBe(64000);
+		});
+
+		test("missing reference-provider model falls back to generic metadata inheritance", () => {
+			writeRawModelsJson({
+				gateway: {
+					baseUrl: "https://gateway.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					referenceProvider: "openai-codex",
+					models: [{ id: "claude-sonnet-4-6" }],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const genericRegistry = readonlyRegistry({
+				providers: {
+					generic: {
+						baseUrl: "https://generic.example.com/v1",
+						apiKey: "TEST_KEY",
+						api: "openai-completions",
+						models: [{ id: "claude-sonnet-4-6" }],
+					},
+				},
+			});
+			const genericReference = genericRegistry.find("generic", "claude-sonnet-4-6");
+			const model = registry.find("gateway", "claude-sonnet-4-6");
+
+			expect(registry.getError()).toBeUndefined();
+			expect(model?.contextWindow).toBe(genericReference?.contextWindow);
+			expect(model?.maxTokens).toBe(genericReference?.maxTokens);
+		});
+
 		test("discoverable bundled replacement survives refresh", async () => {
 			writeModelsJson({
 				openai: providerConfig(

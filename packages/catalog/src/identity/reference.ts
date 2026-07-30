@@ -17,6 +17,23 @@ export interface ModelReferenceIndex {
 	suffixAlias: Map<string, Model<Api>>;
 }
 
+/** Public model-owner APIs, ordered ahead of subscription transports and relays for metadata inheritance. */
+const METADATA_PROVIDER_RANK: Record<string, number> = {
+	anthropic: 0,
+	openai: 1,
+	google: 2,
+	"google-vertex": 3,
+	moonshot: 4,
+	minimax: 5,
+	"minimax-cn": 6,
+	zai: 7,
+	xai: 8,
+	deepseek: 9,
+	mistral: 10,
+	groq: 11,
+	"alibaba-token-plan": 12,
+};
+
 // xai-oauth subscription entries carry zero public pricing and inflated maxTokens;
 // keep them provider-local so they cannot outrank paid/public Grok references.
 export function isZeroCostXaiOAuthReference(candidate: Model<Api>): boolean {
@@ -29,10 +46,15 @@ export function isZeroCostXaiOAuthReference(candidate: Model<Api>): boolean {
 	);
 }
 
-// Prefer the reference with the largest limits and complete cache pricing, then
-// first-party OpenAI entries.
+// Prefer public model-owner metadata over subscription transports and relays.
+// Within the same provider tier, prefer the largest limits and complete cache pricing.
 function shouldReplaceReference(existing: Model<Api> | undefined, candidate: Model<Api>): boolean {
 	if (!existing) return true;
+	const existingRank = METADATA_PROVIDER_RANK[existing.provider] ?? Number.MAX_SAFE_INTEGER;
+	const candidateRank = METADATA_PROVIDER_RANK[candidate.provider] ?? Number.MAX_SAFE_INTEGER;
+	if (candidateRank !== existingRank) {
+		return candidateRank < existingRank;
+	}
 	if (candidate.contextWindow !== existing.contextWindow) {
 		return (candidate.contextWindow ?? 0) > (existing.contextWindow ?? 0);
 	}
@@ -41,10 +63,7 @@ function shouldReplaceReference(existing: Model<Api> | undefined, candidate: Mod
 	}
 	const existingHasCachePricing = existing.cost.cacheRead > 0 || existing.cost.cacheWrite > 0;
 	const candidateHasCachePricing = candidate.cost.cacheRead > 0 || candidate.cost.cacheWrite > 0;
-	if (candidateHasCachePricing !== existingHasCachePricing) {
-		return candidateHasCachePricing;
-	}
-	return existing.provider !== "openai" && candidate.provider === "openai";
+	return candidateHasCachePricing && !existingHasCachePricing;
 }
 
 function normalizeReferenceKey(value: string): string {

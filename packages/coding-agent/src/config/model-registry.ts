@@ -68,8 +68,10 @@ import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
+	buildModelReferenceIndex,
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
+	type ModelReferenceIndex,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
 import { isBunTestRuntime, isRecord, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
@@ -598,6 +600,7 @@ interface CustomModelOverlay extends ModelPatch {
 	baseUrl: string;
 	cost?: Model<Api>["cost"];
 	isOAuth?: boolean;
+	referenceProvider?: string;
 }
 
 function mergeCustomModelHeaders(
@@ -631,6 +634,25 @@ function resolveCustomModelIsOAuth(api: Api, providerAuth: ProviderAuthMode | un
 	return undefined;
 }
 
+const providerReferenceIndexes = new Map<string, ModelReferenceIndex>();
+
+function resolveCustomModelReference(model: CustomModelOverlay): Model<Api> | undefined {
+	const provider = model.referenceProvider?.trim();
+	if (provider) {
+		let index = providerReferenceIndexes.get(provider);
+		if (!index) {
+			const bundled = getBundledModels(provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[];
+			if (bundled.length > 0) {
+				index = buildModelReferenceIndex(bundled);
+				providerReferenceIndexes.set(provider, index);
+			}
+		}
+		const reference = index ? resolveModelReference(model.id, index) : undefined;
+		if (reference) return reference;
+	}
+	return resolveModelReference(model.id, getBundledModelReferenceIndex());
+}
+
 function buildCustomModelOverlay(
 	providerName: string,
 	providerBaseUrl: string,
@@ -641,6 +663,7 @@ function buildCustomModelOverlay(
 	providerCompat: ModelSpec<Api>["compat"] | undefined,
 	providerAuth: ProviderAuthMode | undefined,
 	providerRemoteCompaction: RemoteCompactionConfig<Api> | undefined,
+	providerReferenceProvider: string | undefined,
 	modelDef: CustomModelDefinitionLike,
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
@@ -666,6 +689,7 @@ function buildCustomModelOverlay(
 		remoteCompaction: mergeRemoteCompactionConfig(providerRemoteCompaction, modelDef.remoteCompaction),
 		premiumMultiplier: modelDef.premiumMultiplier,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
+		referenceProvider: providerReferenceProvider,
 	};
 }
 
@@ -678,9 +702,7 @@ function applyStandaloneCustomModelPolicies(model: CustomModelOverlay): CustomMo
 
 function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
 	const resolvedModel = options.useDefaults ? applyStandaloneCustomModelPolicies(model) : model;
-	const reference = options.useDefaults
-		? resolveModelReference(resolvedModel.id, getBundledModelReferenceIndex())
-		: undefined;
+	const reference = options.useDefaults ? resolveCustomModelReference(resolvedModel) : undefined;
 	const cost =
 		resolvedModel.cost ??
 		reference?.cost ??
@@ -2138,6 +2160,7 @@ export class ModelRegistry {
 					providerCompat,
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
 					providerConfig.remoteCompaction,
+					providerConfig.referenceProvider,
 					modelDef as CustomModelDefinitionLike,
 				);
 				if (!model) continue;
@@ -2518,6 +2541,7 @@ export class ModelRegistry {
 					config.compat,
 					undefined,
 					config.remoteCompaction,
+					config.referenceProvider,
 					modelDef as CustomModelDefinitionLike,
 				);
 				if (!overlay) {
@@ -2586,6 +2610,7 @@ export class ModelRegistry {
 							providerCompat,
 							undefined,
 							config.remoteCompaction,
+							config.referenceProvider,
 							modelDef as CustomModelDefinitionLike,
 						);
 						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
@@ -2680,6 +2705,7 @@ export interface ProviderConfigInput {
 	baseUrl?: string;
 	apiKey?: string;
 	api?: Api;
+	referenceProvider?: string;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];

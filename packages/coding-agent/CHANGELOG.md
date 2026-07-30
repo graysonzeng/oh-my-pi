@@ -7,6 +7,7 @@
 
 ### Added
 - Added custom-model validation for `compat.codexResponsesEndpoint`, enabling standard `/responses` WebSocket-to-SSE fallback on compatible gateways.
+- Added provider-level `referenceProvider` for custom model gateways, allowing same-id metadata to inherit from a specific bundled upstream provider before falling back to generic proxy inference.
 - Added opt-in model optimization profiles for ordinary coding-agent sessions, with model-resolver-compatible matching and model-switch-safe prompt/tool scheduling updates that remain separate from workflow roles, permissions, aliases, budgets, and output schemas.
 - Added direct Moonshot Kimi K3 capability facts for parallel tool calls, native MFJS structured output, complete reasoning replay, and exact-prefix caching while keeping proxy routes conservative.
 - Added explicit MCP server `lazy: true` configuration: cached tools remain discoverable at startup while the server transport opens only on first tool use or manual reconnect.

@@ -19,6 +19,28 @@ describe("Portkey gateway model references", () => {
 	});
 });
 
+describe("generic proxy metadata references", () => {
+	const cases = [
+		["gpt-5.6-sol", "openai", 1_050_000, 128_000],
+		["claude-sonnet-4-6", "anthropic", 1_000_000, 128_000],
+		["glm-5.2", "zai", 1_000_000, 131_072],
+		["grok-4.20-0309-reasoning", "xai", 1_000_000, 30_000],
+		["grok-4.5", "xai", 500_000, 500_000],
+		["deepseek-v4-pro", "deepseek", 1_000_000, 384_000],
+		["kimi-k3", "moonshot", 1_048_576, 131_072],
+		["minimax-m3", "minimax", 1_000_000, 128_000],
+	] as const;
+
+	for (const [id, provider, contextWindow, maxTokens] of cases) {
+		test(`${id} prefers ${provider} metadata over relay limits`, () => {
+			const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+			expect(reference?.provider).toBe(provider);
+			expect(reference?.contextWindow).toBe(contextWindow);
+			expect(reference?.maxTokens).toBe(maxTokens);
+		});
+	}
+});
+
 describe("Vercel AI Gateway cache compat", () => {
 	test("resolves Chat Completions caching controls only for the Vercel endpoint", () => {
 		const model = buildModel({

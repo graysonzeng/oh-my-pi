@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed direct Moonshot Kimi K3 compatibility metadata to omit unsupported sampling parameters without changing Kimi Code or third-party K3 routes.
+- Fixed generic proxy metadata inheritance preferring relay models with larger advertised limits over the model owner's public API metadata, which inflated context and output limits for GLM, Grok, DeepSeek, Kimi, and similar same-id models.
 ## [17.1.8] - 2026-07-28
 
 ### Added

@@ -52,6 +52,8 @@ providers:
     baseUrl: https://api.example.com/v1
     apiKey: MY_PROVIDER_API_KEY
     api: openai-completions
+    # Prefer same-id metadata from this bundled provider before generic proxy inference.
+    referenceProvider: openai-codex
     headers:
       X-Team: platform
     authHeader: true
@@ -90,6 +92,11 @@ providers:
             gateway: m1-01
             controller: mlx
 ```
+
+`referenceProvider` selects the bundled provider used first when a custom model omits metadata such as
+`contextWindow`, `maxTokens`, pricing, or input capabilities. OMP matches the model id within that provider,
+keeps the custom provider's transport and authentication, and honors every explicitly configured model field.
+When the reference provider has no matching model, the existing generic proxy-reference lookup remains the fallback.
 
 ### Allowed provider/model `api` values
 

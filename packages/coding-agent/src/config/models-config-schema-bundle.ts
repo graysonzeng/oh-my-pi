@@ -270,6 +270,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"baseUrl?": "string",
 		"apiKey?": "string",
 		"api?": ApiSchema,
+		"referenceProvider?": "string",
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"remoteCompaction?": RemoteCompactionSchema,
@@ -293,6 +294,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		}
 		if (value.apiKey !== undefined && typeof value.apiKey === "string" && value.apiKey.length === 0) {
 			return ctx.mustBe("apiKey a non-empty string");
+		}
+		if (
+			value.referenceProvider !== undefined &&
+			typeof value.referenceProvider === "string" &&
+			value.referenceProvider.length === 0
+		) {
+			return ctx.mustBe("referenceProvider a non-empty string");
 		}
 		return true;
 	});
