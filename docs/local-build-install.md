@@ -86,15 +86,15 @@ Last updated: 2026-07-30 (Asia/Shanghai).
 
 | Item | Verified value |
 |---|---|
-| Source commit | `e13a01e6d43e2a2c766ae254f4672c5bf690ceac` plus the current uncommitted quality-gated workflow optimization Phase 0-2 changes |
+| Source commit | `e13a01e6d43e2a2c766ae254f4672c5bf690ceac` / `c3e5f0958` plus current uncommitted Phase 0-2 completion |
 | Package version | `omp/17.1.8` |
 | Artifact | `packages/coding-agent/dist/omp` |
 | Installed path | `/Users/sheng/.local/bin/omp` |
-| SHA-256 | `3cf6ecd3fc95597a5d530cdcf289428134bbd6a60e0ed510cfcc921082b51326` |
-| Native SHA-256 | `b429572e4544ab60e71063a3c8b6ec8bb70f3f1e5adeb4d693a8a9b4a9ba4964` (source and installed cache match) |
-| Rollback backup | `/Users/sheng/.local/bin/omp.pre-quality-gated-20260730` |
+| SHA-256 | `60e09dc2a3a598380e7e998460dabe11c38d23c7b2ca132110da22ea19237737` |
+| Native SHA-256 | `6c79bfbd95a3626a038c5f21b4d00636a23e32c8480f2b3ff114821e16474c27` (source and installed cache match; sentinel `__piNativesV17_1_8`) |
+| Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build` |
 | Artifact type | signed arm64 Mach-O executable |
-| Gates | 192 focused Phase 0-2 tests / 2,020 assertions, full `bun check`, production binary build, all 30 live fixtures materialized with verifier and scope checks, fake CLI pipeline, artifact/install checksum match, installed `omp --smoke-test`; the first real-provider paired A/B exposed and rejected a false-positive gate, and the final bilateral hard-gate rerun was still running when this baseline row was written |
+| Gates | focused Phase 0-2 contracts pass; `bun check`; production binary build; fake CLI; installed `omp --smoke-test`; short live paired A/B 2×2 (`gateway/claude-sonnet-4-6`) gate passed with short-acceptance note |
 
 The installed checksum matched the build artifact, and the installed
 `omp --smoke-test` returned `smoke-test: ok`. Existing worktree changes were

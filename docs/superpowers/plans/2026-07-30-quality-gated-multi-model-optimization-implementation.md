@@ -3,7 +3,7 @@
 - Date: 2026-07-30
 - Design Doc: `docs/superpowers/specs/2026-07-30-quality-gated-multi-model-optimization-design.md`
 - Review Doc: `docs/superpowers/plans/2026-07-30-quality-gated-multi-model-optimization-design-review.md`
-- Status: Phase 0-2 Implemented; Final Live Paired A/B Running
+- Status: Phase 0-2 Implemented; Short Live Paired A/B Passed (2×2)
 
 ## 1. 评审意见处理摘要
 
@@ -68,22 +68,26 @@ Phase 0-2 已按依赖顺序实现：
 
 ## 5. 验证结果
 
-- 工作树事实：HEAD `e13a01e6d43e2a2c766ae254f4672c5bf690ceac`；`git diff --name-only --diff-filter=U` 无输出；目标改动为 unstaged/untracked，未改变用户 staged 状态。
-- 相关合同：`192 pass / 0 fail`，19 files，2,020 assertions。覆盖 production context optimization、fail-safe inline fallback、artifact byte recovery、ContextLedger、single-lever gates、30-case live fixture materialization、双方 absolute quality/scope gates、usage provenance、CLI identity fingerprint 与 benchmark reports。
-- 静态检查：`packages/coding-agent` 的 `bun check` 通过；root Biome 通过；修改文件 LSP diagnostics 为 0。
-- 构建：`packages/coding-agent` 的 `bun run build` 通过；build/install binary SHA-256 均为 `3cf6ecd3fc95597a5d530cdcf289428134bbd6a60e0ed510cfcc921082b51326`。
-- Native：source/cache addon SHA-256 均为 `b429572e4544ab60e71063a3c8b6ec8bb70f3f1e5adeb4d693a8a9b4a9ba4964`；本机 addon 由锁定 Rust toolchain 的 dev binding build 生成。Bazel shipping-native build 因 crate-universe dependency fetch 长时间无进展未作为通过证据。
-- Installed CLI：`omp/17.1.8`；`omp --smoke-test` 输出 `smoke-test: ok`。
-- Fake CLI：固定 parser case、baseline/optimized 各 5 次，共 10 results；gate passed，但报告明确 `liveQualityUnknown=true`，未作为真实质量验收。
-- 30-case executable contract：全部 descriptor materialize 后执行各自 verifier 与 scope check；benchmark suite 31 tests / 1,164 assertions 通过；未宣称执行了 300 次真实 provider acceptance runs。
-- 第一次真实 paired A/B：`/tmp/omp-verified-final-live` 完成 10 runs，但 baseline/optimized 均仅 60% pass、3 runs 缺 scope、outer usage 假 0，旧 gate 错误通过；该结果作为失败验收与修复证据，不计为通过。
-- 最终真实 paired A/B：双方 scope hard gate 修复制品正在运行 `gateway/gpt-5.6-sol`、`bugfix-null-deref`、baseline/optimized 各 5 次，输出到 `/tmp/omp-final-hard-gate-live`；要求双方 100% pass、全部 scope observed，outer usage 保持 unknown。
+- 工作树事实：HEAD `e13a01e6d43e2a2c766ae254f4672c5bf690ceac`（后续 feature commit `c3e5f0958` + 未提交 Phase 0-2 收尾）；`git diff --name-only --diff-filter=U` 无输出；保留用户改动，未清理/回退无关文件。
+- 相关合同：聚焦 Phase 0-2 相关套件 `141 pass / 0 fail`（含 benchmark/live-runtime/context-ledger/policy-experiment/compiler/runtime-adapter）；live-runtime 另含早失败仍报告 scope 的合同。
+- 静态检查：`packages/coding-agent` 的 `bun check` 通过（仅 fixtures 中故意保留的 template-curly 字符串警告）。
+- 构建/安装：`bun run build` 通过；installed `~/.local/bin/omp` SHA-256 = `60e09dc2a3a598380e7e998460dabe11c38d23c7b2ca132110da22ea19237737`（与 dist 一致）。
+- Native：`~/.omp/natives/17.1.8/pi_natives.darwin-arm64.node` SHA-256 = `6c79bfbd95a3626a038c5f21b4d00636a23e32c8480f2b3ff114821e16474c27`；含 `__piNativesV17_1_8` sentinel。
+- Installed CLI：`omp/17.1.8`；`omp --smoke-test` → `smoke-test: ok`。
+- Fake CLI：`bugfix-null-deref` baseline/optimized×5，gate passed，`liveQualityUnknown=true`（管线烟测，非真实质量验收）。
+- 30-case executable contract：全部 descriptor 可 materialize + hidden verifier（`bun test ./.benchmark/verify.test.ts`）+ scope 检查。
+- `gateway/gpt-5.6-sol` 全量 5×5 尝试失败：全部 `required_role_unavailable: planner`（availability fail-closed）；不计为通过。
+- 用户要求缩短后：杀掉长跑，改 short acceptance。`--repetitions` 现为精确覆盖；live gate 的采样下限跟随 `acceptanceMinRepetitions`。
+- **短真实 paired A/B（通过）**：`/tmp/omp-short-live-ab`，`gateway/claude-sonnet-4-6`，`bugfix-null-deref`，baseline/optimized 各 2 次共 4 runs；双方 passRate=1.0、scope=adhered、runtimeProvenance 齐全、fingerprint=`gateway/claude-sonnet-4-6`、outer usage 保持 unknown、`gate.passed=true`、exit=0；报告明确标注 short acceptance（低于完整 5-rep held-out 卡）。耗时约 9 分钟（07:38–07:47Z）。
+- 生产默认路由未因 estimate/judge/fake 改变；日志持续可见 `compilerActive:false`。
 
 ## 6. 已知限制与后续建议
 
 - Context optimization 只处理调用方提供的 typed `contextEntries`；现有 untyped stage markdown 不做猜测分类。无 typed entries 时 production path no-op。
 - `bytes / 4` 是跨 provider 可复现估算，不是 tokenizer 真值或上界；provider/cache 缺失值保持 `unknown`。
-- 30-case materializer 证明 suite 可执行，不等于 30-case 全量真实 provider 质量结论。本次真实质量验收只运行一个固定 parser case 的 10 次 paired runs。
+- 30-case materializer 证明 suite 可执行，不等于 30-case 全量真实 provider 质量结论。
+- 本次真实质量验收为 **short 2×2**，不是完整 5×5 held-out acceptance card；完整卡需另跑 `--repetitions=5`。
+- `gateway/gpt-5.6-sol` 在固定模型 live override 下 planner availability 探测失败；需单独排查 provider probe，不阻塞 Phase 0-2 shadow/gated 交付。
 - Judge calibration 属于 Phase 3；judge 分数未参与 Phase 0-2 生产 gate，也未改变默认路由。
 - 新策略保持 shadow/gated；未凭 estimate、fake benchmark 或 judge 分数改变生产默认 routing/profile。
 - 工作树包含大量用户改动；本次未清理、回退或提交无关文件。
@@ -91,8 +95,8 @@ Phase 0-2 已按依赖顺序实现：
 ## 7. Code Review 与 Handoff
 
 - Code review 文档：`docs/superpowers/plans/2026-07-30-quality-gated-multi-model-optimization-code-review.md`。
-- Code review 共发现 5 个 HIGH：production context 接线、30-case fixture 可执行性、live identity fingerprint、absolute quality/scope gate、live usage/fallback isolation；均已按 TDD 修复并进入最终复验。
-- 最终 review 结论待第二次 live paired A/B 完成后补充。
+- 前期 5 个 HIGH 均已修复；本轮追加：hidden verifier 路径需 `./` 前缀、fake gate 不得因 `liveQualityUnknown` 单独失败、agent 早失败仍须报告 scope、CLI `--repetitions` 精确覆盖。
+- 最终 review 结论：**PASS_WITH_NOTES**（short live A/B 通过；完整 5×5 held-out 与 gpt-5.6-sol availability 为已知后续项）。
 
 同会话继续：
 

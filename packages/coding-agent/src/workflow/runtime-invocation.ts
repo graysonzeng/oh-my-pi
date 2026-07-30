@@ -28,6 +28,7 @@ import {
 	type ToolOutputArtifactAdapter,
 	type WorkflowToolOptimizationResult,
 } from "./optimization-receipt";
+import { productionPolicyFeatureGates } from "./policy-experiment";
 import {
 	applyPresentationPolicy,
 	formatToolCatalogSummary,
@@ -131,32 +132,72 @@ function createSessionArtifactAdapter(session: ToolSession): ToolOutputArtifactA
 		},
 	};
 }
+export interface SessionArtifactRecord {
+	uri: string;
+	sha256: string;
+	path: string;
+}
 
-function createSessionContextArtifactAdapter(session: ToolSession): ContextArtifactAdapter | null {
+/** Persist immutable bytes into the session ArtifactManager namespace and verify them by readback. */
+export async function persistSessionArtifact(
+	session: ToolSession,
+	content: string,
+	kind: string,
+	expectedSha256 = sha256Hex(content),
+): Promise<SessionArtifactRecord | null> {
 	const manager = session.getArtifactManager?.() ?? null;
 	const dir = manager?.dir ?? session.getArtifactsDir?.() ?? null;
 	if (!dir) return null;
+	await fs.promises.mkdir(dir, { recursive: true });
+	const safeKind = sanitizeArtifactToolName(kind);
+	for (let attempt = 0; attempt < 64; attempt++) {
+		const allocated = manager ? await manager.allocatePath(safeKind) : null;
+		const id = allocated?.id ?? allocateFreeArtifactId(dir);
+		const filePath = allocated?.path ?? path.join(dir, `${id}.${safeKind}.log`);
+		let handle: fs.promises.FileHandle | undefined;
+		try {
+			handle = await fs.promises.open(filePath, "wx");
+			await handle.writeFile(content, "utf8");
+			await handle.sync();
+			await handle.close();
+			handle = undefined;
+			const immutableSha256 = sha256Hex(await fs.promises.readFile(filePath, "utf8"));
+			if (immutableSha256 !== expectedSha256) {
+				await fs.promises.rm(filePath, { force: true });
+				return null;
+			}
+			return { uri: `artifact://${id}`, sha256: immutableSha256, path: filePath };
+		} catch (error) {
+			await handle?.close().catch(() => undefined);
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+			await fs.promises.rm(filePath, { force: true }).catch(() => undefined);
+			return null;
+		}
+	}
+	return null;
+}
+
+function createSessionContextArtifactAdapter(session: ToolSession): ContextArtifactAdapter | null {
+	if (!session.getArtifactManager?.() && !session.getArtifactsDir?.()) return null;
 	const storedPaths = new Map<string, string>();
 	return {
 		async persist(entry, sha256) {
-			let id: string;
-			let filePath: string;
-			if (manager) {
-				const allocated = await manager.allocatePath(`context-${entry.kind}`);
-				id = allocated.id;
-				filePath = allocated.path;
-			} else {
-				fs.mkdirSync(dir, { recursive: true });
-				id = allocateFreeArtifactId(dir);
-				filePath = path.join(dir, `${id}.context-${sanitizeArtifactToolName(entry.kind)}.log`);
-			}
-			await Bun.write(filePath, entry.content);
-			const uri = `artifact://${id}`;
-			storedPaths.set(uri, filePath);
-			return { uri, sha256 };
+			const stored = await persistSessionArtifact(session, entry.content, `context-${entry.kind}`, sha256);
+			if (!stored) throw new Error("context artifact persistence failed");
+			storedPaths.set(stored.uri, stored.path);
+			return { uri: stored.uri, sha256: stored.sha256 };
 		},
 		async verify(uri, sha256) {
-			const filePath = storedPaths.get(uri);
+			let filePath = storedPaths.get(uri);
+			if (!filePath && /^artifact:\/\/\d+$/.test(uri)) {
+				const id = uri.slice("artifact://".length);
+				filePath = (await session.getArtifactManager?.()?.getPath(id)) ?? undefined;
+				if (!filePath) {
+					const dir = session.getArtifactsDir?.();
+					const file = dir ? (await fs.promises.readdir(dir)).find(name => name.startsWith(`${id}.`)) : undefined;
+					if (dir && file) filePath = path.join(dir, file);
+				}
+			}
 			if (!filePath) return false;
 			try {
 				return sha256Hex(await fs.promises.readFile(filePath, "utf8")) === sha256;
@@ -407,6 +448,10 @@ export function prepareWorkflowInvocation(
 
 	// Capability compile (shadow by default). Role allowlist already computed;
 	// compiler never expands it. Existing profile/presentation/schema stay authoritative.
+	const productionFeatureGates = productionPolicyFeatureGates(
+		request.modelPolicyFeatureGates,
+		request.policyExperimentReceipt,
+	);
 	const adaptedPolicy: AdaptedCompiledPolicy = compileFromWorkflowRequestFields({
 		role: request.role,
 		assignment: request.assignment,
@@ -416,7 +461,7 @@ export function prepareWorkflowInvocation(
 		model: request.model,
 		modelFacts: request.modelFacts,
 		sessionPolicyState: request.sessionPolicyState,
-		modelPolicyFeatureGates: request.modelPolicyFeatureGates,
+		modelPolicyFeatureGates: productionFeatureGates,
 		semanticTools: request.semanticTools,
 		turnOrStageId: `${request.workflowId}:${request.attemptId}:${request.role}`,
 	});
@@ -623,11 +668,25 @@ export function prepareWorkflowInvocation(
 	// explicit mode — avoid forcing toolScheduling on every structured subagent.
 	const resourceConflictMode = toolStrategy?.resourceConflictMode;
 
+	const compiledConcurrencyCeiling =
+		adaptedPolicy.receipt.leverGates["compiler.active"] === true &&
+		adaptedPolicy.receipt.activeLever === "tool_concurrency_ceiling"
+			? adaptedPolicy.compiledPolicy.tools.maxConcurrentTools
+			: undefined;
+	const profileConcurrency = toolStrategy?.maxConcurrentTools;
+	const maxConcurrentTools =
+		typeof compiledConcurrencyCeiling === "number"
+			? typeof profileConcurrency === "number"
+				? Math.min(profileConcurrency, compiledConcurrencyCeiling)
+				: compiledConcurrencyCeiling === 1
+					? 1
+					: undefined
+			: profileConcurrency;
 	const workflowToolOptimization: WorkflowToolOptimization = {
 		processResult: processToolResult,
 		toolAliases: Object.keys(toolAliases).length > 0 ? toolAliases : undefined,
 		argumentAliases: Object.keys(argumentAliases).length > 0 ? argumentAliases : undefined,
-		maxConcurrentTools: toolStrategy?.maxConcurrentTools,
+		maxConcurrentTools,
 		remainingToolCalls,
 		remainingStageTimeMs,
 		resourceConflictMode: resourceConflictMode ?? "serialize",

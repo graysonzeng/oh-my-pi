@@ -68,6 +68,7 @@ import {
 	type ModelPolicyFeatureGates,
 	PROVIDER_OPAQUE_STATE_RECEIPT_KIND,
 } from "./model-policy";
+import { type PolicyExperimentReceiptV1, productionPolicyFeatureGates } from "./workflow/policy-experiment";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
@@ -394,8 +395,10 @@ export interface CreateAgentSessionOptions {
 	thinkingLevelCeiling?: Effort;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	/** Capability compiler rollout gates. Defaults to shadow-only. */
+	/** Shadow candidate gates; raw active fields never authorize production rollout. */
 	modelPolicyFeatureGates?: ModelPolicyFeatureGates;
+	/** Validated evidence receipt that exclusively authorizes one live compiler lever. */
+	policyExperimentReceipt?: PolicyExperimentReceiptV1;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
@@ -2941,13 +2944,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const descriptorPlacement = inlineToolDescriptorsDecision.enabled
 				? ("system_inline" as const)
 				: ("provider_schema" as const);
+			const productionFeatureGates = productionPolicyFeatureGates(
+				options.modelPolicyFeatureGates,
+				options.policyExperimentReceipt,
+			);
 			const adapted = compileForOrdinaryReconcile({
 				model: activeModel,
-				enabled:
-					options.modelPolicyFeatureGates?.compilerShadow !== false ||
-					options.modelPolicyFeatureGates?.compilerActive === true,
+				enabled: productionFeatureGates.compilerShadow === true || productionFeatureGates.compilerActive === true,
 				descriptorPlacement,
-				featureGates: options.modelPolicyFeatureGates,
+				featureGates: productionFeatureGates,
 			});
 			const withCompiled = withOrdinaryCompiledPolicy(resolved, adapted);
 			logger.debug("Reconciled model optimization policy", {

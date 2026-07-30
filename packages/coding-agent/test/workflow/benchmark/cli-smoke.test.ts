@@ -47,8 +47,8 @@ describe("workflow-bench CLI adapter", () => {
 			gate: { passed: boolean };
 		};
 		expect(payload.caseCount).toBe(2);
-		// 2 cases × 2 variants × 5 fixed repetitions
-		expect(payload.resultCount).toBe(20);
+		// 2 cases × 2 variants × explicit --repetitions=3
+		expect(payload.resultCount).toBe(12);
 		expect(payload.liveQualityUnknown).toBe(true);
 		expect(payload.scorecard.liveQualityUnknown).toBe(true);
 		expect(payload.scorecard.notes.some(n => /live quality unknown/i.test(n))).toBe(true);
@@ -85,8 +85,8 @@ describe("workflow-bench CLI adapter", () => {
 			scorecard: { summaries: unknown[]; notes: string[] };
 			gate: { passed: boolean; reasons: string[] };
 		};
-		// 1 case × 1 variant × max(case.reps=5, min=1) = 5
-		expect(payload.resultCount).toBe(5);
+		// 1 case × 1 variant × explicit --reps=1
+		expect(payload.resultCount).toBe(1);
 		expect(payload.scorecard.summaries.length).toBe(1);
 		expect(payload.gate.passed).toBe(false);
 		expect(payload.gate.reasons.some(r => /inconclusive/.test(r))).toBe(true);

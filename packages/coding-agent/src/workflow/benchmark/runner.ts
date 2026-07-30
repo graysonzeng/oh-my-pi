@@ -12,6 +12,7 @@ import type {
 	BenchmarkReport,
 	BenchmarkRunFingerprint,
 	BenchmarkRunResult,
+	BenchmarkRuntimeProvenance,
 	BenchmarkScorecard,
 	BenchmarkSuite,
 	BenchmarkVariantKind,
@@ -37,6 +38,8 @@ export interface BenchmarkRuntimeResponse {
 	stage?: Partial<StageRunMetrics>;
 	scopeStatus?: BenchmarkRunResult["scopeStatus"];
 	error?: string;
+	/** Runtime-observed identity required for live acceptance. */
+	runtimeProvenance?: BenchmarkRuntimeProvenance;
 	durationMs?: number;
 }
 
@@ -135,6 +138,8 @@ export function caseFingerprint(c: BenchmarkCase): string {
 		category: c.category,
 		successCriteria: c.successCriteria,
 		baseCommit: c.baseCommit ?? null,
+		fixtureVersion: c.fixtureVersion,
+		fixtureBaseIdentity: c.fixtureBaseIdentity,
 		repoFixture: c.repoFixture ?? null,
 		allowedPaths: [...c.allowedPaths].sort(),
 		forbiddenPaths: [...c.forbiddenPaths].sort(),
@@ -180,6 +185,8 @@ export function fingerprintIdentity(fp: BenchmarkRunFingerprint): string {
 		caseId: fp.caseId,
 		variant: fp.variant,
 		caseFingerprint: fp.caseFingerprint,
+		fixtureVersion: fp.fixtureVersion,
+		fixtureBaseIdentity: fp.fixtureBaseIdentity,
 		profileId: fp.profileId ?? null,
 		strategyFingerprint: fp.strategyFingerprint ?? null,
 		provider: fp.provider,
@@ -210,6 +217,8 @@ export function buildFingerprint(
 		caseId: c.id,
 		variant,
 		caseFingerprint: caseFingerprint(c),
+		fixtureVersion: c.fixtureVersion,
+		fixtureBaseIdentity: c.fixtureBaseIdentity,
 		profileId: variant === "optimized" ? opts.optimizedProfileId : "baseline",
 		strategyFingerprint: variant === "optimized" ? opts.optimizedStrategyFingerprint : "none",
 		provider: nullableIdentity(opts.provider),
@@ -270,16 +279,52 @@ export async function runBenchmarkSuite(opts: BenchmarkRunOptions): Promise<Benc
 						fingerprint,
 					});
 					const durationMs = response.durationMs ?? performance.now() - started;
+					const identityErrors: string[] = [];
+					const runtimeProvenance = response.runtimeProvenance ?? null;
+					let resultFingerprint = fingerprint;
+					if (opts.liveQualityUnknown === false) {
+						if (!runtimeProvenance?.provider.trim() || !runtimeProvenance.model.trim()) {
+							identityErrors.push("live runtime provenance missing actual provider/model identity");
+						} else {
+							resultFingerprint = {
+								...fingerprint,
+								provider: runtimeProvenance.provider,
+								model: runtimeProvenance.model,
+								checkpoint: runtimeProvenance.checkpoint,
+								api: runtimeProvenance.api,
+								adapter: runtimeProvenance.adapter,
+								parser: runtimeProvenance.parser,
+							};
+							if (opts.provider && runtimeProvenance.provider !== opts.provider) {
+								identityErrors.push(
+									`live provider mismatch: requested=${opts.provider} actual=${runtimeProvenance.provider}`,
+								);
+							}
+							const requestedModel = opts.model?.includes("/")
+								? opts.model.slice(opts.model.lastIndexOf("/") + 1)
+								: opts.model;
+							if (requestedModel && runtimeProvenance.model !== requestedModel) {
+								identityErrors.push(
+									`live model mismatch: requested=${opts.model} actual=${runtimeProvenance.model}`,
+								);
+							}
+						}
+						const fallbackCount = response.stage?.fallbacks?.value;
+						if (typeof fallbackCount === "number" && fallbackCount > 0) {
+							identityErrors.push(`fixed-model live run observed ${fallbackCount} fallback(s)`);
+						}
+					}
 					results.push({
-						fingerprint,
+						fingerprint: resultFingerprint,
 						repetition,
-						passed: response.passed,
-						firstPassed: response.firstPassed ?? null,
-						qualityScore: response.qualityScore ?? null,
+						passed: response.passed && identityErrors.length === 0,
+						firstPassed: identityErrors.length === 0 ? (response.firstPassed ?? null) : false,
+						qualityScore: identityErrors.length === 0 ? (response.qualityScore ?? null) : null,
 						tokens: mergeTokens(response.tokens),
 						stage: mergeStage(response.stage),
 						scopeStatus: response.scopeStatus ?? null,
-						error: response.error,
+						runtimeProvenance,
+						error: [...identityErrors, ...(response.error ? [response.error] : [])].join("; ") || undefined,
 						durationMs,
 					});
 				} catch (err) {
@@ -292,6 +337,7 @@ export async function runBenchmarkSuite(opts: BenchmarkRunOptions): Promise<Benc
 						tokens: defaultTokens(),
 						stage: defaultStage(),
 						scopeStatus: null,
+						runtimeProvenance: null,
 						error: err instanceof Error ? err.message : String(err),
 						durationMs: performance.now() - started,
 					});
@@ -373,6 +419,7 @@ export function buildScorecard(
 		liveQualityUnknown?: boolean;
 		notes?: string[];
 		combinationRun?: boolean;
+		acceptanceMinRepetitions?: number;
 	},
 ): BenchmarkScorecard {
 	const liveQualityUnknown = opts?.liveQualityUnknown ?? true;
@@ -381,6 +428,7 @@ export function buildScorecard(
 	const activeLever = sharedFingerprintField(results, fp => fp.activeLever);
 	const combinationRun =
 		opts?.combinationRun === true || (typeof activeLever === "string" && activeLever.startsWith("combo:"));
+	const acceptanceMinRepetitions = opts?.acceptanceMinRepetitions ?? 5;
 	const notes = [
 		...(liveQualityUnknown
 			? ["Live provider quality not measured; fake-runtime scorecard only.", "live quality unknown"]
@@ -399,6 +447,9 @@ export function buildScorecard(
 	if (combinationRun) {
 		notes.push("combinationRun=true (explicit multi-lever; production profiles unchanged)");
 	}
+	if (!liveQualityUnknown && acceptanceMinRepetitions < 5) {
+		notes.push(`acceptanceMinRepetitions=${acceptanceMinRepetitions}`);
+	}
 	// Cache facts remain unknown when no provider counters were observed.
 	const anyCacheObservable = results.some(r => r.tokens.cacheObservable);
 	if (!anyCacheObservable) {
@@ -416,6 +467,7 @@ export function buildScorecard(
 		compiledPolicyFingerprint,
 		activeLever,
 		combinationRun,
+		acceptanceMinRepetitions,
 	};
 }
 
@@ -425,6 +477,8 @@ export function evaluateBenchmarkQualityGate(
 	gate: BenchmarkQualityGate = { minPassRate: 100, maxPassRateDropPp: 3, maxQualityDropPp: 3 },
 ): BenchmarkGateResult {
 	const reasons: string[] = [];
+	// Fake/synthetic pipeline may pass the structural gate while liveQualityUnknown=true.
+	// Live acceptance (`liveQualityUnknown=false`) adds absolute identity/sampling checks below.
 	const byCase = new Map<string, { baseline?: BenchmarkVariantSummary; optimized?: BenchmarkVariantSummary }>();
 	for (const s of scorecard.summaries) {
 		const entry = byCase.get(s.caseId) ?? {};
@@ -447,6 +501,20 @@ export function evaluateBenchmarkQualityGate(
 			continue;
 		}
 		for (const summary of [base, opt]) {
+			const requiredReps = scorecard.acceptanceMinRepetitions ?? 5;
+			if (!scorecard.liveQualityUnknown && summary.runs.length < requiredReps) {
+				reasons.push(
+					`${caseId}: ${summary.variant} acceptance is undersampled (${summary.runs.length}/${requiredReps} repetitions)`,
+				);
+			}
+			if (!scorecard.liveQualityUnknown) {
+				const missingRuntimeIdentity = summary.runs.filter(run => !run.runtimeProvenance);
+				if (missingRuntimeIdentity.length > 0) {
+					reasons.push(
+						`${caseId}: ${summary.variant} run(s) missing runtime provenance (${missingRuntimeIdentity.length}/${summary.runs.length})`,
+					);
+				}
+			}
 			if (summary.passRate * 100 < gate.minPassRate) {
 				reasons.push(
 					`${caseId}: ${summary.variant} passRate ${(summary.passRate * 100).toFixed(1)}% below min ${gate.minPassRate}`,
@@ -465,6 +533,18 @@ export function evaluateBenchmarkQualityGate(
 				reasons.push(
 					`${caseId}: ${summary.variant} run(s) reported scopeStatus=violation (${hardFailRuns.length}/${summary.runs.length})`,
 				);
+			}
+			// Live acceptance requires observed adherence; fake/indeterminate/warning remain reportable without hard-fail.
+			if (!scorecard.liveQualityUnknown) {
+				const nonAdheredRuns = summary.runs.filter(
+					run => run.scopeStatus !== "adhered" && run.scopeStatus !== "pass",
+				);
+				if (nonAdheredRuns.length > 0) {
+					const statuses = [...new Set(nonAdheredRuns.map(run => run.scopeStatus ?? "missing"))].join(",");
+					reasons.push(
+						`${caseId}: ${summary.variant} scope hard gate requires adhered; got ${statuses} (${nonAdheredRuns.length}/${summary.runs.length})`,
+					);
+				}
 			}
 		}
 		const dropPp = (base.passRate - opt.passRate) * 100;
@@ -497,12 +577,14 @@ export function buildBenchmarkReport(
 		notes?: string[];
 		gate?: BenchmarkQualityGate;
 		combinationRun?: boolean;
+		acceptanceMinRepetitions?: number;
 	},
 ): BenchmarkReport {
 	const scorecard = buildScorecard(suite, results, {
 		liveQualityUnknown: opts?.liveQualityUnknown,
 		notes: opts?.notes,
 		combinationRun: opts?.combinationRun,
+		acceptanceMinRepetitions: opts?.acceptanceMinRepetitions,
 	});
 	const gate = evaluateBenchmarkQualityGate(scorecard, opts?.gate);
 	const comparison = buildComparisonRows(scorecard, gate);

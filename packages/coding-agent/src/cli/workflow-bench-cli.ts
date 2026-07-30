@@ -101,7 +101,14 @@ export async function runWorkflowBenchCommand(
 	suite = filterCases(suite, args.flags.case);
 	const variants = parseVariants(args.flags.variant);
 	const repsFlag = args.flags.repetitions ?? args.flags.reps;
-	const minRepetitions = repsFlag && repsFlag > 0 ? repsFlag : undefined;
+	const explicitRepetitions = repsFlag && repsFlag > 0 ? repsFlag : undefined;
+	// Explicit --repetitions/--reps is an exact override (including short acceptance < suite default).
+	if (explicitRepetitions !== undefined) {
+		suite = {
+			...suite,
+			cases: suite.cases.map(benchmarkCase => ({ ...benchmarkCase, repetitions: explicitRepetitions })),
+		};
+	}
 
 	const mode = args.flags.mode?.trim().toLowerCase() || "fake";
 	if (mode !== "fake" && mode !== "live") throw new Error(`Invalid --mode=${args.flags.mode}. Use fake or live.`);
@@ -109,24 +116,31 @@ export async function runWorkflowBenchCommand(
 		throw new Error("Live benchmark runtime was not configured at the command boundary");
 	}
 	const liveQualityUnknown = mode !== "live";
+	const acceptanceMinRepetitions = explicitRepetitions ?? 5;
 	const results = await runBenchmarkSuite({
 		suite,
 		runtime: mode === "live" ? dependencies.liveRuntime! : createFakeBenchmarkRuntime(),
 		variants,
 		optimizedProfileId: "grok_implementer",
 		optimizedStrategyFingerprint: "workflow-bench-cli",
-		minRepetitions,
 		liveQualityUnknown,
 		provider: mode === "live" ? args.flags.provider : null,
 		model: mode === "live" ? args.flags.model : null,
 	});
+	const shortAcceptance = mode === "live" && explicitRepetitions !== undefined && explicitRepetitions < 5;
 	const report = buildBenchmarkReport(suite, results, {
 		liveQualityUnknown,
+		acceptanceMinRepetitions,
 		notes:
 			mode === "live"
 				? [
 						`Live workflow benchmark used explicit provider/model ${args.flags.provider}/${args.flags.model}.`,
 						"Fixture verificationCommands and git diff scope were executed.",
+						...(shortAcceptance
+							? [
+									`short acceptance: explicit --repetitions=${explicitRepetitions} (below full live floor of 5); not a full held-out acceptance card.`,
+								]
+							: []),
 					]
 				: [
 						"CLI path uses fake-runtime smoke only (no live agent, no real repo clone, verificationCommands not executed).",

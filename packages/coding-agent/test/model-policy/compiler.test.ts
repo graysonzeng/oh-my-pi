@@ -212,6 +212,7 @@ describe("compileModelPolicy", () => {
 
 	it("compiles known GPT-like facts into native tiers and effort wire params", () => {
 		const policy = compile({
+			featureGates: { contextCache: true },
 			taskPolicy: baseTask({
 				reasoningIntent: "deep",
 				outputContract: {
@@ -333,6 +334,7 @@ describe("compileModelPolicy", () => {
 		});
 		const policy = compile({
 			modelFacts: facts,
+			featureGates: { contextCache: true },
 			taskPolicy: baseTask({
 				reasoningIntent: "fast",
 				toolIntent: { semanticToolIds: ["read", "grep"], allowParallelReadonly: true },
@@ -751,5 +753,32 @@ describe("compileModelPolicy", () => {
 		expect(policy.contextAndCache.cacheMode).toBe("none");
 		expect(policy.receipt.leverGates["toolSurface.openai/gpt-5"]).toBe(false);
 		expect(policy.receipt.leverGates["promptOverlay.needs_explicit_completion"]).toBe(false);
+	});
+
+	it("defaults catalog and cache cohorts off while preserving structured output", () => {
+		const semanticTools: SemanticToolContract[] = Array.from({ length: 13 }, (_, index) => ({
+			id: `tool-${index}`,
+			description: `Tool ${index}`,
+			parametersSchema: { type: "object" },
+			permission: "readonly",
+		}));
+		const policy = compile({
+			semanticTools,
+			taskPolicy: baseTask({
+				toolIntent: {
+					semanticToolIds: semanticTools.map(tool => tool.id),
+					allowParallelReadonly: true,
+				},
+				outputContract: { kind: "typed_artifact", schema: { type: "object" } },
+			}),
+			featureGates: {},
+		});
+
+		expect(policy.tools.presentationMode).toBe("direct");
+		expect(policy.contextAndCache.cacheMode).toBe("none");
+		expect(policy.receipt.leverGates.toolSurface).toBe(false);
+		expect(policy.receipt.leverGates.contextCache).toBe(false);
+		expect(policy.receipt.leverGates.structuredOutput).toBe(true);
+		expect(policy.output.tier).toBe("native_json_schema");
 	});
 });

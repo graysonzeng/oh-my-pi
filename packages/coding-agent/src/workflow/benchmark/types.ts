@@ -40,6 +40,12 @@ export interface BenchmarkCase {
 	/** Optional fixed base commit / fixture repo id. */
 	baseCommit?: string;
 	repoFixture?: string;
+	/** Canonical materializer version used for this fixed case. */
+	fixtureVersion: string;
+	/** Stable sha256 of the canonical initial fixture tree, including hidden verifier. */
+	fixtureBaseIdentity: string;
+	/** Immutable verifier paths intentionally outside allowedPaths. */
+	hiddenVerifierPaths: string[];
 	/** Optional human note for intended public mini-repo (not required at test time). */
 	publicRepoNote?: string;
 	allowedPaths: string[];
@@ -80,6 +86,10 @@ export interface BenchmarkRunFingerprint {
 	variant: BenchmarkVariantKind;
 	/** Stable hash of case inputs (request, paths, commit). */
 	caseFingerprint: string;
+	/** Canonical fixture materializer version actually selected. */
+	fixtureVersion: string;
+	/** Canonical initial fixture tree identity, not a temporary git commit id. */
+	fixtureBaseIdentity: string;
 	/** Profile / strategy id used for optimized variant. */
 	profileId?: string;
 	/** sha256 of tool strategy JSON when optimized. */
@@ -156,6 +166,17 @@ export interface TokenBucketMetrics {
 	cacheObservable: boolean;
 }
 
+export interface BenchmarkRuntimeProvenance {
+	/** Runtime-observed identity; requested configuration is not provenance. */
+	source: "runtime_observed";
+	provider: string;
+	model: string;
+	checkpoint: string | null;
+	api: string | null;
+	adapter: string | null;
+	parser: string | null;
+}
+
 export interface BenchmarkRunResult {
 	fingerprint: BenchmarkRunFingerprint;
 	repetition: number;
@@ -174,6 +195,8 @@ export interface BenchmarkRunResult {
 	 * Legacy dual-read also accepts pass | hard_fail.
 	 */
 	scopeStatus?: "adhered" | "warning" | "violation" | "indeterminate" | "pass" | "hard_fail" | null;
+	/** Runtime-observed live identity; null for fake/unobservable runs. */
+	runtimeProvenance: BenchmarkRuntimeProvenance | null;
 	error?: string;
 	/** Wall clock for this repetition. */
 	durationMs: number;
@@ -226,6 +249,8 @@ export interface BenchmarkScorecard {
 	activeLever?: string | null;
 	/** True when this scorecard came from an explicit combination run. */
 	combinationRun?: boolean;
+	/** Live acceptance sampling floor (default 5; short CLI overrides may lower). */
+	acceptanceMinRepetitions?: number;
 }
 
 export interface BenchmarkQualityGate {

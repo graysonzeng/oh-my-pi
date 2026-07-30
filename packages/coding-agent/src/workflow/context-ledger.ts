@@ -24,6 +24,12 @@ export interface ContextEntry {
 	bucket: Exclude<ContextLedgerBucket, "output">;
 	kind: ContextEntryKind;
 	content: string;
+	/** Existing one-hop session artifact for this typed entry, when available. */
+	artifactRef?: string;
+	/** Immutable SHA-256 of the bytes addressed by artifactRef. */
+	immutableSha256?: string;
+	/** Handoff recovery refs carried by this typed entry. */
+	handoffRefs?: string[];
 	/** Old tool results may be replaced; the current result remains inline. */
 	replaceable?: boolean;
 }
@@ -44,12 +50,18 @@ export interface ContextOptimizationReceiptV1 {
 	schemaVersion: 1;
 	kind: "context_optimization_receipt";
 	entryId: string;
+	replacedEntryId: string;
+	replacedPosition: number;
 	retainedEntryId: string | null;
 	transform: ContextOptimizationTransform;
+	bucket: Exclude<ContextLedgerBucket, "output">;
 	originalSha256: string;
+	retainedSha256: string | null;
+	immutableSha256: string;
 	visibleSha256: string;
 	originalBytes: number;
 	visibleBytes: number;
+	estimatedSavedBytes: number;
 	artifactRef: string;
 	estimatedSavedTokens: number;
 	estimateVersion: typeof CONTEXT_ESTIMATE_VERSION;
@@ -61,10 +73,10 @@ export interface OptimizedContextEntries {
 }
 
 export interface ContextBucketMeasurement {
-	bytes: number;
-	tokens: number;
-	provenance: "estimate";
-	measurement: typeof CONTEXT_ESTIMATE_VERSION;
+	bytes: number | null;
+	tokens: number | null;
+	provenance: "estimate" | "provider_fact" | "unknown";
+	measurement: typeof CONTEXT_ESTIMATE_VERSION | "provider_usage" | "unknown";
 }
 
 export interface ContextProviderMetric {
@@ -79,6 +91,10 @@ export interface ContextLedgerV1 {
 	provider: string;
 	model: string;
 	api: string;
+	plannedProvider: string;
+	plannedModel: string;
+	resolvedProvider: string | null;
+	resolvedModel: string | null;
 	measurementVersion: typeof CONTEXT_ESTIMATE_VERSION;
 	buckets: Record<ContextLedgerBucket, ContextBucketMeasurement>;
 	providerUsage: {
@@ -125,6 +141,7 @@ async function persistAndVerify(
 ): Promise<ContextArtifactRecord | null> {
 	try {
 		const stored = await artifact.persist(entry, sha256);
+		if (!/^artifact:\/\/\d+$/.test(stored.uri)) return null;
 		if (stored.sha256 !== sha256 || !(await artifact.verify(stored.uri, sha256))) return null;
 		return stored;
 	} catch {
@@ -132,18 +149,24 @@ async function persistAndVerify(
 	}
 }
 
+interface RetainedContextEntry {
+	id: string;
+	artifactRef?: string;
+	immutableSha256?: string;
+}
+
 export async function optimizeContextEntries(
 	entries: readonly ContextEntry[],
 	artifact: ContextArtifactAdapter,
 ): Promise<OptimizedContextEntries> {
-	const firstByHash = new Map<string, string>();
+	const firstByHash = new Map<string, RetainedContextEntry>();
 	const optimized: ContextEntry[] = [];
 	const receipts: ContextOptimizationReceiptV1[] = [];
 
-	for (const entry of entries) {
+	for (const [position, entry] of entries.entries()) {
 		const originalSha256 = sha256Hex(entry.content);
-		const retainedEntryId = DEDUPE_KINDS[entry.kind] ? firstByHash.get(originalSha256) : undefined;
-		const transform: ContextOptimizationTransform | null = retainedEntryId
+		const retained = DEDUPE_KINDS[entry.kind] ? firstByHash.get(originalSha256) : undefined;
+		const transform: ContextOptimizationTransform | null = retained
 			? "dedupe_exact"
 			: entry.kind === "tool_result" && entry.replaceable === true
 				? "artifact_ref"
@@ -151,30 +174,52 @@ export async function optimizeContextEntries(
 
 		if (!transform) {
 			optimized.push({ ...entry });
-			if (DEDUPE_KINDS[entry.kind] && !retainedEntryId) firstByHash.set(originalSha256, entry.id);
+			if (DEDUPE_KINDS[entry.kind] && !retained) {
+				firstByHash.set(originalSha256, {
+					id: entry.id,
+					artifactRef: entry.artifactRef,
+					immutableSha256: entry.immutableSha256,
+				});
+			}
 			continue;
 		}
 
-		const stored = await persistAndVerify(entry, originalSha256, artifact);
+		let stored: ContextArtifactRecord | null = null;
+		if (
+			retained?.artifactRef &&
+			retained.immutableSha256 === originalSha256 &&
+			/^artifact:\/\/\d+$/.test(retained.artifactRef) &&
+			(await artifact.verify(retained.artifactRef, originalSha256))
+		) {
+			stored = { uri: retained.artifactRef, sha256: originalSha256 };
+		} else {
+			stored = await persistAndVerify(entry, originalSha256, artifact);
+		}
 		if (!stored) {
 			optimized.push({ ...entry });
 			continue;
 		}
 
-		const content = `[context ref: ${stored.uri}]`;
+		const content = `[context ref: ${stored.uri} sha256:${stored.sha256}]`;
 		const originalBytes = Buffer.byteLength(entry.content, "utf8");
 		const visibleBytes = Buffer.byteLength(content, "utf8");
-		optimized.push({ ...entry, content });
+		optimized.push({ ...entry, content, artifactRef: stored.uri, immutableSha256: stored.sha256 });
 		receipts.push({
 			schemaVersion: 1,
 			kind: "context_optimization_receipt",
 			entryId: entry.id,
-			retainedEntryId: retainedEntryId ?? null,
+			replacedEntryId: entry.id,
+			replacedPosition: position,
+			retainedEntryId: retained?.id ?? null,
 			transform,
+			bucket: entry.bucket,
 			originalSha256,
+			retainedSha256: retained ? originalSha256 : null,
+			immutableSha256: stored.sha256,
 			visibleSha256: sha256Hex(content),
 			originalBytes,
 			visibleBytes,
+			estimatedSavedBytes: Math.max(0, originalBytes - visibleBytes),
 			artifactRef: stored.uri,
 			estimatedSavedTokens: Math.max(0, Math.ceil(originalBytes / 4) - Math.ceil(visibleBytes / 4)),
 			estimateVersion: CONTEXT_ESTIMATE_VERSION,
@@ -208,7 +253,7 @@ export function buildContextLedger(input: {
 		contents.push(entry.content);
 		bucketText.set(entry.bucket, contents);
 	}
-	bucketText.set("output", input.output ? [input.output] : []);
+	bucketText.set("output", input.output !== undefined ? [input.output] : []);
 
 	const bucketIds: ContextLedgerBucket[] = [
 		"system_static",
@@ -234,6 +279,10 @@ export function buildContextLedger(input: {
 		requestId: input.requestId,
 		provider: input.provider,
 		model: input.model,
+		plannedProvider: input.provider,
+		plannedModel: input.model,
+		resolvedProvider: null,
+		resolvedModel: null,
 		api: input.api,
 		measurementVersion: CONTEXT_ESTIMATE_VERSION,
 		buckets,
@@ -244,8 +293,12 @@ export function buildContextLedger(input: {
 			cacheWriteTokens: providerMetric(usage?.cacheWriteTokens),
 			uncachedInputTokens: providerMetric(usage?.uncachedInputTokens),
 		},
-		artifactRefs: [...(input.artifactRefs ?? [])],
-		handoffRefs: [...(input.handoffRefs ?? [])],
+		artifactRefs: [
+			...new Set([...(input.artifactRefs ?? []), ...input.entries.flatMap(entry => entry.artifactRef ?? [])]),
+		],
+		handoffRefs: [
+			...new Set([...(input.handoffRefs ?? []), ...input.entries.flatMap(entry => entry.handoffRefs ?? [])]),
+		],
 		optimizationReceipts: [...(input.optimizationReceipts ?? [])],
 	};
 }
@@ -258,19 +311,51 @@ export function withContextProviderUsage(
 				output?: number | null;
 				cacheRead?: number | null;
 				cacheWrite?: number | null;
-				uncachedInput?: number | null;
 		  }
 		| null
 		| undefined,
+	options: {
+		cacheReadObservable?: boolean;
+		cacheWriteObservable?: boolean;
+		resolvedProvider?: string;
+		resolvedModel?: string;
+		recoverableOutput?: string;
+	} = {},
 ): ContextLedgerV1 {
+	const mergeMetric = (current: ContextProviderMetric, value: number | null | undefined): ContextProviderMetric =>
+		typeof value === "number" && Number.isFinite(value) ? providerMetric(value) : current;
+	const outputTokens = mergeMetric(ledger.providerUsage.outputTokens, usage?.output);
+	let output = ledger.buckets.output;
+	if (outputTokens.provenance === "provider_fact") {
+		output = {
+			bytes: options.recoverableOutput === undefined ? null : Buffer.byteLength(options.recoverableOutput, "utf8"),
+			tokens: outputTokens.value,
+			provenance: "provider_fact",
+			measurement: "provider_usage",
+		};
+	} else if (options.recoverableOutput !== undefined) {
+		output = estimateMeasurement(options.recoverableOutput);
+	} else {
+		output = { bytes: null, tokens: null, provenance: "unknown", measurement: "unknown" };
+	}
+	const inputTokens = mergeMetric(ledger.providerUsage.inputTokens, usage?.input);
 	return {
 		...ledger,
+		resolvedProvider: options.resolvedProvider ?? ledger.resolvedProvider,
+		resolvedModel: options.resolvedModel ?? ledger.resolvedModel,
+		buckets: { ...ledger.buckets, output },
 		providerUsage: {
-			inputTokens: providerMetric(usage?.input),
-			outputTokens: providerMetric(usage?.output),
-			cacheReadTokens: providerMetric(usage?.cacheRead),
-			cacheWriteTokens: providerMetric(usage?.cacheWrite),
-			uncachedInputTokens: providerMetric(usage?.uncachedInput),
+			inputTokens,
+			outputTokens,
+			cacheReadTokens:
+				options.cacheReadObservable === true
+					? mergeMetric(ledger.providerUsage.cacheReadTokens, usage?.cacheRead)
+					: ledger.providerUsage.cacheReadTokens,
+			cacheWriteTokens:
+				options.cacheWriteObservable === true
+					? mergeMetric(ledger.providerUsage.cacheWriteTokens, usage?.cacheWrite)
+					: ledger.providerUsage.cacheWriteTokens,
+			uncachedInputTokens: mergeMetric(ledger.providerUsage.uncachedInputTokens, usage?.input),
 		},
 	};
 }

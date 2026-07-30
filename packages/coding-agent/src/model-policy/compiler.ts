@@ -563,9 +563,13 @@ function compileGuards(
 	};
 }
 
-function resolveCohortGate(gate: ModelPolicyFeatureGates["toolSurface"], cohort: string): boolean {
+function resolveCohortGate(
+	gate: ModelPolicyFeatureGates["toolSurface"],
+	cohort: string,
+	defaultEnabled: boolean,
+): boolean {
 	if (typeof gate === "boolean") return gate;
-	if (gate === undefined) return true;
+	if (gate === undefined) return defaultEnabled;
 	return gate[cohort] === true;
 }
 
@@ -574,9 +578,9 @@ function buildLeverGates(
 	overlayId: string | null,
 	cohort: string,
 ): Record<string, boolean> {
-	const toolSurface = resolveCohortGate(gates.toolSurface, cohort);
-	const structuredOutput = resolveCohortGate(gates.structuredOutput, cohort);
-	const contextCache = resolveCohortGate(gates.contextCache, cohort);
+	const toolSurface = resolveCohortGate(gates.toolSurface, cohort, false);
+	const structuredOutput = resolveCohortGate(gates.structuredOutput, cohort, true);
+	const contextCache = resolveCohortGate(gates.contextCache, cohort, false);
 	const compilerActive = gates.compilerActive === true && gates.activeLever !== undefined;
 	const leverGates: Record<string, boolean> = {
 		"compiler.shadow": gates.compilerShadow === true,
@@ -615,9 +619,9 @@ export function compileModelPolicy(input: CompileModelPolicyInput): CompiledMode
 	const cohort = `${modelFacts.identity.provider}/${modelFacts.identity.model}`;
 	const effectiveFeatureGates: ModelPolicyFeatureGates = {
 		...featureGates,
-		toolSurface: resolveCohortGate(featureGates.toolSurface, cohort),
-		structuredOutput: resolveCohortGate(featureGates.structuredOutput, cohort),
-		contextCache: resolveCohortGate(featureGates.contextCache, cohort),
+		toolSurface: resolveCohortGate(featureGates.toolSurface, cohort, false),
+		structuredOutput: resolveCohortGate(featureGates.structuredOutput, cohort, true),
+		contextCache: resolveCohortGate(featureGates.contextCache, cohort, false),
 	};
 	if (featureGates.compilerActive === true && featureGates.activeLever === undefined) {
 		notes.push("compiler_active_without_single_lever:shadow");

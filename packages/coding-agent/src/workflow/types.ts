@@ -9,6 +9,7 @@ import type {
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ToolSession } from "../tools";
 import type { ContextEntry, ContextLedgerV1 } from "./context-ledger";
+import type { PolicyExperimentReceiptV1 } from "./policy-experiment";
 import type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
 
 /** Re-export for consumers that import receipt types from workflow/types. */
@@ -372,8 +373,10 @@ export interface WorkflowAgentRequest {
 	model?: ModelFactsSource;
 	/** Optional session seed for policy compilation. */
 	sessionPolicyState?: Partial<SessionPolicyStateV1>;
-	/** Optional feature gates (default: compiler shadow on, active off). */
+	/** Shadow candidate gates; raw active fields never authorize production rollout. */
 	modelPolicyFeatureGates?: ModelPolicyFeatureGates;
+	/** Validated evidence receipt that exclusively authorizes one live compiler lever. */
+	policyExperimentReceipt?: PolicyExperimentReceiptV1;
 	/** Optional semantic tools for descriptor compilation (never expands role allowlist). */
 	semanticTools?: SemanticToolContract[];
 }

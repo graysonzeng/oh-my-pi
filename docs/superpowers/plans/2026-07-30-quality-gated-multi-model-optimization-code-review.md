@@ -105,5 +105,7 @@
 
 ## 6. Re-review Status
 
-- Pending final live paired A/B completion and final installed-artifact verification.
-- Final conclusion will be updated after the post-fix full verification loop.
+- **PASS_WITH_NOTES**
+- Short live paired A/B (`gateway/claude-sonnet-4-6`, `bugfix-null-deref`, 2×2) passed: both variants 100% pass, adhered scope, runtime provenance, fingerprint identity, unknown outer usage, `gate.passed=true`.
+- Notes: this is explicitly short acceptance (`acceptanceMinRepetitions=2`), not a full 5-rep held-out card; `gateway/gpt-5.6-sol` remains blocked by planner availability fail-closed.
+- Production defaults remain shadow/gated (`compilerActive:false` without approved lever).

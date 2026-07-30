@@ -6,7 +6,9 @@ import { Settings } from "../../config/settings";
 import { createAgentSession } from "../../sdk";
 import { getDefaultConfig } from "../default-config";
 import type { ModelProfile } from "../types";
+import { materializeBenchmarkFixture } from "./fixtures";
 import type { BenchmarkRuntime, BenchmarkRuntimeRequest, BenchmarkRuntimeResponse } from "./runner";
+import type { BenchmarkRuntimeProvenance } from "./types";
 
 interface WorkflowToolDetails {
 	workflowId?: string;
@@ -44,6 +46,10 @@ export interface LiveBenchmarkAgentResult {
 	costUsd: number;
 	usageObservable: boolean;
 	toolCalls: number;
+	/** Runtime-observed identity; requested flags are not accepted as provenance. */
+	runtimeProvenance?: BenchmarkRuntimeProvenance;
+	/** Actual fallback count when observable; omitted means unknown. */
+	fallbackCount?: number;
 }
 
 export type LiveBenchmarkAgentRunner = (
@@ -105,46 +111,7 @@ async function initializeFixtureRepository(
 	root: string,
 	benchmarkCase: BenchmarkRuntimeRequest["case"],
 ): Promise<void> {
-	if (benchmarkCase.id === "bugfix-null-deref") {
-		await Bun.write(
-			path.join(root, "src/parser.ts"),
-			"export function parseValue(input: string | null): string {\n\treturn input.trim();\n}\n",
-		);
-		await Bun.write(
-			path.join(root, "test/parser.test.ts"),
-			'import { describe, expect, it } from "bun:test";\nimport { parseValue } from "../src/parser";\n\ndescribe("parseValue", () => {\n\tit("returns an empty value for null input", () => {\n\t\texpect(parseValue(null)).toBe("");\n\t});\n\tit("trims string input", () => {\n\t\texpect(parseValue(" value ")).toBe("value");\n\t});\n});\n',
-		);
-	} else {
-		for (const relativePath of benchmarkCase.allowedPaths) {
-			if (relativePath.endsWith(".test.ts")) {
-				await Bun.write(
-					path.join(root, relativePath),
-					`import { expect, test } from "bun:test";\n\ntest(${JSON.stringify(benchmarkCase.id)}, () => {\n\texpect("broken").toBe("fixed");\n});\n`,
-				);
-			} else if (/\.(?:ts|tsx|js|jsx)$/.test(relativePath)) {
-				await Bun.write(
-					path.join(root, relativePath),
-					`/** Synthetic live fixture for ${benchmarkCase.id}. */\nexport const fixtureState = "broken";\n`,
-				);
-			}
-		}
-	}
-
-	const hasTests = benchmarkCase.allowedPaths.some(relativePath => relativePath.endsWith(".test.ts"));
-	await Bun.write(
-		path.join(root, "package.json"),
-		`${JSON.stringify({ private: true, scripts: { check: hasTests ? "bun test" : "bun -e ''" } }, null, 2)}\n`,
-	);
-	await Bun.write(
-		path.join(root, "AGENTS.md"),
-		[
-			benchmarkCase.request,
-			`Allowed paths: ${benchmarkCase.allowedPaths.join(", ")}.`,
-			"Do not edit package.json or files outside the allowed paths.",
-			"Run every configured verification command before finishing.",
-			"",
-		].join("\n"),
-	);
+	await materializeBenchmarkFixture(root, benchmarkCase);
 	for (const command of [
 		"git init",
 		"git config user.email workflow-bench@example.invalid",
@@ -227,6 +194,7 @@ async function runProductionWorkflow(
 		if (!tool) throw new Error("Workflow tool is unavailable in the live benchmark session");
 		const terminalStatus = await executeWorkflow(tool, request, options.maxResumeSteps ?? 32);
 		const stats = session.getSessionStats();
+		const runtimeModel = session.model;
 		return {
 			terminalStatus,
 			inputTokens: stats.tokens.input,
@@ -238,10 +206,37 @@ async function runProductionWorkflow(
 			usageObservable: false,
 			costUsd: stats.cost,
 			toolCalls: stats.toolCalls,
+			...(runtimeModel
+				? {
+						runtimeProvenance: {
+							source: "runtime_observed" as const,
+							provider: runtimeModel.provider,
+							model: runtimeModel.id,
+							checkpoint: null,
+							api: runtimeModel.api,
+							adapter: "coding-agent:createAgentSession",
+							parser: `pi-ai:${runtimeModel.api}`,
+						},
+					}
+				: {}),
 		};
 	} finally {
 		await session.dispose();
 	}
+}
+
+async function observeScope(
+	cwd: string,
+	allowedPaths: readonly string[],
+): Promise<{ scopeStatus: "adhered" | "violation"; changedFiles: string[] }> {
+	const diff = await runCommand("git status --porcelain=v1 -z --untracked-files=all", cwd);
+	const changedFiles = diff.output
+		.split("\0")
+		.filter(Boolean)
+		.map(record => record.slice(3))
+		.map(file => (file.includes(" -> ") ? file.slice(file.lastIndexOf(" -> ") + 4) : file));
+	const scopeViolation = changedFiles.some(file => !pathAllowed(file, allowedPaths));
+	return { scopeStatus: scopeViolation ? "violation" : "adhered", changedFiles };
 }
 
 async function runLiveCase(
@@ -251,30 +246,47 @@ async function runLiveCase(
 	const cwd = await prepareFixture(request);
 	const startedAt = performance.now();
 	try {
-		const agentResult = await (options.agentRunner ?? runProductionWorkflow)(request, cwd, options);
+		let agentResult: LiveBenchmarkAgentResult;
+		try {
+			agentResult = await (options.agentRunner ?? runProductionWorkflow)(request, cwd, options);
+		} catch (err) {
+			// Availability / policy failures must still emit observed scope evidence for live gates.
+			const scope = await observeScope(cwd, request.case.allowedPaths);
+			return {
+				passed: false,
+				firstPassed: false,
+				qualityScore: 0,
+				durationMs: performance.now() - startedAt,
+				runtimeProvenance: undefined,
+				scopeStatus: scope.scopeStatus,
+				error: err instanceof Error ? err.message : String(err),
+				tokens: { cacheObservable: false },
+				stage: {
+					provider: null,
+					model: null,
+					durationMs: exact(performance.now() - startedAt),
+					toolCalls: exact(0),
+				},
+			};
+		}
 		const verification = await Promise.all(
 			request.case.verificationCommands.map(command => runCommand(command, cwd)),
 		);
-		const diff = await runCommand("git status --porcelain=v1 -z --untracked-files=all", cwd);
-		const changedFiles = diff.output
-			.split("\0")
-			.filter(Boolean)
-			.map(record => record.slice(3))
-			.map(file => (file.includes(" -> ") ? file.slice(file.lastIndexOf(" -> ") + 4) : file));
-		const scopeViolation = changedFiles.some(file => !pathAllowed(file, request.case.allowedPaths));
+		const scope = await observeScope(cwd, request.case.allowedPaths);
 		const passed =
 			agentResult.terminalStatus === "completed" &&
 			verification.every(result => result.exitCode === 0) &&
-			!scopeViolation;
+			scope.scopeStatus === "adhered";
 		return {
 			passed,
 			firstPassed: passed,
 			qualityScore: passed ? 1 : 0,
 			durationMs: performance.now() - startedAt,
-			scopeStatus: scopeViolation ? "violation" : "adhered",
+			runtimeProvenance: agentResult.runtimeProvenance,
+			scopeStatus: scope.scopeStatus,
 			error: passed
 				? undefined
-				: `workflow=${agentResult.terminalStatus}; verification=${verification.map(v => v.exitCode).join(",")}; changed=${changedFiles.join(",")}`,
+				: `workflow=${agentResult.terminalStatus}; verification=${verification.map(v => v.exitCode).join(",")}; changed=${scope.changedFiles.join(",")}`,
 			tokens: {
 				...(agentResult.usageObservable
 					? {
@@ -292,10 +304,11 @@ async function runLiveCase(
 				cacheObservable: agentResult.cacheObservable,
 			},
 			stage: {
-				provider: options.provider,
-				model: options.model,
+				provider: agentResult.runtimeProvenance?.provider ?? null,
+				model: agentResult.runtimeProvenance?.model ?? null,
 				durationMs: exact(performance.now() - startedAt),
 				toolCalls: exact(agentResult.toolCalls),
+				...(agentResult.fallbackCount === undefined ? {} : { fallbacks: exact(agentResult.fallbackCount) }),
 			},
 		};
 	} finally {

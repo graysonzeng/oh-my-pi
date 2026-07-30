@@ -1,11 +1,23 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import {
+	applyKnownGoodBenchmarkSolution,
 	buildDefaultBenchmarkSuite,
 	buildLiveBenchmarkProfileOverrides,
 	createLiveWorkflowBenchmarkRuntime,
 	runBenchmarkSuite,
 } from "../../../src/workflow/benchmark";
+import type { BenchmarkRuntimeProvenance } from "../../../src/workflow/benchmark/types";
+
+const FIXTURE_PROVENANCE: BenchmarkRuntimeProvenance = {
+	source: "runtime_observed",
+	provider: "fixture-provider",
+	model: "fixture-model",
+	checkpoint: null,
+	api: "openai-completions",
+	adapter: "coding-agent:createAgentSession",
+	parser: "pi-ai:openai-completions",
+};
 
 describe("live workflow benchmark runtime", () => {
 	it("uses the agent seam, verifies the fixture, and reports provider facts without synthetic quality", async () => {
@@ -17,12 +29,9 @@ describe("live workflow benchmark runtime", () => {
 		const runtime = createLiveWorkflowBenchmarkRuntime({
 			provider: "fixture-provider",
 			model: "fixture-model",
-			agentRunner: async (_request, cwd) => {
+			agentRunner: async (request, cwd) => {
 				calls += 1;
-				await Bun.write(
-					path.join(cwd, "src/parser.ts"),
-					'export function parseValue(input: string | null): string {\n\treturn input?.trim() ?? "";\n}\n',
-				);
+				await applyKnownGoodBenchmarkSolution(cwd, request.case);
 				return {
 					terminalStatus: "completed",
 					inputTokens: 11,
@@ -33,6 +42,7 @@ describe("live workflow benchmark runtime", () => {
 					costUsd: 0.02,
 					toolCalls: 2,
 					usageObservable: true,
+					runtimeProvenance: FIXTURE_PROVENANCE,
 				};
 			},
 		});
@@ -43,12 +53,15 @@ describe("live workflow benchmark runtime", () => {
 			variants: ["baseline"],
 			minRepetitions: 1,
 			liveQualityUnknown: false,
+			provider: "fixture-provider",
+			model: "fixture-model",
 		});
 
 		expect(calls).toBe(5);
 		expect(results.map(result => result.error)).toEqual([undefined, undefined, undefined, undefined, undefined]);
 		expect(results.every(result => result.passed)).toBe(true);
 		expect(results.every(result => result.scopeStatus === "adhered")).toBe(true);
+		expect(results.every(result => result.runtimeProvenance?.provider === "fixture-provider")).toBe(true);
 		expect(results[0]?.tokens.inputTokens).toEqual({ value: 11, provenance: "provider_fact" });
 		expect(results[0]?.stage.toolCalls).toEqual({ value: 2, provenance: "exact" });
 		expect(results[0]?.stage.schemaRetries).toEqual({ value: null, provenance: "unknown" });
@@ -62,21 +75,7 @@ describe("live workflow benchmark runtime", () => {
 			provider: "fixture-provider",
 			model: "fixture-model",
 			agentRunner: async (request, cwd) => {
-				for (const relativePath of request.case.allowedPaths) {
-					if (relativePath.endsWith(".test.ts")) {
-						await Bun.write(
-							path.join(cwd, relativePath),
-							'import { expect, test } from "bun:test";\ntest("fixture contract", () => expect(true).toBe(true));\n',
-						);
-					} else if (relativePath.endsWith(".json")) {
-						await Bun.write(
-							path.join(cwd, relativePath),
-							`${JSON.stringify({ kind: "fixture", passed: true })}\n`,
-						);
-					} else {
-						await Bun.write(path.join(cwd, relativePath), `fixture=${request.case.id}\n`);
-					}
-				}
+				await applyKnownGoodBenchmarkSolution(cwd, request.case);
 				return {
 					terminalStatus: "completed",
 					inputTokens: 1,
@@ -87,6 +86,7 @@ describe("live workflow benchmark runtime", () => {
 					usageObservable: false,
 					costUsd: 0,
 					toolCalls: 1,
+					runtimeProvenance: FIXTURE_PROVENANCE,
 				};
 			},
 		});
@@ -101,7 +101,7 @@ describe("live workflow benchmark runtime", () => {
 			expect(result?.passed).toBe(true);
 			expect(result?.scopeStatus).toBe("adhered");
 		}
-	}, 30_000);
+	}, 60_000);
 
 	it("keeps outer-session zero usage unknown when workflow child usage is not observable", async () => {
 		const suite = buildDefaultBenchmarkSuite();
@@ -109,11 +109,8 @@ describe("live workflow benchmark runtime", () => {
 		const runtime = createLiveWorkflowBenchmarkRuntime({
 			provider: "fixture-provider",
 			model: "fixture-model",
-			agentRunner: async (_request, cwd) => {
-				await Bun.write(
-					path.join(cwd, "src/parser.ts"),
-					'export function parseValue(input: string | null): string {\n\treturn input?.trim() ?? "";\n}\n',
-				);
+			agentRunner: async (request, cwd) => {
+				await applyKnownGoodBenchmarkSolution(cwd, request.case);
 				return {
 					terminalStatus: "completed",
 					inputTokens: 0,
@@ -198,5 +195,27 @@ describe("live workflow benchmark runtime", () => {
 		expect(result?.passed).toBe(false);
 		expect(result?.scopeStatus).toBe("violation");
 		expect(result?.error).toContain("untracked.txt");
+	}, 10_000);
+
+	it("still reports scope evidence when the agent seam throws before completion", async () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const benchmarkCase = { ...suite.cases[0]!, repetitions: 1, verificationCommands: [] };
+		const runtime = createLiveWorkflowBenchmarkRuntime({
+			provider: "fixture-provider",
+			model: "fixture-model",
+			agentRunner: async () => {
+				throw new Error("Policy violation: required_role_unavailable: planner");
+			},
+		});
+		const [result] = await runBenchmarkSuite({
+			suite: { ...suite, cases: [benchmarkCase] },
+			runtime,
+			variants: ["baseline"],
+			minRepetitions: 1,
+		});
+		expect(result?.passed).toBe(false);
+		expect(result?.scopeStatus).toBe("adhered");
+		expect(result?.error).toContain("required_role_unavailable");
+		expect(result?.runtimeProvenance).toBeNull();
 	}, 10_000);
 });

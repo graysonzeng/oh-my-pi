@@ -9,7 +9,7 @@ describe("default benchmark suite shape", () => {
 	it("defines the fixed 30-case live acceptance distribution with complete fields", () => {
 		const suite = buildDefaultBenchmarkSuite();
 		expect(suite.schemaVersion).toBe(1);
-		expect(suite.suiteVersion).toBe("2.0.0");
+		expect(suite.suiteVersion).toBe("3.0.0");
 		expect(suite.cases.length).toBe(30);
 
 		const counts = countCasesByCategory(suite);
@@ -34,6 +34,9 @@ describe("default benchmark suite shape", () => {
 			expect(c.forbiddenPaths.length).toBeGreaterThan(0);
 			expect(c.verificationCommands.length).toBeGreaterThan(0);
 			expect(c.repetitions).toBeGreaterThanOrEqual(5);
+			expect(c.fixtureVersion).toBe("benchmark-fixtures-v3");
+			expect(c.fixtureBaseIdentity.length).toBe(64);
+			expect(c.hiddenVerifierPaths.length).toBeGreaterThan(0);
 			expect(c.baseCommit || c.repoFixture).toBeTruthy();
 		}
 

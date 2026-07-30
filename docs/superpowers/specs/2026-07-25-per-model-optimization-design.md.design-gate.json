@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "gate": "design-review",
+  "verdict": "PASS_WITH_NOTES",
+  "design_doc": "/Users/sheng/tencent/oh-my-pi/docs/superpowers/specs/2026-07-25-per-model-optimization-design.md",
+  "design_sha256": "abc0ed4a8f7362c57779fa2fe967c894581f5a8b86001f04018c40803839ce10",
+  "contributors": [
+    "gpt"
+  ],
+  "author": "gpt",
+  "reviewer": "claude",
+  "harness": "claude-code",
+  "model_observed": "claude-sonnet-5",
+  "provider_observed": null,
+  "identity_ok": true,
+  "expected_harness": "claude-code",
+  "reviewed_at": "2026-07-25T13:20:03Z",
+  "run_dir": "/Users/sheng/.cache/worker-runs/peer-design-20260725T211724-66631/primary",
+  "worker_exit": 0,
+  "stale": false
+}

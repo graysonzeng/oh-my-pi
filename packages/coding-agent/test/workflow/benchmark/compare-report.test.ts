@@ -101,7 +101,9 @@ describe("comparison report + quality gate markers", () => {
 		});
 		const gate = evaluateBenchmarkQualityGate(buildScorecard(slim, results, { liveQualityUnknown: false }));
 		expect(gate.passed).toBe(false);
-		expect(gate.reasons).toContain("bugfix-null-deref: baseline run(s) reported scopeStatus=violation (1/1)");
+		expect(gate.reasons).toContain(
+			"bugfix-null-deref: baseline scope hard gate requires adhered; got violation (1/1)",
+		);
 	});
 	it("marks pass-rate drop >3pp as gate failure with red fail reason", async () => {
 		const suite = buildDefaultBenchmarkSuite();
