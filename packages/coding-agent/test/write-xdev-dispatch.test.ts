@@ -57,19 +57,20 @@ describe("read and write route xd:// device URLs", () => {
 			await Bun.write(filePath, "legacyWrap(x, value)\n");
 			const queue = new ToolChoiceQueue();
 
-			const tools = await createTools(
-				xdevSession(tempDir, {
-					getToolChoiceQueue: () => queue,
-					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
-					steer: () => {},
-				}),
-			);
+			const session = xdevSession(tempDir, {
+				getToolChoiceQueue: () => queue,
+				buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+				steer: () => {},
+			});
+			const tools = await createTools(session);
 			// xdev on: ast_edit is unmounted into xd://; write stays in the toolset.
 			const write = tools.find(entry => entry.name === "write");
 			const read = tools.find(entry => entry.name === "read");
 			expect(read).toBeDefined();
 			expect(write).toBeDefined();
 			expect(tools.some(entry => entry.name === "ast_edit")).toBe(false);
+			expect(tools.some(entry => entry.name === "workflow")).toBe(false);
+			expect(session.xdev?.mountedNames.has("workflow")).toBe(true);
 
 			const listing = await read!.execute("read-xd-list", { path: "xd://" });
 			expect(listing.content.find(entry => entry.type === "text")?.text).toContain("xd://ast_edit");
@@ -291,11 +292,14 @@ describe("read and write route xd:// device URLs", () => {
 		expect(lines.some(line => line.includes(backgroundPrefix))).toBe(true);
 	});
 
+	it("defaults mounted device docs to the on-demand catalog", () => {
+		expect(xdevSession(process.cwd()).settings.get("tools.xdevDocs")).toBe("catalog");
+	});
+
 	it("docsAll inlines small device docs and falls back to a listing past the caps", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-docs-"));
 		try {
 			const session = xdevSession(tempDir);
-			expect(session.settings.get("tools.xdevDocs")).toBe("builtins");
 			await createTools(session);
 			const xdev = session.xdev;
 			if (!xdev) throw new Error("expected xdev state");
@@ -326,7 +330,6 @@ describe("read and write route xd:// device URLs", () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-external-"));
 		try {
 			const session = xdevSession(tempDir);
-			expect(session.settings.get("tools.xdevDocs")).toBe("builtins");
 			await createTools(session);
 			const xdev = session.xdev;
 			if (!xdev) throw new Error("expected xdev state");

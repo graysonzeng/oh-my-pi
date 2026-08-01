@@ -40,6 +40,7 @@ export function approvalTierForOp(op: WorkflowToolInput["op"]): "read" | "write"
 export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowToolDetails> {
 	readonly name = "workflow";
 	readonly label = "Workflow";
+	readonly loadMode = "discoverable" as const;
 	// Static prompt file — no Handlebars vars; avoid pi-utils/prompt (pulls natives) for pure tests
 	readonly description = workflowDescription.trim();
 	readonly parameters = workflowSchema;

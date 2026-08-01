@@ -52,6 +52,7 @@ describe("WorkflowTool", () => {
 		expect(approvalTierForOp("cancel")).toBe("write");
 		expect(tool.parameters).toBeTruthy();
 		expect(tool.name).toBe("workflow");
+		expect(tool.loadMode).toBe("discoverable");
 		// Tool.approval must be wired so resolveToolTier does not default to exec
 		expect(typeof tool.approval).toBe("function");
 		expect((tool.approval as (a: unknown) => string)({ op: "status" })).toBe("read");

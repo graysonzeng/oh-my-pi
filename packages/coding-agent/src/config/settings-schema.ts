@@ -4207,13 +4207,13 @@ export const SETTINGS_SCHEMA = {
 	"tools.xdevDocs": {
 		type: "enum",
 		values: ["inline", "builtins", "catalog"] as const,
-		default: "builtins",
+		default: "catalog",
 		ui: {
 			tab: "tools",
 			group: "Discovery & MCP",
 			label: "xd:// Prompt Docs",
 			description:
-				"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on-demand.",
+				"Choose which mounted-device docs and schemas are inlined in the system prompt. Catalog keeps every device on demand; Built-ins keeps core tools inline.",
 			options: [
 				{ value: "inline", label: "All Devices", description: "Inline docs and schemas for every mounted device." },
 				{

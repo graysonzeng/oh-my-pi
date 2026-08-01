@@ -652,8 +652,36 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		const text = systemPrompt.join("\n\n");
+		const instruction = "Read matching `skill://<name>` or `rule://<name>` before proceeding.";
+		expect(text.split(instruction)).toHaveLength(2);
 
 		expect(text).toContain("<skills>");
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
+	});
+
+	it("lists matching rules and directs an on-demand read", async () => {
+		const rulePath = path.join(tempDir, "typescript.md");
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [
+				{
+					name: "typescript",
+					path: rulePath,
+					globs: ["**/*.ts"],
+					description: "TypeScript constraints",
+				},
+			],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+		const instruction = "Read matching `skill://<name>` or `rule://<name>` before proceeding.";
+
+		expect(text.split(instruction)).toHaveLength(2);
+		expect(text).toContain("<domain-rules>");
+		expect(text).toContain("- typescript (**/*.ts): TypeScript constraints");
 	});
 });
