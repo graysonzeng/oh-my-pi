@@ -3,6 +3,7 @@ import {
 	hasOpus47ApiRestrictions,
 	isClaudeModelId,
 	isGlmVisionModelId,
+	isGrokModelId,
 	isGrokReasoningEffortCapable,
 	isKimiK26ModelId,
 	isKimiModelId,
@@ -242,6 +243,19 @@ describe("isGlmVisionModelId", () => {
 		expect(isGlmVisionModelId("glm-5-turbo")).toBe(false);
 	});
 });
+describe("isGrokModelId", () => {
+	test("matches bare and provider-namespaced Grok ids", () => {
+		expect(isGrokModelId("grok-4.5")).toBe(true);
+		expect(isGrokModelId("xai/grok-4.5")).toBe(true);
+		expect(isGrokModelId("openrouter/x-ai/grok-4-5")).toBe(true);
+	});
+
+	test("excludes unrelated ids that only contain the Grok substring", () => {
+		expect(isGrokModelId("nongrok-4.5")).toBe(false);
+		expect(isGrokModelId("my-grok-4.5-proxy")).toBe(false);
+	});
+});
+
 describe("modelFamilyToken", () => {
 	test("groups point releases within a vendor and separates across vendors", () => {
 		expect(modelFamilyToken("claude-opus-4-7")).toBe("anthropic");
@@ -255,6 +269,13 @@ describe("modelFamilyToken", () => {
 	test("folds aggregator mirrors and namespace prefixes onto the lineage", () => {
 		expect(modelFamilyToken("anthropic/claude-opus-4.8")).toBe("anthropic");
 		expect(modelFamilyToken("openrouter/anthropic/claude-opus-4-8")).toBe("anthropic");
+	});
+
+	test("normalizes Grok provider namespaces and mirrors to the xAI lineage", () => {
+		expect(modelFamilyToken("grok-4.5")).toBe("xai");
+		expect(modelFamilyToken("xai-oauth/grok-4.5")).toBe("xai");
+		expect(modelFamilyToken("openrouter/x-ai/grok-4-5")).toBe("xai");
+		expect(modelFamilyToken("my-grok-4.5-proxy")).toBe("");
 	});
 
 	test("classifies Bedrock cross-region profile ids for Claude kinds not enumerated in parseAnthropicModel", () => {

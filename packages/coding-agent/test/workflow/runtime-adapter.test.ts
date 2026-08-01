@@ -9,7 +9,7 @@ import {
 	type StructuredRunnerRequest,
 	type StructuredRunnerResult,
 } from "../../src/workflow/runtime-adapter";
-import type { WorkflowAgentRequest } from "../../src/workflow/types";
+import type { CapturedChangesMerger, WorkflowAgentRequest } from "../../src/workflow/types";
 import { fakeSession, implArtifact } from "./helpers";
 
 function baseRequest(signal?: AbortSignal, overrides: Partial<WorkflowAgentRequest> = {}): WorkflowAgentRequest {
@@ -76,6 +76,18 @@ describe("RuntimeAdapter", () => {
 		expect(result.patchPath).toBe("patches/a.patch");
 		expect(result.branchName).toBe("wf/branch");
 		expect(result.usage?.output).toBe(2);
+	});
+
+	it("exposes an optional captured-change merger seam and preserves the legacy constructor", async () => {
+		const merger: CapturedChangesMerger = async request => ({
+			patchPath: request.outputPatchPath,
+			changesApplied: true,
+			summary: "merged",
+		});
+		const adapter = new RuntimeAdapter(async () => okResult({ ok: true }), merger);
+		expect(adapter.mergeCapturedChanges).toBe(merger);
+		expect((await adapter.run(baseRequest())).artifact).toEqual({ ok: true });
+		expect(new RuntimeAdapter(async () => okResult({})).mergeCapturedChanges).toBeUndefined();
 	});
 
 	it("strict schema rejection maps to schema_violation", async () => {

@@ -22,11 +22,15 @@
 - Added multi-model coding workflow MVP: pure transition/schema policy, SQLite resume with version locks and artifact hashes, model routing with diversity/fallback audit metadata, budget + finding escalation, injectable embedded runtime adapter with production factory wiring, deterministic verifier matrix, port-driven stages, engine repair/budget/cancel/resume loops, and built-in `workflow` tool (`start|status|resume|cancel`) with settings and role prompts.
 - Documented workflow lifecycle, recovery, and blocked states in `docs/workflow.md`.
 
+### Changed
+- Reduced fresh-session prompt cost: mounted-device docs now default to the on-demand catalog, the low-frequency workflow tool is discoverable under `xd://`, and repeated system guidance was consolidated.
+
 ### Notes
 - Multi-model is embedded-only: different `ModelProfile`s resolve omp provider models; do not set `workflow.profiles.*.runtime`.
 - Live provider smoke is opt-in and cost-bearing; automated tests use injectable runners only.
 
 ### Fixed
+- Fixed provider-level `referenceProvider` being ignored by proxy discovery, which replaced configured upstream metadata with generic fallback limits.
 - Fixed Codex MCP discovery ignoring `enabled = false` in `~/.codex/config.toml`, which caused disabled servers such as Computer Use to be spawned during OMP startup.
 - Map wall-clock `maxRuntimeMs` / "runtime limit exceeded" subagent aborts to retryable `WorkflowTimeoutError` (not hard `cancelled`); raise plan/code reviewer default `maxRuntimeMs` to 300s so slow gateway reviews can fall through profiles instead of terminal-cancelling the workflow.
 - Workflow tool alias Proxies no longer pass the Proxy as `Reflect.get` receiver, which broke class private-field getters (e.g. `BashTool.#asyncEnabled` via `description`) and blocked implement stages with a configuration TypeError.

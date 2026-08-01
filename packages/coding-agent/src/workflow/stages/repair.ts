@@ -11,6 +11,7 @@ import type {
 	PromptAssemblyReceiptV1,
 	ReviewFindingV1,
 	RuntimePort,
+	WorkflowRuntimeIdentityReceiptV1,
 } from "../types";
 
 export interface RepairStageInput {
@@ -36,6 +37,8 @@ export interface RepairStageResult {
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	contextLedger?: ContextLedgerV1;
 	optimizationReceipts?: unknown[];
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	modelFamily?: string;
 }
 
 export class RepairStage {
@@ -46,10 +49,11 @@ export class RepairStage {
 	}
 
 	async execute(input: RepairStageInput): Promise<RepairStageResult> {
+		const strictIdentity = input.profile.strictIdentity === true;
 		const isolation = {
 			requested: true,
-			merge: input.isolation?.merge ?? "patch",
-			apply: input.isolation?.apply ?? true,
+			merge: strictIdentity ? ("patch" as const) : (input.isolation?.merge ?? "patch"),
+			apply: strictIdentity ? false : (input.isolation?.apply ?? true),
 		};
 		const request = this.#runtime.buildRequest({
 			workflowId: input.workflowId,
@@ -90,8 +94,8 @@ export class RepairStage {
 				stage: "repairing",
 				createdAt: coerceIsoDatetime(modelArtifact.createdAt),
 				modelProfileId: input.profile.id,
-				provider: result.resolvedProvider ?? input.profile.vendor,
-				model: result.resolvedModel,
+				provider: result.identityReceipt?.attested.provider ?? result.resolvedProvider ?? input.profile.vendor,
+				model: result.identityReceipt?.attested.model ?? result.resolvedModel,
 				promptVersion: input.profile.promptVersion,
 				patchPath,
 				branchName,
@@ -111,6 +115,8 @@ export class RepairStage {
 			resolvedProvider: result.resolvedProvider,
 			resolvedModel: result.resolvedModel,
 			toolCalls: result.toolCalls,
+			identityReceipt: result.identityReceipt,
+			modelFamily: result.modelFamily,
 			promptAssemblyReceipt: result.promptAssemblyReceipt,
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,

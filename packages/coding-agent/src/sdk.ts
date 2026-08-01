@@ -591,6 +591,9 @@ export interface CreateAgentSessionOptions {
 	workflowWritePolicy?: WorkflowWritePolicy;
 	workflowCommandPolicy?: WorkflowCommandPolicy;
 
+	/** Provider response observer composed with extension after-provider hooks. */
+	onResponse?: SimpleStreamOptions["onResponse"];
+
 	/**
 	 * Fired once, when the agent loop hands its first request to the provider
 	 * transport (i.e. the `streamFn` wrapper is first invoked). Used to measure
@@ -3196,6 +3199,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return await extensionRunner.emitBeforeProviderRequest(payload, model);
 		};
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model) => {
+			await options.onResponse?.(response, model);
 			await extensionRunner.emitAfterProviderResponse(response, model);
 		};
 

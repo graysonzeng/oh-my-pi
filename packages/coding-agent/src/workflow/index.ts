@@ -39,4 +39,5 @@ export * from "./tool-scheduling";
 export * from "./transitions";
 export * from "./types";
 export * from "./verifier";
+export * from "./work-packages";
 export * from "./workflow-tool";

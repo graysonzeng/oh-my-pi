@@ -82,21 +82,21 @@ created by the current build; never delete pre-existing user files.
 
 ## Latest verified baseline
 
-Last updated: 2026-07-30 (Asia/Shanghai).
+Last updated: 2026-07-31 (Asia/Shanghai).
 
 | Item | Verified value |
 |---|---|
-| Source commit | `e13a01e6d43e2a2c766ae254f4672c5bf690ceac` / `c3e5f0958` plus current uncommitted Phase 0-2 completion |
+| Source commit | `d86d1834952f642291bb496469bd78cf8a509c6a` / `d86d18349` plus the current uncommitted proxy-discovery reference fix; preserved `.gitignore` changes |
 | Package version | `omp/17.1.8` |
 | Artifact | `packages/coding-agent/dist/omp` |
 | Installed path | `/Users/sheng/.local/bin/omp` |
-| SHA-256 | `60e09dc2a3a598380e7e998460dabe11c38d23c7b2ca132110da22ea19237737` |
+| SHA-256 | `8b612cc2e2a5e2580be19f52dd56c6c3fa6019fe6e4945d76c3277571836d0c9` |
 | Native SHA-256 | `6c79bfbd95a3626a038c5f21b4d00636a23e32c8480f2b3ff114821e16474c27` (source and installed cache match; sentinel `__piNativesV17_1_8`) |
 | Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build` |
 | Artifact type | signed arm64 Mach-O executable |
-| Gates | focused Phase 0-2 contracts pass; `bun check`; production binary build; fake CLI; installed `omp --smoke-test`; short live paired A/B 2×2 (`gateway/claude-sonnet-4-6`) gate passed with short-acceptance note |
+| Gates | proxy-discovery regression + full model-discovery/model-registry/gateway-reference tests; `bun --cwd=packages/coding-agent run check`; production binary build; artifact type/signature/checksum; artifact and installed `--smoke-test`; installed `gateway/gpt-5.6-sol` metadata; installed path/version/checksum |
 
-The installed checksum matched the build artifact, and the installed
-`omp --smoke-test` returned `smoke-test: ok`. Existing worktree changes were
+The installed checksum matched the build artifact, `omp --smoke-test` returned
+`smoke-test: ok`, and `gateway/gpt-5.6-sol` resolved to a 372,000-token context window. Existing worktree changes were
 preserved, no commit or official upgrade command was run, and the previous
 installed command remains available at the rollback path above.

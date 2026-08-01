@@ -7,6 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -114,6 +115,8 @@ export interface StructuredSubagentRequest {
 	maxRuntimeMs?: number;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	signal?: AbortSignal;
+	onResponse?: SimpleStreamOptions["onResponse"];
+	strictModelIdentity?: boolean;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
 	 * When set, subagent tools are restricted to this allowlist (workflow scoped write/read policies).
@@ -432,6 +435,8 @@ function buildExecutorOptions(
 		signal: request.signal,
 		eventBus: session.eventBus,
 		onProgress: request.onProgress,
+		onResponse: request.onResponse,
+		strictModelIdentity: request.strictModelIdentity,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,

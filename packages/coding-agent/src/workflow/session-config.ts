@@ -1,6 +1,12 @@
 import { getDefaultConfig, type WorkflowDefaultConfig } from "./default-config";
+import { WorkflowPolicyError } from "./errors";
 import { assertSupportedModelProfile, normalizeModelProfile } from "./model-profile-registry";
-import type { ModelProfile } from "./types";
+import type {
+	ModelProfile,
+	WorkflowQualityRoutes,
+	WorkflowQualityTier,
+	WorkflowRole,
+} from "./types";
 
 /**
  * Merge settings `workflow.profiles` over defaults.
@@ -36,6 +42,79 @@ export function resolveWorkflowProfilesFromSettings(
 	return merged;
 }
 
+const QUALITY_TIERS: readonly WorkflowQualityTier[] = ["balanced", "critical"];
+const QUALITY_ROUTE_ROLES: readonly WorkflowRole[] = [
+	"planner",
+	"plan_reviewer",
+	"implementer",
+	"code_reviewer",
+	"repair",
+];
+
+export function resolveWorkflowQualityRoutesFromSettings(
+	rawRoutes: unknown,
+	profiles: Readonly<Record<string, ModelProfile>>,
+): WorkflowQualityRoutes {
+	if (rawRoutes === undefined || rawRoutes === null) return {};
+	if (typeof rawRoutes !== "object" || Array.isArray(rawRoutes)) {
+		throw new WorkflowPolicyError("invalid_quality_routes", { reason: "expected object" });
+	}
+	const entries = Object.entries(rawRoutes as Record<string, unknown>);
+	if (entries.length === 0) return {};
+	const routes: WorkflowQualityRoutes = {};
+	for (const [tierKey, rawTier] of entries) {
+		if (!QUALITY_TIERS.includes(tierKey as WorkflowQualityTier)) {
+			throw new WorkflowPolicyError("unknown_quality_tier", { qualityTier: tierKey });
+		}
+		if (!rawTier || typeof rawTier !== "object" || Array.isArray(rawTier)) {
+			throw new WorkflowPolicyError("invalid_quality_route_tier", { qualityTier: tierKey });
+		}
+		const rawRoleMap = rawTier as Record<string, unknown>;
+		const unknownRoles = Object.keys(rawRoleMap).filter(role => !QUALITY_ROUTE_ROLES.includes(role as WorkflowRole));
+		if (unknownRoles.length > 0) {
+			throw new WorkflowPolicyError("unknown_quality_route_role", { qualityTier: tierKey, roles: unknownRoles });
+		}
+		const roleMap = {} as Record<WorkflowRole, readonly string[]>;
+		for (const role of QUALITY_ROUTE_ROLES) {
+			const rawIds = rawRoleMap[role];
+			if (!Array.isArray(rawIds) || rawIds.length === 0 || !rawIds.every(id => typeof id === "string" && id.length > 0)) {
+				throw new WorkflowPolicyError("empty_or_invalid_quality_route_role", {
+					qualityTier: tierKey,
+					role,
+				});
+			}
+			const ids = rawIds as string[];
+			if (new Set(ids).size !== ids.length) {
+				throw new WorkflowPolicyError("duplicate_quality_route_profile", { qualityTier: tierKey, role });
+			}
+			for (const profileId of ids) {
+				const profile = profiles[profileId];
+				if (!profile) {
+					throw new WorkflowPolicyError("unknown_quality_route_profile", {
+						qualityTier: tierKey,
+						role,
+						profileId,
+					});
+				}
+				if (!profile.roles.includes(role)) {
+					throw new WorkflowPolicyError("quality_route_profile_role_mismatch", {
+						qualityTier: tierKey,
+						role,
+						profileId,
+						profileRoles: profile.roles,
+					});
+				}
+				if (profile.strictIdentity !== true) {
+					throw new WorkflowPolicyError("quality_route_profile_not_strict", { qualityTier: tierKey, role, profileId });
+				}
+			}
+			roleMap[role] = [...ids];
+		}
+		routes[tierKey as WorkflowQualityTier] = roleMap;
+	}
+	return routes;
+}
+
 /** Build engine config fields from session `workflow.*` settings getters. */
 export function buildWorkflowConfigFromSessionSettings(
 	get: (key: string) => unknown,
@@ -56,6 +135,14 @@ export function buildWorkflowConfigFromSessionSettings(
 	const isolationRaw = get("workflow.isolationMerge");
 	const isolationMerge: "patch" | "branch" =
 		isolationRaw === "branch" || isolationRaw === "patch" ? isolationRaw : defaults.isolation.merge;
+	const profiles = resolveWorkflowProfilesFromSettings(get("workflow.profiles"), defaults.profiles);
+	const qualityRoutes = resolveWorkflowQualityRoutesFromSettings(get("workflow.qualityRoutes"), profiles);
+	const tierRaw = get("workflow.defaultQualityTier");
+	const defaultQualityTier: WorkflowQualityTier =
+		tierRaw === "critical" || tierRaw === "balanced" ? tierRaw : defaults.defaultQualityTier;
+	if (Object.keys(qualityRoutes).length > 0 && !qualityRoutes[defaultQualityTier]) {
+		throw new WorkflowPolicyError("default_quality_tier_not_configured", { defaultQualityTier });
+	}
 
 	return {
 		degradedMode: asBool("workflow.degradedMode", defaults.degradedMode),
@@ -64,10 +151,12 @@ export function buildWorkflowConfigFromSessionSettings(
 		maxRepairCycles: asNumber("workflow.maxRepairCycles", defaults.maxRepairCycles),
 		maxPlanCycles: asNumber("workflow.maxPlanCycles", defaults.maxPlanCycles),
 		confidenceThreshold: asNumber("workflow.confidenceThreshold", defaults.confidenceThreshold),
+		defaultQualityTier,
+		qualityRoutes,
 		isolation: { merge: isolationMerge, apply: defaults.isolation.apply },
 		verificationTimeoutMs: asNumber("workflow.verificationTimeoutMs", defaults.verificationTimeoutMs),
 		verificationCommands: asStringArray("workflow.verificationCommands", defaults.verificationCommands),
-		profiles: resolveWorkflowProfilesFromSettings(get("workflow.profiles"), defaults.profiles),
+		profiles,
 		presentationOptimizationEnabled: asBool(
 			"workflow.presentationOptimization.enabled",
 			defaults.presentationOptimizationEnabled,

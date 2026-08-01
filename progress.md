@@ -144,3 +144,29 @@ Skeptic gap closure (2026-07-26T12:02Z): re-executed full workflow suite + check
 1. **Availability flake**: fail-closed single probe can yield `required_role_unavailable: planner` (~30s); clean re-run recovered to 3/3. No product retry-on-probe in this goal.
 2. **Dirty worktree**: large WIP retained; **no commit/push** per constraints (no secrets/DB/logs/artifacts committed).
 3. **Paired quality gate**: `gate.json` false when only optimized present — expected for single-variant bench; not a goal criterion.
+
+---
+
+## Active goal — workflow work-package parallelism
+
+| Field | Value |
+| --- | --- |
+| goal_id | `workflow-work-packages-20260801` |
+| title | Add automatic, fail-closed workflow work-package parallel implementation |
+| created | 2026-08-01T12:32:05Z |
+| updated_at | 2026-08-01T12:32:05Z |
+| status | `in_progress` |
+| HEAD at start | `00706f601210a2cf8667e67cf8d344d4723d4025` |
+| branch | `workflow` |
+| complexity | High — plan contract, persisted resume state, concurrency, isolation merge |
+| architecture review | Required; Goal Mode remains the lifecycle owner |
+
+### TaskStartSnapshot
+
+- Pre-existing worktree retained: 8 unstaged files and 2 untracked files; no reset, commit, push, or release.
+- Baseline read-set: workflow engine/types/schemas/stages/runtime/store, task batch/semaphore/isolation/worktree, focused tests, `docs/workflow.md`, changelog, and this progress record.
+- Canonical owner: existing `WorkflowEngine` `implementing` stage; packages add no workflow status, queue, DAG platform, or configuration key.
+- Compatibility: optional `PlanArtifactV1.workPackages`; absent, single, invalid dependency graph, shared paths, or unavailable atomic merge → unchanged serial implementation call.
+- Parallel safety: stable dependency waves, exclusive repo-relative ownership, `task.maxConcurrency`, capture-only isolation, patch ground-truth ownership checks, one deterministic atomic apply.
+- Persistence/resume: engine-owned revisioned work-package state artifacts record outputs/status/failures/merge; interrupted capture-only package runs may resume, while serial/repair crash behavior stays fail-closed.
+- Downstream contract: aggregate one `ImplementationArtifactV1`; implementation verification, code review, repair, final verification, and transitions remain unchanged.

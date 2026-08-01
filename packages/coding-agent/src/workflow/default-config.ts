@@ -1,6 +1,14 @@
 import { DEFAULT_MODEL_OPTIMIZATION_PROFILES } from "../model-optimization/default-profiles";
 import { DEFAULT_TRUNCATION_RULES } from "./tool-output-manager";
-import type { ContextStrategy, ModelProfile, OutputStrategy, PromptStrategy, ToolStrategy } from "./types";
+import type {
+	ContextStrategy,
+	ModelProfile,
+	OutputStrategy,
+	PromptStrategy,
+	ToolStrategy,
+	WorkflowQualityRoutes,
+	WorkflowQualityTier,
+} from "./types";
 
 /** Eight models required by the quality-first per-model optimization design. */
 export const TARGET_MODEL_PATTERNS = [
@@ -645,6 +653,8 @@ export interface WorkflowDefaultConfig {
 	maxPlanCycles: number;
 	confidenceThreshold: number;
 	requireIndependentReview: boolean;
+	defaultQualityTier: WorkflowQualityTier;
+	qualityRoutes: WorkflowQualityRoutes;
 	isolation: { merge: "patch" | "branch"; apply: boolean };
 	/** Hard timeout for each verification command (ms). */
 	verificationTimeoutMs: number;
@@ -668,6 +678,8 @@ export function getDefaultConfig(): WorkflowDefaultConfig {
 		maxPlanCycles: 2,
 		confidenceThreshold: 0.6,
 		requireIndependentReview: true,
+		defaultQualityTier: "balanced",
+		qualityRoutes: {},
 		isolation: { merge: "patch", apply: true },
 		verificationTimeoutMs: 120_000,
 		// Prefer trusted repo checks + focused commands; full `bun test` is opt-in via settings.

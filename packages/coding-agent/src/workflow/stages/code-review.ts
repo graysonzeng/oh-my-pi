@@ -3,7 +3,14 @@ import type { ToolSession } from "../../tools";
 import { ReviewArtifactJsonSchema } from "../json-schemas";
 import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { ReviewArtifactSchema } from "../schemas";
-import type { ContextLedgerV1, ModelProfile, PromptAssemblyReceiptV1, ReviewArtifactV1, RuntimePort } from "../types";
+import type {
+	ContextLedgerV1,
+	ModelProfile,
+	PromptAssemblyReceiptV1,
+	ReviewArtifactV1,
+	RuntimePort,
+	WorkflowRuntimeIdentityReceiptV1,
+} from "../types";
 
 export interface CodeReviewStageInput {
 	workflowId: string;
@@ -23,6 +30,11 @@ export interface CodeReviewStageResult {
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	contextLedger?: ContextLedgerV1;
 	optimizationReceipts?: unknown[];
+	resolvedProvider?: string;
+	resolvedModel?: string;
+	toolCalls?: number;
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	modelFamily?: string;
 }
 
 export class CodeReviewStage {
@@ -57,7 +69,8 @@ export class CodeReviewStage {
 				stage: "code_review",
 				createdAt: coerceIsoDatetime((result.artifact as ReviewArtifactV1).createdAt),
 				modelProfileId: input.profile.id,
-				provider: input.profile.vendor,
+				provider: result.identityReceipt?.attested.provider ?? result.resolvedProvider ?? input.profile.vendor,
+				model: result.identityReceipt?.attested.model ?? result.resolvedModel,
 				promptVersion: input.profile.promptVersion,
 			},
 			"CodeReviewArtifact",
@@ -65,6 +78,11 @@ export class CodeReviewStage {
 		return {
 			artifact,
 			usage: result.usage,
+			resolvedProvider: result.resolvedProvider,
+			resolvedModel: result.resolvedModel,
+			toolCalls: result.toolCalls,
+			identityReceipt: result.identityReceipt,
+			modelFamily: result.modelFamily,
 			promptAssemblyReceipt: result.promptAssemblyReceipt,
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,

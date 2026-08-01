@@ -7,11 +7,11 @@
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ServiceTierByFamily, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
-import { ModelRegistry } from "../config/model-registry";
+import { isAuthenticated, kNoAuth, ModelRegistry } from "../config/model-registry";
 import {
 	formatModelSelectorValue,
 	formatModelStringWithRouting,
@@ -361,6 +361,8 @@ export interface ExecutorOptions {
 	restrictToolNames?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	onResponse?: SimpleStreamOptions["onResponse"];
+	strictModelIdentity?: boolean;
 	/**
 	 * Epochs (ms, `Date.now()`) bracketing the concurrency-semaphore wait:
 	 * `invokedAt` is stamped at the spawn boundary before `acquire()`,
@@ -2444,6 +2446,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
+			...(options.strictModelIdentity ? { "retry.modelFallback": false } : undefined),
 		},
 		options.parentServiceTier,
 	);
@@ -2610,24 +2613,43 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			const defaultRetryFallbackChain =
-				configuredModelPatterns.length === 1
+				!options.strictModelIdentity && configuredModelPatterns.length === 1
 					? resolveSubagentDefaultRetryFallbackChain(subagentSettings)
 					: undefined;
+			const resolution = options.strictModelIdentity
+				? await awaitAbortable(
+						(async () => {
+							const resolved = resolveModelOverride(modelPatterns, modelRegistry, settings);
+							if (!resolved.model) {
+								throw new Error(
+									`Strict model identity could not resolve requested model: ${modelPatterns.join(", ")}`,
+								);
+							}
+							const apiKey = await modelRegistry.getApiKey(resolved.model, id);
+							if (apiKey !== kNoAuth && !isAuthenticated(apiKey)) {
+								throw new Error(
+									`Strict model identity has no working credentials for ${formatModelStringWithRouting(resolved.model)}`,
+								);
+							}
+							return { ...resolved, authFallbackUsed: false };
+						})(),
+					)
+				: await awaitAbortable(
+						resolveModelOverrideWithAuthFallback(
+							modelPatterns,
+							options.parentActiveModelPattern,
+							modelRegistry,
+							settings,
+							id,
+						),
+					);
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
 				warning: modelResolutionWarning,
-			} = await awaitAbortable(
-				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
-					options.parentActiveModelPattern,
-					modelRegistry,
-					settings,
-					id,
-				),
-			);
+			} = resolution;
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -2642,14 +2664,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					resolvedModel: model.id,
 				});
 			}
-			const retryFallbackRole = installSubagentRetryFallbackChain({
-				settings: subagentSettings,
-				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, settings),
-				defaultFallbackChain: defaultRetryFallbackChain,
-				model,
-				authFallbackUsed,
-			});
+			const retryFallbackRole = options.strictModelIdentity
+				? undefined
+				: installSubagentRetryFallbackChain({
+						settings: subagentSettings,
+						id,
+						candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, settings),
+						defaultFallbackChain: defaultRetryFallbackChain,
+						model,
+						authFallbackUsed,
+					});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {
 					role: retryFallbackRole,
@@ -2690,10 +2714,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn.
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = resolveAgentPrewalkPattern({
-				settingsOverride: settings.get("task.agentPrewalk")[agent.name],
-				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
-			});
+			const prewalkPattern = options.strictModelIdentity
+				? undefined
+				: resolveAgentPrewalkPattern({
+						settingsOverride: settings.get("task.agentPrewalk")[agent.name],
+						agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
+					});
 			if (prewalkPattern) {
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
 				const target = resolvedPrewalk.model;
@@ -2846,6 +2872,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},
+				onResponse: options.onResponse,
 				// Workflow prepare installs these on the parent session; createTools
 				// must see them on the child ToolSession (argumentAliases / processResult).
 				workflowToolOptimization: options.workflowToolOptimization,

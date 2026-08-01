@@ -49,6 +49,56 @@ export interface ArtifactHeader {
 	promptVersion?: string;
 }
 
+export interface WorkPackageV1 {
+	id: string;
+	assignment: string;
+	paths: string[];
+	dependsOn: string[];
+}
+
+export type WorkPackageRunStatusV1 = "pending" | "succeeded" | "failed";
+
+export interface WorkPackageExecutionV1 extends WorkPackageV1 {
+	status: WorkPackageRunStatusV1;
+	invocationAttemptId?: string;
+	implementation?: ImplementationArtifactV1;
+	errorKind?: WorkflowErrorKind;
+	errorSummary?: string;
+}
+
+export interface WorkPackageMergeV1 {
+	status: "pending" | "applied" | "failed";
+	order: string[];
+	patchPath?: string;
+	changesApplied?: boolean;
+	summary?: string;
+}
+
+export interface WorkPackageStateArtifactV1 extends ArtifactHeader {
+	kind: "work-package-state";
+	revision: number;
+	mode: "capture_then_apply";
+	packages: WorkPackageExecutionV1[];
+	merge: WorkPackageMergeV1;
+}
+
+export interface CapturedChangesMergeRequest {
+	workflowId: string;
+	attemptId: string;
+	cwd: string;
+	patches: readonly { packageId: string; patchPath: string }[];
+	outputPatchPath: string;
+	signal?: AbortSignal;
+}
+
+export interface CapturedChangesMergeResult {
+	patchPath: string;
+	changesApplied: boolean;
+	summary: string;
+}
+
+export type CapturedChangesMerger = (request: CapturedChangesMergeRequest) => Promise<CapturedChangesMergeResult>;
+
 export interface PlanArtifactV1 extends ArtifactHeader {
 	kind: "plan";
 	summary: string;
@@ -64,6 +114,7 @@ export interface PlanArtifactV1 extends ArtifactHeader {
 		description: string;
 		dependsOn: string[];
 	}>;
+	workPackages?: WorkPackageV1[];
 	acceptanceCriteria: string[];
 	verificationCommands: string[];
 	risks: string[];
@@ -181,6 +232,138 @@ export interface StageHandoffArtifactRef {
 }
 
 export type WorkflowRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer" | "repair";
+export type WorkflowQualityTier = "balanced" | "critical";
+
+export type ModelIdentityProvenance =
+	| "configured"
+	| "local_resolution"
+	| "provider_echo"
+	| "gateway_attestation"
+	| "unknown";
+
+export interface ModelIdentityCoordinatesV1 {
+	provider: string | null;
+	model: string | null;
+	checkpoint: string | null;
+	provenance: ModelIdentityProvenance;
+}
+
+export interface ConfiguredModelIdentityV1 extends ModelIdentityCoordinatesV1 {
+	profileId: string;
+	modelPattern: string;
+	requestedEffort: ConfiguredThinkingLevel | null;
+	modelFamily: string | null;
+}
+
+export interface WorkflowRuntimeIdentityReceiptV1 {
+	schemaVersion: 1;
+	configured: ConfiguredModelIdentityV1;
+	localResolution: ModelIdentityCoordinatesV1;
+	attested: ModelIdentityCoordinatesV1;
+	exactMatch: boolean | null;
+	effortSupported: boolean | null;
+	modelFamily: string | null;
+}
+
+export interface QualityRouteProfileSnapshotV1 {
+	profile: ModelProfile;
+	configuredIdentity: ConfiguredModelIdentityV1;
+}
+
+export interface QualityRouteSnapshotV1 {
+	schemaVersion: 1;
+	qualityTier: WorkflowQualityTier;
+	degradedMode: false;
+	routes: Readonly<Record<WorkflowRole, readonly string[]>>;
+	profiles: readonly QualityRouteProfileSnapshotV1[];
+	fingerprint: string;
+}
+
+export type WorkflowModelBackedStage = "planning" | "plan_review" | "implementing" | "code_review" | "repairing";
+
+export type WorkflowEvidenceStatus = "verified" | "legacy" | "unknown" | "invalid";
+
+/** Secret-safe identity projection used by persisted workflow status reports. */
+export interface WorkflowIdentityCoordinatesEvidenceV1 {
+	provider: string | null;
+	model: string | null;
+	checkpoint: string | null;
+	provenance: ModelIdentityProvenance;
+}
+
+export interface WorkflowConfiguredIdentityEvidenceV1 extends WorkflowIdentityCoordinatesEvidenceV1 {
+	profileId: string | null;
+	modelPattern: string | null;
+	requestedEffort: string | null;
+	modelFamily: string | null;
+}
+
+export interface WorkflowConfiguredStageRouteEvidenceV1 {
+	stage: WorkflowModelBackedStage;
+	role: WorkflowRole;
+	orderedProfileIds: string[] | null;
+}
+
+export interface WorkflowRoutingSkipEvidenceV1 {
+	profileId: string | null;
+	reason: string;
+}
+
+export interface WorkflowRoutingDecisionEvidenceV1 {
+	selectedProfileId: string | null;
+	configuredProfileIds: string[] | null;
+	reason: string | null;
+	fallbackFrom: string | null;
+	skipped: WorkflowRoutingSkipEvidenceV1[];
+}
+
+export interface WorkflowModelExecutionEvidenceV1 {
+	profileId: string | null;
+	configuredIdentity: WorkflowConfiguredIdentityEvidenceV1 | null;
+	localResolution: WorkflowIdentityCoordinatesEvidenceV1 | null;
+	attestedIdentity: WorkflowIdentityCoordinatesEvidenceV1 | null;
+	exactIdentityMatch: boolean | null;
+	effortSupported: boolean | null;
+	modelFamily: string | null;
+}
+
+export interface WorkflowModelAttemptEvidenceV1 {
+	attemptId: string;
+	stage: WorkflowModelBackedStage;
+	role: WorkflowRole;
+	ordinal: number;
+	status: string;
+	configuredProfileId: string | null;
+	evidenceStatus: WorkflowEvidenceStatus;
+	routing: WorkflowRoutingDecisionEvidenceV1[];
+	executions: WorkflowModelExecutionEvidenceV1[];
+}
+
+export interface WorkflowQualityRouteStatusEvidenceV1 {
+	status: WorkflowEvidenceStatus;
+	qualityTier: WorkflowQualityTier | null;
+	snapshotFingerprint: string | null;
+	configuredStages: WorkflowConfiguredStageRouteEvidenceV1[];
+}
+
+/** Safe, persisted-only status projection. Request/policy/artifact bodies are intentionally excluded. */
+export interface WorkflowStatusReportV1 {
+	schemaVersion: 1;
+	workflowId: string;
+	status: WorkflowStatus;
+	currentStage: WorkflowStatus;
+	version: number;
+	attemptCount: number;
+	artifactCount: number;
+	transitionCount: number;
+	budgetTotals: Record<string, unknown> | null;
+	qualityRoute: WorkflowQualityRouteStatusEvidenceV1;
+	modelAttempts: WorkflowModelAttemptEvidenceV1[];
+}
+
+export type WorkflowQualityRoutes = Partial<
+	Record<WorkflowQualityTier, Readonly<Record<WorkflowRole, readonly string[]>>>
+>;
 
 /** Per-model system prompt style and instruction shaping. */
 export interface PromptStrategy {
@@ -299,6 +482,8 @@ export interface WorkflowModelProfile {
 	 */
 	optimizationProfileId?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Provider/gateway execution identity must exactly attest this profile before output is trusted. */
+	strictIdentity?: boolean;
 	promptTemplate: string;
 	promptVersion: string;
 	toolPolicyId: string;
@@ -383,6 +568,7 @@ export interface WorkflowAgentRequest {
 
 export interface WorkflowAgentResult<TArtifact = unknown> {
 	artifact: TArtifact;
+
 	rawResultId: string;
 	attemptId: string;
 	patchPath?: string;
@@ -403,6 +589,10 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	optimizationReceipts?: unknown[];
 	/** Deterministic schema repair attempt receipt when raw repair ran. */
 	schemaRepairReceipt?: unknown;
+	/** Configured/local/provider-attested identity layers for this execution. */
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	/** Catalog-derived lineage from the attested execution identity. */
+	modelFamily?: string;
 }
 
 export interface WorkflowRuntimeEvidence {
@@ -413,6 +603,8 @@ export interface WorkflowRuntimeEvidence {
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	contextLedger?: ContextLedgerV1;
 	optimizationReceipts?: unknown[];
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	modelFamily?: string;
 	/** Relative artifact kind ref when scope-metrics was persisted. */
 	scopeMetricsKind?: string;
 }
@@ -421,6 +613,7 @@ export interface WorkflowRequest {
 	workflowId?: string;
 	request: string;
 	constraints?: string;
+	qualityTier?: WorkflowQualityTier;
 }
 
 export type WorkflowErrorKind =
@@ -432,6 +625,7 @@ export type WorkflowErrorKind =
 	| "cancelled"
 	| "provider_transient"
 	| "provider_permanent"
+	| "identity_mismatch"
 	| "schema_violation"
 	| "tool_failure"
 	| "verification_failure"
@@ -493,6 +687,7 @@ export interface Attempt {
 export interface RuntimePort {
 	buildRequest(request: WorkflowAgentRequest): WorkflowAgentRequest;
 	run<TArtifact = unknown>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>>;
+	mergeCapturedChanges?: CapturedChangesMerger;
 }
 
 /** Port used by verify stages — deterministic commands only. */
@@ -529,9 +724,18 @@ export interface WorkflowAvailabilityProbeRequest {
 /** Outcome of one physical probe before per-profile expansion. */
 export interface WorkflowAvailabilityProbeResult {
 	status: AvailabilityProbeStatus;
-	/** Only from runtime response metadata — never from profile config/vendor. */
+	/** Local registry/session resolution; never provider attestation. */
+	localProvider?: string;
+	localModel?: string;
+	/** Provider/gateway-attested identity only. */
+	attestedProvider?: string;
+	attestedModel?: string;
+	attestedCheckpoint?: string;
+	identityProvenance?: ModelIdentityProvenance;
+	exactIdentityMatch?: boolean | null;
+	effortSupported?: boolean | null;
+	/** Compatibility projection: attested identity for strict profiles, local identity otherwise. */
 	actualProvider?: string;
-	/** Only from runtime response metadata — never from profile config/vendor. */
 	actualModel?: string;
 	/** Omitted when the target never started before the overall deadline. */
 	latencyMs?: number;
@@ -560,6 +764,14 @@ export interface WorkflowAvailabilityProfileResult {
 	runtime: "embedded";
 	actualProvider?: string;
 	actualModel?: string;
+	localProvider?: string;
+	localModel?: string;
+	attestedProvider?: string;
+	attestedModel?: string;
+	attestedCheckpoint?: string;
+	identityProvenance?: ModelIdentityProvenance;
+	exactIdentityMatch?: boolean | null;
+	effortSupported?: boolean | null;
 	latencyMs?: number;
 	source?: "live" | "shared_live";
 	/** Marks this usage as preflight diagnostics, not stage/workflow model usage. */

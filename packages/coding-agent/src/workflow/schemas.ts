@@ -29,6 +29,15 @@ const ArtifactHeaderSchema = z
 	})
 	.strict();
 
+const WorkPackageSchema = z
+	.object({
+		id: z.string().min(1),
+		assignment: z.string().min(1),
+		paths: z.array(z.string().min(1)).min(1),
+		dependsOn: z.array(z.string()),
+	})
+	.strict();
+
 export const PlanArtifactSchema = ArtifactHeaderSchema.extend({
 	kind: z.literal("plan"),
 	summary: z.string().min(1),
@@ -52,6 +61,7 @@ export const PlanArtifactSchema = ArtifactHeaderSchema.extend({
 			})
 			.strict(),
 	),
+	workPackages: z.array(WorkPackageSchema).optional(),
 	acceptanceCriteria: z.array(z.string()),
 	verificationCommands: z.array(z.string()),
 	risks: z.array(z.string()),

@@ -27,7 +27,8 @@ export interface AvailabilityCandidate {
  */
 export function availabilityProbeDedupeKey(profile: ModelProfile, authScope = "default"): string {
 	const model = Array.isArray(profile.modelPattern) ? profile.modelPattern.join(",") : String(profile.modelPattern);
-	return `embedded|${model}|${authScope}`;
+	const effort = profile.thinkingLevel ?? "none";
+	return `embedded|${model}|${effort}|strict:${profile.strictIdentity === true}|${authScope}`;
 }
 
 /**

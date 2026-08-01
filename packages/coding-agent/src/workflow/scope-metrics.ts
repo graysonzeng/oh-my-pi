@@ -368,7 +368,12 @@ export function buildScopeMetrics(input: ScopeMetricsInput): ScopeMetricsV1 {
 
 /** Derive planned paths from a plan artifact. */
 export function plannedFilesFromPlan(plan: PlanArtifactV1): string[] {
-	return plan.affectedFiles.map(f => normalizePath(f.path));
+	return [
+		...new Set([
+			...plan.affectedFiles.map(file => normalizePath(file.path)),
+			...(plan.workPackages?.flatMap(workPackage => workPackage.paths.map(normalizePath)) ?? []),
+		]),
+	];
 }
 
 /** Merge plan affected files with optional benchmark/case allowlist. */

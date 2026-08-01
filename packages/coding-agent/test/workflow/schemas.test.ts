@@ -56,6 +56,28 @@ describe("Workflow schemas", () => {
 		).toBe("verification");
 	});
 
+	it("accepts optional work packages and keeps legacy plans valid", () => {
+		const parsed = PlanArtifactSchema.parse({
+			...validPlan,
+			workPackages: [
+				{
+					id: "pkg-a",
+					assignment: "Implement the first slice",
+					paths: ["src/first.ts"],
+					dependsOn: [],
+				},
+				{
+					id: "pkg-b",
+					assignment: "Implement the second slice",
+					paths: ["src/second.ts"],
+					dependsOn: ["pkg-a"],
+				},
+			],
+		});
+		expect(parsed.workPackages).toHaveLength(2);
+		expect(PlanArtifactSchema.parse(validPlan).workPackages).toBeUndefined();
+	});
+
 	it("rejects unknown schema versions and stages", () => {
 		expect(() => PlanArtifactSchema.parse({ ...validPlan, schemaVersion: 2 })).toThrow();
 		expect(() => PlanArtifactSchema.parse({ ...validPlan, stage: "unknown" })).toThrow();
@@ -134,6 +156,33 @@ describe("Workflow schemas", () => {
 
 	it("rejects unknown keys on strict objects", () => {
 		expect(() => PlanArtifactSchema.parse({ ...validPlan, extraField: true })).toThrow();
+		expect(() =>
+			PlanArtifactSchema.parse({
+				...validPlan,
+				workPackages: [
+					{
+						id: "pkg-a",
+						assignment: "Implement the first slice",
+						paths: ["src/first.ts"],
+						dependsOn: [],
+						extraField: true,
+					},
+				],
+			}),
+		).toThrow();
+		expect(() =>
+			PlanArtifactSchema.parse({
+				...validPlan,
+				workPackages: [
+					{
+						id: "pkg-a",
+						assignment: "Implement the first slice",
+						paths: [],
+						dependsOn: [],
+					},
+				],
+			}),
+		).toThrow();
 	});
 
 	it("validates persisted workflow state", () => {

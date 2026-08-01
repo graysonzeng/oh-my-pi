@@ -54,6 +54,22 @@ const commandRunItem = {
 	},
 } as const;
 
+const workPackageItem = {
+	type: "object",
+	additionalProperties: false,
+	required: ["id", "assignment", "paths", "dependsOn"],
+	properties: {
+		id: { type: "string", minLength: 1 },
+		assignment: { type: "string", minLength: 1 },
+		paths: {
+			type: "array",
+			minItems: 1,
+			items: { type: "string", minLength: 1 },
+		},
+		dependsOn: { type: "array", items: { type: "string" } },
+	},
+} as const;
+
 export const PlanArtifactJsonSchema = {
 	type: "object",
 	additionalProperties: false,
@@ -106,6 +122,7 @@ export const PlanArtifactJsonSchema = {
 				},
 			},
 		},
+		workPackages: { type: "array", items: workPackageItem },
 		acceptanceCriteria: { type: "array", items: { type: "string" } },
 		verificationCommands: { type: "array", items: { type: "string" } },
 		risks: { type: "array", items: { type: "string" } },

@@ -88,6 +88,11 @@ export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
+/** Grok family ids in bare or provider-namespaced forms (`grok-*`, `x-ai/grok-*`). */
+export const isGrokModelId = memo((modelId: string): boolean => {
+	return /(^|[/.])grok[-.]/i.test(modelId);
+});
+
 const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3", "grok-4.5"] as const;
 
 /**
@@ -250,6 +255,7 @@ export const modelFamilyToken = memo((modelId: string): string => {
 	if (parsed.family !== "unknown") return parsed.family;
 	if (isClaudeModelId(modelId) || isAnthropicNamespacedModelId(modelId)) return "anthropic";
 	if (isOpenAIModelId(modelId)) return "openai";
+	if (isGrokModelId(modelId)) return "xai";
 	if (isKimiModelId(modelId)) return "kimi";
 	if (isQwenModelId(modelId)) return "qwen";
 	if (isMinimaxM2FamilyModelId(modelId) || isMinimaxM3FamilyModelId(modelId)) return "minimax";

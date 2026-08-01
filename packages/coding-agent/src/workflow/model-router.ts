@@ -1,12 +1,40 @@
 import { WorkflowPolicyError } from "./errors";
 import type { FindingTracker } from "./finding-tracker";
-import type { ModelProfile, ReviewFindingV1, WorkflowRole } from "./types";
+import { configuredIdentityForProfile } from "./model-profile-registry";
+import type {
+	ModelIdentityProvenance,
+	ModelProfile,
+	ReviewFindingV1,
+	WorkflowQualityTier,
+	WorkflowRole,
+} from "./types";
+
+export interface RoutingSkip {
+	profileId: string;
+	reason:
+		| "profile_not_found"
+		| "role_mismatch"
+		| "unavailable"
+		| "excluded"
+		| "identity_mismatch"
+		| "attestation_missing"
+		| "effort_unsupported"
+		| "opaque_lineage"
+		| "author_lineage_conflict";
+	detail?: string;
+}
 
 export interface RoutingAudit {
 	profileId: string;
 	vendor: string;
 	reason: string;
 	degraded: boolean;
+	qualityTier?: WorkflowQualityTier;
+	snapshotFingerprint?: string;
+	candidateProfileIds?: readonly string[];
+	skipped?: readonly RoutingSkip[];
+	modelFamily?: string;
+	identityProvenance?: ModelIdentityProvenance;
 }
 
 export interface RoutingDecision extends RoutingAudit {
@@ -14,20 +42,30 @@ export interface RoutingDecision extends RoutingAudit {
 }
 
 export interface RouteOptions {
-	/** Prefer this vendor when multiple profiles match. */
+	/** Ordered immutable candidate ids from a quality-route snapshot. */
+	preferredProfileIds?: readonly string[];
+	qualityTier?: WorkflowQualityTier;
+	snapshotFingerprint?: string;
+	/** Per-profile preflight/runtime reason for an unavailable candidate. */
+	unavailableReasons?: Readonly<Record<string, string>>;
+	/** Prefer this vendor when multiple profiles match (legacy router). */
 	vendorPreference?: string;
-	/** Implementer vendor for diversity checks on code_reviewer. */
+	/** Implementer vendor for legacy diversity checks on code_reviewer. */
 	implementerVendor?: string;
+	/** Attested implementer lineage for quality-route reviewer independence. */
+	implementerModelFamily?: string;
 	/** Whether independent review is required (default true for code_reviewer). */
 	requireIndependentReview?: boolean;
-	/** Opt-in degraded mode allows same-vendor review. */
+	/** Opt-in degraded mode allows same-vendor review only on legacy routes. */
 	degradedMode?: boolean;
 	/** Profile ids that are currently unavailable. */
 	unavailableProfileIds?: Iterable<string>;
 	/** Profile ids forbidden for this decision (for reviewer diversity). */
 	excludedProfileIds?: Iterable<string>;
-	/** Prefer a different vendor when one is available. */
+	/** Prefer a different vendor when one is available (legacy router). */
 	avoidVendor?: string;
+	/** Attested author lineage that the reviewer must differ from. */
+	avoidModelFamily?: string;
 	/** Finding used for repair routing. */
 	finding?: ReviewFindingV1;
 	/** Tracker for repeated/complex escalation. */
@@ -64,6 +102,7 @@ export class ModelRouter {
 	 * Throws WorkflowPolicyError when independent review is required and no alternate vendor exists.
 	 */
 	resolve(role: WorkflowRole, options: RouteOptions = {}): RoutingDecision {
+		if (options.preferredProfileIds) return this.#resolveQualityRoute(role, options);
 		const unavailable = new Set([...(options.unavailableProfileIds ?? []), ...(options.excludedProfileIds ?? [])]);
 		const preferReasoning =
 			options.preferReasoningRepair ||
@@ -177,6 +216,92 @@ export class ModelRouter {
 			vendor: primary.vendor,
 			reason: reasonBase,
 			degraded: false,
+		};
+	}
+
+	#resolveQualityRoute(role: WorkflowRole, options: RouteOptions): RoutingDecision {
+		if (options.degradedMode) {
+			throw new WorkflowPolicyError("quality_route_degraded_mode_forbidden", {
+				qualityTier: options.qualityTier,
+			});
+		}
+		const candidateProfileIds = [...(options.preferredProfileIds ?? [])];
+		if (candidateProfileIds.length === 0) {
+			throw new WorkflowPolicyError("empty_quality_route_role", { role, qualityTier: options.qualityTier });
+		}
+		const unavailable = new Set(options.unavailableProfileIds ?? []);
+		const excluded = new Set(options.excludedProfileIds ?? []);
+		const skipped: RoutingSkip[] = [];
+		const candidates: Array<{ profile: ModelProfile; modelFamily: string }> = [];
+		const authorModelFamily = options.avoidModelFamily ??
+			(role === "code_reviewer" ? options.implementerModelFamily : undefined);
+		for (const profileId of candidateProfileIds) {
+			const profile = this.#profiles.get(profileId);
+			if (!profile) {
+				skipped.push({ profileId, reason: "profile_not_found" });
+				continue;
+			}
+			if (!profile.roles.includes(role)) {
+				skipped.push({ profileId, reason: "role_mismatch" });
+				continue;
+			}
+			if (excluded.has(profileId)) {
+				skipped.push({ profileId, reason: "excluded" });
+				continue;
+			}
+			if (unavailable.has(profileId)) {
+				const detail = options.unavailableReasons?.[profileId];
+				const reason = detail?.includes("identity_mismatch")
+					? "identity_mismatch"
+					: detail?.includes("attestation") || detail?.includes("missing_identity")
+						? "attestation_missing"
+						: detail?.includes("effort")
+							? "effort_unsupported"
+							: "unavailable";
+				skipped.push({ profileId, reason, detail });
+				continue;
+			}
+			let modelFamily: string | null;
+			try {
+				modelFamily = configuredIdentityForProfile(profile).modelFamily;
+			} catch (error) {
+				modelFamily = null;
+				skipped.push({
+					profileId,
+					reason: "opaque_lineage",
+					detail: error instanceof Error ? error.message : String(error),
+				});
+			}
+			if (!modelFamily) continue;
+			if (authorModelFamily && modelFamily === authorModelFamily) {
+				skipped.push({ profileId, reason: "author_lineage_conflict", detail: authorModelFamily });
+				continue;
+			}
+			candidates.push({ profile, modelFamily });
+		}
+		const selected = candidates[0];
+		if (!selected) {
+			throw new WorkflowPolicyError(authorModelFamily ? "independent_reviewer_unavailable" : "model_profile_not_found", {
+				role,
+				qualityTier: options.qualityTier,
+				authorModelFamily,
+				candidateProfileIds,
+				skipped,
+			});
+		}
+		const primaryId = candidateProfileIds[0];
+		return {
+			profile: selected.profile,
+			profileId: selected.profile.id,
+			vendor: selected.profile.vendor,
+			reason: selected.profile.id === primaryId ? `quality_route:${role}` : `fallback_from:${primaryId}`,
+			degraded: false,
+			qualityTier: options.qualityTier,
+			snapshotFingerprint: options.snapshotFingerprint,
+			candidateProfileIds,
+			skipped,
+			modelFamily: selected.modelFamily,
+			identityProvenance: "configured",
 		};
 	}
 

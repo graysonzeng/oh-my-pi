@@ -4,13 +4,15 @@
  * Pure unit tests may import this file with an injected embeddedRunner.
  * Do not touch worker host / __omp_worker_* paths — those stay independent.
  */
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { mergeIsolatedChanges } from "../task/isolation-runner";
 import { runStructuredSubagent } from "../task/structured-subagent";
+import type { SingleResult } from "../task/types";
 import { defaultWorkflowArtifactDir } from "./artifact-store";
 import { EmbeddedWorkflowAvailabilityPort } from "./availability-adapter";
+import { WorkflowCancelledError } from "./errors";
 import { RuntimeAdapter, type StructuredRunner, type StructuredRunnerRequest } from "./runtime-adapter";
-import type { WorkflowAvailabilityPort } from "./types";
+import type { CapturedChangesMerger, WorkflowAvailabilityPort } from "./types";
 
 async function preservePatchArtifact(
 	patchPath: string | undefined,
@@ -21,7 +23,6 @@ async function preservePatchArtifact(
 	try {
 		const text = await Bun.file(patchPath).text();
 		const destDir = path.join(defaultWorkflowArtifactDir(), workflowId, "patches");
-		await fs.mkdir(destDir, { recursive: true });
 		const dest = path.join(destDir, `${attemptId}.patch`);
 		await Bun.write(dest, text);
 		return dest;
@@ -73,6 +74,8 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 		signal: request.signal,
 		retainArtifacts: isolationRequested || request.retainArtifacts === true,
 		allowedTools: request.allowedTools,
+		onResponse: request.onResponse,
+		strictModelIdentity: request.strictModelIdentity,
 	});
 
 	let patchPath = result.result.patchPath;
@@ -101,15 +104,66 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 	};
 };
 
+const productionCapturedChangesMerger: CapturedChangesMerger = async request => {
+	if (request.signal?.aborted) {
+		throw new WorkflowCancelledError("Captured changes merge cancelled");
+	}
+
+	const patchTexts: string[] = [];
+	for (const patch of request.patches) {
+		if (request.signal?.aborted) {
+			throw new WorkflowCancelledError("Captured changes merge cancelled");
+		}
+		const text = await Bun.file(patch.patchPath).text();
+		patchTexts.push(text.length === 0 || text.endsWith("\n") ? text : `${text}\n`);
+	}
+
+	if (request.signal?.aborted) {
+		throw new WorkflowCancelledError("Captured changes merge cancelled");
+	}
+	await Bun.write(request.outputPatchPath, patchTexts.join(""));
+
+	if (request.signal?.aborted) {
+		throw new WorkflowCancelledError("Captured changes merge cancelled");
+	}
+	const result: SingleResult = {
+		index: 0,
+		id: `${request.workflowId}:${request.attemptId}`,
+		agent: "workflow",
+		agentSource: "bundled",
+		task: "Merge captured workflow changes",
+		exitCode: 0,
+		output: "",
+		stderr: "",
+		truncated: false,
+		durationMs: 0,
+		tokens: 0,
+		requests: 0,
+		patchPath: request.outputPatchPath,
+	};
+	const outcome = await mergeIsolatedChanges({
+		result,
+		repoRoot: request.cwd,
+		mergeMode: "patch",
+	});
+	return {
+		patchPath: request.outputPatchPath,
+		changesApplied: outcome.changesApplied === true,
+		summary: outcome.summary,
+	};
+};
+
 export interface DefaultRuntimeDependencies {
 	/** Override for tests; production uses runStructuredSubagent. */
 	embeddedRunner?: StructuredRunner;
+	/** Override the atomic captured-change merge seam in tests. */
+	mergeCapturedChanges?: CapturedChangesMerger;
 }
 
 /** Embedded multi-model runtime (RuntimeAdapter → structured-subagent). */
 export function createDefaultRuntimeAdapter(dependencies: DefaultRuntimeDependencies = {}): RuntimeAdapter {
 	const embeddedRunner = dependencies.embeddedRunner ?? productionRunner;
-	return new RuntimeAdapter(embeddedRunner);
+	return new RuntimeAdapter(embeddedRunner, dependencies.mergeCapturedChanges ?? productionCapturedChangesMerger);
 }
 
 /**

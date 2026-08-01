@@ -12,6 +12,7 @@ const workflowSchema = type({
 	op: type("'start' | 'status' | 'resume' | 'cancel'").describe("workflow operation"),
 	"request?": type("string").describe("start: user request / objective"),
 	"constraints?": type("string").describe("start: optional constraints"),
+	"qualityTier?": type("'balanced' | 'critical'").describe("start: quality route tier; defaults from settings"),
 	"workflowId?": type("string").describe("status/resume/cancel: workflow id"),
 	"degradedMode?": type("boolean").describe("start: allow same-vendor review"),
 	"singleStep?": type("boolean").describe("resume: run only one stage"),
@@ -101,13 +102,13 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				const request = params.request?.trim();
 				if (!request) throw new ToolError("request is required when op=start");
 				const started = await engine.start(
-					{ request, constraints: params.constraints },
+					{ request, constraints: params.constraints, qualityTier: params.qualityTier },
 					{ degradedMode: params.degradedMode === true },
 				);
 				const workflowId = started.workflowId;
 				activeWorkflowId = workflowId;
 				const state = await engine.getState(workflowId);
-				const availabilityText = formatAvailabilitySummary(started.availability);
+				const availabilityText = `${formatQualityRoutePolicy(state?.policyJson)}\n${formatAvailabilitySummary(started.availability)}`;
 				return {
 					content: [
 						{
@@ -139,6 +140,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 					`Artifacts: ${snapshot.artifacts.length}`,
 					`Transitions: ${snapshot.transitions.length}`,
 					snapshot.budgetTotals ? `Budget: ${JSON.stringify(snapshot.budgetTotals)}` : "Budget: (none)",
+					formatQualityRoutePolicy(snapshot.state.policyJson),
 				].join("\n");
 				return {
 					content: [{ type: "text", text }],
@@ -162,11 +164,12 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 					forceUnlock: params.forceUnlock === true,
 				});
 				const availabilityText = result.availability ? `\n${formatAvailabilitySummary(result.availability)}` : "";
+				const qualityRouteText = `\n${formatQualityRoutePolicy(result.state.policyJson)}`;
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Workflow resumed: ${workflowId}\nStatus: ${result.state.status}\nStage: ${result.state.currentStage}${availabilityText}`,
+							text: `Workflow resumed: ${workflowId}\nStatus: ${result.state.status}\nStage: ${result.state.currentStage}${qualityRouteText}${availabilityText}`,
 						},
 					],
 					details: {
@@ -204,20 +207,49 @@ function formatAvailabilitySummary(report: WorkflowAvailabilityReport): string {
 	const lines = [`Availability: ${report.status} (scope=${report.scope}, wall=${report.wallLatencyMs}ms)`];
 	for (const row of report.profiles) {
 		const id = `${row.role}/${row.profileId}`;
+		const local =
+			row.localProvider || row.localModel
+				? `${row.localProvider ?? "unknown"}/${row.localModel ?? "unknown"}`
+				: "unknown";
+		const attested =
+			row.attestedProvider || row.attestedModel
+				? `${row.attestedProvider ?? "unknown"}/${row.attestedModel ?? "unknown"}`
+				: "unknown";
+		const identity = `local=${local} attested=${attested} exact=${row.exactIdentityMatch ?? "unknown"}`;
+		const cost = row.reportedCostUsd === undefined ? "" : ` cost=${row.reportedCostUsd ?? "unknown"}`;
 		if (row.status === "available") {
-			const identity =
-				row.actualProvider && row.actualModel ? `${row.actualProvider}/${row.actualModel}` : "(identity missing)";
-			const cost = row.reportedCostUsd === undefined ? "" : ` cost=${row.reportedCostUsd ?? "unknown"}`;
 			lines.push(`  - ${id}: available ${identity} ${row.latencyMs ?? "?"}ms${cost} [${row.requirement}]`);
 		} else {
 			const err = row.errorKind ? ` ${row.errorKind}` : "";
 			const latency = row.latencyMs === undefined ? "" : ` ${row.latencyMs}ms`;
-			const cost = row.reportedCostUsd === undefined ? "" : ` cost=${row.reportedCostUsd ?? "unknown"}`;
-			lines.push(`  - ${id}: ${row.status}${err}${latency}${cost} [${row.requirement}]`);
+			lines.push(`  - ${id}: ${row.status}${err}${latency}${cost} ${identity} [${row.requirement}]`);
 		}
 	}
 	if (report.blockedRoles && report.blockedRoles.length > 0) {
 		lines.push(`  blocked roles: ${report.blockedRoles.join(", ")}`);
 	}
 	return lines.join("\n");
+}
+
+function formatQualityRoutePolicy(policyJson: string | undefined): string {
+	if (!policyJson) return "Quality route: legacy role-based routing";
+	try {
+		const policy = JSON.parse(policyJson) as {
+			qualityRouteSnapshot?: {
+				qualityTier?: unknown;
+				fingerprint?: unknown;
+				roles?: Record<string, { candidates?: Array<{ id?: unknown }> }>;
+			};
+		};
+		const route = policy.qualityRouteSnapshot;
+		if (!route) return "Quality route: legacy role-based routing";
+		const roles = Object.entries(route.roles ?? {})
+			.map(([role, value]) => `${role}=[${(value.candidates ?? []).map(candidate => String(candidate.id)).join(",")}]`)
+			.join(" ");
+		return `Quality route: tier=${String(route.qualityTier ?? "unknown")} fingerprint=${String(
+			route.fingerprint ?? "unknown",
+		)}${roles ? `\nConfigured routes: ${roles}` : ""}`;
+	} catch {
+		return "Quality route: invalid persisted policy";
+	}
 }

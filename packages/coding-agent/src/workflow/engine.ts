@@ -22,6 +22,12 @@ import {
 import { FindingTracker } from "./finding-tracker";
 import { assertSupportedModelProfile } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
+import {
+	compileQualityRouteSnapshot,
+	qualityRouteProfileIds,
+	qualityRouteProfiles,
+	verifyQualityRouteSnapshot,
+} from "./quality-route-snapshot";
 import { RuntimeAdapter } from "./runtime-adapter";
 import {
 	buildScopeMetrics,
@@ -48,9 +54,12 @@ import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
 import type {
 	Artifact,
+	CapturedChangesMergeResult,
 	ImplementationArtifactV1,
 	ModelProfile,
 	PlanArtifactV1,
+	ModelIdentityProvenance,
+	QualityRouteSnapshotV1,
 	ReviewArtifactV1,
 	ReviewFindingV1,
 	RuntimePort,
@@ -60,16 +69,134 @@ import type {
 	VerifierPort,
 	WorkflowAvailabilityPort,
 	WorkflowAvailabilityReport,
+	WorkflowConfiguredIdentityEvidenceV1,
+	WorkflowConfiguredStageRouteEvidenceV1,
+	WorkflowEvidenceStatus,
+	WorkflowIdentityCoordinatesEvidenceV1,
+	WorkflowModelAttemptEvidenceV1,
+	WorkflowModelBackedStage,
+	WorkflowModelExecutionEvidenceV1,
 	WorkflowRequest,
 	WorkflowRole,
 	WorkflowRuntimeEvidence,
+	WorkflowRuntimeIdentityReceiptV1,
+	WorkflowRoutingDecisionEvidenceV1,
+	WorkflowStatusReportV1,
 	WorkflowState,
 	WorkflowStatus,
+	WorkPackageStateArtifactV1,
 } from "./types";
 import { Verifier } from "./verifier";
+import {
+	aggregateWorkPackageImplementations,
+	buildWorkPackageExecutionPlan,
+	executeWorkPackagePlan,
+	renderWorkPackageAssignment,
+	WorkPackageExecutionError,
+	withWorkPackageMerge,
+} from "./work-packages";
 
 const TERMINAL: ReadonlySet<WorkflowStatus> = new Set(["completed", "blocked", "cancelled", "failed"]);
 
+const MODEL_STAGE_ROLES: readonly Readonly<{ stage: WorkflowModelBackedStage; role: WorkflowRole }>[] = [
+	{ stage: "planning", role: "planner" },
+	{ stage: "plan_review", role: "plan_reviewer" },
+	{ stage: "implementing", role: "implementer" },
+	{ stage: "code_review", role: "code_reviewer" },
+	{ stage: "repairing", role: "repair" },
+];
+
+const IDENTITY_PROVENANCE: Record<ModelIdentityProvenance, true> = {
+	configured: true,
+	local_resolution: true,
+	provider_echo: true,
+	gateway_attestation: true,
+	unknown: true,
+};
+
+function evidenceRecord(value: unknown): Record<string, unknown> | null {
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function evidenceString(value: unknown): string | null {
+	return typeof value === "string" ? redactSecretsInText(value).slice(0, 500) : null;
+}
+
+function evidenceBoolean(value: unknown): boolean | null {
+	return typeof value === "boolean" ? value : null;
+}
+
+function evidenceProvenance(value: unknown): ModelIdentityProvenance {
+	return typeof value === "string" && IDENTITY_PROVENANCE[value as ModelIdentityProvenance] === true
+		? (value as ModelIdentityProvenance)
+		: "unknown";
+}
+
+function identityCoordinatesEvidence(value: unknown): WorkflowIdentityCoordinatesEvidenceV1 | null {
+	const record = evidenceRecord(value);
+	if (!record) return null;
+	return {
+		provider: evidenceString(record.provider),
+		model: evidenceString(record.model),
+		checkpoint: evidenceString(record.checkpoint),
+		provenance: evidenceProvenance(record.provenance),
+	};
+}
+
+function configuredIdentityEvidence(value: unknown): WorkflowConfiguredIdentityEvidenceV1 | null {
+	const record = evidenceRecord(value);
+	if (!record) return null;
+	return {
+		...identityCoordinatesEvidence(record)!,
+		profileId: evidenceString(record.profileId),
+		modelPattern: evidenceString(record.modelPattern),
+		requestedEffort: evidenceString(record.requestedEffort),
+		modelFamily: evidenceString(record.modelFamily),
+	};
+}
+
+function evidenceStringArray(value: unknown): string[] | null {
+	if (!Array.isArray(value) || !value.every(item => typeof item === "string")) return null;
+	return value.map(item => evidenceString(item)!);
+}
+
+function routingDecisionEvidence(value: unknown): WorkflowRoutingDecisionEvidenceV1 | null {
+	const record = evidenceRecord(value);
+	if (!record) return null;
+	const reason = evidenceString(record.reason);
+	const skipped = Array.isArray(record.skipped)
+		? record.skipped.flatMap(item => {
+				const skip = evidenceRecord(item);
+				if (!skip) return [];
+				return [{ profileId: evidenceString(skip.profileId), reason: evidenceString(skip.reason) ?? "unknown" }];
+			})
+		: [];
+	return {
+		selectedProfileId: evidenceString(record.profileId),
+		configuredProfileIds: evidenceStringArray(record.candidateProfileIds),
+		reason,
+		fallbackFrom: reason?.startsWith("fallback_from:") ? reason.slice("fallback_from:".length) || null : null,
+		skipped,
+	};
+}
+
+function modelExecutionEvidence(value: unknown): WorkflowModelExecutionEvidenceV1 | null {
+	const record = evidenceRecord(value);
+	if (!record) return null;
+	return {
+		profileId: evidenceString(record.profileId),
+		configuredIdentity: configuredIdentityEvidence(record.configuredIdentity),
+		localResolution: identityCoordinatesEvidence(record.localResolution),
+		attestedIdentity: identityCoordinatesEvidence(record.attestedIdentity),
+		exactIdentityMatch: evidenceBoolean(record.exactIdentityMatch),
+		effortSupported: evidenceBoolean(record.effortSupported),
+		modelFamily: evidenceString(record.modelFamily),
+	};
+}
+
+function modelStageRole(stage: string): Readonly<{ stage: WorkflowModelBackedStage; role: WorkflowRole }> | null {
+	return MODEL_STAGE_ROLES.find(entry => entry.stage === stage) ?? null;
+}
 export interface WorkflowEngineOptions {
 	store?: WorkflowStore;
 	router?: ModelRouter;
@@ -101,6 +228,7 @@ export interface WorkflowRunResult {
 	verification?: VerificationArtifactV1;
 	codeReview?: ReviewArtifactV1;
 	finalVerification?: VerificationArtifactV1;
+	workPackageState?: WorkPackageStateArtifactV1;
 	routingAudit: Array<Record<string, unknown>>;
 	/** Preflight report from this start/resume invocation (when availability port is configured). */
 	availability?: WorkflowAvailabilityReport;
@@ -112,7 +240,8 @@ export interface WorkflowRunResult {
  */
 export class WorkflowEngine {
 	readonly #store: WorkflowStore;
-	readonly #router: ModelRouter;
+	#router: ModelRouter;
+	readonly #configuredRouter: ModelRouter;
 	readonly #budgetLedger: BudgetLedger;
 	readonly #findingTracker: FindingTracker;
 	readonly #adapter: RuntimePort;
@@ -131,6 +260,9 @@ export class WorkflowEngine {
 	#signal: AbortSignal | undefined;
 	/** Last preflight report from start/resume (for tool surfacing / tests). */
 	#lastAvailability: WorkflowAvailabilityReport | undefined;
+	#qualityRouteSnapshot: QualityRouteSnapshotV1 | undefined;
+	#qualityRouteArtifactPersisted = false;
+	#preflightUnavailableReasons: Record<string, string> = {};
 
 	// In-memory artifact cache for the current process (also persisted to store)
 	#plan: PlanArtifactV1 | undefined;
@@ -139,6 +271,7 @@ export class WorkflowEngine {
 	#verification: VerificationArtifactV1 | undefined;
 	#codeReview: ReviewArtifactV1 | undefined;
 	#finalVerification: VerificationArtifactV1 | undefined;
+	#workPackageState: WorkPackageStateArtifactV1 | undefined;
 	/** Durable refs for stage-handoff sizing / recovery (source artifacts never deleted). */
 	#planArtifactRef: StageHandoffArtifactRef | undefined;
 	#planReviewArtifactRef: StageHandoffArtifactRef | undefined;
@@ -150,6 +283,8 @@ export class WorkflowEngine {
 	#plannerProfileId: string | undefined;
 	#plannerVendor: string | undefined;
 	#implementerVendor: string | undefined;
+	#plannerModelFamily: string | undefined;
+	#implementerModelFamily: string | undefined;
 	#planCycles = 0;
 	#lastRouteProfileId: string | undefined;
 	#lastScopeMetrics: ScopeMetricsV1 | undefined;
@@ -160,7 +295,8 @@ export class WorkflowEngine {
 		this.#config = { ...getDefaultConfig(), ...options.config };
 		const profiles = Object.values(this.#config.profiles);
 		for (const profile of profiles) assertSupportedModelProfile(profile);
-		this.#router = options.router ?? new ModelRouter(profiles);
+		this.#configuredRouter = options.router ?? new ModelRouter(profiles);
+		this.#router = this.#configuredRouter;
 		// Production wiring injects createDefaultRuntimeAdapter(); pure tests inject fakes.
 		// No default real runner here — avoids task/natives load and AGENTS.md dynamic-import ban.
 		this.#adapter =
@@ -219,12 +355,33 @@ export class WorkflowEngine {
 		request: WorkflowRequest | Record<string, unknown>,
 		policyOverrides: Record<string, unknown> = {},
 	): Promise<WorkflowStartResult> {
+		const requestedTier = (request as Record<string, unknown>).qualityTier;
+		if (requestedTier !== undefined && requestedTier !== "balanced" && requestedTier !== "critical") {
+			throw new WorkflowPolicyError("unknown_quality_tier", { qualityTier: requestedTier });
+		}
+		const qualityRoutesConfigured = Object.keys(this.#config.qualityRoutes).length > 0;
+		let persistedRequest: WorkflowRequest | Record<string, unknown> = request;
+		let routeSnapshot: QualityRouteSnapshotV1 | undefined;
+		if (qualityRoutesConfigured || requestedTier !== undefined) {
+			const qualityTier = requestedTier ?? this.#config.defaultQualityTier;
+			const degradedMode =
+				typeof policyOverrides.degradedMode === "boolean"
+					? policyOverrides.degradedMode
+					: this.#config.degradedMode;
+			if (degradedMode) {
+				throw new WorkflowPolicyError("quality_route_degraded_mode_forbidden", { qualityTier });
+			}
+			routeSnapshot = compileQualityRouteSnapshot(this.#config, qualityTier);
+			this.#activateQualityRoute(routeSnapshot);
+			persistedRequest = { ...request, qualityTier };
+		}
 		const policy = {
-			degradedMode: this.#config.degradedMode,
+			degradedMode: routeSnapshot ? false : this.#config.degradedMode,
 			requireIndependentReview: this.#config.requireIndependentReview,
 			...policyOverrides,
+			...(routeSnapshot ? { degradedMode: false, qualityRouteSnapshot: routeSnapshot } : {}),
 		};
-		const workflowId = await this.#store.createWorkflow(request, policy);
+		const workflowId = await this.#store.createWorkflow(persistedRequest, policy);
 		const availability = await this.#runPreflight({
 			workflowId,
 			operation: "start",
@@ -232,8 +389,7 @@ export class WorkflowEngine {
 			singleStep: false,
 			session: this.#session,
 			signal: this.#signal,
-			// start is diagnostic only — never fail-closed into a stage transition
-			failClosed: false,
+			failClosed: routeSnapshot !== undefined,
 		});
 		this.#lastAvailability = availability;
 		return { workflowId, availability };
@@ -258,6 +414,139 @@ export class WorkflowEngine {
 
 	async getState(workflowId: string): Promise<WorkflowState | null> {
 		return this.#store.getCurrentState(workflowId);
+	}
+
+	/**
+	 * Rebuild a secret-safe status/evidence projection exclusively from persisted state and
+	 * hash-verified artifact bodies. Runtime settings and in-memory routing state are not consulted.
+	 */
+	async getStatusReport(workflowId: string): Promise<WorkflowStatusReportV1 | null> {
+		const snapshot = await this.#store.resumeFromPersistedState(workflowId);
+		if (!snapshot) return null;
+
+		let qualityStatus: WorkflowEvidenceStatus = "legacy";
+		let qualityTier: QualityRouteSnapshotV1["qualityTier"] | null = null;
+		let snapshotFingerprint: string | null = null;
+		let configuredStages: WorkflowConfiguredStageRouteEvidenceV1[] = MODEL_STAGE_ROLES.map(entry => ({
+			...entry,
+			orderedProfileIds: null,
+		}));
+		let policy: Record<string, unknown> | null = null;
+		try {
+			policy = evidenceRecord(JSON.parse(snapshot.state.policyJson));
+			if (!policy) qualityStatus = "invalid";
+		} catch {
+			qualityStatus = "invalid";
+		}
+		const persistedRoute = policy?.qualityRouteSnapshot;
+		if (persistedRoute !== undefined) {
+			const rawRoute = evidenceRecord(persistedRoute);
+			qualityTier = rawRoute?.qualityTier === "balanced" || rawRoute?.qualityTier === "critical"
+				? rawRoute.qualityTier
+				: null;
+			snapshotFingerprint = evidenceString(rawRoute?.fingerprint);
+			try {
+				const verified = verifyQualityRouteSnapshot(persistedRoute);
+				qualityStatus = "verified";
+				qualityTier = verified.qualityTier;
+				snapshotFingerprint = verified.fingerprint;
+				configuredStages = MODEL_STAGE_ROLES.map(entry => ({
+					...entry,
+					orderedProfileIds: [...verified.routes[entry.role]],
+				}));
+			} catch {
+				qualityStatus = "invalid";
+			}
+		}
+
+		const executionsByAttempt = new Map<string, WorkflowModelExecutionEvidenceV1[]>();
+		const routingByAttempt = new Map<string, WorkflowRoutingDecisionEvidenceV1[]>();
+		const seenRoutingEntries = new Set<string>();
+		for (const meta of snapshot.artifacts) {
+			if (meta.kind !== "runtime-evidence" && meta.kind !== "routing-audit") continue;
+			const loaded = await this.#artifactStore.load(meta.relativePath, meta.sha256);
+			if (!loaded?.content) continue;
+			let parsed: Record<string, unknown> | null;
+			try {
+				parsed = evidenceRecord(JSON.parse(loaded.content));
+			} catch {
+				parsed = null;
+			}
+			if (!parsed) continue;
+			if (meta.kind === "runtime-evidence") {
+				const execution = modelExecutionEvidence(parsed);
+				if (!execution) continue;
+				const prior = executionsByAttempt.get(meta.attemptId) ?? [];
+				prior.push(execution);
+				executionsByAttempt.set(meta.attemptId, prior);
+				continue;
+			}
+			if (!Array.isArray(parsed.entries)) continue;
+			for (const rawEntry of parsed.entries) {
+				const routing = routingDecisionEvidence(rawEntry);
+				if (!routing) continue;
+				const rawRecord = evidenceRecord(rawEntry);
+				const routingKey = evidenceString(rawRecord?.at) ?? JSON.stringify(routing);
+				if (seenRoutingEntries.has(routingKey)) continue;
+				seenRoutingEntries.add(routingKey);
+				const prior = routingByAttempt.get(meta.attemptId) ?? [];
+				prior.push(routing);
+				routingByAttempt.set(meta.attemptId, prior);
+			}
+		}
+
+		const configuredProfilesByStage = new Map(
+			configuredStages.map(entry => [entry.stage, entry.orderedProfileIds] as const),
+		);
+		const modelAttempts: WorkflowModelAttemptEvidenceV1[] = [];
+		for (const attempt of snapshot.attempts) {
+			const stageRole = modelStageRole(attempt.stage);
+			if (!stageRole) continue;
+			const executions = executionsByAttempt.get(attempt.id) ?? [];
+			const configuredProfiles = configuredProfilesByStage.get(stageRole.stage) ?? null;
+			const routing = (routingByAttempt.get(attempt.id) ?? []).map(decision => ({
+				...decision,
+				configuredProfileIds: decision.configuredProfileIds ?? configuredProfiles,
+			}));
+			const evidenceStatus: WorkflowEvidenceStatus =
+				executions.length > 0 || routing.length > 0
+					? "verified"
+					: qualityStatus === "legacy"
+						? "legacy"
+						: qualityStatus === "invalid"
+							? "invalid"
+							: "unknown";
+			modelAttempts.push({
+				attemptId: attempt.id,
+				stage: stageRole.stage,
+				role: stageRole.role,
+				ordinal: attempt.ordinal,
+				status: attempt.status,
+				configuredProfileId: attempt.modelProfileId ?? null,
+				evidenceStatus,
+				routing,
+				executions,
+			});
+		}
+
+		return {
+			schemaVersion: 1,
+			workflowId,
+			status: snapshot.state.status,
+			currentStage: snapshot.state.currentStage,
+			version: snapshot.state.version,
+			attemptCount: snapshot.attempts.length,
+			artifactCount: snapshot.artifacts.length,
+			transitionCount: snapshot.transitions.length,
+			budgetTotals: snapshot.budgetTotals,
+			qualityRoute: {
+				status: qualityStatus,
+				qualityTier,
+				snapshotFingerprint,
+				configuredStages,
+			},
+			modelAttempts,
+		};
 	}
 
 	/** Cancel: abort in-flight work, finish open attempts, and persist cancelled. */
@@ -320,6 +609,7 @@ export class WorkflowEngine {
 		if (TERMINAL.has(snapshot.state.status)) {
 			throw new WorkflowPolicyError("cannot_resume_terminal", { status: snapshot.state.status });
 		}
+		this.#activateQualityRouteFromPolicy(snapshot.state.policyJson);
 		if (snapshot.budgetTotals) {
 			this.#budgetLedger.restore(snapshot.budgetTotals as Partial<BudgetSnapshot>);
 		}
@@ -349,6 +639,7 @@ export class WorkflowEngine {
 		session: ToolSession | undefined,
 		singleStep: boolean,
 	): Promise<WorkflowRunResult> {
+		this.#activateQualityRouteFromPolicy((await this.#requireState(workflowId)).policyJson);
 		this.#controller = new AbortController();
 		registerWorkflowAbort(workflowId, this.#controller, this.#controller);
 		const parentSignal = this.#signal;
@@ -397,7 +688,7 @@ export class WorkflowEngine {
 							singleStep,
 							session,
 							signal: this.#controller.signal,
-							failClosed: true,
+							failClosed: this.#qualityRouteSnapshot !== undefined,
 						});
 						this.#lastAvailability = availability;
 					}
@@ -526,12 +817,41 @@ export class WorkflowEngine {
 				verification: this.#verification,
 				codeReview: this.#codeReview,
 				finalVerification: this.#finalVerification,
+				workPackageState: this.#workPackageState,
 				routingAudit: [...this.#routingAudit],
 				availability: availability ?? this.#lastAvailability,
 			};
 		} finally {
 			unregisterWorkflowAbort(workflowId, this.#controller);
 		}
+	}
+
+	#activateQualityRoute(snapshot: QualityRouteSnapshotV1): void {
+		const verified = verifyQualityRouteSnapshot(snapshot);
+		this.#qualityRouteSnapshot = verified;
+		this.#router = new ModelRouter(qualityRouteProfiles(verified));
+	}
+
+	#activateQualityRouteFromPolicy(policyJson: string): void {
+		const policy = this.#parsePolicy(policyJson);
+		const rawSnapshot = policy.qualityRouteSnapshot;
+		if (rawSnapshot === undefined) {
+			this.#qualityRouteSnapshot = undefined;
+			this.#router = this.#configuredRouter;
+			return;
+		}
+		if (policy.degradedMode !== false) {
+			throw new WorkflowPolicyError("quality_route_degraded_mode_forbidden", {
+				degradedMode: policy.degradedMode,
+			});
+		}
+		this.#activateQualityRoute(verifyQualityRouteSnapshot(rawSnapshot));
+	}
+
+	async #persistQualityRouteSnapshot(workflowId: string, attemptId: string): Promise<void> {
+		if (!this.#qualityRouteSnapshot || this.#qualityRouteArtifactPersisted) return;
+		await this.#persistArtifact(workflowId, attemptId, "quality-route-snapshot", this.#qualityRouteSnapshot);
+		this.#qualityRouteArtifactPersisted = true;
 	}
 
 	/**
@@ -548,6 +868,11 @@ export class WorkflowEngine {
 		failClosed: boolean;
 	}): Promise<WorkflowAvailabilityReport> {
 		if (!this.#availability || !options.session) {
+			if (options.failClosed) {
+				throw new WorkflowPolicyError("quality_route_preflight_required", {
+					reason: !this.#availability ? "availability_port_not_configured" : "session_required",
+				});
+			}
 			return skippedAvailabilityReport({
 				workflowId: options.workflowId,
 				operation: options.operation,
@@ -566,10 +891,20 @@ export class WorkflowEngine {
 			session: options.session,
 			signal: options.signal,
 		});
-
-		if (options.failClosed) {
-			assertRequiredRolesAvailable(report);
+		this.#preflightUnavailableReasons = {};
+		for (const row of report.profiles) {
+			if (row.status !== "available") {
+				this.#preflightUnavailableReasons[row.profileId] = [row.errorKind, row.errorSummary]
+					.filter((part): part is string => Boolean(part))
+					.join(":");
+			}
+			if (row.source === "live") this.#budgetLedger.recordRequest(row.usage, row.profileId);
 		}
+		await this.#store.saveBudgetTotals(
+			options.workflowId,
+			this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
+		);
+		if (options.failClosed) assertRequiredRolesAvailable(report);
 		return report;
 	}
 
@@ -582,6 +917,7 @@ export class WorkflowEngine {
 		// Fail-closed resume: never silently re-run a write stage without detection.
 		// If an open in_progress attempt exists for this stage, mark it failed then start fresh.
 		const attemptId = await this.#beginAttemptFailClosed(workflowId, stage, state);
+		await this.#persistQualityRouteSnapshot(workflowId, attemptId);
 		const fresh = await this.#requireState(workflowId);
 		const cwd = session.cwd;
 
@@ -593,6 +929,11 @@ export class WorkflowEngine {
 					promptAssemblyReceipt,
 					contextLedger,
 					optimizationReceipts,
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+					identityReceipt,
+					modelFamily,
 				} = await this.#withProfileFallback("planner", {}, async profile => {
 					this.#plannerProfileId = profile.id;
 					this.#plannerVendor = profile.vendor;
@@ -615,12 +956,18 @@ export class WorkflowEngine {
 						signal,
 					});
 				});
+				this.#plannerModelFamily = modelFamily;
 				this.#plan = plan;
 				this.#planArtifactRef = await this.#persistArtifact(workflowId, attemptId, "plan", plan);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
 					contextLedger,
 					optimizationReceipts,
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+					identityReceipt,
+					modelFamily,
 				});
 				const next = getNextStage("planning", "approved");
 				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "plan ready", fresh.version);
@@ -635,11 +982,17 @@ export class WorkflowEngine {
 					promptAssemblyReceipt,
 					contextLedger,
 					optimizationReceipts,
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+					identityReceipt,
+					modelFamily,
 				} = await this.#withProfileFallback(
 					"plan_reviewer",
 					{
 						excludedProfileIds: this.#plannerProfileId ? [this.#plannerProfileId] : [],
 						avoidVendor: this.#plannerVendor,
+						avoidModelFamily: this.#plannerModelFamily,
 					},
 					async profile =>
 						new PlanReviewStage(this.#adapter).execute({
@@ -663,6 +1016,11 @@ export class WorkflowEngine {
 					promptAssemblyReceipt,
 					contextLedger,
 					optimizationReceipts,
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+					identityReceipt,
+					modelFamily,
 				});
 				const next = getNextStage("plan_review", review.decision);
 				if (!next) throw new WorkflowPolicyError("invalid_review_decision", { decision: review.decision });
@@ -708,37 +1066,22 @@ export class WorkflowEngine {
 						}),
 					[this.#planArtifactRef, this.#planReviewArtifactRef],
 				);
-				const {
-					artifact: impl,
-					usage,
-					resolvedProvider,
-					resolvedModel,
-					toolCalls,
-					promptAssemblyReceipt,
-					contextLedger,
-					optimizationReceipts,
-				} = await this.#withProfileFallback("implementer", {}, async profile => {
-					this.#implementerVendor = profile.vendor;
-					return new ImplementStage(this.#adapter).execute({
-						workflowId,
-						attemptId,
-						profile,
-						assignment: "Implement the approved plan in isolation",
-						context: await this.#buildStageContext(
-							this.#contextBuilder.buildImplementContext(
-								this.#plan!,
-								this.#planReview,
-								resolveArtifactInclusion(profile),
-							),
-							profile,
-							session,
-							this.#plan?.affectedFiles.map(f => f.path),
-							plannerHandoff,
-						),
-						session,
-						signal,
-						isolation: this.#config.isolation,
+				const execution = await this.#executeImplementation(workflowId, attemptId, session, plannerHandoff, signal);
+				let impl = execution.artifact;
+				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, impl);
+				if (!execution.usageRecorded) {
+					await this.#recordUsageAndProfile(workflowId, attemptId, execution.usage, {
+						...execution.evidence,
+						scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 					});
+				}
+				impl = await this.#commitValidatedWrite({
+					workflowId,
+					attemptId,
+					cwd,
+					artifact: impl,
+					identityReceipt: execution.evidence?.identityReceipt,
+					signal,
 				});
 				this.#implementation = impl;
 				this.#implementationArtifactRef = await this.#persistArtifact(
@@ -747,16 +1090,6 @@ export class WorkflowEngine {
 					"implementation",
 					impl,
 				);
-				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, impl);
-				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
-					resolvedProvider,
-					resolvedModel,
-					toolCalls,
-					promptAssemblyReceipt,
-					contextLedger,
-					optimizationReceipts,
-					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
-				});
 				const next = getNextStage("implementing", null);
 				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "implementation ready", fresh.version);
 				return;
@@ -829,12 +1162,20 @@ export class WorkflowEngine {
 					promptAssemblyReceipt,
 					contextLedger,
 					optimizationReceipts,
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+					identityReceipt,
+					modelFamily,
 				} = await this.#withProfileFallback(
 					"code_reviewer",
 					{
 						implementerVendor: this.#implementerVendor ?? this.#implementation.provider,
+						implementerModelFamily: this.#implementerModelFamily,
 						requireIndependentReview: policy.requireIndependentReview !== false,
-						degradedMode: Boolean(policy.degradedMode) || this.#config.degradedMode,
+						degradedMode: this.#qualityRouteSnapshot
+							? false
+							: Boolean(policy.degradedMode) || this.#config.degradedMode,
 					},
 					async (profile, route) => {
 						if (route.degraded) await this.#store.setDegradedMode(workflowId, true);
@@ -876,6 +1217,11 @@ export class WorkflowEngine {
 					promptAssemblyReceipt,
 					contextLedger,
 					optimizationReceipts,
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+					identityReceipt,
+					modelFamily,
 				});
 
 				const blocking = review.findings.filter(
@@ -961,6 +1307,8 @@ export class WorkflowEngine {
 					promptAssemblyReceipt,
 					contextLedger,
 					optimizationReceipts,
+					identityReceipt,
+					modelFamily,
 				} = await this.#withProfileFallback(
 					"repair",
 					{
@@ -999,12 +1347,11 @@ export class WorkflowEngine {
 							isolation: this.#config.isolation,
 						}),
 				);
-				// Accumulate cumulative changed files / patch refs so prior deltas remain auditable.
+				// Build the cumulative candidate without mutating durable workflow state before validation/merge.
 				const previous = this.#implementation;
-				this.#implementation = {
+				let candidateImplementation: ImplementationArtifactV1 = {
 					...repaired,
 					changedFiles: [...new Set([...(previous?.changedFiles ?? []), ...repaired.changedFiles])],
-					// Keep prior patch path in unresolved metadata when both exist
 					unresolved: [
 						...new Set([
 							...(repaired.unresolved ?? []),
@@ -1014,12 +1361,31 @@ export class WorkflowEngine {
 						]),
 					],
 				};
-				// Resolve only explicitly addressed finding IDs (never auto-all).
+				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, candidateImplementation);
+				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
+					resolvedProvider,
+					resolvedModel,
+					toolCalls,
+					identityReceipt,
+					modelFamily,
+					promptAssemblyReceipt,
+					contextLedger,
+					optimizationReceipts,
+					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
+				});
+				candidateImplementation = await this.#commitValidatedWrite({
+					workflowId,
+					attemptId,
+					cwd,
+					artifact: candidateImplementation,
+					identityReceipt,
+					signal,
+				});
+				this.#implementation = candidateImplementation;
+				// Resolve only explicitly addressed finding IDs after the validated patch is applied.
 				const resolvedIds = new Set(repaired.addressedStepIds);
 				for (const id of open.map(f => f.id)) {
-					if (resolvedIds.has(id)) {
-						this.#findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
-					}
+					if (resolvedIds.has(id)) this.#findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
 				}
 				this.#implementationArtifactRef = await this.#persistArtifact(
 					workflowId,
@@ -1028,18 +1394,6 @@ export class WorkflowEngine {
 					this.#implementation,
 				);
 				await this.#persistFindingsState(workflowId, attemptId);
-				if (this.#plan) {
-					await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, this.#implementation);
-				}
-				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
-					resolvedProvider,
-					resolvedModel,
-					toolCalls,
-					promptAssemblyReceipt,
-					contextLedger,
-					optimizationReceipts,
-					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
-				});
 				// One completed repair attempt toward maxRepairCycles.
 				this.#budgetLedger.recordRepairCycle();
 				const next = getNextStage("repairing", null);
@@ -1080,6 +1434,266 @@ export class WorkflowEngine {
 		}
 	}
 
+	async #executeImplementation(
+		workflowId: string,
+		attemptId: string,
+		session: ToolSession,
+		plannerHandoff: StageHandoffV1 | undefined,
+		signal?: AbortSignal,
+	): Promise<{
+		artifact: ImplementationArtifactV1;
+		usageRecorded: boolean;
+		usage?: unknown;
+		evidence?: WorkflowRuntimeEvidence;
+	}> {
+		const configuredConcurrency = session.settings?.get?.("task.maxConcurrency" as never);
+		const maxConcurrency =
+			typeof configuredConcurrency === "number" && Number.isFinite(configuredConcurrency)
+				? configuredConcurrency
+				: 1;
+		const mergeCapturedChanges = this.#adapter.mergeCapturedChanges;
+		const packagePlan = mergeCapturedChanges
+			? buildWorkPackageExecutionPlan(this.#plan?.workPackages, maxConcurrency)
+			: null;
+		if (!packagePlan) {
+			const result = await this.#withProfileFallback("implementer", {}, async profile => {
+				this.#implementerVendor = profile.vendor;
+				return new ImplementStage(this.#adapter).execute({
+					workflowId,
+					attemptId,
+					profile,
+					assignment: "Implement the approved plan in isolation",
+					context: await this.#buildStageContext(
+						this.#contextBuilder.buildImplementContext(
+							this.#plan!,
+							this.#planReview,
+							resolveArtifactInclusion(profile),
+						),
+						profile,
+						session,
+						this.#plan?.affectedFiles.map(file => file.path),
+						plannerHandoff,
+					),
+					session,
+					signal,
+					isolation: this.#config.isolation,
+				});
+			});
+			this.#implementerModelFamily = result.modelFamily;
+			return {
+				artifact: result.artifact,
+				usageRecorded: false,
+				usage: result.usage,
+				evidence: {
+					resolvedProvider: result.resolvedProvider,
+					resolvedModel: result.resolvedModel,
+					toolCalls: result.toolCalls,
+					promptAssemblyReceipt: result.promptAssemblyReceipt,
+					contextLedger: result.contextLedger,
+					optimizationReceipts: result.optimizationReceipts,
+					identityReceipt: result.identityReceipt,
+					modelFamily: result.modelFamily,
+				},
+			};
+		}
+
+		if (!mergeCapturedChanges) throw new WorkflowPolicyError("work_package_merge_seam_unavailable");
+		let profileAttempt = 0;
+		const resumableStatePresent = this.#workPackageState !== undefined;
+		const completed = await this.#withProfileFallback("implementer", {}, async profile => {
+			this.#implementerVendor = profile.vendor;
+			const reuseSucceeded = profileAttempt === 0 && resumableStatePresent;
+			profileAttempt += 1;
+			const profileBudget = this.#budgetLedger.profileSnapshot(profile.id);
+			const plannedRequests = reuseSucceeded
+				? packagePlan.packages.filter(workPackage => {
+						const previous = this.#workPackageState?.packages.find(candidate => candidate.id === workPackage.id);
+						return previous?.status !== "succeeded";
+					}).length
+				: packagePlan.packages.length;
+			if (
+				profile.maxRequests !== undefined &&
+				profileBudget.profileRequests + plannedRequests > profile.maxRequests
+			) {
+				throw new BudgetExhaustedError(
+					profileBudget.profileRequests + plannedRequests,
+					profileBudget.profileRequests,
+					profile.maxRequests,
+				);
+			}
+			const workPackageState = await executeWorkPackagePlan({
+				workflowId,
+				attemptId,
+				cwd: session.cwd,
+				plan: packagePlan,
+				priorState: this.#workPackageState,
+				reuseSucceeded,
+				signal,
+				execute: async (workPackage, invocationAttemptId, workerSignal) =>
+					new ImplementStage(this.#adapter).execute({
+						workflowId,
+						attemptId: invocationAttemptId,
+						profile,
+						assignment: renderWorkPackageAssignment(workPackage),
+						context: await this.#buildStageContext(
+							this.#contextBuilder.buildImplementContext(
+								this.#plan!,
+								this.#planReview,
+								resolveArtifactInclusion(profile),
+							),
+							profile,
+							session,
+							workPackage.paths,
+							plannerHandoff,
+						),
+						session,
+						signal: workerSignal,
+						isolation: { merge: "patch", apply: false },
+					}),
+				persist: state => this.#persistWorkPackageState(workflowId, attemptId, state),
+				onSuccess: async (_workPackage, result) => {
+					await this.#recordUsageAndProfile(workflowId, attemptId, result.usage, {
+						resolvedProvider: result.resolvedProvider,
+						resolvedModel: result.resolvedModel,
+						toolCalls: result.toolCalls,
+						promptAssemblyReceipt: result.promptAssemblyReceipt,
+						contextLedger: result.contextLedger,
+						optimizationReceipts: result.optimizationReceipts,
+						identityReceipt: result.identityReceipt,
+						modelFamily: result.modelFamily,
+					});
+				},
+			});
+			return { profile, workPackageState };
+		});
+
+		const patches = completed.workPackageState.merge.order.map(packageId => {
+			const execution = completed.workPackageState.packages.find(candidate => candidate.id === packageId);
+			const patchPath = execution?.implementation?.patchPath;
+			if (!patchPath) throw new WorkflowPolicyError("work_package_patch_missing_before_merge", { packageId });
+			return { packageId, patchPath };
+		});
+		const outputPatchPath = path.join(
+			this.#artifactStore.baseDir,
+			workflowId,
+			"patches",
+			`${attemptId}.packages.patch`,
+		);
+		let merge: CapturedChangesMergeResult;
+		try {
+			merge = await mergeCapturedChanges({
+				workflowId,
+				attemptId,
+				cwd: session.cwd,
+				patches,
+				outputPatchPath,
+				signal,
+			});
+		} catch (error) {
+			const failedMerge: CapturedChangesMergeResult = {
+				patchPath: outputPatchPath,
+				changesApplied: false,
+				summary: redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500),
+			};
+			const failedState = withWorkPackageMerge(completed.workPackageState, attemptId, failedMerge);
+			await this.#persistWorkPackageState(workflowId, attemptId, failedState);
+			if (error instanceof WorkflowCancelledError) throw error;
+			throw new WorkflowError("Work-package merge failed without applying changes", "merge_conflict", {
+				order: failedState.merge.order,
+				patchPath: failedMerge.patchPath,
+				summary: failedMerge.summary,
+			});
+		}
+		const mergedState = withWorkPackageMerge(completed.workPackageState, attemptId, merge);
+		await this.#persistWorkPackageState(workflowId, attemptId, mergedState);
+		if (!merge.changesApplied) {
+			throw new WorkflowError("Work-package merge failed without applying changes", "merge_conflict", {
+				order: mergedState.merge.order,
+				patchPath: merge.patchPath,
+				summary: merge.summary,
+			});
+		}
+		return {
+			artifact: aggregateWorkPackageImplementations({
+				workflowId,
+				attemptId,
+				profile: completed.profile,
+				state: mergedState,
+				merge,
+			}),
+			usageRecorded: true,
+		};
+	}
+
+	async #commitValidatedWrite(options: {
+		workflowId: string;
+		attemptId: string;
+		cwd: string;
+		artifact: ImplementationArtifactV1;
+		identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+		signal?: AbortSignal;
+	}): Promise<ImplementationArtifactV1> {
+		const profile = this.#router.list().find(candidate => candidate.id === options.artifact.modelProfileId);
+		if (!profile?.strictIdentity) return options.artifact;
+		const receipt = options.identityReceipt;
+		if (
+			!receipt ||
+			receipt.attested.provenance === "unknown" ||
+			receipt.exactMatch !== true ||
+			receipt.effortSupported !== true ||
+			!receipt.modelFamily ||
+			receipt.modelFamily !== receipt.configured.modelFamily
+		) {
+			throw new WorkflowPolicyError("strict_write_identity_not_verified", {
+				profileId: profile.id,
+				identityReceipt: receipt ?? null,
+			});
+		}
+		if (this.#lastScopeMetrics?.status !== "adhered") {
+			throw new WorkflowPolicyError("strict_write_scope_not_approved", {
+				profileId: profile.id,
+				scopeStatus: this.#lastScopeMetrics?.status ?? "missing",
+				scopeFindings: this.#lastScopeMetrics?.scopeCreepFindings ?? [],
+			});
+		}
+		if (!options.artifact.patchPath) {
+			throw new WorkflowPolicyError("strict_write_patch_missing", { profileId: profile.id });
+		}
+		const mergeCapturedChanges = this.#adapter.mergeCapturedChanges;
+		if (!mergeCapturedChanges) {
+			throw new WorkflowPolicyError("strict_write_commit_seam_unavailable", { profileId: profile.id });
+		}
+		const merge = await mergeCapturedChanges({
+			workflowId: options.workflowId,
+			attemptId: options.attemptId,
+			cwd: options.cwd,
+			patches: [{ packageId: profile.id, patchPath: options.artifact.patchPath }],
+			outputPatchPath: path.join(
+				this.#artifactStore.baseDir,
+				options.workflowId,
+				"patches",
+				`${options.attemptId}.validated.patch`,
+			),
+			signal: options.signal,
+		});
+		if (!merge.changesApplied) {
+			throw new WorkflowError("Validated workflow patch was not applied", "merge_conflict", {
+				patchPath: merge.patchPath,
+				summary: merge.summary,
+			});
+		}
+		return { ...options.artifact, patchPath: merge.patchPath, branchName: undefined };
+	}
+
+	async #persistWorkPackageState(
+		workflowId: string,
+		attemptId: string,
+		state: WorkPackageStateArtifactV1,
+	): Promise<void> {
+		this.#workPackageState = structuredClone(state);
+		await this.#persistArtifact(workflowId, attemptId, "work-package-state", state);
+	}
+
 	/**
 	 * Optionally append stage handoff then a compressed repo-map when enabled.
 	 * Production call site for ContextBuilder.appendStageHandoff + appendRepoMapIfEnabled.
@@ -1115,10 +1729,12 @@ export class WorkflowEngine {
 		const planned = plannedFilesFromPlan(plan);
 		const forbidden = this.#config.forbiddenPaths ?? [];
 		let changedFromPatch: string[] = [];
+		let patchEvidenceAvailable = false;
 		if (impl.patchPath) {
 			const resolved = path.isAbsolute(impl.patchPath) ? impl.patchPath : path.join(cwd, impl.patchPath);
 			try {
 				const text = await Bun.file(resolved).text();
+				patchEvidenceAvailable = true;
 				changedFromPatch = changedFilesFromPatch(text);
 			} catch {
 				// missing patch is handled by verify; scope falls through to git
@@ -1126,7 +1742,7 @@ export class WorkflowEngine {
 		}
 
 		let metrics: ScopeMetricsV1;
-		if (changedFromPatch.length > 0) {
+		if (patchEvidenceAvailable) {
 			// Patch is filesystem evidence (not model prose). Infer deletes from /dev/null headers not needed here.
 			metrics = buildScopeMetrics({
 				plannedFiles: planned,
@@ -1185,18 +1801,42 @@ export class WorkflowEngine {
 		routeOptions: RouteOptions,
 		run: (profile: ModelProfile, route: RoutingDecision) => Promise<T>,
 	): Promise<T> {
-		const unavailable = new Set<string>([...(routeOptions.unavailableProfileIds ?? [])]);
+		const preferredProfileIds = qualityRouteProfileIds(this.#qualityRouteSnapshot, role);
+		const unavailable = new Set<string>([
+			...Object.keys(this.#preflightUnavailableReasons),
+			...(routeOptions.unavailableProfileIds ?? []),
+		]);
+		const unavailableReasons: Record<string, string> = {
+			...this.#preflightUnavailableReasons,
+			...routeOptions.unavailableReasons,
+		};
+		const effectiveRouteOptions: RouteOptions = {
+			...routeOptions,
+			...(this.#qualityRouteSnapshot
+				? {
+						preferredProfileIds,
+						qualityTier: this.#qualityRouteSnapshot.qualityTier,
+						snapshotFingerprint: this.#qualityRouteSnapshot.fingerprint,
+						degradedMode: false,
+					}
+				: {}),
+			unavailableReasons,
+		};
 		let lastError: unknown;
-		// First resolve to read profile retry policy for max attempts (default 2).
-		const probe = this.#router.resolve(role, { ...routeOptions, unavailableProfileIds: unavailable });
-		const maxAttempts = Math.max(1, probe.profile.retryPolicy?.maxAttempts ?? 2);
+		const probe = this.#router.resolve(role, {
+			...effectiveRouteOptions,
+			unavailableProfileIds: unavailable,
+		});
+		const maxAttempts = preferredProfileIds?.length ?? Math.max(1, probe.profile.retryPolicy?.maxAttempts ?? 2);
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			if (attempt > 0 && !(await this.#budgetLedger.checkPreRetry())) {
 				const snap = this.#budgetLedger.snapshot();
 				throw new BudgetExhaustedError(snap.requests, snap.costUsd ?? "unknown", snap.limitUsd);
 			}
-			const route = this.#router.resolve(role, { ...routeOptions, unavailableProfileIds: unavailable });
-			// Per-profile request/cost hard-stop before external call.
+			const route = this.#router.resolve(role, {
+				...effectiveRouteOptions,
+				unavailableProfileIds: unavailable,
+			});
 			if (
 				!this.#budgetLedger.checkProfileBudget(route.profileId, {
 					maxRequests: route.profile.maxRequests,
@@ -1211,19 +1851,31 @@ export class WorkflowEngine {
 			}
 			this.#audit(route);
 			try {
-				const result = await run(route.profile, route);
-				return result;
+				return await run(route.profile, route);
 			} catch (error) {
 				lastError = error;
-				// Count the failed attempt toward request budget even when retrying.
-				this.#budgetLedger.recordRequest(undefined, route.profileId);
+				const failedRequests = error instanceof WorkPackageExecutionError ? Math.max(1, error.failedRequests) : 1;
+				for (let index = 0; index < failedRequests; index++) {
+					this.#budgetLedger.recordRequest(undefined, route.profileId);
+				}
 				const kind = error instanceof WorkflowError ? error.kind : "";
 				const retryableKinds = route.profile.retryPolicy?.retryableErrorKinds ?? [];
 				const kindOk =
 					this.#isRetryableProviderError(error) || (typeof kind === "string" && retryableKinds.includes(kind));
 				if (attempt < maxAttempts - 1 && kindOk) {
 					unavailable.add(route.profileId);
+					unavailableReasons[route.profileId] = `${kind || "runtime_error"}:${
+						error instanceof Error ? error.message : String(error)
+					}`;
 					continue;
+				}
+				if (this.#qualityRouteSnapshot && kindOk) {
+					throw new WorkflowPolicyError("quality_route_candidates_exhausted", {
+						role,
+						qualityTier: this.#qualityRouteSnapshot.qualityTier,
+						lastProfileId: route.profileId,
+						lastErrorKind: kind || "runtime_error",
+					});
 				}
 				throw error;
 			}
@@ -1244,6 +1896,10 @@ export class WorkflowEngine {
 			);
 			if (open) {
 				const writeStage = stage === "implementing" || stage === "repairing";
+				const resumablePackageCapture =
+					stage === "implementing" &&
+					this.#workPackageState?.mode === "capture_then_apply" &&
+					this.#workPackageState.merge.status !== "failed";
 				await this.#store.completeAttempt(
 					workflowId,
 					open.id,
@@ -1251,10 +1907,15 @@ export class WorkflowEngine {
 					{},
 					{
 						kind: "cancelled",
-						summary: writeStage ? "write_stage_interrupted_no_rerun" : "stale_in_progress_on_resume",
+						summary:
+							writeStage && !resumablePackageCapture
+								? "write_stage_interrupted_no_rerun"
+								: resumablePackageCapture
+									? "work_package_capture_interrupted_resumable"
+									: "stale_in_progress_on_resume",
 					},
 				);
-				if (writeStage) {
+				if (writeStage && !resumablePackageCapture) {
 					const refreshed = await this.#requireState(workflowId);
 					if (!TERMINAL.has(refreshed.status) && isValidTransition(refreshed.status, "blocked")) {
 						await this.#store.transitionWorkflow(
@@ -1470,14 +2131,27 @@ export class WorkflowEngine {
 				continue;
 			}
 			try {
-				const parsed = JSON.parse(loaded.content) as { kind?: string; findings?: ReviewFindingV1[] };
+				const parsed = JSON.parse(loaded.content) as {
+					kind?: string;
+					findings?: ReviewFindingV1[];
+					revision?: number;
+					profileId?: string | null;
+					modelFamily?: string | null;
+				};
 				const ref = this.#refFromMeta(meta, loaded.content);
+				if (meta.kind === "quality-route-snapshot") {
+					verifyQualityRouteSnapshot(parsed);
+					this.#qualityRouteArtifactPersisted = true;
+					continue;
+				}
 				if (parsed.kind === "plan") {
 					this.#plan = parsed as PlanArtifactV1;
 					this.#planArtifactRef = ref;
 					// Restore planner route context for plan_review diversity across Engine resume.
 					if (this.#plan.modelProfileId) this.#plannerProfileId = this.#plan.modelProfileId;
-					if (this.#plan.provider) this.#plannerVendor = this.#plan.provider;
+					if (this.#plan.modelProfileId) {
+						this.#plannerVendor = this.#router.list().find(p => p.id === this.#plan?.modelProfileId)?.vendor;
+					}
 				} else if (parsed.kind === "review") {
 					const review = parsed as ReviewArtifactV1;
 					if (review.subject === "plan") {
@@ -1507,10 +2181,25 @@ export class WorkflowEngine {
 							this.#findingTracker.recordRepairCycle(FindingTracker.fingerprint(f));
 						}
 					}
+				} else if (parsed.kind === "work-package-state") {
+					const workPackageState = parsed as WorkPackageStateArtifactV1;
+					if (!this.#workPackageState || workPackageState.revision > this.#workPackageState.revision) {
+						this.#workPackageState = workPackageState;
+					}
 				} else if (parsed.kind === "implementation") {
 					this.#implementation = parsed as ImplementationArtifactV1;
 					this.#implementationArtifactRef = ref;
-					this.#implementerVendor = this.#implementation.provider;
+					this.#implementerVendor = this.#router
+						.list()
+						.find(p => p.id === this.#implementation?.modelProfileId)?.vendor;
+				} else if (parsed.kind === "runtime-evidence" && parsed.profileId) {
+					const profile = this.#router.list().find(candidate => candidate.id === parsed.profileId);
+					if (profile?.roles.includes("planner") && parsed.modelFamily) {
+						this.#plannerModelFamily = parsed.modelFamily;
+					}
+					if (profile?.roles.includes("implementer") && parsed.modelFamily) {
+						this.#implementerModelFamily = parsed.modelFamily;
+					}
 				} else if (parsed.kind === "verification") {
 					const v = parsed as VerificationArtifactV1;
 					if (v.stage === "final_verify") this.#finalVerification = v;
@@ -1524,8 +2213,7 @@ export class WorkflowEngine {
 			}
 		}
 	}
-
-	#audit(route: { profileId: string; vendor: string; reason: string; degraded: boolean }): void {
+	#audit(route: RoutingDecision): void {
 		this.#lastRouteProfileId = route.profileId;
 		this.#routingAudit.push({ ...route, at: new Date().toISOString() });
 	}
@@ -1567,6 +2255,23 @@ export class WorkflowEngine {
 			toolCalls: evidence?.toolCalls ?? null,
 			resolvedProvider: evidence?.resolvedProvider ?? null,
 			resolvedModel: evidence?.resolvedModel ?? null,
+			qualityTier: this.#qualityRouteSnapshot?.qualityTier ?? null,
+			routeSnapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
+			configuredIdentity: evidence?.identityReceipt?.configured ?? null,
+			localResolution:
+				evidence?.identityReceipt?.localResolution ??
+				(evidence?.resolvedProvider || evidence?.resolvedModel
+					? {
+							provider: evidence.resolvedProvider ?? null,
+							model: evidence.resolvedModel ?? null,
+							checkpoint: null,
+							provenance: "local_resolution",
+						}
+					: null),
+			attestedIdentity: evidence?.identityReceipt?.attested ?? null,
+			exactIdentityMatch: evidence?.identityReceipt?.exactMatch ?? null,
+			effortSupported: evidence?.identityReceipt?.effortSupported ?? null,
+			modelFamily: evidence?.modelFamily ?? evidence?.identityReceipt?.modelFamily ?? null,
 			scopeMetricsKind: evidence?.scopeMetricsKind ?? null,
 			promptAssemblyReceipt: evidence?.promptAssemblyReceipt ?? null,
 			contextLedger: evidence?.contextLedger ?? null,
@@ -1600,17 +2305,34 @@ export class WorkflowEngine {
 				receipts: evidence.optimizationReceipts,
 			});
 		}
-		if (evidence?.resolvedProvider || evidence?.resolvedModel) {
+		if (evidence?.identityReceipt || evidence?.resolvedProvider || evidence?.resolvedModel) {
 			await this.#persistArtifact(workflowId, attemptId, "runtime-evidence", {
 				kind: "runtime-evidence",
 				schemaVersion: 1,
 				workflowId,
 				attemptId,
-				resolvedProvider: evidence.resolvedProvider,
-				resolvedModel: evidence.resolvedModel,
-				toolCalls: evidence.toolCalls,
 				profileId,
-				scopeMetricsKind: evidence.scopeMetricsKind ?? null,
+				qualityTier: this.#qualityRouteSnapshot?.qualityTier ?? null,
+				routeSnapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
+				configuredIdentity: evidence?.identityReceipt?.configured ?? null,
+				localResolution:
+					evidence?.identityReceipt?.localResolution ?? {
+						provider: evidence?.resolvedProvider ?? null,
+						model: evidence?.resolvedModel ?? null,
+						checkpoint: null,
+						provenance: "local_resolution",
+					},
+				attestedIdentity: evidence?.identityReceipt?.attested ?? {
+					provider: null,
+					model: null,
+					checkpoint: null,
+					provenance: "unknown",
+				},
+				exactIdentityMatch: evidence?.identityReceipt?.exactMatch ?? null,
+				effortSupported: evidence?.identityReceipt?.effortSupported ?? null,
+				modelFamily: evidence?.modelFamily ?? evidence?.identityReceipt?.modelFamily ?? null,
+				toolCalls: evidence?.toolCalls ?? null,
+				scopeMetricsKind: evidence?.scopeMetricsKind ?? null,
 			});
 		}
 		await this.#persistRoutingAudit(workflowId, attemptId);
@@ -1631,6 +2353,8 @@ export class WorkflowEngine {
 				return {
 					request: raw.request,
 					constraints: typeof raw.constraints === "string" ? raw.constraints : undefined,
+					qualityTier:
+						raw.qualityTier === "balanced" || raw.qualityTier === "critical" ? raw.qualityTier : undefined,
 				};
 			}
 			return { request: JSON.stringify(raw) };

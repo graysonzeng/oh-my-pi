@@ -166,6 +166,14 @@ export async function runAvailabilityPreflight(
 				source: i === 0 ? "live" : "shared_live",
 				usageKind: "diagnostic",
 			};
+			if (normalized.localProvider) row.localProvider = normalized.localProvider;
+			if (normalized.localModel) row.localModel = normalized.localModel;
+			if (normalized.attestedProvider) row.attestedProvider = normalized.attestedProvider;
+			if (normalized.attestedModel) row.attestedModel = normalized.attestedModel;
+			if (normalized.attestedCheckpoint) row.attestedCheckpoint = normalized.attestedCheckpoint;
+			if (normalized.identityProvenance) row.identityProvenance = normalized.identityProvenance;
+			if (normalized.exactIdentityMatch !== undefined) row.exactIdentityMatch = normalized.exactIdentityMatch;
+			if (normalized.effortSupported !== undefined) row.effortSupported = normalized.effortSupported;
 			if (normalized.usage) row.usage = normalized.usage;
 			if (normalized.reportedCostUsd !== undefined) row.reportedCostUsd = normalized.reportedCostUsd;
 			if (normalized.status === "available") {

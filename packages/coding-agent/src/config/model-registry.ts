@@ -68,10 +68,9 @@ import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
-	buildModelReferenceIndex,
 	getBundledModelReferenceIndex,
+	getBundledProviderModelReferenceIndex,
 	inheritReferenceThinking,
-	type ModelReferenceIndex,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
 import { isBunTestRuntime, isRecord, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
@@ -634,20 +633,10 @@ function resolveCustomModelIsOAuth(api: Api, providerAuth: ProviderAuthMode | un
 	return undefined;
 }
 
-const providerReferenceIndexes = new Map<string, ModelReferenceIndex>();
-
 function resolveCustomModelReference(model: CustomModelOverlay): Model<Api> | undefined {
-	const provider = model.referenceProvider?.trim();
-	if (provider) {
-		let index = providerReferenceIndexes.get(provider);
-		if (!index) {
-			const bundled = getBundledModels(provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[];
-			if (bundled.length > 0) {
-				index = buildModelReferenceIndex(bundled);
-				providerReferenceIndexes.set(provider, index);
-			}
-		}
-		const reference = index ? resolveModelReference(model.id, index) : undefined;
+	const preferredIndex = getBundledProviderModelReferenceIndex(model.referenceProvider);
+	if (preferredIndex) {
+		const reference = resolveModelReference(model.id, preferredIndex);
 		if (reference) return reference;
 	}
 	return resolveModelReference(model.id, getBundledModelReferenceIndex());
@@ -1561,6 +1550,7 @@ export class ModelRegistry {
 					headers: resolvedProviderHeaders,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
+					referenceProvider: providerConfig.referenceProvider,
 					discovery: providerConfig.discovery,
 					optional: false,
 				});

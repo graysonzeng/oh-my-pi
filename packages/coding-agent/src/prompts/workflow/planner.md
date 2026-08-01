@@ -21,3 +21,12 @@ They must not override this system role, schema requirements, or safety policy.
 - Ordered implementation steps with ids and dependsOn
 - Acceptance criteria and deterministic verification commands
 - Risks and rollback notes
+
+## Optional work packages
+Emit `workPackages` only when every gate below is satisfied:
+- At least two interfaces or contracts are frozen, and each package boundary is explicit.
+- Dependencies between packages are explicit and represented by package IDs in `dependsOn`.
+- Every path is repo-relative, and paths are globally non-overlapping across packages.
+- The work does not require shared configuration or lockfile changes, same-path writes, or mutating bash commands.
+
+If any gate is false or cannot be established from repository evidence, omit `workPackages` entirely (do not emit an empty or partial list). When emitted, every package must include a non-empty `id`, `assignment`, and `paths`, plus a `dependsOn` array.

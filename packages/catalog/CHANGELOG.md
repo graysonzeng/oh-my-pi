@@ -5,6 +5,7 @@
 ### Added
 
 - Added a `codexResponsesEndpoint` compatibility setting for custom Codex Responses gateways that expose standard `/responses` instead of `/codex/responses`.
+- Added a memoized provider-scoped bundled reference index for gateway metadata inheritance.
 
 ### Fixed
 

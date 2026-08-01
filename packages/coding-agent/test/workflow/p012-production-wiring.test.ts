@@ -2,10 +2,12 @@
  * Integration contracts: production paths consume P0/P1/P2 optimization modules.
  * These tests fail if prepare/engine/runtime stop wiring the libraries.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { $ } from "bun";
+import * as isolationRunner from "../../src/task/isolation-runner";
 import { applyWorkflowTransformTools } from "../../src/tools/workflow-alias-wrap";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import {
@@ -38,6 +40,12 @@ import {
 	SAMPLE_PATCH,
 	scriptedRunner,
 } from "./helpers";
+
+async function runGit(cwd: string, ...args: string[]): Promise<string> {
+	const result = await $`git ${args}`.cwd(cwd).quiet().nothrow();
+	if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
+	return result.text();
+}
 
 describe("P0 production processToolOutputDetailed + receipts", () => {
 	it("prepare installs detailed processResult that surfaces receipt + recovery on session", () => {
@@ -965,6 +973,145 @@ describe("AC6 default-path budget + multi-runtime + real AgentTool transform", (
 	it("createDefaultRuntimeAdapter returns embedded RuntimeAdapter only", () => {
 		const adapter = createDefaultRuntimeAdapter();
 		expect(adapter).toBeInstanceOf(RuntimeAdapter);
+	});
+
+	it("default adapter merges ordered captured patches through one patch merge", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "wf-p012-captured-"));
+		try {
+			await runGit(repoRoot, "init");
+			await runGit(repoRoot, "config", "user.email", "workflow@example.com");
+			await runGit(repoRoot, "config", "user.name", "Workflow Test");
+			await Bun.write(path.join(repoRoot, "first.txt"), "base\n");
+			await Bun.write(path.join(repoRoot, "second.txt"), "base\n");
+			await runGit(repoRoot, "add", "first.txt", "second.txt");
+			await runGit(repoRoot, "commit", "-m", "base");
+
+			const firstPatch = path.join(repoRoot, "first.patch");
+			const secondPatch = path.join(repoRoot, "second.patch");
+			await Bun.write(
+				firstPatch,
+				[
+					"diff --git a/first.txt b/first.txt",
+					"--- a/first.txt",
+					"+++ b/first.txt",
+					"@@ -1 +1 @@",
+					"-base",
+					"+first",
+				].join("\n"),
+			);
+			await Bun.write(
+				secondPatch,
+				[
+					"diff --git a/second.txt b/second.txt",
+					"--- a/second.txt",
+					"+++ b/second.txt",
+					"@@ -1 +1 @@",
+					"-base",
+					"+second",
+				].join("\n"),
+			);
+			const outputPatchPath = path.join(repoRoot, "merged", "captured.patch");
+			const originalMerge = isolationRunner.mergeIsolatedChanges;
+			const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockImplementation(originalMerge);
+			const adapter = createDefaultRuntimeAdapter({
+				embeddedRunner: async () => ({ result: { id: "unused" } }),
+			});
+			const merged = await adapter.mergeCapturedChanges!({
+				workflowId: "wf-captured",
+				attemptId: "att-captured",
+				cwd: repoRoot,
+				patches: [
+					{ packageId: "first", patchPath: firstPatch },
+					{ packageId: "second", patchPath: secondPatch },
+				],
+				outputPatchPath,
+			});
+
+			expect(merged).toMatchObject({ patchPath: outputPatchPath, changesApplied: true });
+			expect(await Bun.file(outputPatchPath).text()).toBe(
+				`${[
+					"diff --git a/first.txt b/first.txt",
+					"--- a/first.txt",
+					"+++ b/first.txt",
+					"@@ -1 +1 @@",
+					"-base",
+					"+first",
+					"diff --git a/second.txt b/second.txt",
+					"--- a/second.txt",
+					"+++ b/second.txt",
+					"@@ -1 +1 @@",
+					"-base",
+					"+second",
+				].join("\n")}\n`,
+			);
+			expect(await Bun.file(path.join(repoRoot, "first.txt")).text()).toBe("first\n");
+			expect(await Bun.file(path.join(repoRoot, "second.txt")).text()).toBe("second\n");
+			expect(mergeSpy).toHaveBeenCalledTimes(1);
+			expect(mergeSpy).toHaveBeenCalledWith(expect.objectContaining({ repoRoot, mergeMode: "patch" }));
+		} finally {
+			vi.restoreAllMocks();
+			await fs.rm(repoRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("returns a conflict without partially applying an ordered patch batch", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "wf-p012-captured-conflict-"));
+		try {
+			await runGit(repoRoot, "init");
+			await runGit(repoRoot, "config", "user.email", "workflow@example.com");
+			await runGit(repoRoot, "config", "user.name", "Workflow Test");
+			await Bun.write(path.join(repoRoot, "first.txt"), "base\n");
+			await Bun.write(path.join(repoRoot, "second.txt"), "parent\n");
+			await runGit(repoRoot, "add", "first.txt", "second.txt");
+			await runGit(repoRoot, "commit", "-m", "base");
+
+			const firstPatch = path.join(repoRoot, "first.patch");
+			const conflictingPatch = path.join(repoRoot, "conflicting.patch");
+			await Bun.write(
+				firstPatch,
+				[
+					"diff --git a/first.txt b/first.txt",
+					"--- a/first.txt",
+					"+++ b/first.txt",
+					"@@ -1 +1 @@",
+					"-base",
+					"+first",
+				].join("\n"),
+			);
+			await Bun.write(
+				conflictingPatch,
+				[
+					"diff --git a/second.txt b/second.txt",
+					"--- a/second.txt",
+					"+++ b/second.txt",
+					"@@ -1 +1 @@",
+					"-old",
+					"+second",
+				].join("\n"),
+			);
+			const outputPatchPath = path.join(repoRoot, "merged", "captured.patch");
+			const adapter = createDefaultRuntimeAdapter({
+				embeddedRunner: async () => ({ result: { id: "unused" } }),
+			});
+			const merged = await adapter.mergeCapturedChanges!({
+				workflowId: "wf-captured-conflict",
+				attemptId: "att-captured-conflict",
+				cwd: repoRoot,
+				patches: [
+					{ packageId: "first", patchPath: firstPatch },
+					{ packageId: "conflict", patchPath: conflictingPatch },
+				],
+				outputPatchPath,
+			});
+
+			expect(merged.changesApplied).toBe(false);
+			expect(merged.summary).toContain("Patches were not applied");
+			expect(await Bun.file(path.join(repoRoot, "first.txt")).text()).toBe("base\n");
+			expect(await Bun.file(path.join(repoRoot, "second.txt")).text()).toBe("parent\n");
+			expect(await runGit(repoRoot, "status", "--porcelain", "--", "first.txt", "second.txt")).toBe("");
+		} finally {
+			await fs.rm(repoRoot, { recursive: true, force: true });
+		}
 	});
 
 	it("applyWorkflowTransformTools drops schema on real AgentTool-like objects in catalog mode", () => {

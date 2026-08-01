@@ -10,6 +10,7 @@ import type {
 	ModelProfile,
 	PromptAssemblyReceiptV1,
 	RuntimePort,
+	WorkflowRuntimeIdentityReceiptV1,
 } from "../types";
 
 export interface ImplementStageInput {
@@ -33,6 +34,8 @@ export interface ImplementStageResult {
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	contextLedger?: ContextLedgerV1;
 	optimizationReceipts?: unknown[];
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	modelFamily?: string;
 }
 
 export class ImplementStage {
@@ -43,10 +46,11 @@ export class ImplementStage {
 	}
 
 	async execute(input: ImplementStageInput): Promise<ImplementStageResult> {
+		const strictIdentity = input.profile.strictIdentity === true;
 		const isolation = {
-			merge: input.isolation?.merge ?? "patch",
-			apply: input.isolation?.apply ?? true,
 			...input.isolation,
+			merge: strictIdentity ? ("patch" as const) : (input.isolation?.merge ?? "patch"),
+			apply: strictIdentity ? false : (input.isolation?.apply ?? true),
 			requested: true, // isolation required for write stages
 		};
 		const request = this.#runtime.buildRequest({
@@ -83,8 +87,8 @@ export class ImplementStage {
 				stage: "implementing",
 				createdAt: coerceIsoDatetime(modelArtifact.createdAt),
 				modelProfileId: input.profile.id,
-				provider: result.resolvedProvider ?? input.profile.vendor,
-				model: result.resolvedModel,
+				provider: result.identityReceipt?.attested.provider ?? result.resolvedProvider ?? input.profile.vendor,
+				model: result.identityReceipt?.attested.model ?? result.resolvedModel,
 				promptVersion: input.profile.promptVersion,
 				patchPath,
 				branchName,
@@ -105,6 +109,8 @@ export class ImplementStage {
 			resolvedProvider: result.resolvedProvider,
 			resolvedModel: result.resolvedModel,
 			toolCalls: result.toolCalls,
+			identityReceipt: result.identityReceipt,
+			modelFamily: result.modelFamily,
 			promptAssemblyReceipt: result.promptAssemblyReceipt,
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,

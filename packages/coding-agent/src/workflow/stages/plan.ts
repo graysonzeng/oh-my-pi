@@ -3,7 +3,14 @@ import type { ToolSession } from "../../tools";
 import { PlanArtifactJsonSchema } from "../json-schemas";
 import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
 import { PlanArtifactSchema } from "../schemas";
-import type { ContextLedgerV1, ModelProfile, PlanArtifactV1, PromptAssemblyReceiptV1, RuntimePort } from "../types";
+import type {
+	ContextLedgerV1,
+	ModelProfile,
+	PlanArtifactV1,
+	PromptAssemblyReceiptV1,
+	RuntimePort,
+	WorkflowRuntimeIdentityReceiptV1,
+} from "../types";
 
 export interface PlanStageInput {
 	workflowId: string;
@@ -21,6 +28,11 @@ export interface PlanStageResult {
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	contextLedger?: ContextLedgerV1;
 	optimizationReceipts?: unknown[];
+	resolvedProvider?: string;
+	resolvedModel?: string;
+	toolCalls?: number;
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	modelFamily?: string;
 }
 
 export class PlanStage {
@@ -54,7 +66,8 @@ export class PlanStage {
 				stage: "planning",
 				createdAt: coerceIsoDatetime((result.artifact as PlanArtifactV1).createdAt),
 				modelProfileId: input.profile.id,
-				provider: input.profile.vendor,
+				provider: result.identityReceipt?.attested.provider ?? result.resolvedProvider ?? input.profile.vendor,
+				model: result.identityReceipt?.attested.model ?? result.resolvedModel,
 				promptVersion: input.profile.promptVersion,
 			},
 			"PlanArtifact",
@@ -62,6 +75,11 @@ export class PlanStage {
 		return {
 			artifact,
 			usage: result.usage,
+			resolvedProvider: result.resolvedProvider,
+			resolvedModel: result.resolvedModel,
+			toolCalls: result.toolCalls,
+			identityReceipt: result.identityReceipt,
+			modelFamily: result.modelFamily,
 			promptAssemblyReceipt: result.promptAssemblyReceipt,
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,

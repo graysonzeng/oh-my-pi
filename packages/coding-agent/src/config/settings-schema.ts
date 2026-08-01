@@ -4458,6 +4458,27 @@ export const SETTINGS_SCHEMA = {
 			description: "Bounded plan rejection / replan loops before the workflow blocks",
 		},
 	},
+	"workflow.defaultQualityTier": {
+		type: "enum",
+		values: ["balanced", "critical"] as const,
+		default: "balanced",
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Default Workflow Quality Tier",
+			description: "Default quality route selected by workflow.start when quality routes are configured",
+		},
+	},
+	"workflow.qualityRoutes": {
+		type: "record",
+		default: {} as Record<string, unknown>,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Quality Routes",
+			description: "Ordered model profile ids per workflow role for balanced and critical routes",
+		},
+	},
 	"workflow.profiles": {
 		type: "record",
 		default: {} as Record<string, unknown>,

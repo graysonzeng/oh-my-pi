@@ -10,6 +10,7 @@ const RETRYABLE_KINDS: ReadonlySet<WorkflowErrorKind> = new Set([
 	"provider_transient",
 	"quota",
 	"authentication",
+	"identity_mismatch",
 ]);
 
 const BLOCKED_KINDS: ReadonlySet<WorkflowErrorKind> = new Set([
@@ -70,6 +71,12 @@ export class WorkflowCancelledError extends WorkflowError {
 	}
 }
 
+
+export class WorkflowIdentityError extends WorkflowError {
+	constructor(reason: string, details?: unknown) {
+		super(`Identity verification failed: ${reason}`, "identity_mismatch", details);
+	}
+}
 export class WorkflowTimeoutError extends WorkflowError {
 	constructor(message = "Workflow stage timed out", details?: unknown) {
 		super(message, "timeout", details);

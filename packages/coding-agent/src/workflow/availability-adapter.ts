@@ -1,6 +1,11 @@
 import * as ai from "@oh-my-pi/pi-ai";
 import { resolveModelOverride } from "../config/model-resolver";
 import availabilityProbePrompt from "../prompts/workflow/availability-probe.hbs.md" with { type: "text" };
+import {
+	assertStrictRuntimeIdentity,
+	buildRuntimeIdentityReceipt,
+	ProviderIdentityCollector,
+} from "./identity-receipt";
 import type { StructuredRunnerResult } from "./runtime-adapter";
 import type {
 	WorkflowAvailabilityPort,
@@ -92,6 +97,9 @@ async function probeSessionModel(
 		};
 	}
 	const prompt = availabilityProbePrompt.trim();
+	const identityCollector = new ProviderIdentityCollector();
+	const requestedEffort =
+		request.profile.thinkingLevel === "auto" ? undefined : request.profile.thinkingLevel;
 	const response = await ai.completeSimple(
 		model,
 		{
@@ -100,18 +108,36 @@ async function probeSessionModel(
 		},
 		{
 			apiKey: registry.resolver(model, sessionId),
-			maxTokens: 16,
-			disableReasoning: true,
+			maxTokens: request.profile.strictIdentity ? 64 : 16,
+			reasoning: request.profile.strictIdentity ? requestedEffort : undefined,
+			disableReasoning: request.profile.strictIdentity ? undefined : true,
 			signal,
 			fetch: request.session.fetch,
 			cwd: request.session.cwd,
 			serviceTier: ai.resolveModelServiceTier(request.session.getServiceTierByFamily?.(), model),
+			onResponse: identityCollector.onResponse,
 		},
 	);
 	const latencyMs = performance.now() - started;
+	const identityReceipt = buildRuntimeIdentityReceipt(
+		request.profile,
+		identityCollector,
+		`${model.provider}/${model.id}`,
+	);
+	const identityFields = {
+		localProvider: identityReceipt.localResolution.provider ?? undefined,
+		localModel: identityReceipt.localResolution.model ?? undefined,
+		attestedProvider: identityReceipt.attested.provider ?? undefined,
+		attestedModel: identityReceipt.attested.model ?? undefined,
+		attestedCheckpoint: identityReceipt.attested.checkpoint ?? undefined,
+		identityProvenance: identityReceipt.attested.provenance,
+		exactIdentityMatch: identityReceipt.exactMatch,
+		effortSupported: identityReceipt.effortSupported,
+	};
 	if (response.stopReason === "error" || response.stopReason === "aborted") {
 		return {
 			status: "unavailable",
+			...identityFields,
 			latencyMs,
 			usage: response.usage,
 			reportedCostUsd: reportedCost(response.usage),
@@ -119,10 +145,33 @@ async function probeSessionModel(
 			errorSummary: response.errorMessage ?? `probe stopped: ${response.stopReason}`,
 		};
 	}
+	if (request.profile.strictIdentity) {
+		try {
+			assertStrictRuntimeIdentity(identityReceipt);
+		} catch (error) {
+			const missing = identityReceipt.attested.provenance === "unknown";
+			return {
+				status: missing ? "indeterminate" : "unavailable",
+				...identityFields,
+				latencyMs,
+				usage: response.usage,
+				reportedCostUsd: reportedCost(response.usage),
+				errorKind: missing
+					? "missing_attestation"
+					: identityReceipt.effortSupported !== true
+						? "unsupported_effort"
+						: "identity_mismatch",
+				errorSummary: error instanceof Error ? error.message : String(error),
+			};
+		}
+	}
 	return {
 		status: "available",
-		actualProvider: response.provider,
-		actualModel: response.model,
+		...identityFields,
+		actualProvider: request.profile.strictIdentity
+			? (identityReceipt.attested.provider ?? undefined)
+			: response.provider,
+		actualModel: request.profile.strictIdentity ? (identityReceipt.attested.model ?? undefined) : response.model,
 		latencyMs,
 		usage: response.usage,
 		reportedCostUsd: reportedCost(response.usage),

@@ -1,4 +1,4 @@
-import type { Usage } from "@oh-my-pi/pi-ai";
+import type { SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../tools";
 import { withContextProviderUsage } from "./context-ledger";
 import {
@@ -8,6 +8,11 @@ import {
 	WorkflowSchemaError,
 	WorkflowTimeoutError,
 } from "./errors";
+import {
+	assertStrictRuntimeIdentity,
+	buildRuntimeIdentityReceipt,
+	ProviderIdentityCollector,
+} from "./identity-receipt";
 import { sha256Hex } from "./optimization-receipt";
 import { withProviderCacheMetrics } from "./prompt-assembly";
 import {
@@ -35,11 +40,13 @@ import {
 	totalSchemaModelAttempts,
 } from "./structured-output-repair";
 import type {
+	CapturedChangesMerger,
 	RuntimePort,
 	WorkflowAgentRequest,
 	WorkflowAgentResult,
 	WorkflowErrorKind,
 	WorkflowIsolationControls,
+	WorkflowRuntimeIdentityReceiptV1,
 } from "./types";
 
 /** Minimal request shape accepted by the injectable structured runner. */
@@ -56,6 +63,10 @@ export interface StructuredRunnerRequest {
 	isolation?: WorkflowIsolationControls;
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
+	/** Provider response observer used to collect execution identity attestation. */
+	onResponse?: SimpleStreamOptions["onResponse"];
+	/** Disable every inner model replacement path for exact-identity execution. */
+	strictModelIdentity?: boolean;
 	/** When true, task runtime keeps isolation artifacts for verification. */
 	retainArtifacts?: boolean;
 	/** Used to place durable patch copies under workflow artifact storage. */
@@ -124,9 +135,11 @@ export { injectWorkflowPrompt, wrapSessionForWorkflowIsolation } from "./runtime
  */
 export class RuntimeAdapter implements RuntimePort {
 	readonly #runner: StructuredRunner;
+	readonly mergeCapturedChanges?: CapturedChangesMerger;
 
-	constructor(runner: StructuredRunner) {
+	constructor(runner: StructuredRunner, mergeCapturedChanges?: CapturedChangesMerger) {
 		this.#runner = runner;
+		this.mergeCapturedChanges = mergeCapturedChanges;
 	}
 
 	buildRequest(request: WorkflowAgentRequest): WorkflowAgentRequest {
@@ -358,6 +371,7 @@ export class RuntimeAdapter implements RuntimePort {
 		const schemaMode =
 			request.profile.outputStrategy?.schemaEnhancement?.strictMode === false ? "permissive" : "strict";
 
+		const identityCollector = new ProviderIdentityCollector();
 		const mappedRequest: StructuredRunnerRequest = {
 			session: prepared.session,
 			invocationKind: "task",
@@ -378,6 +392,8 @@ export class RuntimeAdapter implements RuntimePort {
 			allowedTools: prepared.allowedTools,
 			processToolResult: prepared.processToolResult,
 			transformTools: prepared.transformTools,
+			onResponse: identityCollector.onResponse,
+			strictModelIdentity: request.profile.strictIdentity === true,
 		};
 
 		try {
@@ -401,6 +417,8 @@ export class RuntimeAdapter implements RuntimePort {
 			if (body.error) {
 				throw new WorkflowError(body.error, this.#classifyErrorKind(body.error), { exitCode: body.exitCode });
 			}
+			const identityReceipt = buildRuntimeIdentityReceipt(request.profile, identityCollector, body.resolvedModel);
+			if (request.profile.strictIdentity) assertStrictRuntimeIdentity(identityReceipt);
 			if (body.exitCode !== undefined && body.exitCode !== 0) {
 				// Schema violation often surfaces as exitCode=1 + structured invalid — try repair first.
 				const structuredFail = body.structuredOutput;
@@ -411,6 +429,7 @@ export class RuntimeAdapter implements RuntimePort {
 						prepared,
 						request,
 						result.changesApplied ?? null,
+						identityReceipt,
 						hooks,
 					);
 					if (repaired) return repaired;
@@ -454,6 +473,7 @@ export class RuntimeAdapter implements RuntimePort {
 					prepared,
 					request,
 					result.changesApplied ?? null,
+					identityReceipt,
 					hooks,
 				);
 				if (repaired) return repaired;
@@ -492,6 +512,8 @@ export class RuntimeAdapter implements RuntimePort {
 				contextLedger: withContextProviderUsage(prepared.contextLedger, body.usage),
 				optimizationReceipts:
 					prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
+				identityReceipt,
+				modelFamily: identityReceipt.modelFamily ?? undefined,
 			};
 		} catch (error) {
 			throw this.#normalizeError(error);
@@ -508,6 +530,7 @@ export class RuntimeAdapter implements RuntimePort {
 		prepared: PreparedWorkflowInvocation,
 		request: WorkflowAgentRequest,
 		changesApplied: boolean | null,
+		identityReceipt: WorkflowRuntimeIdentityReceiptV1,
 		hooks?: {
 			onSchemaRepairReceipt?: (receipt: SchemaRepairReceiptV1) => void;
 			schemaRetryMaxRetries?: number;
@@ -549,6 +572,8 @@ export class RuntimeAdapter implements RuntimePort {
 			contextLedger: withContextProviderUsage(prepared.contextLedger, body.usage),
 			optimizationReceipts:
 				prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
+			identityReceipt,
+			modelFamily: identityReceipt.modelFamily ?? undefined,
 			schemaRepairReceipt: receipt,
 		};
 	}
