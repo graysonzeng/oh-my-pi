@@ -1,12 +1,7 @@
 import { getDefaultConfig, type WorkflowDefaultConfig } from "./default-config";
 import { WorkflowPolicyError } from "./errors";
 import { assertSupportedModelProfile, normalizeModelProfile } from "./model-profile-registry";
-import type {
-	ModelProfile,
-	WorkflowQualityRoutes,
-	WorkflowQualityTier,
-	WorkflowRole,
-} from "./types";
+import type { ModelProfile, WorkflowQualityRoutes, WorkflowQualityTier, WorkflowRole } from "./types";
 
 /**
  * Merge settings `workflow.profiles` over defaults.
@@ -77,7 +72,11 @@ export function resolveWorkflowQualityRoutesFromSettings(
 		const roleMap = {} as Record<WorkflowRole, readonly string[]>;
 		for (const role of QUALITY_ROUTE_ROLES) {
 			const rawIds = rawRoleMap[role];
-			if (!Array.isArray(rawIds) || rawIds.length === 0 || !rawIds.every(id => typeof id === "string" && id.length > 0)) {
+			if (
+				!Array.isArray(rawIds) ||
+				rawIds.length === 0 ||
+				!rawIds.every(id => typeof id === "string" && id.length > 0)
+			) {
 				throw new WorkflowPolicyError("empty_or_invalid_quality_route_role", {
 					qualityTier: tierKey,
 					role,
@@ -105,7 +104,11 @@ export function resolveWorkflowQualityRoutesFromSettings(
 					});
 				}
 				if (profile.strictIdentity !== true) {
-					throw new WorkflowPolicyError("quality_route_profile_not_strict", { qualityTier: tierKey, role, profileId });
+					throw new WorkflowPolicyError("quality_route_profile_not_strict", {
+						qualityTier: tierKey,
+						role,
+						profileId,
+					});
 				}
 			}
 			roleMap[role] = [...ids];

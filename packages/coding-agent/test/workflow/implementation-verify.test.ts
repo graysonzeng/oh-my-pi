@@ -61,6 +61,55 @@ describe("ImplementationVerifyStage patch content", () => {
 		expect(files).toContain("foo.ts");
 	});
 
+	it("decodes quoted spaces and UTF-8 octal paths from Git patches", () => {
+		const patch = [
+			'diff --git "a/src/with space.ts" "b/src/with space.ts"',
+			'+++ "b/src/with space.ts"',
+			'diff --git "a/src/\\344\\275\\240\\345\\245\\275.ts" "b/src/\\344\\275\\240\\345\\245\\275.ts"',
+			'+++ "b/src/\\344\\275\\240\\345\\245\\275.ts"',
+		].join("\n");
+		expect(changedFilesFromPatch(patch)).toEqual(["src/with space.ts", "src/你好.ts"]);
+	});
+
+	it("reports only the destination for copy-only patches while preserving rename endpoints", () => {
+		const patch = [
+			"diff --git a/src/template.ts b/src/template-copy.ts",
+			"similarity index 100%",
+			"copy from src/template.ts",
+			"copy to src/template-copy.ts",
+			"diff --git a/src/old.ts b/src/new.ts",
+			"similarity index 100%",
+			"rename from src/old.ts",
+			"rename to src/new.ts",
+		].join("\n");
+
+		expect(changedFilesFromPatch(patch)).toEqual(["src/template-copy.ts", "src/old.ts", "src/new.ts"]);
+	});
+
+	it("preserves literal a and b directory prefixes from copy extension headers", () => {
+		const patch = [
+			"diff --git a/src/template.ts b/a/template-copy.ts",
+			"similarity index 100%",
+			"copy from src/template.ts",
+			"copy to a/template-copy.ts",
+		].join("\n");
+
+		expect(changedFilesFromPatch(patch)).toEqual(["a/template-copy.ts"]);
+	});
+
+	it("does not parse hunk body lines that resemble file headers as paths", () => {
+		const patch = [
+			"diff --git a/src/note.md b/src/note.md",
+			"--- a/src/note.md",
+			"+++ b/src/note.md",
+			"@@ -1 +1 @@",
+			"--- note",
+			"+++ note",
+		].join("\n");
+
+		expect(changedFilesFromPatch(patch)).toEqual(["src/note.md"]);
+	});
+
 	it("fails closed when branch mode has no readable patch evidence", async () => {
 		let verifyCalls = 0;
 		const verifier: VerifierPort = {

@@ -164,6 +164,114 @@ const OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE =
 const OPENAI_RESPONSES_CHAIN_STALE_FAILURE_LIMIT = 3;
 const OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES = 1;
 const OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS = 500;
+type OpenAIResponsesResponseIdentity = {
+	model?: unknown;
+	provider?: unknown;
+	checkpoint?: unknown;
+};
+
+type OpenAIResponsesIdentityEvent = {
+	response?: OpenAIResponsesResponseIdentity;
+	model?: unknown;
+	provider?: unknown;
+	checkpoint?: unknown;
+};
+
+type OpenAIResponsesIdentityAggregate = {
+	metadata: Record<string, unknown>;
+	conflicted: boolean;
+};
+
+function resolveOpenAIResponsesIdentityCoordinate(
+	field: "model" | "provider" | "checkpoint",
+	primary: unknown,
+	secondary: unknown,
+): string | undefined {
+	const primaryValue = typeof primary === "string" && primary.length > 0 ? primary : undefined;
+	const secondaryValue = typeof secondary === "string" && secondary.length > 0 ? secondary : undefined;
+	if (primaryValue !== undefined && secondaryValue !== undefined && primaryValue !== secondaryValue) {
+		throw new AIError.ProviderResponseError(
+			`Conflicting OpenAI Responses ${field} identity coordinates: ${primaryValue} vs ${secondaryValue}`,
+			{ kind: "output" },
+		);
+	}
+	return primaryValue ?? secondaryValue;
+}
+
+/**
+ * Read identity-bearing fields from one standard Responses lifecycle envelope.
+ * The request-local model is deliberately not synthesized here: only provider
+ * response fields become execution evidence.
+ */
+function getOpenAIResponsesResponseMetadata(
+	event: ResponseStreamEvent | undefined,
+): Record<string, unknown> | undefined {
+	if (!event) return undefined;
+	const eventType = (event as { type?: unknown }).type;
+	switch (eventType) {
+		case "response.created":
+		case "response.in_progress":
+		case "response.queued":
+		case "response.completed":
+		case "response.done":
+		case "response.failed":
+		case "response.incomplete":
+			break;
+		default:
+			return undefined;
+	}
+	const identityEvent = event as unknown as OpenAIResponsesIdentityEvent;
+	const response =
+		identityEvent.response && typeof identityEvent.response === "object" ? identityEvent.response : undefined;
+	const model = resolveOpenAIResponsesIdentityCoordinate("model", response?.model, identityEvent.model);
+	const provider = resolveOpenAIResponsesIdentityCoordinate("provider", response?.provider, identityEvent.provider);
+	const checkpoint = resolveOpenAIResponsesIdentityCoordinate(
+		"checkpoint",
+		response?.checkpoint,
+		identityEvent.checkpoint,
+	);
+	if (model === undefined && provider === undefined && checkpoint === undefined) return undefined;
+
+	const metadata: Record<string, unknown> = {};
+	if (model !== undefined) metadata.model = model;
+	if (provider !== undefined) metadata.provider = provider;
+	if (checkpoint !== undefined) metadata.checkpoint = checkpoint;
+	return metadata;
+}
+
+function mergeOpenAIResponsesIdentity(aggregate: OpenAIResponsesIdentityAggregate, event: ResponseStreamEvent): void {
+	let metadata: Record<string, unknown> | undefined;
+	try {
+		metadata = getOpenAIResponsesResponseMetadata(event);
+	} catch (error) {
+		aggregate.conflicted = true;
+		throw error;
+	}
+	if (!metadata) return;
+	for (const field of ["model", "provider", "checkpoint"] as const) {
+		const value = metadata[field];
+		if (typeof value !== "string") continue;
+		const previous = aggregate.metadata[field];
+		if (previous !== undefined && previous !== value) {
+			aggregate.conflicted = true;
+			throw new AIError.ProviderResponseError(
+				`Conflicting OpenAI Responses ${field} identity coordinates: ${String(previous)} vs ${value}`,
+				{ kind: "output" },
+			);
+		}
+		aggregate.metadata[field] = value;
+	}
+}
+
+function isOpenAIResponsesTerminalIdentityEvent(event: ResponseStreamEvent): boolean {
+	const eventType: unknown = event.type;
+	return (
+		eventType === "response.completed" ||
+		eventType === "response.done" ||
+		eventType === "response.failed" ||
+		eventType === "response.incomplete"
+	);
+}
 
 function isOpenAIResponsesReplayUnsafeEvent(event: ResponseStreamEvent): boolean {
 	switch (event.type) {
@@ -549,14 +657,40 @@ const streamOpenAIResponsesOnce = (
 								// so retries cannot extend the caller's deadline.
 								onSseEvent: rawSseObserver,
 							});
-							// Disarm the first-event watchdog as soon as headers arrive — a slow
-							// onResponse callback must not abort an already-connected stream.
+							// The transport timeout is only for obtaining response headers. The
+							// iterator-level first-event watchdog must not include callback work.
 							if (requestTimeout !== undefined) {
 								clearTimeout(requestTimeout);
 								requestTimeout = undefined;
 							}
-							await notifyProviderResponse(options, response, model, requestId);
-							return events;
+							const identityAggregate: OpenAIResponsesIdentityAggregate = {
+								metadata: {},
+								conflicted: false,
+							};
+							let responseNotified = false;
+							const notifyResponse = async (): Promise<void> => {
+								if (responseNotified) return;
+								responseNotified = true;
+								const metadata =
+									identityAggregate.conflicted || Object.keys(identityAggregate.metadata).length === 0
+										? undefined
+										: identityAggregate.metadata;
+								await notifyProviderResponse(options, response, model, requestId, metadata);
+							};
+							const observedEvents = (async function* (): AsyncGenerator<ResponseStreamEvent> {
+								try {
+									for await (const event of events) {
+										mergeOpenAIResponsesIdentity(identityAggregate, event);
+										if (isOpenAIResponsesTerminalIdentityEvent(event)) await notifyResponse();
+										yield event;
+									}
+								} finally {
+									// A parse error, conflict, or clean end before identity still
+									// emits exactly one headers-preserving notification.
+									await notifyResponse();
+								}
+							})();
+							return observedEvents;
 						} finally {
 							if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 						}

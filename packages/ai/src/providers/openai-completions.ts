@@ -715,8 +715,32 @@ const streamOpenAICompletionsOnce = (
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
 					});
-					await notifyProviderResponse(options, response, model, requestId);
-					return events;
+					let responseNotified = false;
+					const notifyResponse = async (chunk?: ChatCompletionChunk): Promise<void> => {
+						if (responseNotified) return;
+						responseNotified = true;
+						let metadata: Record<string, unknown> | undefined;
+						const responseModel = chunk?.model;
+						if (typeof responseModel === "string" && responseModel.length > 0) {
+							metadata = { model: responseModel };
+							const responseProvider = (chunk as ProviderAttributedChatCompletionChunk).provider;
+							if (typeof responseProvider === "string" && responseProvider.length > 0) {
+								metadata.upstreamProvider = responseProvider;
+							}
+						}
+						await notifyProviderResponse(options, response, model, requestId, metadata);
+					};
+					const observedEvents = (async function* (): AsyncGenerator<ChatCompletionChunk> {
+						try {
+							for await (const chunk of events) {
+								await notifyResponse(chunk);
+								yield chunk;
+							}
+						} finally {
+							await notifyResponse();
+						}
+					})();
+					return observedEvents;
 				} finally {
 					// Headers arrived (or the request failed); from here the
 					// first-event deadline is enforced by `iterateWithIdleTimeout`.

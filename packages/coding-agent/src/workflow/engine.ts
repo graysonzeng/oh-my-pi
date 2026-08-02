@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import type { ToolSession } from "../tools";
+import * as git from "../utils/git";
 import { abortRegisteredWorkflow, registerWorkflowAbort, unregisterWorkflowAbort } from "./abort-registry";
 import { resolveArtifactInclusion } from "./artifact-inclusion";
 import { ArtifactStore } from "./artifact-store";
@@ -20,7 +21,12 @@ import {
 	WorkflowPolicyError,
 } from "./errors";
 import { FindingTracker } from "./finding-tracker";
-import { assertSupportedModelProfile } from "./model-profile-registry";
+import { assertStrictRuntimeIdentity } from "./identity-receipt";
+import {
+	assertSupportedModelProfile,
+	configuredIdentityForProfile,
+	normalizeModelProfile,
+} from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
 import {
 	compileQualityRouteSnapshot,
@@ -56,9 +62,9 @@ import type {
 	Artifact,
 	CapturedChangesMergeResult,
 	ImplementationArtifactV1,
+	ModelIdentityProvenance,
 	ModelProfile,
 	PlanArtifactV1,
-	ModelIdentityProvenance,
 	QualityRouteSnapshotV1,
 	ReviewArtifactV1,
 	ReviewFindingV1,
@@ -78,12 +84,12 @@ import type {
 	WorkflowModelExecutionEvidenceV1,
 	WorkflowRequest,
 	WorkflowRole,
+	WorkflowRoutingDecisionEvidenceV1,
 	WorkflowRuntimeEvidence,
 	WorkflowRuntimeIdentityReceiptV1,
-	WorkflowRoutingDecisionEvidenceV1,
-	WorkflowStatusReportV1,
 	WorkflowState,
 	WorkflowStatus,
+	WorkflowStatusReportV1,
 	WorkPackageStateArtifactV1,
 } from "./types";
 import { Verifier } from "./verifier";
@@ -292,9 +298,16 @@ export class WorkflowEngine {
 	constructor(options: WorkflowEngineOptions = {}) {
 		this.#ownsStore = options.ownsStore ?? options.store === undefined;
 		this.#store = options.store ?? new WorkflowStore();
-		this.#config = { ...getDefaultConfig(), ...options.config };
-		const profiles = Object.values(this.#config.profiles);
-		for (const profile of profiles) assertSupportedModelProfile(profile);
+		const mergedConfig = { ...getDefaultConfig(), ...options.config };
+		const normalizedProfiles = Object.fromEntries(
+			Object.entries(mergedConfig.profiles).map(([key, profile]) => {
+				const normalized = normalizeModelProfile(profile);
+				assertSupportedModelProfile(normalized);
+				return [key, normalized];
+			}),
+		);
+		this.#config = { ...mergedConfig, profiles: normalizedProfiles };
+		const profiles = Object.values(normalizedProfiles);
 		this.#configuredRouter = options.router ?? new ModelRouter(profiles);
 		this.#router = this.#configuredRouter;
 		// Production wiring injects createDefaultRuntimeAdapter(); pure tests inject fakes.
@@ -441,9 +454,8 @@ export class WorkflowEngine {
 		const persistedRoute = policy?.qualityRouteSnapshot;
 		if (persistedRoute !== undefined) {
 			const rawRoute = evidenceRecord(persistedRoute);
-			qualityTier = rawRoute?.qualityTier === "balanced" || rawRoute?.qualityTier === "critical"
-				? rawRoute.qualityTier
-				: null;
+			qualityTier =
+				rawRoute?.qualityTier === "balanced" || rawRoute?.qualityTier === "critical" ? rawRoute.qualityTier : null;
 			snapshotFingerprint = evidenceString(rawRoute?.fingerprint);
 			try {
 				const verified = verifyQualityRouteSnapshot(persistedRoute);
@@ -1075,14 +1087,16 @@ export class WorkflowEngine {
 						scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 					});
 				}
-				impl = await this.#commitValidatedWrite({
-					workflowId,
-					attemptId,
-					cwd,
-					artifact: impl,
-					identityReceipt: execution.evidence?.identityReceipt,
-					signal,
-				});
+				if (!execution.writeCommitted) {
+					impl = await this.#commitValidatedWrite({
+						workflowId,
+						attemptId,
+						cwd,
+						artifact: impl,
+						identityReceipt: execution.evidence?.identityReceipt,
+						signal,
+					});
+				}
 				this.#implementation = impl;
 				this.#implementationArtifactRef = await this.#persistArtifact(
 					workflowId,
@@ -1443,19 +1457,18 @@ export class WorkflowEngine {
 	): Promise<{
 		artifact: ImplementationArtifactV1;
 		usageRecorded: boolean;
+		writeCommitted: boolean;
 		usage?: unknown;
 		evidence?: WorkflowRuntimeEvidence;
 	}> {
+		if (this.#workPackageState?.merge.status === "applied") {
+			return this.#recoverAppliedWorkPackageImplementation(workflowId, attemptId, session.cwd);
+		}
 		const configuredConcurrency = session.settings?.get?.("task.maxConcurrency" as never);
-		const maxConcurrency =
-			typeof configuredConcurrency === "number" && Number.isFinite(configuredConcurrency)
-				? configuredConcurrency
-				: 1;
+		const maxConcurrency = typeof configuredConcurrency === "number" ? configuredConcurrency : 0;
 		const mergeCapturedChanges = this.#adapter.mergeCapturedChanges;
-		const packagePlan = mergeCapturedChanges
-			? buildWorkPackageExecutionPlan(this.#plan?.workPackages, maxConcurrency)
-			: null;
-		if (!packagePlan) {
+		const packagePlan = buildWorkPackageExecutionPlan(this.#plan?.workPackages, maxConcurrency);
+		if (!mergeCapturedChanges || !packagePlan) {
 			const result = await this.#withProfileFallback("implementer", {}, async profile => {
 				this.#implementerVendor = profile.vendor;
 				return new ImplementStage(this.#adapter).execute({
@@ -1483,6 +1496,7 @@ export class WorkflowEngine {
 			return {
 				artifact: result.artifact,
 				usageRecorded: false,
+				writeCommitted: false,
 				usage: result.usage,
 				evidence: {
 					resolvedProvider: result.resolvedProvider,
@@ -1497,10 +1511,9 @@ export class WorkflowEngine {
 			};
 		}
 
-		if (!mergeCapturedChanges) throw new WorkflowPolicyError("work_package_merge_seam_unavailable");
 		let profileAttempt = 0;
 		const resumableStatePresent = this.#workPackageState !== undefined;
-		const completed = await this.#withProfileFallback("implementer", {}, async profile => {
+		const completed = await this.#withProfileFallback("implementer", {}, async (profile, route) => {
 			this.#implementerVendor = profile.vendor;
 			const reuseSucceeded = profileAttempt === 0 && resumableStatePresent;
 			profileAttempt += 1;
@@ -1529,8 +1542,8 @@ export class WorkflowEngine {
 				priorState: this.#workPackageState,
 				reuseSucceeded,
 				signal,
-				execute: async (workPackage, invocationAttemptId, workerSignal) =>
-					new ImplementStage(this.#adapter).execute({
+				execute: async (workPackage, invocationAttemptId, workerSignal) => {
+					const result = await new ImplementStage(this.#adapter).execute({
 						workflowId,
 						attemptId: invocationAttemptId,
 						profile,
@@ -1549,7 +1562,10 @@ export class WorkflowEngine {
 						session,
 						signal: workerSignal,
 						isolation: { merge: "patch", apply: false },
-					}),
+					});
+					this.#assertStrictWriteIdentity(profile, result.identityReceipt);
+					return result;
+				},
 				persist: state => this.#persistWorkPackageState(workflowId, attemptId, state),
 				onSuccess: async (_workPackage, result) => {
 					await this.#recordUsageAndProfile(workflowId, attemptId, result.usage, {
@@ -1564,8 +1580,18 @@ export class WorkflowEngine {
 					});
 				},
 			});
-			return { profile, workPackageState };
+			return { profile, routeModelFamily: route.modelFamily, workPackageState };
 		});
+		const completedExecutions = completed.workPackageState.packages.filter(
+			execution => execution.status === "succeeded",
+		);
+		for (const execution of completedExecutions) {
+			this.#assertStrictWriteIdentity(completed.profile, execution.identityReceipt);
+		}
+		this.#implementerModelFamily =
+			completedExecutions
+				.map(execution => execution.modelFamily ?? execution.identityReceipt?.modelFamily)
+				.find((family): family is string => typeof family === "string") ?? completed.routeModelFamily;
 
 		const patches = completed.workPackageState.merge.order.map(packageId => {
 			const execution = completed.workPackageState.packages.find(candidate => candidate.id === packageId);
@@ -1573,6 +1599,8 @@ export class WorkflowEngine {
 			if (!patchPath) throw new WorkflowPolicyError("work_package_patch_missing_before_merge", { packageId });
 			return { packageId, patchPath };
 		});
+		await this.#persistWorkPackageScopeMetrics(workflowId, attemptId, session.cwd, this.#plan!, patches);
+		this.#assertStrictWriteScope(completed.profile);
 		const outputPatchPath = path.join(
 			this.#artifactStore.baseDir,
 			workflowId,
@@ -1622,6 +1650,99 @@ export class WorkflowEngine {
 				merge,
 			}),
 			usageRecorded: true,
+			writeCommitted: true,
+		};
+	}
+
+	async #recoverAppliedWorkPackageImplementation(
+		workflowId: string,
+		attemptId: string,
+		cwd: string,
+	): Promise<{
+		artifact: ImplementationArtifactV1;
+		usageRecorded: boolean;
+		writeCommitted: boolean;
+	}> {
+		const state = this.#workPackageState;
+		if (
+			state?.merge.status !== "applied" ||
+			state.merge.changesApplied !== true ||
+			!state.merge.patchPath ||
+			state.packages.some(execution => execution.status !== "succeeded" || !execution.implementation)
+		) {
+			throw new WorkflowPolicyError("work_package_applied_state_invalid");
+		}
+		const persistedPatchPath = state.merge.patchPath;
+		const resolvedPatchPath = path.isAbsolute(persistedPatchPath)
+			? persistedPatchPath
+			: path.join(cwd, persistedPatchPath);
+		let persistedPatchText: string;
+		try {
+			persistedPatchText = await Bun.file(resolvedPatchPath).text();
+		} catch (error) {
+			throw new WorkflowPolicyError("work_package_applied_patch_unreadable", {
+				patchPath: persistedPatchPath,
+				reason: redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500),
+			});
+		}
+		if (!persistedPatchText.trim()) {
+			throw new WorkflowPolicyError("work_package_applied_patch_ambiguous", {
+				patchPath: persistedPatchPath,
+				reason: "empty_patch",
+			});
+		}
+		let reverseApplies: boolean;
+		let forwardApplies: boolean;
+		try {
+			[reverseApplies, forwardApplies] = await Promise.all([
+				git.patch.canApplyText(cwd, persistedPatchText, { reverse: true }),
+				git.patch.canApplyText(cwd, persistedPatchText),
+			]);
+		} catch (error) {
+			throw new WorkflowPolicyError("work_package_applied_patch_verification_failed", {
+				patchPath: persistedPatchPath,
+				reason: redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500),
+			});
+		}
+		if (reverseApplies !== true || forwardApplies !== false) {
+			throw new WorkflowPolicyError("work_package_applied_patch_drift", {
+				patchPath: persistedPatchPath,
+				reverseApplies,
+				forwardApplies,
+			});
+		}
+		const packageProfileIds = state.packages.map(
+			execution => execution.identityReceipt?.configured.profileId ?? execution.implementation?.modelProfileId,
+		);
+		const profileIds = new Set(packageProfileIds.filter((profileId): profileId is string => Boolean(profileId)));
+		if (profileIds.size !== 1 || packageProfileIds.some(profileId => !profileId)) {
+			throw new WorkflowPolicyError("work_package_applied_profile_ambiguous", {
+				profileIds: [...profileIds],
+			});
+		}
+		const profileId = profileIds.values().next().value;
+		const profile = this.#router.list().find(candidate => candidate.id === profileId);
+		if (!profile?.roles.includes("implementer")) {
+			throw new WorkflowPolicyError("work_package_applied_profile_missing", { profileId });
+		}
+		for (const execution of state.packages) {
+			this.#assertStrictWriteIdentity(profile, execution.identityReceipt);
+		}
+		this.#assertStrictWriteScope(profile);
+		const merge: CapturedChangesMergeResult = {
+			patchPath: state.merge.patchPath,
+			changesApplied: true,
+			summary: state.merge.summary ?? "Recovered previously applied work-package merge",
+		};
+		this.#implementerVendor = profile.vendor;
+		this.#implementerModelFamily =
+			state.packages
+				.map(execution => execution.modelFamily ?? execution.identityReceipt?.modelFamily)
+				.find((family): family is string => typeof family === "string") ?? this.#implementerModelFamily;
+		return {
+			artifact: aggregateWorkPackageImplementations({ workflowId, attemptId, profile, state, merge }),
+			usageRecorded: true,
+			writeCommitted: true,
 		};
 	}
 
@@ -1635,27 +1756,8 @@ export class WorkflowEngine {
 	}): Promise<ImplementationArtifactV1> {
 		const profile = this.#router.list().find(candidate => candidate.id === options.artifact.modelProfileId);
 		if (!profile?.strictIdentity) return options.artifact;
-		const receipt = options.identityReceipt;
-		if (
-			!receipt ||
-			receipt.attested.provenance === "unknown" ||
-			receipt.exactMatch !== true ||
-			receipt.effortSupported !== true ||
-			!receipt.modelFamily ||
-			receipt.modelFamily !== receipt.configured.modelFamily
-		) {
-			throw new WorkflowPolicyError("strict_write_identity_not_verified", {
-				profileId: profile.id,
-				identityReceipt: receipt ?? null,
-			});
-		}
-		if (this.#lastScopeMetrics?.status !== "adhered") {
-			throw new WorkflowPolicyError("strict_write_scope_not_approved", {
-				profileId: profile.id,
-				scopeStatus: this.#lastScopeMetrics?.status ?? "missing",
-				scopeFindings: this.#lastScopeMetrics?.scopeCreepFindings ?? [],
-			});
-		}
+		this.#assertStrictWriteIdentity(profile, options.identityReceipt);
+		this.#assertStrictWriteScope(profile);
 		if (!options.artifact.patchPath) {
 			throw new WorkflowPolicyError("strict_write_patch_missing", { profileId: profile.id });
 		}
@@ -1685,13 +1787,94 @@ export class WorkflowEngine {
 		return { ...options.artifact, patchPath: merge.patchPath, branchName: undefined };
 	}
 
+	#assertStrictWriteIdentity(profile: ModelProfile, receipt: WorkflowRuntimeIdentityReceiptV1 | undefined): void {
+		if (!profile.strictIdentity) return;
+		let runtimeIdentityVerified = false;
+		if (receipt) {
+			try {
+				assertStrictRuntimeIdentity(receipt);
+				runtimeIdentityVerified = true;
+			} catch {
+				runtimeIdentityVerified = false;
+			}
+		}
+		const expected = configuredIdentityForProfile(profile);
+		const configured = receipt?.configured;
+		const configuredMatches =
+			configured?.profileId === expected.profileId &&
+			configured.provider === expected.provider &&
+			configured.model === expected.model &&
+			configured.checkpoint === expected.checkpoint &&
+			configured.provenance === expected.provenance &&
+			configured.modelPattern === expected.modelPattern &&
+			configured.requestedEffort === expected.requestedEffort &&
+			configured.modelFamily === expected.modelFamily;
+		if (!runtimeIdentityVerified || !configuredMatches) {
+			throw new WorkflowPolicyError("strict_write_identity_not_verified", {
+				profileId: profile.id,
+				identityReceipt: receipt ?? null,
+			});
+		}
+	}
+
+	#assertStrictWriteScope(profile: ModelProfile): void {
+		if (!profile.strictIdentity) return;
+		if (this.#lastScopeMetrics?.status !== "adhered") {
+			throw new WorkflowPolicyError("strict_write_scope_not_approved", {
+				profileId: profile.id,
+				scopeStatus: this.#lastScopeMetrics?.status ?? "missing",
+				scopeFindings: this.#lastScopeMetrics?.scopeCreepFindings ?? [],
+			});
+		}
+	}
+
+	async #persistWorkPackageScopeMetrics(
+		workflowId: string,
+		attemptId: string,
+		cwd: string,
+		plan: PlanArtifactV1,
+		patches: readonly { packageId: string; patchPath: string }[],
+	): Promise<void> {
+		const changedFiles = new Set<string>();
+		for (const patch of patches) {
+			const resolved = path.isAbsolute(patch.patchPath) ? patch.patchPath : path.join(cwd, patch.patchPath);
+			let text: string;
+			try {
+				text = await Bun.file(resolved).text();
+			} catch (error) {
+				throw new WorkflowPolicyError("work_package_patch_unreadable_before_merge", {
+					packageId: patch.packageId,
+					patchPath: patch.patchPath,
+					reason: redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500),
+				});
+			}
+			const patchFiles = changedFilesFromPatch(text);
+			if (patchFiles.length === 0) {
+				throw new WorkflowPolicyError("work_package_patch_paths_unreadable", {
+					packageId: patch.packageId,
+					patchPath: patch.patchPath,
+				});
+			}
+			for (const file of patchFiles) changedFiles.add(file);
+		}
+		const plannedFiles = plannedFilesFromPlan(plan, [...changedFiles]);
+		const metrics = buildScopeMetrics({
+			plannedFiles,
+			forbiddenFiles: this.#config.forbiddenPaths ?? [],
+			changedFiles: [...changedFiles],
+		});
+		this.#lastScopeMetrics = metrics;
+		await this.#persistArtifact(workflowId, attemptId, "scope-metrics", metrics);
+	}
+
 	async #persistWorkPackageState(
 		workflowId: string,
 		attemptId: string,
 		state: WorkPackageStateArtifactV1,
 	): Promise<void> {
-		this.#workPackageState = structuredClone(state);
-		await this.#persistArtifact(workflowId, attemptId, "work-package-state", state);
+		const persisted = structuredClone(state);
+		await this.#persistArtifact(workflowId, attemptId, "work-package-state", persisted);
+		this.#workPackageState = persisted;
 	}
 
 	/**
@@ -1745,7 +1928,7 @@ export class WorkflowEngine {
 		if (patchEvidenceAvailable) {
 			// Patch is filesystem evidence (not model prose). Infer deletes from /dev/null headers not needed here.
 			metrics = buildScopeMetrics({
-				plannedFiles: planned,
+				plannedFiles: plannedFilesFromPlan(plan, changedFromPatch),
 				forbiddenFiles: forbidden,
 				changedFiles: changedFromPatch,
 			});
@@ -1896,10 +2079,14 @@ export class WorkflowEngine {
 			);
 			if (open) {
 				const writeStage = stage === "implementing" || stage === "repairing";
+				const packageState = stage === "implementing" ? this.#workPackageState : undefined;
 				const resumablePackageCapture =
-					stage === "implementing" &&
-					this.#workPackageState?.mode === "capture_then_apply" &&
-					this.#workPackageState.merge.status !== "failed";
+					packageState?.mode === "capture_then_apply" && packageState.merge.status === "pending";
+				const recoverableAppliedMerge =
+					packageState?.mode === "capture_then_apply" &&
+					packageState.merge.status === "applied" &&
+					packageState.merge.changesApplied === true;
+				const recoverablePackageState = resumablePackageCapture || recoverableAppliedMerge;
 				await this.#store.completeAttempt(
 					workflowId,
 					open.id,
@@ -1908,14 +2095,16 @@ export class WorkflowEngine {
 					{
 						kind: "cancelled",
 						summary:
-							writeStage && !resumablePackageCapture
+							writeStage && !recoverablePackageState
 								? "write_stage_interrupted_no_rerun"
-								: resumablePackageCapture
-									? "work_package_capture_interrupted_resumable"
-									: "stale_in_progress_on_resume",
+								: recoverableAppliedMerge
+									? "work_package_merge_already_applied_resume"
+									: resumablePackageCapture
+										? "work_package_capture_interrupted_resumable"
+										: "stale_in_progress_on_resume",
 					},
 				);
-				if (writeStage && !resumablePackageCapture) {
+				if (writeStage && !recoverablePackageState) {
 					const refreshed = await this.#requireState(workflowId);
 					if (!TERMINAL.has(refreshed.status) && isValidTransition(refreshed.status, "blocked")) {
 						await this.#store.transitionWorkflow(
@@ -2181,6 +2370,8 @@ export class WorkflowEngine {
 							this.#findingTracker.recordRepairCycle(FindingTracker.fingerprint(f));
 						}
 					}
+				} else if (meta.kind === "scope-metrics") {
+					this.#lastScopeMetrics = parsed as unknown as ScopeMetricsV1;
 				} else if (parsed.kind === "work-package-state") {
 					const workPackageState = parsed as WorkPackageStateArtifactV1;
 					if (!this.#workPackageState || workPackageState.revision > this.#workPackageState.revision) {
@@ -2315,13 +2506,12 @@ export class WorkflowEngine {
 				qualityTier: this.#qualityRouteSnapshot?.qualityTier ?? null,
 				routeSnapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
 				configuredIdentity: evidence?.identityReceipt?.configured ?? null,
-				localResolution:
-					evidence?.identityReceipt?.localResolution ?? {
-						provider: evidence?.resolvedProvider ?? null,
-						model: evidence?.resolvedModel ?? null,
-						checkpoint: null,
-						provenance: "local_resolution",
-					},
+				localResolution: evidence?.identityReceipt?.localResolution ?? {
+					provider: evidence?.resolvedProvider ?? null,
+					model: evidence?.resolvedModel ?? null,
+					checkpoint: null,
+					provenance: "local_resolution",
+				},
 				attestedIdentity: evidence?.identityReceipt?.attested ?? {
 					provider: null,
 					model: null,

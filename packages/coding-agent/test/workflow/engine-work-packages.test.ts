@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { $ } from "bun";
 import type { ToolSession } from "../../src/tools";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
+import type { WorkflowDefaultConfig } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { WorkflowError, WorkflowPolicyError } from "../../src/workflow/errors";
 import {
@@ -12,14 +14,20 @@ import {
 	type StructuredRunnerRequest,
 	type StructuredRunnerResult,
 } from "../../src/workflow/runtime-adapter";
+import { buildScopeMetrics } from "../../src/workflow/scope-metrics";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import type {
 	CapturedChangesMergeRequest,
 	CapturedChangesMerger,
 	ImplementationArtifactV1,
+	ModelProfile,
 	PlanArtifactV1,
 	ReviewArtifactV1,
 	VerifierPort,
+	WorkflowAvailabilityPort,
+	WorkflowQualityRoutes,
+	WorkflowRole,
+	WorkflowRuntimeIdentityReceiptV1,
 	WorkPackageStateArtifactV1,
 	WorkPackageV1,
 } from "../../src/workflow/types";
@@ -36,9 +44,13 @@ interface RunnerScript {
 	planReview: ScriptValue<ReviewArtifactV1>;
 	implement: ImplementScript;
 	codeReview: ScriptValue<ReviewArtifactV1>;
+	identityMode?: (request: StructuredRunnerRequest, packageId: string | undefined) => IdentityMode;
 }
 
 const PACKAGE_ASSIGNMENT = /^# Work package `([^`]+)`/;
+type IdentityMode = "valid" | "unknown" | "mismatch";
+
+const MEDIUM = "medium" as NonNullable<ModelProfile["thinkingLevel"]>;
 
 function resolveScript<T>(value: ScriptValue<T>): T {
 	return typeof value === "function" ? (value as () => T)() : value;
@@ -46,6 +58,134 @@ function resolveScript<T>(value: ScriptValue<T>): T {
 
 function packageIdFromAssignment(assignment: string): string | undefined {
 	return PACKAGE_ASSIGNMENT.exec(assignment)?.[1];
+}
+
+function requestModel(request: StructuredRunnerRequest): string {
+	const model = Array.isArray(request.model) ? request.model[0] : request.model;
+	if (!model) throw new Error("strict package runner requires a model");
+	return model;
+}
+
+function emitRuntimeIdentity(request: StructuredRunnerRequest, mode: IdentityMode): void {
+	if (mode === "unknown") return;
+	const configured = requestModel(request);
+	const slash = configured.indexOf("/");
+	const provider = slash > 0 ? configured.slice(0, slash) : "xai";
+	const model = slash > 0 ? configured.slice(slash + 1) : configured;
+	const attestedModel = mode === "mismatch" ? `${model}-mismatch` : model;
+	request.onResponse?.(
+		{ status: 200, headers: { "x-provider-model": `${provider}/${attestedModel}` } } as never,
+		{
+			provider,
+			id: model,
+			reasoning: true,
+			thinking: { efforts: [MEDIUM] },
+		} as never,
+	);
+}
+
+function strictProfile(id: string, role: WorkflowRole, modelPattern: string, vendor: string): ModelProfile {
+	return {
+		id,
+		vendor,
+		modelPattern,
+		roles: [role],
+		thinkingLevel: MEDIUM,
+		strictIdentity: true,
+		promptTemplate: role,
+		promptVersion: "strict-package-test-1",
+		toolPolicyId: "strict-package-test",
+		maxRequests: 20,
+		maxRuntimeMs: 30_000,
+		retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: [] },
+		contextPolicy: {
+			includePlan: true,
+			includeReviewFindings: true,
+			includeVerification: true,
+			includeFullTranscript: false,
+			maxArtifactBytes: 50_000,
+		},
+	};
+}
+
+function strictPackageConfig(
+	forbiddenPaths: string[] = [],
+	implementerProfile = strictProfile("strict_implementer", "implementer", "xai/grok-4.5", "xai"),
+): Partial<WorkflowDefaultConfig> {
+	const profiles = [
+		strictProfile("strict_planner", "planner", "anthropic/claude-fable-5", "anthropic"),
+		strictProfile("strict_plan_reviewer", "plan_reviewer", "openai/gpt-5.6-sol", "openai"),
+		implementerProfile,
+		strictProfile("strict_code_reviewer", "code_reviewer", "openai/gpt-5.6-sol", "openai"),
+		strictProfile("strict_repair", "repair", "anthropic/claude-fable-5", "anthropic"),
+	];
+	const route: Readonly<Record<WorkflowRole, readonly string[]>> = {
+		planner: ["strict_planner"],
+		plan_reviewer: ["strict_plan_reviewer"],
+		implementer: [implementerProfile.id],
+		code_reviewer: ["strict_code_reviewer"],
+		repair: ["strict_repair"],
+	};
+	const qualityRoutes: WorkflowQualityRoutes = { balanced: route, critical: route };
+	return {
+		profiles: Object.fromEntries(profiles.map(profile => [profile.id, profile])),
+		qualityRoutes,
+		defaultQualityTier: "balanced",
+		forbiddenPaths,
+	};
+}
+
+function availableProfiles(): WorkflowAvailabilityPort {
+	return {
+		async probe({ profile }) {
+			const configured = Array.isArray(profile.modelPattern) ? profile.modelPattern[0]! : profile.modelPattern;
+			const slash = configured.indexOf("/");
+			const provider = slash > 0 ? configured.slice(0, slash) : profile.vendor;
+			const model = slash > 0 ? configured.slice(slash + 1) : configured;
+			return {
+				status: "available",
+				actualProvider: provider,
+				actualModel: model,
+				attestedProvider: provider,
+				attestedModel: model,
+				identityProvenance: "provider_echo",
+				exactIdentityMatch: true,
+				effortSupported: true,
+				latencyMs: 1,
+			};
+		},
+	};
+}
+
+function strictPackageReceipt(): WorkflowRuntimeIdentityReceiptV1 {
+	return {
+		schemaVersion: 1,
+		configured: {
+			profileId: "strict_implementer",
+			provider: "xai",
+			model: "grok-4.5",
+			checkpoint: null,
+			provenance: "configured",
+			modelPattern: "xai/grok-4.5",
+			requestedEffort: MEDIUM,
+			modelFamily: "xai",
+		},
+		localResolution: {
+			provider: "xai",
+			model: "grok-4.5",
+			checkpoint: null,
+			provenance: "local_resolution",
+		},
+		attested: {
+			provider: "xai",
+			model: "grok-4.5",
+			checkpoint: null,
+			provenance: "provider_echo",
+		},
+		exactMatch: true,
+		effortSupported: true,
+		modelFamily: "xai",
+	};
 }
 
 function makePlan(workPackages?: WorkPackageV1[]): PlanArtifactV1 {
@@ -122,26 +262,43 @@ function makeImplementation(
 	};
 }
 
-function patchText(changedFiles: readonly string[]): string {
+function patchText(
+	changedFiles: readonly string[],
+	replacements: Readonly<Record<string, { before: string; after: string }>> = {},
+): string {
 	return changedFiles
-		.map(file =>
-			[
+		.map(file => {
+			const replacement = replacements[file] ?? { before: "before", after: "after" };
+			return [
 				`diff --git a/${file} b/${file}`,
 				`--- a/${file}`,
 				`+++ b/${file}`,
 				"@@ -1 +1 @@",
-				"-before",
-				"+after",
+				`-${replacement.before}`,
+				`+${replacement.after}`,
 				"",
-			].join("\n"),
-		)
+			].join("\n");
+		})
 		.join("\n");
 }
 
-async function writePatchFile(cwd: string, patchPath: string, changedFiles: readonly string[]): Promise<void> {
+async function writePatchFile(
+	cwd: string,
+	patchPath: string,
+	changedFiles: readonly string[],
+	replacements: Readonly<Record<string, { before: string; after: string }>> = {},
+): Promise<void> {
 	const fullPath = path.isAbsolute(patchPath) ? patchPath : path.join(cwd, patchPath);
 	await fs.mkdir(path.dirname(fullPath), { recursive: true });
-	await Bun.write(fullPath, patchText(changedFiles.length > 0 ? changedFiles : ["src/a.ts"]));
+	await Bun.write(fullPath, patchText(changedFiles.length > 0 ? changedFiles : ["src/a.ts"], replacements));
+}
+
+async function initializeGitRepository(repository: string): Promise<void> {
+	await $`git init -q -b main`.cwd(repository).quiet();
+	await $`git config user.email test@example.com`.cwd(repository).quiet();
+	await $`git config user.name Test`.cwd(repository).quiet();
+	await $`git add .`.cwd(repository).quiet();
+	await $`git commit -q -m initial`.cwd(repository).quiet();
 }
 
 function scriptedRunner(script: RunnerScript): StructuredRunner {
@@ -176,20 +333,22 @@ function scriptedRunner(script: RunnerScript): StructuredRunner {
 		} else {
 			throw new Error(`unexpected scripted agent ${agent}`);
 		}
+		const identityMode = script.identityMode?.(request, packageIdFromAssignment(request.assignment));
+		if (identityMode) emitRuntimeIdentity(request, identityMode);
 		const result: StructuredRunnerResult["result"] = {
 			id: `scripted-${label}`,
 			structuredOutput: { status: "valid", data },
 			patchPath,
 			branchName,
-			resolvedModel: "test/model",
+			resolvedModel: identityMode ? requestModel(request) : "test/model",
 		};
 		return { result };
 	};
 }
 
-function fakeSession(cwd: string, maxConcurrency = 1): ToolSession {
+function fakeSession(cwd: string, maxConcurrency = 1, exposeMaxConcurrency = true): ToolSession {
 	const settings = {
-		get: (key: string) => (key === "task.maxConcurrency" ? maxConcurrency : undefined),
+		get: (key: string) => (key === "task.maxConcurrency" && exposeMaxConcurrency ? maxConcurrency : undefined),
 		set: () => {},
 	};
 	return {
@@ -277,13 +436,16 @@ describe("WorkflowEngine work-package execution", () => {
 		runner: StructuredRunner,
 		merger: CapturedChangesMerger | undefined,
 		maxConcurrency = 1,
+		config?: Partial<WorkflowDefaultConfig>,
 	): WorkflowEngine {
 		return new WorkflowEngine({
 			store,
+			config,
 			adapter: new RuntimeAdapter(runner, merger),
 			verifier: passVerifier(),
 			artifactStore,
 			session: fakeSession(cwd, maxConcurrency),
+			availability: config ? availableProfiles() : undefined,
 		});
 	}
 
@@ -349,6 +511,7 @@ describe("WorkflowEngine work-package execution", () => {
 		const mergeCalls: CapturedChangesMergeRequest[] = [];
 		let active = 0;
 		let peakActive = 0;
+		let firstPackageId: string | undefined;
 		const isolationByPackage = new Map<string, StructuredRunnerRequest["isolation"]>();
 		const runner = scriptedRunner({
 			plan: makePlan(packages),
@@ -358,7 +521,8 @@ describe("WorkflowEngine work-package execution", () => {
 				isolationByPackage.set(packageId, request.isolation);
 				active += 1;
 				peakActive = Math.max(peakActive, active);
-				if (packageId === "a") {
+				if (firstPackageId === undefined) {
+					firstPackageId = packageId;
 					firstStarted.resolve();
 					await releaseFirst.promise;
 				} else {
@@ -559,22 +723,201 @@ describe("WorkflowEngine work-package execution", () => {
 		}
 	});
 
-	it("resumes a stale capture attempt without rerunning a succeeded package, then merges and transitions", async () => {
+	it("routes missing and non-finite maxConcurrency through the unbounded work-package contract", async () => {
+		for (const testCase of [
+			{ label: "missing", session: fakeSession(cwd, 1, false) },
+			{ label: "non-finite", session: fakeSession(cwd, Number.POSITIVE_INFINITY) },
+		]) {
+			const packages: WorkPackageV1[] = [
+				{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+				{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+			];
+			const mergeCalls: CapturedChangesMergeRequest[] = [];
+			let wholePlanCalls = 0;
+			let packageStarts = 0;
+			const runner = scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async (_request, packageId) => {
+					if (!packageId) {
+						wholePlanCalls += 1;
+						return makeImplementation("patches/whole-plan.patch", ["src/a.ts", "src/b.ts"]);
+					}
+					packageStarts += 1;
+					return makeImplementation(`patches/${testCase.label}-${packageId}.patch`, [`src/${packageId}.ts`]);
+				},
+				codeReview: makeReview("implementation"),
+			});
+			const engine = makeEngine(runner, combinedMerger(mergeCalls), 2);
+			const workflowId = await engine.startWorkflow({ request: `unbounded ${testCase.label}` });
+			const run = engine.run(workflowId, testCase.session);
+			const result = await run;
+
+			expect(result.state.status).toBe("completed");
+			expect(wholePlanCalls).toBe(0);
+			expect(packageStarts).toBe(2);
+			expect(mergeCalls).toHaveLength(1);
+		}
+	});
+
+	it("does not merge strict packages when one runtime identity mismatches", async () => {
 		const packages: WorkPackageV1[] = [
 			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
 			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
 		];
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const runner = scriptedRunner({
+			plan: makePlan(packages),
+			planReview: makeReview("plan"),
+			implement: async (_request, packageId) =>
+				makeImplementation(`patches/strict-${packageId}.patch`, [`src/${packageId}.ts`], packageId),
+			codeReview: makeReview("implementation"),
+			identityMode: (_request, packageId) => (packageId === "b" ? "mismatch" : "valid"),
+		});
+		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2, strictPackageConfig());
+		const workflowId = await engine.startWorkflow({
+			request: "reject mismatched strict package identity",
+			qualityTier: "balanced",
+		});
+
+		await expect(engine.run(workflowId, fakeSession(cwd, 2))).rejects.toThrow(
+			/identity|quality_route_candidates_exhausted/i,
+		);
+
+		const packageState = await latestPackageState(workflowId);
+		const failed = packageState.packages.find(workPackage => workPackage.id === "b");
+		expect((await engine.getState(workflowId))?.status).toBe("blocked");
+		expect(mergeCalls).toHaveLength(0);
+		expect(failed?.status).toBe("failed");
+		expect(failed?.errorSummary).toMatch(/identity/i);
+	});
+
+	it("does not merge strict packages until aggregate scope is approved", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const runner = scriptedRunner({
+			plan: makePlan(packages),
+			planReview: makeReview("plan"),
+			implement: async (_request, packageId) =>
+				makeImplementation(`patches/strict-${packageId}.patch`, [`src/${packageId}.ts`], packageId),
+			codeReview: makeReview("implementation"),
+			identityMode: () => "valid",
+		});
+		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2, strictPackageConfig(["src/b.ts"]));
+		const workflowId = await engine.startWorkflow({
+			request: "reject forbidden strict package scope",
+			qualityTier: "balanced",
+		});
+
+		await expect(engine.run(workflowId, fakeSession(cwd, 2))).rejects.toThrow(/strict_write_scope_not_approved/i);
+
+		const packageState = await latestPackageState(workflowId);
+		const scopeMetadata = (await store.listArtifacts(workflowId)).find(artifact => artifact.kind === "scope-metrics");
+		expect(scopeMetadata).toBeDefined();
+		const scopeArtifact = await artifactStore.load(scopeMetadata!.relativePath, scopeMetadata!.sha256);
+		expect((await engine.getState(workflowId))?.status).toBe("blocked");
+		expect(mergeCalls).toHaveLength(0);
+		expect(packageState.packages.every(workPackage => workPackage.status === "succeeded")).toBe(true);
+		expect(JSON.parse(scopeArtifact!.content!).status).toBe("violation");
+	});
+
+	it("merges strict directory-owned packages whose patches touch nested files", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Own shared A", paths: ["src/shared-a"], dependsOn: [] },
+			{ id: "b", assignment: "Own shared B", paths: ["src/shared-b"], dependsOn: [] },
+		];
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const runner = scriptedRunner({
+			plan: makePlan(packages),
+			planReview: makeReview("plan"),
+			implement: async (_request, packageId) =>
+				makeImplementation(`patches/directory-${packageId}.patch`, [`src/shared-${packageId}/${packageId}.ts`]),
+			codeReview: makeReview("implementation"),
+			identityMode: () => "valid",
+		});
+		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2, strictPackageConfig());
+		const workflowId = await engine.startWorkflow({
+			request: "merge directory-owned strict packages",
+			qualityTier: "balanced",
+		});
+
+		const result = await engine.run(workflowId, fakeSession(cwd, 2));
+
+		expect(result.state.status).toBe("completed");
+		expect(mergeCalls).toHaveLength(1);
+		expect(mergeCalls[0]?.patches.map(patch => patch.packageId)).toEqual(["a", "b"]);
+		const scopeMetadata = (await store.listArtifacts(workflowId))
+			.filter(artifact => artifact.kind === "scope-metrics")
+			.at(-1);
+		if (!scopeMetadata) throw new Error("missing final scope metrics metadata");
+		const latestScope = await artifactStore.load(scopeMetadata.relativePath, scopeMetadata.sha256);
+		if (!latestScope?.content) throw new Error("missing final scope metrics");
+		const scope = JSON.parse(latestScope.content) as {
+			status: string;
+			plannedFiles: string[];
+			unplannedFiles: string[];
+		};
+		expect(scope.status).toBe("adhered");
+		expect(scope.plannedFiles).toEqual(expect.arrayContaining(["src/shared-a/a.ts", "src/shared-b/b.ts"]));
+		expect(scope.unplannedFiles).toEqual([]);
+	});
+
+	it("merges strict packages exactly once after identity and scope approval", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const runner = scriptedRunner({
+			plan: makePlan(packages),
+			planReview: makeReview("plan"),
+			implement: async (_request, packageId) =>
+				makeImplementation(`patches/strict-${packageId}.patch`, [`src/${packageId}.ts`], packageId),
+			codeReview: makeReview("implementation"),
+			identityMode: () => "valid",
+		});
+		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2, strictPackageConfig());
+		const workflowId = await engine.startWorkflow({
+			request: "merge approved strict packages",
+			qualityTier: "balanced",
+		});
+
+		const result = await engine.run(workflowId, fakeSession(cwd, 2));
+
+		expect(result.state.status).toBe("completed");
+		expect(mergeCalls).toHaveLength(1);
+		expect(mergeCalls[0]?.patches.map(patch => patch.packageId)).toEqual(["a", "b"]);
+		expect(
+			result.workPackageState?.packages.every(workPackage => workPackage.identityReceipt?.exactMatch === true),
+		).toBe(true);
+		expect(result.workPackageState?.merge.status).toBe("applied");
+	});
+
+	it("resumes strict packages with the persisted receipt and merges exactly once", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const persistedReceipt = strictPackageReceipt();
 		const captureEngine = makeEngine(
 			scriptedRunner({
 				plan: makePlan(packages),
 				planReview: makeReview("plan"),
 				implement: async () => makeImplementation("patches/unexpected.patch", ["src/a.ts"]),
 				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
 			}),
 			undefined,
 			2,
+			strictPackageConfig(),
 		);
-		const workflowId = await captureEngine.startWorkflow({ request: "resume package capture" });
+		const workflowId = await captureEngine.startWorkflow({
+			request: "resume strict package capture",
+			qualityTier: "balanced",
+		});
 		await captureEngine.resume(workflowId, { singleStep: true });
 		await captureEngine.resume(workflowId, { singleStep: true });
 		await captureEngine.resume(workflowId, { singleStep: true });
@@ -601,7 +944,11 @@ describe("WorkflowEngine work-package execution", () => {
 			execute: async workPackage => {
 				const patchPath = "patches/captured-a.patch";
 				await writePatchFile(cwd, patchPath, workPackage.paths);
-				return { artifact: makeImplementation(patchPath, workPackage.paths, "captured A") };
+				return {
+					artifact: makeImplementation(patchPath, workPackage.paths, "captured A"),
+					identityReceipt: persistedReceipt,
+					modelFamily: persistedReceipt.modelFamily ?? undefined,
+				};
 			},
 			persist: state => persistPackageState(workflowId, staleAttemptId, state),
 		});
@@ -615,6 +962,9 @@ describe("WorkflowEngine work-package execution", () => {
 		};
 		await persistPackageState(workflowId, staleAttemptId, captureState);
 		expect(captureState.packages.find(workPackage => workPackage.id === "a")?.status).toBe("succeeded");
+		expect(captureState.packages.find(workPackage => workPackage.id === "a")?.identityReceipt).toEqual(
+			persistedReceipt,
+		);
 		expect((await store.listAttempts(workflowId)).find(attempt => attempt.id === staleAttemptId)?.status).toBe(
 			"in_progress",
 		);
@@ -635,9 +985,11 @@ describe("WorkflowEngine work-package execution", () => {
 					);
 				},
 				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
 			}),
 			combinedMerger(mergeCalls),
 			2,
+			strictPackageConfig(),
 		);
 
 		const result = await resumeEngine.resume(workflowId, { forceUnlock: true });
@@ -658,6 +1010,350 @@ describe("WorkflowEngine work-package execution", () => {
 			order: ["a", "b"],
 		});
 		expect(result.workPackageState?.packages.every(workPackage => workPackage.status === "succeeded")).toBe(true);
+		expect(result.workPackageState?.packages.find(workPackage => workPackage.id === "a")?.identityReceipt).toEqual(
+			persistedReceipt,
+		);
+	});
+
+	it("rejects reusable receipts that are not bound to the selected implementer profile", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const selectedProfile = {
+			...strictProfile("strict_implementer_v2", "implementer", "xai/grok-4.5", "xai"),
+			thinkingLevel: "high" as NonNullable<ModelProfile["thinkingLevel"]>,
+		};
+		const config = strictPackageConfig([], selectedProfile);
+		const captureEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async () => makeImplementation("patches/unexpected.patch", ["src/a.ts"]),
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			undefined,
+			2,
+			config,
+		);
+		const workflowId = await captureEngine.startWorkflow({
+			request: "reject stale package receipt",
+			qualityTier: "balanced",
+		});
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		const implementingState = await captureEngine.getState(workflowId);
+		const staleAttemptId = await store.beginAttempt(
+			workflowId,
+			"implementing",
+			undefined,
+			implementingState!.version,
+		);
+		const persistedReceipt = strictPackageReceipt();
+		for (const workPackage of packages) {
+			await writePatchFile(cwd, `patches/stale-${workPackage.id}.patch`, workPackage.paths);
+		}
+		const staleState: WorkPackageStateArtifactV1 = {
+			kind: "work-package-state",
+			schemaVersion: 1,
+			workflowId,
+			attemptId: staleAttemptId,
+			stage: "implementing",
+			createdAt: new Date().toISOString(),
+			revision: 1,
+			mode: "capture_then_apply",
+			packages: packages.map(workPackage => ({
+				...workPackage,
+				status: "succeeded",
+				invocationAttemptId: `${staleAttemptId}:${workPackage.id}`,
+				implementation: {
+					...makeImplementation(`patches/stale-${workPackage.id}.patch`, workPackage.paths),
+					modelProfileId: "strict_implementer",
+				},
+				identityReceipt: persistedReceipt,
+				modelFamily: persistedReceipt.modelFamily ?? undefined,
+			})),
+			merge: { status: "pending", order: ["a", "b"] },
+		};
+		await persistPackageState(workflowId, staleAttemptId, staleState);
+
+		let implementCalls = 0;
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const resumeEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async () => {
+					implementCalls += 1;
+					return makeImplementation("patches/should-not-run.patch", ["src/a.ts"]);
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			combinedMerger(mergeCalls),
+			2,
+			config,
+		);
+
+		await expect(resumeEngine.resume(workflowId, { forceUnlock: true })).rejects.toThrow(
+			/strict_write_identity_not_verified/i,
+		);
+		expect(implementCalls).toBe(0);
+		expect(mergeCalls).toHaveLength(0);
+	});
+
+	it("resumes an already-applied package merge without rerunning implementers or the merge seam", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const config = strictPackageConfig();
+		const captureEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async () => makeImplementation("patches/unexpected.patch", ["src/a.ts"]),
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			undefined,
+			2,
+			config,
+		);
+		const workflowId = await captureEngine.startWorkflow({
+			request: "recover applied package merge",
+			qualityTier: "balanced",
+		});
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		const implementingState = await captureEngine.getState(workflowId);
+		const staleAttemptId = await store.beginAttempt(
+			workflowId,
+			"implementing",
+			undefined,
+			implementingState!.version,
+		);
+		const receipt = strictPackageReceipt();
+		const appliedReplacements = {
+			"src/a.ts": { before: "before-a", after: "after-a" },
+			"src/b.ts": { before: "before-b", after: "after-b" },
+		} as const;
+		await initializeGitRepository(cwd);
+		for (const workPackage of packages) {
+			await writePatchFile(cwd, `patches/applied-${workPackage.id}.patch`, workPackage.paths, appliedReplacements);
+		}
+		const aggregatePatchPath = "patches/applied.packages.patch";
+		await writePatchFile(
+			cwd,
+			aggregatePatchPath,
+			packages.flatMap(workPackage => workPackage.paths),
+			appliedReplacements,
+		);
+		for (const [file, replacement] of Object.entries(appliedReplacements)) {
+			await Bun.write(path.join(cwd, file), `${replacement.after}\n`);
+		}
+		const appliedState: WorkPackageStateArtifactV1 = {
+			kind: "work-package-state",
+			schemaVersion: 1,
+			workflowId,
+			attemptId: staleAttemptId,
+			stage: "implementing",
+			createdAt: new Date().toISOString(),
+			revision: 4,
+			mode: "capture_then_apply",
+			packages: packages.map(workPackage => ({
+				...workPackage,
+				status: "succeeded",
+				invocationAttemptId: `${staleAttemptId}:${workPackage.id}`,
+				implementation: {
+					...makeImplementation(`patches/applied-${workPackage.id}.patch`, workPackage.paths),
+					modelProfileId: "strict_implementer",
+				},
+				identityReceipt: receipt,
+				modelFamily: receipt.modelFamily ?? undefined,
+			})),
+			merge: {
+				status: "applied",
+				order: ["a", "b"],
+				patchPath: aggregatePatchPath,
+				changesApplied: true,
+				summary: "already merged",
+			},
+		};
+		await persistPackageState(workflowId, staleAttemptId, appliedState);
+		const scopeMetrics = buildScopeMetrics({
+			plannedFiles: packages.flatMap(workPackage => workPackage.paths),
+			changedFiles: packages.flatMap(workPackage => workPackage.paths),
+		});
+		const storedScope = await artifactStore.store({
+			workflowId,
+			attemptId: staleAttemptId,
+			kind: "scope-metrics",
+			schemaVersion: 1,
+			relativePath: "",
+			content: JSON.stringify(scopeMetrics),
+		});
+		await store.addArtifact(storedScope);
+
+		let implementCalls = 0;
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const resumeEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async () => {
+					implementCalls += 1;
+					return makeImplementation("patches/should-not-run.patch", ["src/a.ts"]);
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			combinedMerger(mergeCalls),
+			1,
+			config,
+		);
+
+		const result = await resumeEngine.resume(workflowId, {
+			forceUnlock: true,
+			singleStep: true,
+			session: fakeSession(cwd, 1),
+		});
+		const staleAttempt = (await store.listAttempts(workflowId)).find(attempt => attempt.id === staleAttemptId);
+
+		expect(result.state.status).toBe("implementation_verify");
+		expect(staleAttempt?.status).toBe("failed");
+		expect(staleAttempt?.errorSummary).toBe("work_package_merge_already_applied_resume");
+		expect(implementCalls).toBe(0);
+		expect(mergeCalls).toHaveLength(0);
+		expect(result.workPackageState?.merge).toMatchObject({ status: "applied", changesApplied: true });
+	});
+
+	it("fails closed when an applied package merge was reverted", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const config = strictPackageConfig();
+		const captureEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async () => makeImplementation("patches/unexpected.patch", ["src/a.ts"]),
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			undefined,
+			2,
+			config,
+		);
+		const workflowId = await captureEngine.startWorkflow({
+			request: "reject reverted applied package merge",
+			qualityTier: "balanced",
+		});
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		const implementingState = await captureEngine.getState(workflowId);
+		const staleAttemptId = await store.beginAttempt(
+			workflowId,
+			"implementing",
+			undefined,
+			implementingState!.version,
+		);
+		const receipt = strictPackageReceipt();
+		const appliedReplacements = {
+			"src/a.ts": { before: "before-a", after: "after-a" },
+			"src/b.ts": { before: "before-b", after: "after-b" },
+		} as const;
+		await initializeGitRepository(cwd);
+		for (const workPackage of packages) {
+			await writePatchFile(cwd, `patches/reverted-${workPackage.id}.patch`, workPackage.paths, appliedReplacements);
+		}
+		const aggregatePatchPath = "patches/reverted.packages.patch";
+		await writePatchFile(
+			cwd,
+			aggregatePatchPath,
+			packages.flatMap(workPackage => workPackage.paths),
+			appliedReplacements,
+		);
+		const appliedState: WorkPackageStateArtifactV1 = {
+			kind: "work-package-state",
+			schemaVersion: 1,
+			workflowId,
+			attemptId: staleAttemptId,
+			stage: "implementing",
+			createdAt: new Date().toISOString(),
+			revision: 4,
+			mode: "capture_then_apply",
+			packages: packages.map(workPackage => ({
+				...workPackage,
+				status: "succeeded",
+				invocationAttemptId: `${staleAttemptId}:${workPackage.id}`,
+				implementation: {
+					...makeImplementation(`patches/reverted-${workPackage.id}.patch`, workPackage.paths),
+					modelProfileId: "strict_implementer",
+				},
+				identityReceipt: receipt,
+				modelFamily: receipt.modelFamily ?? undefined,
+			})),
+			merge: {
+				status: "applied",
+				order: ["a", "b"],
+				patchPath: aggregatePatchPath,
+				changesApplied: true,
+				summary: "already merged",
+			},
+		};
+		await persistPackageState(workflowId, staleAttemptId, appliedState);
+		const scopeMetrics = buildScopeMetrics({
+			plannedFiles: packages.flatMap(workPackage => workPackage.paths),
+			changedFiles: packages.flatMap(workPackage => workPackage.paths),
+		});
+		const storedScope = await artifactStore.store({
+			workflowId,
+			attemptId: staleAttemptId,
+			kind: "scope-metrics",
+			schemaVersion: 1,
+			relativePath: "",
+			content: JSON.stringify(scopeMetrics),
+		});
+		await store.addArtifact(storedScope);
+
+		let implementCalls = 0;
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const resumeEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async () => {
+					implementCalls += 1;
+					return makeImplementation("patches/should-not-run.patch", ["src/a.ts"]);
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			combinedMerger(mergeCalls),
+			1,
+			config,
+		);
+
+		await expect(
+			resumeEngine.resume(workflowId, {
+				forceUnlock: true,
+				singleStep: true,
+				session: fakeSession(cwd, 1),
+			}),
+		).rejects.toThrow(/work_package_applied_patch_drift/i);
+		const staleAttempt = (await store.listAttempts(workflowId)).find(attempt => attempt.id === staleAttemptId);
+
+		expect((await resumeEngine.getState(workflowId))?.status).toBe("blocked");
+		expect(staleAttempt?.status).toBe("failed");
+		expect(staleAttempt?.errorSummary).toBe("work_package_merge_already_applied_resume");
+		expect(implementCalls).toBe(0);
+		expect(mergeCalls).toHaveLength(0);
 	});
 
 	it("keeps the existing blocked semantics for a stale serial write-stage attempt", async () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Effort } from "@oh-my-pi/pi-ai";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { WorkflowPolicyError } from "../../src/workflow/errors";
@@ -33,6 +34,23 @@ function testProfile(id: string, roles: WorkflowRole[], modelPattern: string): M
 	};
 }
 
+function qualityTestProfile(id: string, role: WorkflowRole): ModelProfile {
+	const identityByRole: Record<WorkflowRole, { vendor: string; modelPattern: string }> = {
+		planner: { vendor: "anthropic", modelPattern: "anthropic/claude-fable-5" },
+		plan_reviewer: { vendor: "openai", modelPattern: "openai/gpt-5.6-sol" },
+		implementer: { vendor: "xai", modelPattern: "xai/grok-4.5" },
+		code_reviewer: { vendor: "openai", modelPattern: "openai/gpt-5.6-terra" },
+		repair: { vendor: "anthropic", modelPattern: "anthropic/claude-fable-5" },
+	};
+	const identity = identityByRole[role];
+	return {
+		...testProfile(id, [role], identity.modelPattern),
+		vendor: identity.vendor,
+		thinkingLevel: Effort.Medium,
+		strictIdentity: true,
+	};
+}
+
 describe("availability fail-closed (required role unavailable)", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
@@ -47,19 +65,19 @@ describe("availability fail-closed (required role unavailable)", () => {
 		await fs.rm(artifactDir, { recursive: true, force: true });
 	});
 
-	it("keeps workflow state, creates zero attempts, and names the unavailable role", async () => {
+	it("quality routes fail closed before attempts for an unavailable required role", async () => {
 		const profiles = [
-			testProfile("planner_a", ["planner"], "m-planner"),
-			testProfile("reviewer_a", ["plan_reviewer"], "m-plan-review"),
-			testProfile("impl_a", ["implementer"], "m-impl"),
-			testProfile("code_a", ["code_reviewer"], "m-code"),
-			testProfile("repair_a", ["repair"], "m-repair"),
+			qualityTestProfile("planner_a", "planner"),
+			qualityTestProfile("reviewer_a", "plan_reviewer"),
+			qualityTestProfile("impl_a", "implementer"),
+			qualityTestProfile("code_a", "code_reviewer"),
+			qualityTestProfile("repair_a", "repair"),
 		];
-
-		// Planner always unavailable; other roles available.
+		let plannerUnavailable = false;
+		// Start succeeds with an available snapshot; the planner becomes unavailable before the model stage.
 		const availability: WorkflowAvailabilityPort = {
 			async probe(req) {
-				if (req.role === "planner" || req.profile.roles.includes("planner")) {
+				if (plannerUnavailable && (req.role === "planner" || req.profile.roles.includes("planner"))) {
 					// When probe representative is a planner profile
 					if (req.profile.id === "planner_a") {
 						return {
@@ -82,7 +100,25 @@ describe("availability fail-closed (required role unavailable)", () => {
 		const engine = new WorkflowEngine({
 			store,
 			router: new ModelRouter(profiles),
-			config: { profiles: Object.fromEntries(profiles.map(p => [p.id, p])) },
+			config: {
+				profiles: Object.fromEntries(profiles.map(p => [p.id, p])),
+				qualityRoutes: {
+					balanced: {
+						planner: ["planner_a"],
+						plan_reviewer: ["reviewer_a"],
+						implementer: ["impl_a"],
+						code_reviewer: ["code_a"],
+						repair: ["repair_a"],
+					},
+					critical: {
+						planner: ["planner_a"],
+						plan_reviewer: ["reviewer_a"],
+						implementer: ["impl_a"],
+						code_reviewer: ["code_a"],
+						repair: ["repair_a"],
+					},
+				},
+			},
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
 					plan: planArtifact(),
@@ -97,9 +133,10 @@ describe("availability fail-closed (required role unavailable)", () => {
 			availability,
 		});
 
-		const { workflowId } = await engine.start({ request: "fail closed" });
+		const { workflowId } = await engine.start({ request: "fail closed", qualityTier: "balanced" });
 		// Advance created → planning so resume will need planner
 		await engine.resume(workflowId, { singleStep: true, session: fakeSession() });
+		plannerUnavailable = true;
 		const before = await engine.getState(workflowId);
 		expect(before?.status).toBe("planning");
 		const versionBefore = before!.version;
@@ -129,7 +166,61 @@ describe("availability fail-closed (required role unavailable)", () => {
 		expect(snapAfter?.attempts.length ?? 0).toBe(attemptsBefore);
 	});
 
-	it("required role with zero registered profiles fail-closes before any attempt", async () => {
+	it("keeps legacy advisory behavior when a registered role is unavailable", async () => {
+		const profiles = [testProfile("planner_only", ["planner"], "m-planner")];
+		const availability: WorkflowAvailabilityPort = {
+			async probe() {
+				return {
+					status: "unavailable",
+					latencyMs: 1,
+					errorKind: "authentication",
+					errorSummary: "planner credentials missing",
+				};
+			},
+		};
+		const engine = new WorkflowEngine({
+			store,
+			router: new ModelRouter(profiles),
+			config: { profiles: Object.fromEntries(profiles.map(p => [p.id, p])) },
+			adapter: new RuntimeAdapter(
+				scriptedRunner({
+					plan: planArtifact(),
+					planReview: reviewArtifact("approved", "plan"),
+					implement: implArtifact(),
+					codeReview: reviewArtifact("approved", "implementation"),
+				}),
+			),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+			availability,
+		});
+
+		const { workflowId, availability: startReport } = await engine.start({ request: "legacy unavailable" });
+		expect(startReport.status).toBe("blocked");
+		await engine.resume(workflowId, { singleStep: true, session: fakeSession() });
+		const before = await engine.getState(workflowId);
+		expect(before?.status).toBe("planning");
+		const attemptsBefore = (await engine.recoverFromPersistedState(workflowId))?.attempts.length ?? 0;
+
+		let caught: unknown;
+		try {
+			await engine.resume(workflowId, { singleStep: true, session: fakeSession() });
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(WorkflowPolicyError);
+		expect(engine.getLastAvailabilityReport()?.status).toBe("blocked");
+		expect((caught as WorkflowPolicyError).message).toMatch(/model_profile_not_found/i);
+		expect((caught as WorkflowPolicyError).message).not.toMatch(/required_role_unavailable/i);
+		expect((await engine.getState(workflowId))?.status).toBe("blocked");
+		expect((await engine.recoverFromPersistedState(workflowId))?.attempts.length ?? 0).toBeGreaterThan(
+			attemptsBefore,
+		);
+	});
+
+	it("keeps legacy advisory behavior when a required role has no registered profile", async () => {
 		// Registry has only implementer — no planner. At planning singleStep, planner is required.
 		const profiles = [testProfile("impl_only", ["implementer"], "m-impl")];
 
@@ -173,7 +264,6 @@ describe("availability fail-closed (required role unavailable)", () => {
 		expect(before?.status).toBe("planning");
 		const snapBefore = await engine.recoverFromPersistedState(workflowId);
 		const attemptsBefore = snapBefore?.attempts.length ?? 0;
-		expect(attemptsBefore).toBe(0);
 
 		let caught: unknown;
 		try {
@@ -183,16 +273,15 @@ describe("availability fail-closed (required role unavailable)", () => {
 		}
 
 		expect(caught).toBeInstanceOf(WorkflowPolicyError);
+		expect(engine.getLastAvailabilityReport()?.status).toBe("blocked");
 		const err = caught as WorkflowPolicyError;
-		// Must be availability fail-closed, not late model_profile_not_found after an attempt.
-		expect(err.message).toMatch(/required_role_unavailable/i);
-		expect(err.message).toMatch(/planner/i);
-		expect(err.message).not.toMatch(/model_profile_not_found/i);
+		// Legacy workflows proceed to normal routing, where the missing profile is reported after an attempt.
+		expect(err.message).toMatch(/model_profile_not_found/i);
 
 		const after = await engine.getState(workflowId);
-		expect(after?.status).toBe("planning");
+		expect(after?.status).toBe("blocked");
 		const snapAfter = await engine.recoverFromPersistedState(workflowId);
-		expect(snapAfter?.attempts.length ?? 0).toBe(0);
+		expect(snapAfter?.attempts.length ?? 0).toBeGreaterThan(attemptsBefore);
 	});
 
 	it("does not block when a required role has at least one available fallback", async () => {

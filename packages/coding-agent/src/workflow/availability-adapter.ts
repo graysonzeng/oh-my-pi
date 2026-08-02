@@ -1,6 +1,7 @@
 import * as ai from "@oh-my-pi/pi-ai";
 import { resolveModelOverride } from "../config/model-resolver";
 import availabilityProbePrompt from "../prompts/workflow/availability-probe.hbs.md" with { type: "text" };
+import { concreteThinkingLevel, toReasoningEffort } from "../thinking";
 import {
 	assertStrictRuntimeIdentity,
 	buildRuntimeIdentityReceipt,
@@ -98,8 +99,7 @@ async function probeSessionModel(
 	}
 	const prompt = availabilityProbePrompt.trim();
 	const identityCollector = new ProviderIdentityCollector();
-	const requestedEffort =
-		request.profile.thinkingLevel === "auto" ? undefined : request.profile.thinkingLevel;
+	const requestedEffort = toReasoningEffort(concreteThinkingLevel(request.profile.thinkingLevel));
 	const response = await ai.completeSimple(
 		model,
 		{

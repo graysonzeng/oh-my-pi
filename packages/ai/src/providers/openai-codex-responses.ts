@@ -62,6 +62,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
@@ -1492,6 +1493,81 @@ export async function buildTransformedCodexRequestBody(
 
 	return transformRequestBody(params, model, codexOptions, { developerMessages });
 }
+type CodexResponseIdentityAggregate = {
+	metadata: Record<string, unknown>;
+	conflicted: boolean;
+};
+
+function codexResponseIdentityMetadata(event?: Record<string, unknown>): Record<string, unknown> | undefined {
+	const eventType = event?.type;
+	if (
+		eventType !== "response.created" &&
+		eventType !== "response.completed" &&
+		eventType !== "response.done" &&
+		eventType !== "response.failed" &&
+		eventType !== "response.incomplete"
+	) {
+		return undefined;
+	}
+	const responseEnvelope = asRecord(event?.response);
+	const resolveCoordinate = (
+		field: "model" | "provider" | "checkpoint",
+		primary: unknown,
+		secondary: unknown,
+	): string | undefined => {
+		const primaryValue = typeof primary === "string" && primary.length > 0 ? primary : undefined;
+		const secondaryValue = typeof secondary === "string" && secondary.length > 0 ? secondary : undefined;
+		if (primaryValue !== undefined && secondaryValue !== undefined && primaryValue !== secondaryValue) {
+			throw new AIError.ProviderResponseError(
+				`Conflicting Codex ${field} identity coordinates: ${primaryValue} vs ${secondaryValue}`,
+				{ kind: "output" },
+			);
+		}
+		return primaryValue ?? secondaryValue;
+	};
+	const model = resolveCoordinate("model", responseEnvelope?.model, event?.model);
+	const provider = resolveCoordinate("provider", responseEnvelope?.provider, event?.provider);
+	const checkpoint = resolveCoordinate("checkpoint", responseEnvelope?.checkpoint, event?.checkpoint);
+	if (model === undefined && provider === undefined && checkpoint === undefined) return undefined;
+	const metadata: Record<string, unknown> = {};
+	if (model !== undefined) metadata.model = model;
+	if (provider !== undefined) metadata.provider = provider;
+	if (checkpoint !== undefined) metadata.checkpoint = checkpoint;
+	return metadata;
+}
+
+function mergeCodexResponseIdentity(aggregate: CodexResponseIdentityAggregate, event: Record<string, unknown>): void {
+	let metadata: Record<string, unknown> | undefined;
+	try {
+		metadata = codexResponseIdentityMetadata(event);
+	} catch (error) {
+		aggregate.conflicted = true;
+		throw error;
+	}
+	if (!metadata) return;
+	for (const field of ["model", "provider", "checkpoint"] as const) {
+		const value = metadata[field];
+		if (typeof value !== "string") continue;
+		const previous = aggregate.metadata[field];
+		if (previous !== undefined && previous !== value) {
+			aggregate.conflicted = true;
+			throw new AIError.ProviderResponseError(
+				`Conflicting Codex ${field} identity coordinates: ${String(previous)} vs ${value}`,
+				{ kind: "output" },
+			);
+		}
+		aggregate.metadata[field] = value;
+	}
+}
+
+function isCodexTerminalIdentityEvent(event: Record<string, unknown>): boolean {
+	return (
+		event.type === "response.completed" ||
+		event.type === "response.done" ||
+		event.type === "response.failed" ||
+		event.type === "response.incomplete"
+	);
+}
 
 async function openInitialCodexEventStream(
 	model: Model<"openai-codex-responses">,
@@ -1624,7 +1700,7 @@ async function openCodexWebSocketTransport(
 		model.provider,
 		requestSetup.requestSignal,
 	);
-	const eventStream = websocketConnection.streamRequest(
+	const rawEventStream = websocketConnection.streamRequest(
 		websocketRequest,
 		{
 			idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
@@ -1633,11 +1709,31 @@ async function openCodexWebSocketTransport(
 		requestSetup.requestSignal,
 		onSseEvent,
 	);
-	return {
-		eventStream,
-		requestBodyForState,
-		transport: "websocket",
+	const identityAggregate: CodexResponseIdentityAggregate = { metadata: {}, conflicted: false };
+	let responseNotified = false;
+	const notifyResponse = async (): Promise<void> => {
+		if (responseNotified) return;
+		responseNotified = true;
+		const metadata =
+			identityAggregate.conflicted || Object.keys(identityAggregate.metadata).length === 0
+				? undefined
+				: identityAggregate.metadata;
+		const providerResponse = metadata ? { status: 101, headers: {}, metadata } : { status: 101, headers: {} };
+		await options?.onResponse?.(providerResponse, model);
 	};
+
+	const eventStream = (async function* (): AsyncGenerator<Record<string, unknown>> {
+		try {
+			for await (const event of rawEventStream) {
+				mergeCodexResponseIdentity(identityAggregate, event);
+				if (isCodexTerminalIdentityEvent(event)) await notifyResponse();
+				yield event;
+			}
+		} finally {
+			await notifyResponse();
+		}
+	})();
+	return { eventStream, requestBodyForState, transport: "websocket" };
 }
 
 function getCodexTurnStartedAtUnixMs(context: Context): number {
@@ -1682,6 +1778,7 @@ async function openCodexSseTransport(
 		requestContext.rawRequestDump.body = wireBody;
 		return requestSetup.wrapCodexSseStream(
 			await openCodexSseEventStream(
+				model,
 				requestContext.url,
 				requestContext.requestHeaders,
 				requestContext.accountId,
@@ -1697,6 +1794,7 @@ async function openCodexSseTransport(
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
 				options?.fetch,
+				options,
 			),
 		);
 	};
@@ -3957,6 +4055,7 @@ async function getOrCreateCodexWebSocketConnection(
 }
 
 async function openCodexSseEventStream(
+	model: Model<"openai-codex-responses">,
 	url: string,
 	requestHeaders: Record<string, string> | undefined,
 	accountId: string | undefined,
@@ -3972,6 +4071,7 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
+	options?: OpenAICodexResponsesOptions,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
 		requestHeaders,
@@ -4042,9 +4142,33 @@ async function openCodexSseEventStream(
 	if (!response.body) {
 		throw new CodexProviderStreamError("No response body", false);
 	}
-	return readSseJson<Record<string, unknown>>(response.body, signal, event =>
+	const requestId = response.headers.get("x-request-id");
+	const identityAggregate: CodexResponseIdentityAggregate = { metadata: {}, conflicted: false };
+	let responseNotified = false;
+	const notifyResponse = async (): Promise<void> => {
+		if (responseNotified) return;
+		responseNotified = true;
+		const metadata =
+			identityAggregate.conflicted || Object.keys(identityAggregate.metadata).length === 0
+				? undefined
+				: identityAggregate.metadata;
+		await notifyProviderResponse(options, response, model, requestId, metadata);
+	};
+
+	const events = readSseJson<Record<string, unknown>>(response.body, signal, event =>
 		onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, undefined),
 	);
+	return (async function* (): AsyncGenerator<Record<string, unknown>> {
+		try {
+			for await (const event of events) {
+				mergeCodexResponseIdentity(identityAggregate, event);
+				if (isCodexTerminalIdentityEvent(event)) await notifyResponse();
+				yield event;
+			}
+		} finally {
+			await notifyResponse();
+		}
+	})();
 }
 
 function createCodexHeaders(

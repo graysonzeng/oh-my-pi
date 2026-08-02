@@ -2138,7 +2138,17 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
-					await notifyProviderResponse(options, response, model, requestId);
+					let responseNotified = false;
+					const notifyResponse = async (event?: AnthropicStreamEvent): Promise<void> => {
+						if (responseNotified) return;
+						responseNotified = true;
+						const responseModel = event?.type === "message_start" ? event.message?.model : undefined;
+						const metadata =
+							typeof responseModel === "string" && responseModel.length > 0
+								? { model: responseModel }
+								: undefined;
+						await notifyProviderResponse(options, response, model, requestId, metadata);
+					};
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
@@ -2200,7 +2210,17 @@ const streamAnthropicOnce = (
 						rawSseObserver && !recordsRawSseEvents
 							? observeDecodedAnthropicSdkEvents(timedAnthropicStream, rawSseObserver)
 							: timedAnthropicStream;
-					for await (const event of observedAnthropicStream) {
+					const responseObservedAnthropicStream = (async function* (): AsyncGenerator<AnthropicStreamEvent> {
+						try {
+							for await (const event of observedAnthropicStream) {
+								if (event.type === "message_start") await notifyResponse(event);
+								yield event;
+							}
+						} finally {
+							await notifyResponse();
+						}
+					})();
+					for await (const event of responseObservedAnthropicStream) {
 						sawEvent = true;
 
 						if (event.type === "message_start") {

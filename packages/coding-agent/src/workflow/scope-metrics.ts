@@ -367,11 +367,16 @@ export function buildScopeMetrics(input: ScopeMetricsInput): ScopeMetricsV1 {
 }
 
 /** Derive planned paths from a plan artifact. */
-export function plannedFilesFromPlan(plan: PlanArtifactV1): string[] {
+export function plannedFilesFromPlan(plan: PlanArtifactV1, observedFiles: readonly string[] = []): string[] {
+	const workPackagePaths = plan.workPackages?.flatMap(workPackage => workPackage.paths.map(normalizePath)) ?? [];
+	const observedOwnedFiles = observedFiles
+		.map(normalizePath)
+		.filter(file => pathMatchesPrefixList(file, workPackagePaths));
 	return [
 		...new Set([
 			...plan.affectedFiles.map(file => normalizePath(file.path)),
-			...(plan.workPackages?.flatMap(workPackage => workPackage.paths.map(normalizePath)) ?? []),
+			...workPackagePaths,
+			...observedOwnedFiles,
 		]),
 	];
 }

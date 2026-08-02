@@ -14,6 +14,7 @@ import type {
 	FetchImpl,
 	Model,
 	ModelSpec,
+	ProviderResponseMetadata,
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
@@ -266,6 +267,8 @@ class MockWebSocket {
 		text: string;
 		terminalType?: "response.done" | "response.completed";
 		includeCreated?: boolean;
+		model?: string;
+		checkpoint?: string;
 		usage?: CodexTestUsage;
 	}): void {
 		const {
@@ -274,10 +277,12 @@ class MockWebSocket {
 			text,
 			terminalType = "response.done",
 			includeCreated = false,
+			model,
+			checkpoint,
 			usage = DEFAULT_USAGE,
 		} = opts;
 		if (includeCreated) {
-			this.sendJson({ type: "response.created", response: { id: responseId } });
+			this.sendJson({ type: "response.created", response: { id: responseId, model } });
 		}
 		this.sendJson({
 			type: "response.output_item.added",
@@ -300,6 +305,8 @@ class MockWebSocket {
 			response: {
 				id: responseId,
 				status: "completed",
+				model,
+				checkpoint,
 				usage,
 			},
 		});
@@ -339,6 +346,152 @@ describe("openai-codex streaming", () => {
 			"https://chatgpt.com/backend-api/codex/responses",
 			"https://chatgpt.com/backend-api/codex/responses",
 		]);
+	});
+
+	it("propagates the Codex response envelope model as provider response metadata", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const servedModel = "served-codex-model";
+		const responseId = "resp_provider_identity";
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.in_progress", response: { id: responseId, status: "in_progress" } })}`,
+			`data: ${JSON.stringify({ type: "response.created", response: { id: responseId, status: "in_progress" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_provider_identity", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_provider_identity", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ok" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { id: responseId, status: "completed", model: servedModel, checkpoint: "checkpoint-terminal", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream", "x-request-id": "req_codex_body" },
+			});
+		const seen: ProviderResponseMetadata[] = [];
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			fetch: fetchMock,
+			onResponse: response => {
+				seen.push(response);
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.headers["x-request-id"]).toBe("req_codex_body");
+		expect(seen[0]?.metadata).toEqual({ model: servedModel, checkpoint: "checkpoint-terminal" });
+	});
+	it("propagates the Codex WebSocket response.done model after a preamble", async () => {
+		const servedModel = "served-codex-websocket-model";
+		class IdentityWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			send(): void {
+				this.sendJson({
+					type: "response.in_progress",
+					response: { id: "resp_ws_identity", status: "in_progress" },
+				});
+				this.emitCodexResponse({
+					messageId: "msg_ws_identity",
+					responseId: "resp_ws_identity",
+					text: "ok",
+					includeCreated: false,
+					model: servedModel,
+					checkpoint: "checkpoint-terminal",
+				});
+			}
+		}
+		Object.defineProperty(globalThis, "WebSocket", {
+			configurable: true,
+			writable: true,
+			value: IdentityWebSocket,
+		});
+		const seen: ProviderResponseMetadata[] = [];
+
+		const result = await streamOpenAICodexResponses(createCodexTestModel(), createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-provider-identity",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			onResponse: response => {
+				seen.push(response);
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(seen).toEqual([
+			{ status: 101, headers: {}, metadata: { model: servedModel, checkpoint: "checkpoint-terminal" } },
+		]);
+	});
+	it("rejects conflicting Codex identity envelopes and notifies once", async () => {
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.created", response: { id: "resp_codex_conflict", model: "served-model-a" } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_codex_conflict", status: "completed", model: "served-model-b", usage: DEFAULT_USAGE } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream", "x-request-id": "req_codex_conflict" },
+			});
+		const seen: ProviderResponseMetadata[] = [];
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			fetch: fetchMock,
+			onResponse: response => {
+				seen.push(response);
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Conflicting Codex model identity coordinates");
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.headers["x-request-id"]).toBe("req_codex_conflict");
+		expect(seen[0]?.metadata).toBeUndefined();
+	});
+
+	it("does not couple a slow Codex response callback to the first-event watchdog", async () => {
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const servedModel = "served-codex-watchdog-model";
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_codex_watchdog", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_codex_watchdog", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ok" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_codex_watchdog", status: "completed", model: servedModel, usage: DEFAULT_USAGE } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		const seen: ProviderResponseMetadata[] = [];
+		const callbackEntered = Promise.withResolvers<void>();
+		const releaseCallback = Promise.withResolvers<void>();
+		vi.useFakeTimers();
+		try {
+			const resultPromise = streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				streamFirstEventTimeoutMs: 10,
+				streamIdleTimeoutMs: 1000,
+				onResponse: async response => {
+					callbackEntered.resolve();
+					await releaseCallback.promise;
+					seen.push(response);
+				},
+			}).result();
+			await callbackEntered.promise;
+			vi.advanceTimersByTime(25);
+			releaseCallback.resolve();
+			const result = await resultPromise;
+
+			expect(result.stopReason).toBe("stop");
+			expect(seen).toHaveLength(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("omits chatgpt account headers for opaque custom provider API keys", async () => {

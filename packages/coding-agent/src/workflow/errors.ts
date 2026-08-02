@@ -71,7 +71,6 @@ export class WorkflowCancelledError extends WorkflowError {
 	}
 }
 
-
 export class WorkflowIdentityError extends WorkflowError {
 	constructor(reason: string, details?: unknown) {
 		super(`Identity verification failed: ${reason}`, "identity_mismatch", details);

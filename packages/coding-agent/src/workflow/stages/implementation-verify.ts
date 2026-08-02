@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { parsePatchTouchedFiles } from "../../utils/git";
 import type { ImplementationArtifactV1, VerificationArtifactV1, VerifierPort } from "../types";
 
 function isMissingFile(err: unknown): boolean {
@@ -19,21 +20,7 @@ export interface ImplementationVerifyInput {
 
 /** Best-effort path extraction from unified diff headers. */
 export function changedFilesFromPatch(patchContent: string): string[] {
-	const files = new Set<string>();
-	for (const line of patchContent.split("\n")) {
-		// diff --git a/path b/path
-		const git = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-		if (git?.[2]) {
-			files.add(git[2]);
-			continue;
-		}
-		// +++ b/path  (skip /dev/null)
-		const plus = /^\+\+\+ (?:b\/)?(.+)$/.exec(line);
-		if (plus?.[1] && plus[1] !== "/dev/null") {
-			files.add(plus[1].replace(/^b\//, ""));
-		}
-	}
-	return [...files];
+	return parsePatchTouchedFiles(patchContent);
 }
 
 export class ImplementationVerifyStage {

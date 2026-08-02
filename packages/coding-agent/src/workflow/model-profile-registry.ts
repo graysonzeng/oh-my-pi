@@ -1,18 +1,16 @@
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { getBundledModelReferenceIndex, modelFamilyToken, resolveModelReference } from "@oh-my-pi/pi-catalog/identity";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import {
+	getBundledModelReferenceIndex,
+	getBundledProviderModelReferenceIndex,
+	modelFamilyToken,
+	resolveModelReference,
+} from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseModelString } from "../config/model-resolver";
 import { DEFAULT_MODEL_OPTIMIZATION_PROFILES } from "../model-optimization/default-profiles";
 import type { ModelOptimizationProfile } from "../model-optimization/types";
+import { parseEffort } from "../thinking";
 import { WorkflowPolicyError } from "./errors";
-import type {
-	ConfiguredModelIdentityV1,
-	ContextStrategy,
-	ModelProfile,
-	PromptStrategy,
-	ToolStrategy,
-} from "./types";
+import type { ConfiguredModelIdentityV1, ContextStrategy, ModelProfile, PromptStrategy, ToolStrategy } from "./types";
 
 /**
  * Fields accepted on ModelProfile but not yet wired through the structured runner.
@@ -68,28 +66,32 @@ function exactConfiguredModel(profile: ModelProfile): { provider: string; model:
 function validateConfiguredEffort(
 	profile: ModelProfile,
 	identity: { provider: string; model: string } | undefined,
-): void {
-	const effort = profile.thinkingLevel;
-	if (effort === undefined) return;
-	if (effort === "auto" || !THINKING_EFFORTS.includes(effort)) {
+): ModelProfile["thinkingLevel"] {
+	const configuredEffort = profile.thinkingLevel;
+	if (configuredEffort === undefined) return undefined;
+	const effort = parseEffort(configuredEffort);
+	if (!effort) {
 		throw new WorkflowPolicyError("invalid_model_profile_effort", {
 			profileId: profile.id,
-			effort,
-			hint: "Strict workflow profiles require one concrete supported effort",
+			effort: configuredEffort,
+			hint: "Workflow model profiles require one concrete supported effort",
 		});
 	}
-	if (!identity) return;
-	const knownModel =
-		getBundledModel(identity.provider, identity.model) ??
-		resolveModelReference(identity.model, getBundledModelReferenceIndex());
-	if (knownModel && !getSupportedEfforts(knownModel).includes(effort)) {
-		throw new WorkflowPolicyError("unsupported_model_profile_effort", {
-			profileId: profile.id,
-			modelPattern: profile.modelPattern,
-			effort,
-			supportedEfforts: getSupportedEfforts(knownModel),
-		});
+	if (identity) {
+		const providerReferences = getBundledProviderModelReferenceIndex(identity.provider);
+		const knownModel =
+			(providerReferences ? resolveModelReference(identity.model, providerReferences) : undefined) ??
+			resolveModelReference(identity.model, getBundledModelReferenceIndex());
+		if (knownModel && !getSupportedEfforts(knownModel).includes(effort)) {
+			throw new WorkflowPolicyError("unsupported_model_profile_effort", {
+				profileId: profile.id,
+				modelPattern: profile.modelPattern,
+				effort,
+				supportedEfforts: getSupportedEfforts(knownModel),
+			});
+		}
 	}
+	return effort;
 }
 
 export function configuredIdentityForProfile(profile: ModelProfile): ConfiguredModelIdentityV1 {
@@ -121,7 +123,7 @@ export function configuredIdentityForProfile(profile: ModelProfile): ConfiguredM
 			derivedLineage: lineage,
 		});
 	}
-	validateConfiguredEffort(profile, identity);
+	const requestedEffort = validateConfiguredEffort(profile, identity);
 	return {
 		profileId: profile.id,
 		provider: identity.provider,
@@ -129,7 +131,7 @@ export function configuredIdentityForProfile(profile: ModelProfile): ConfiguredM
 		checkpoint: null,
 		provenance: "configured",
 		modelPattern: profile.modelPattern as string,
-		requestedEffort: profile.thinkingLevel,
+		requestedEffort: requestedEffort ?? null,
 		modelFamily: lineage,
 	};
 }
@@ -138,8 +140,6 @@ function validateModelProfileIdentity(profile: ModelProfile): void {
 	if (profile.strictIdentity !== undefined && typeof profile.strictIdentity !== "boolean") {
 		throw new WorkflowPolicyError("invalid_strict_identity_policy", { profileId: profile.id });
 	}
-	const identity = exactConfiguredModel(profile);
-	validateConfiguredEffort(profile, identity);
 	if (profile.strictIdentity) configuredIdentityForProfile(profile);
 }
 
@@ -152,24 +152,30 @@ export function normalizeModelProfile(profile: ModelProfile): ModelProfile {
 			hint: "Multi-model workflows use embedded RuntimeAdapter + omp provider models only; remove profile.runtime (codex_cli/claude_cli backends removed)",
 		});
 	}
-	const optimization = referencedOptimization(profile);
+	const effort = validateConfiguredEffort(profile, exactConfiguredModel(profile));
+	const profileWithEffort =
+		effort !== undefined && profile.thinkingLevel !== effort ? { ...profile, thinkingLevel: effort } : profile;
+	const optimization = referencedOptimization(profileWithEffort);
 	const promptStrategy = workflowPromptStrategy(optimization);
 	const toolStrategy = workflowToolStrategy(optimization);
 	const contextStrategy = workflowContextStrategy(optimization);
-	const mergedPromptStrategy = profile.promptStrategy
-		? { ...promptStrategy, ...profile.promptStrategy }
+	const mergedPromptStrategy = profileWithEffort.promptStrategy
+		? { ...promptStrategy, ...profileWithEffort.promptStrategy }
 		: promptStrategy;
-	const mergedContextStrategy = profile.contextStrategy
-		? { ...contextStrategy, ...profile.contextStrategy }
+	const mergedContextStrategy = profileWithEffort.contextStrategy
+		? { ...contextStrategy, ...profileWithEffort.contextStrategy }
 		: contextStrategy;
 	const normalized: ModelProfile = optimization
 		? {
-				...profile,
+				...profileWithEffort,
 				promptStrategy: mergedPromptStrategy,
-				toolStrategy: toolStrategy || profile.toolStrategy ? { ...toolStrategy, ...profile.toolStrategy } : undefined,
+				toolStrategy:
+					toolStrategy || profileWithEffort.toolStrategy
+						? { ...toolStrategy, ...profileWithEffort.toolStrategy }
+						: undefined,
 				contextStrategy: mergedContextStrategy,
 			}
-		: profile;
+		: profileWithEffort;
 	validateModelProfileIdentity(normalized);
 	return normalized;
 }

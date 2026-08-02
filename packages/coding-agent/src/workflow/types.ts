@@ -62,6 +62,8 @@ export interface WorkPackageExecutionV1 extends WorkPackageV1 {
 	status: WorkPackageRunStatusV1;
 	invocationAttemptId?: string;
 	implementation?: ImplementationArtifactV1;
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	modelFamily?: string;
 	errorKind?: WorkflowErrorKind;
 	errorSummary?: string;
 }

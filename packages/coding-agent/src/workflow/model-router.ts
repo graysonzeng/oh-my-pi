@@ -233,8 +233,8 @@ export class ModelRouter {
 		const excluded = new Set(options.excludedProfileIds ?? []);
 		const skipped: RoutingSkip[] = [];
 		const candidates: Array<{ profile: ModelProfile; modelFamily: string }> = [];
-		const authorModelFamily = options.avoidModelFamily ??
-			(role === "code_reviewer" ? options.implementerModelFamily : undefined);
+		const authorModelFamily =
+			options.avoidModelFamily ?? (role === "code_reviewer" ? options.implementerModelFamily : undefined);
 		for (const profileId of candidateProfileIds) {
 			const profile = this.#profiles.get(profileId);
 			if (!profile) {
@@ -281,13 +281,16 @@ export class ModelRouter {
 		}
 		const selected = candidates[0];
 		if (!selected) {
-			throw new WorkflowPolicyError(authorModelFamily ? "independent_reviewer_unavailable" : "model_profile_not_found", {
-				role,
-				qualityTier: options.qualityTier,
-				authorModelFamily,
-				candidateProfileIds,
-				skipped,
-			});
+			throw new WorkflowPolicyError(
+				authorModelFamily ? "independent_reviewer_unavailable" : "model_profile_not_found",
+				{
+					role,
+					qualityTier: options.qualityTier,
+					authorModelFamily,
+					candidateProfileIds,
+					skipped,
+				},
+			);
 		}
 		const primaryId = candidateProfileIds[0];
 		return {

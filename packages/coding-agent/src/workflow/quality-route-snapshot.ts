@@ -7,6 +7,7 @@ import type {
 	ModelProfile,
 	QualityRouteProfileSnapshotV1,
 	QualityRouteSnapshotV1,
+	WorkflowModelProfile,
 	WorkflowQualityTier,
 	WorkflowRole,
 } from "./types";
@@ -37,8 +38,34 @@ function freezeDeep<T>(value: T): T {
 	return Object.freeze(value);
 }
 
-function cloneProfile(profile: ModelProfile): ModelProfile {
-	return structuredClone(profile);
+function cloneProfile(profile: WorkflowModelProfile): WorkflowModelProfile {
+	return structuredClone({
+		id: profile.id,
+		vendor: profile.vendor,
+		modelPattern: profile.modelPattern,
+		roles: profile.roles,
+		optimizationProfileId: profile.optimizationProfileId,
+		thinkingLevel: profile.thinkingLevel,
+		strictIdentity: profile.strictIdentity,
+		promptTemplate: profile.promptTemplate,
+		promptVersion: profile.promptVersion,
+		toolPolicyId: profile.toolPolicyId,
+		toolAliases: profile.toolAliases,
+		argumentAliases: profile.argumentAliases,
+		promptStrategy: profile.promptStrategy,
+		toolStrategy: profile.toolStrategy,
+		contextStrategy: profile.contextStrategy,
+		outputStrategy: profile.outputStrategy,
+		presentationPolicy: profile.presentationPolicy,
+		disabledTools: profile.disabledTools,
+		maxRequests: profile.maxRequests,
+		maxRuntimeMs: profile.maxRuntimeMs,
+		maxInputTokens: profile.maxInputTokens,
+		maxOutputTokens: profile.maxOutputTokens,
+		maxCostUsd: profile.maxCostUsd,
+		retryPolicy: profile.retryPolicy,
+		contextPolicy: profile.contextPolicy,
+	});
 }
 
 export function compileQualityRouteSnapshot(
@@ -130,7 +157,7 @@ export function verifyQualityRouteSnapshot(value: unknown): QualityRouteSnapshot
 	for (const role of QUALITY_ROUTE_ROLES) {
 		for (const profileId of value.routes[role]) {
 			const entry = profilesById.get(profileId);
-			if (!entry || !entry.profile.roles.includes(role) || entry.configuredIdentity.profileId !== profileId) {
+			if (!entry?.profile.roles.includes(role) || entry.configuredIdentity.profileId !== profileId) {
 				throw new WorkflowPolicyError("quality_route_snapshot_profile_mismatch", { role, profileId });
 			}
 		}

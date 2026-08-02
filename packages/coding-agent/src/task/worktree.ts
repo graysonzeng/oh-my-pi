@@ -196,39 +196,6 @@ export interface NestedRepoPatch {
 	patch: string;
 }
 
-function unquoteGitDiffPath(rawPath: string): string {
-	let value = rawPath;
-	if (value.startsWith('"') && value.endsWith('"')) {
-		try {
-			value = JSON.parse(value) as string;
-		} catch {
-			value = value.slice(1, -1);
-		}
-	}
-	return value.replace(/^[ab]\//, "");
-}
-
-function parseDiffGitLinePaths(line: string): string[] {
-	if (!line.startsWith("diff --git ")) return [];
-	const rest = line.slice("diff --git ".length);
-	const quoted = rest.match(/^("(?:\\.|[^"])+"|\/dev\/null) ("(?:\\.|[^"])+"|\/dev\/null)$/);
-	const parts = quoted ? [quoted[1], quoted[2]] : rest.split(" ");
-	if (parts.length < 2) return [];
-	const paths = parts
-		.slice(0, 2)
-		.map(unquoteGitDiffPath)
-		.filter(file => file && file !== "/dev/null");
-	return [...new Set(paths)];
-}
-
-function patchTouchedFiles(patch: string): string[] {
-	const files = new Set<string>();
-	for (const line of patch.split("\n")) {
-		for (const file of parseDiffGitLinePaths(line)) files.add(file);
-	}
-	return [...files];
-}
-
 export interface DeltaPatchResult {
 	rootPatch: string;
 	nestedPatches: NestedRepoPatch[];
@@ -294,7 +261,7 @@ export async function applyNestedPatches(
 		}
 
 		const combinedDiff = repoPatches.map(p => p.patch).join("\n");
-		const touchedFiles = [...new Set(repoPatches.flatMap(p => patchTouchedFiles(p.patch)))];
+		const touchedFiles = [...new Set(repoPatches.flatMap(p => git.parsePatchTouchedFiles(p.patch)))];
 
 		// Preserve any pre-existing dirty state (tracked + untracked) so we
 		// commit only the agent delta, not the user's in-flight work.
@@ -631,8 +598,8 @@ async function applyDeltaOverBaselineWip(
 	}
 	await git.patch.applyText(tmpDir, patchText);
 
-	const wipFiles = new Set(wipPatches.flatMap(patchTouchedFiles));
-	const deltaFiles = new Set(patchTouchedFiles(patchText));
+	const wipFiles = new Set(wipPatches.flatMap(git.parsePatchTouchedFiles));
+	const deltaFiles = new Set(git.parsePatchTouchedFiles(patchText));
 	const wipOnly = [...wipFiles].filter(f => !deltaFiles.has(f));
 	if (wipOnly.length === 0) return;
 

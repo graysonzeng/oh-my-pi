@@ -1,10 +1,11 @@
+import type { Api, Model, ProviderResponseMetadata, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import type { Api, Model, ProviderResponseMetadata, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { parseModelString } from "../config/model-resolver";
 import { WorkflowIdentityError } from "./errors";
 import { configuredIdentityForProfile } from "./model-profile-registry";
 import type {
+	ConfiguredModelIdentityV1,
 	ModelIdentityCoordinatesV1,
 	ModelIdentityProvenance,
 	ModelProfile,
@@ -42,7 +43,10 @@ function firstHeader(headers: Readonly<Record<string, string>>, names: readonly 
 	return undefined;
 }
 
-function metadataString(metadata: Readonly<Record<string, unknown>> | undefined, names: readonly string[]): string | undefined {
+function metadataString(
+	metadata: Readonly<Record<string, unknown>> | undefined,
+	names: readonly string[],
+): string | undefined {
 	for (const name of names) {
 		const value = metadata?.[name];
 		if (typeof value === "string" && value.trim()) return value.trim();
@@ -149,7 +153,7 @@ export function buildRuntimeIdentityReceipt(
 	collector: ProviderIdentityCollector,
 	localResolvedModel?: string,
 ): WorkflowRuntimeIdentityReceiptV1 {
-	let configured;
+	let configured: ConfiguredModelIdentityV1;
 	try {
 		configured = configuredIdentityForProfile(profile);
 	} catch {
@@ -183,7 +187,11 @@ export function buildRuntimeIdentityReceipt(
 }
 
 export function assertStrictRuntimeIdentity(receipt: WorkflowRuntimeIdentityReceiptV1): void {
-	if (receipt.attested.provenance === "unknown" || !receipt.attested.provider || !receipt.attested.model) {
+	if (
+		(receipt.attested.provenance !== "provider_echo" && receipt.attested.provenance !== "gateway_attestation") ||
+		!receipt.attested.provider ||
+		!receipt.attested.model
+	) {
 		throw new WorkflowIdentityError("provider_attestation_missing", { receipt });
 	}
 	if (receipt.exactMatch !== true) {

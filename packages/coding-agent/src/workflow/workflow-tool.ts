@@ -6,7 +6,7 @@ import { ToolError } from "../tools/tool-errors";
 import { WorkflowEngine } from "./engine";
 import { WorkflowPolicyError } from "./errors";
 import { WorkflowStore } from "./sqlite-store";
-import type { WorkflowAvailabilityReport, WorkflowStatus } from "./types";
+import type { WorkflowAvailabilityReport, WorkflowStatus, WorkflowStatusReportV1 } from "./types";
 
 const workflowSchema = type({
 	op: type("'start' | 'status' | 'resume' | 'cancel'").describe("workflow operation"),
@@ -129,25 +129,25 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			if (params.op === "status") {
 				const workflowId = params.workflowId?.trim();
 				if (!workflowId) throw new ToolError("workflowId is required when op=status");
-				const snapshot = await engine.recoverFromPersistedState(workflowId);
-				if (!snapshot) throw new ToolError(`Workflow not found: ${workflowId}`);
+				const report = await engine.getStatusReport(workflowId);
+				if (!report) throw new ToolError(`Workflow not found: ${workflowId}`);
 				const text = [
 					`Workflow: ${workflowId}`,
-					`Status: ${snapshot.state.status}`,
-					`Stage: ${snapshot.state.currentStage}`,
-					`Version: ${snapshot.state.version}`,
-					`Attempts: ${snapshot.attempts.length}`,
-					`Artifacts: ${snapshot.artifacts.length}`,
-					`Transitions: ${snapshot.transitions.length}`,
-					snapshot.budgetTotals ? `Budget: ${JSON.stringify(snapshot.budgetTotals)}` : "Budget: (none)",
-					formatQualityRoutePolicy(snapshot.state.policyJson),
+					`Status: ${report.status}`,
+					`Stage: ${report.currentStage}`,
+					`Version: ${report.version}`,
+					`Attempts: ${report.attemptCount}`,
+					`Artifacts: ${report.artifactCount}`,
+					`Transitions: ${report.transitionCount}`,
+					report.budgetTotals ? `Budget: ${JSON.stringify(report.budgetTotals)}` : "Budget: (none)",
+					formatWorkflowStatusReport(report),
 				].join("\n");
 				return {
 					content: [{ type: "text", text }],
 					details: {
 						op: "status",
 						workflowId,
-						status: snapshot.state.status,
+						status: report.status,
 						approvalTier: tier,
 					},
 				};
@@ -164,7 +164,12 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 					forceUnlock: params.forceUnlock === true,
 				});
 				const availabilityText = result.availability ? `\n${formatAvailabilitySummary(result.availability)}` : "";
-				const qualityRouteText = `\n${formatQualityRoutePolicy(result.state.policyJson)}`;
+				const statusReport = await engine.getStatusReport(workflowId);
+				const qualityRouteText = `\n${
+					statusReport
+						? formatWorkflowStatusReport(statusReport)
+						: formatQualityRoutePolicy(result.state.policyJson)
+				}`;
 				return {
 					content: [
 						{
@@ -238,13 +243,13 @@ function formatQualityRoutePolicy(policyJson: string | undefined): string {
 			qualityRouteSnapshot?: {
 				qualityTier?: unknown;
 				fingerprint?: unknown;
-				roles?: Record<string, { candidates?: Array<{ id?: unknown }> }>;
+				routes?: Record<string, unknown>;
 			};
 		};
 		const route = policy.qualityRouteSnapshot;
 		if (!route) return "Quality route: legacy role-based routing";
-		const roles = Object.entries(route.roles ?? {})
-			.map(([role, value]) => `${role}=[${(value.candidates ?? []).map(candidate => String(candidate.id)).join(",")}]`)
+		const roles = Object.entries(route.routes ?? {})
+			.map(([role, value]) => `${role}=[${Array.isArray(value) ? value.map(String).join(",") : ""}]`)
 			.join(" ");
 		return `Quality route: tier=${String(route.qualityTier ?? "unknown")} fingerprint=${String(
 			route.fingerprint ?? "unknown",
@@ -252,4 +257,36 @@ function formatQualityRoutePolicy(policyJson: string | undefined): string {
 	} catch {
 		return "Quality route: invalid persisted policy";
 	}
+}
+
+function formatWorkflowStatusReport(report: WorkflowStatusReportV1): string {
+	const quality = report.qualityRoute;
+	const lines = [
+		`Quality route: status=${quality.status} tier=${quality.qualityTier ?? "unknown"} fingerprint=${quality.snapshotFingerprint ?? "unknown"}`,
+	];
+	const configuredRoutes = quality.configuredStages
+		.filter(stage => stage.orderedProfileIds !== null)
+		.map(stage => `${stage.role}=[${stage.orderedProfileIds!.join(",")}]`)
+		.join(" ");
+	if (configuredRoutes) lines.push(`Configured routes: ${configuredRoutes}`);
+	for (const attempt of report.modelAttempts) {
+		lines.push(
+			`Model attempt: stage=${attempt.stage} role=${attempt.role} ordinal=${attempt.ordinal} status=${attempt.status} profile=${attempt.configuredProfileId ?? "unknown"} evidence=${attempt.evidenceStatus}`,
+		);
+		for (const routing of attempt.routing) {
+			const skipped = routing.skipped.map(entry => `${entry.profileId ?? "unknown"}:${entry.reason}`).join(",");
+			lines.push(
+				`  route: selected=${routing.selectedProfileId ?? "unknown"} fallbackFrom=${routing.fallbackFrom ?? "none"} reason=${routing.reason ?? "none"}${skipped ? ` skipped=[${skipped}]` : ""}`,
+			);
+		}
+		for (const execution of attempt.executions) {
+			const configured = execution.configuredIdentity;
+			const local = execution.localResolution;
+			const attested = execution.attestedIdentity;
+			lines.push(
+				`  execution: profile=${execution.profileId ?? "unknown"} configured=${configured?.provider ?? "unknown"}/${configured?.model ?? "unknown"}:${configured?.requestedEffort ?? "unknown"} local=${local?.provider ?? "unknown"}/${local?.model ?? "unknown"} attested=${attested?.provider ?? "unknown"}/${attested?.model ?? "unknown"}@${attested?.checkpoint ?? "unknown"} provenance=${attested?.provenance ?? "unknown"} exact=${execution.exactIdentityMatch ?? "unknown"} effortSupported=${execution.effortSupported ?? "unknown"} lineage=${execution.modelFamily ?? "unknown"}`,
+			);
+		}
+	}
+	return lines.join("\n");
 }

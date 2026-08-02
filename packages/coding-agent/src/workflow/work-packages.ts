@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import workPackageAssignmentTemplate from "../prompts/workflow/work-package-assignment.hbs.md" with { type: "text" };
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "../task/parallel";
+import { parsePatchTouchedFiles } from "../utils/git";
 import { renderContextTemplate } from "./context-builder";
 import { WorkflowCancelledError, WorkflowError, WorkflowPolicyError } from "./errors";
 import type { ImplementStageResult } from "./stages/implement";
@@ -207,6 +208,8 @@ export async function executeWorkPackagePlan(input: ExecuteWorkPackagePlanInput)
 							status: "succeeded",
 							invocationAttemptId,
 							implementation: result.artifact,
+							identityReceipt: result.identityReceipt,
+							modelFamily: result.modelFamily,
 							errorKind: undefined,
 							errorSummary: undefined,
 						} satisfies WorkPackageExecutionV1);
@@ -390,7 +393,11 @@ async function assertOwnedPatch(
 	if (!patchText.trim()) {
 		throw new WorkflowPolicyError("work_package_empty_patch", { packageId: workPackage.id, patchPath });
 	}
-	const changedPaths = patchOwnershipPaths(patchText);
+	const changedPaths = uniqueSorted(
+		parsePatchTouchedFiles(patchText)
+			.map(normalizeOwnedPath)
+			.filter((value): value is string => value !== null),
+	);
 	if (changedPaths.length === 0) {
 		throw new WorkflowPolicyError("work_package_patch_paths_unreadable", { packageId: workPackage.id, patchPath });
 	}
@@ -404,26 +411,6 @@ async function assertOwnedPatch(
 			changedPaths: outside,
 		});
 	}
-}
-
-function patchOwnershipPaths(patchText: string): string[] {
-	const paths = new Set<string>();
-	for (const line of patchText.split("\n")) {
-		const diff = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-		if (diff) {
-			for (const value of [diff[1], diff[2]]) {
-				const normalized = value ? normalizeOwnedPath(value) : null;
-				if (normalized) paths.add(normalized);
-			}
-			continue;
-		}
-		const header = /^(?:---|\+\+\+) (?:[ab]\/)?(.+)$/.exec(line);
-		if (header?.[1] && header[1] !== "/dev/null") {
-			const normalized = normalizeOwnedPath(header[1]);
-			if (normalized) paths.add(normalized);
-		}
-	}
-	return [...paths];
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
