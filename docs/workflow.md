@@ -13,7 +13,7 @@ Multi-model execution is **embedded only**: `RuntimeAdapter` → `runStructuredS
 | `created` | tool `start` | No model call yet |
 | `planning` | planner profile | Strict `PlanArtifact` |
 | `plan_review` | independent reviewer | `approved` / `changes_requested` / `blocked` |
-| `implementing` | implementer (default: **GLM** primary, Grok/Terra fallback) | Isolation required; real patch/branch only |
+| `implementing` | routed implementer profile | Isolation required; strict quality profiles capture a real patch with `apply: false` before engine-owned validation and merge |
 | `implementation_verify` | verifier (no LLM) | Configured commands + policy checks |
 | `code_review` | independent vendor when possible | Findings drive repair |
 | `repairing` | routed repair profile | Finding IDs; escalation then block |
@@ -35,7 +35,7 @@ Default profile registration order is the router preference (see `DEFAULT_MODEL_
 
 Built-in tool `workflow` supports **only**:
 
-- `start` — create workflow (write)
+- `start` — create workflow (write; optional `qualityTier: balanced | critical`)
 - `status` — read-only snapshot (stage, attempts, artifacts, budget)
 - `resume` — continue from persisted stage (write; refuses terminal)
 - `cancel` — abort + persist `cancelled` (write)
@@ -53,6 +53,8 @@ State lives in SQLite (`workflow.storagePath` or default `workflow.db`). Artifac
 - budget totals when stored
 
 Exclusive `runner_owner` claims prevent two runners from advancing the same workflow silently.
+
+Applied work-package recovery does not trust persisted `changesApplied` state alone. The engine reads the persisted aggregate patch and proceeds only when the reverse patch applies to the current worktree while the forward patch does not; missing, reverted, or ambiguous evidence fails closed without rerunning implementers or the merge seam.
 
 Stuck lock after a hard crash (previous process died holding the lock): resume with `forceUnlock: true` (tool: `workflow op=resume forceUnlock=true`), or call engine `forceUnlock(workflowId)`. **Do not** use `cancel` solely to clear a lock if you still intend to resume — cancel is terminal. In-process cancel also aborts any registered running engine via the abort registry.
 
@@ -76,6 +78,8 @@ Settings group `workflow.*` (schema in `packages/coding-agent/src/config/setting
 
 - `enabled`, `storagePath`
 - `degradedMode`, `requireIndependentReview`
+- `defaultQualityTier` — optional `balanced` or `critical` tier used when configured quality routes are enabled
+- `qualityRoutes` — optional ordered profile-ID lists per tier and workflow role; empty/absent preserves legacy role-router and degraded-mode behavior
 - `maxBudgetUsd`, `maxRepairCycles`, `maxPlanCycles`, `confidenceThreshold`
 - `isolationMerge`, `verificationCommands`, `verificationTimeoutMs`
 - `profiles` — optional override map; empty uses built-in defaults
@@ -90,11 +94,19 @@ Default verification commands are trusted repository checks (`git diff --check`,
 
 | Category | Fields | Behavior |
 | --- | --- | --- |
-| Supported (runtime + strategies) | `thinkingLevel`, `disabledTools`, `maxRuntimeMs`, `contextPolicy`, `modelPattern`, `promptStrategy` / `toolStrategy` / `contextStrategy` / `outputStrategy`, `toolAliases`, `argumentAliases` | Honored via structured-subagent + schema enhancer / tool-alias wraps |
+| Supported (runtime + strategies) | `thinkingLevel`, `strictIdentity`, `disabledTools`, `maxRuntimeMs`, `contextPolicy`, `modelPattern`, `promptStrategy` / `toolStrategy` / `contextStrategy` / `outputStrategy`, `toolAliases`, `argumentAliases` | Honored via structured-subagent + schema enhancer / tool-alias wraps |
 | Rejected | `maxInputTokens`, `maxOutputTokens` | Fail closed at profile registration until the runner can honor them |
 | Removed | `runtime` (`codex_cli` / `claude_cli` / legacy embedded tag) | Fail closed; multi-model is embedded RuntimeAdapter only |
 
 Default plan/code reviewer `maxRuntimeMs` is **300s** (slow gateways); implementer defaults are higher (up to 600s).
+
+### Quality tiers and strict execution identity
+
+When `qualityRoutes` is configured, `start` compiles the selected tier into an immutable snapshot containing ordered candidates and normalized non-secret profile fields. The persisted fingerprint is verified on resume; later settings changes cannot alter model, effort, lineage, or fallback order. Quality routes require `degradedMode: false`. Without configured routes, availability preflight remains advisory and the legacy router behavior is unchanged.
+
+Strict profiles require one exact `provider/model` pattern and one concrete effort. Effort compatibility uses exact provider-scoped catalog facts before cross-provider family defaults. Runtime receipts keep three distinct coordinates: configured selection, local resolution, and provider/gateway attestation. Local resolution never proves execution; unknown, conflicting, mismatched, or effort-unsupported attestations fail closed.
+
+Strict implement/repair calls run isolated with `apply: false`. The engine verifies identity, artifact schema, patch-derived scope, and changed paths before using the existing merge seam. Provider adapters aggregate identity-bearing lifecycle envelopes so a terminal model/checkpoint can enrich an earlier envelope; conflicting coordinates are rejected, and an upstream gateway-reported provider is retained separately from the transport provider.
 
 ## Safety
 
@@ -135,3 +147,5 @@ Optional, cost-bearing. Automated tests use injectable runners only; live smoke 
 **Pass criteria (harness):** ≥5 probe ok; durable `plan` + `review` artifacts; full path prefers terminal `completed` (with `implementation`); `blocked` after plan/review remains a minimum live success.
 
 **Recorded full path (2026-07-25):** protocol default anthropic-messages; OpenAI chat/completions smoke ok; probes 7/7 (`claude-sonnet-5`, `claude-fable-5`, `claude-opus-4-8`, `gpt-5.6-sol`, `gpt-5.6-terra`, `grok-4.5`, `glm-5.2`); workflow `wf_61f89e3f-…` → **`completed`** (`final_verify:passed`) through plan → plan_review → implement → implementation_verify → code_review → final_verify; artifacts include `plan`, `review`, `implementation`, `verification`, `findings-state`, `routing-audit`, `usage`, `stage_handoff`, `prompt_assembly_receipt`. Details: `.agent-artifacts/live-e2e/report.json` and root `progress.md` (session notes; not a package artifact).
+
+**Recorded quality-route fixtures (2026-08-02):** `balanced` workflow `wf_2588513c-…` and `critical` workflow `wf_dc1cf3ad-…` both reached `completed`, changed only `src/math.ts`, passed the fixture test, persisted routing/runtime/usage/scope/verification evidence, and had no model attempt in deterministic verify stages. Reports: `.agent-artifacts/quality-routing-goal/e2e-balanced-latest.json` and `e2e-critical-latest.json`. These local live checks prove route availability and execution identity only; they are not a statistical quality claim.

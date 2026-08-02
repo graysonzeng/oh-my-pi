@@ -170,3 +170,50 @@ Skeptic gap closure (2026-07-26T12:02Z): re-executed full workflow suite + check
 - Parallel safety: stable dependency waves, exclusive repo-relative ownership, `task.maxConcurrency`, capture-only isolation, patch ground-truth ownership checks, one deterministic atomic apply.
 - Persistence/resume: engine-owned revisioned work-package state artifacts record outputs/status/failures/merge; interrupted capture-only package runs may resume, while serial/repair crash behavior stays fail-closed.
 - Downstream contract: aggregate one `ImplementationArtifactV1`; implementation verification, code review, repair, final verification, and transitions remain unchanged.
+
+---
+
+## Quality-first model routing goal — completion checkpoint
+
+| Field | Value |
+| --- | --- |
+| goal_id | unavailable in resumed Goal service (`goal get` returned no active goal; no replacement created) |
+| design | `docs/superpowers/specs/2026-08-01-quality-first-model-routing-goal-design.md` |
+| updated_at | 2026-08-02T10:24:13Z |
+| status | `delivery_complete_goal_service_unavailable` |
+| fixed HEAD | `c200de04069076b6f966ce50661422420b703a79` |
+| worktree | Pre-existing dirty worktree retained; no checkout/reset/clean/commit/push |
+| local config | `defaultQualityTier=balanced`, `degradedMode=false`, `maxBudgetUsd=5`; balanced/critical snapshots load successfully |
+| config backup | `/Users/sheng/.omp/agent/config.yml.quality-routes-2026-08-02T05-53-05-481Z.bak` |
+
+### Live route evidence
+
+| Gate | Result | Evidence |
+| --- | --- | --- |
+| Exact tuple probes | 7/8 available with provider echo, exact identity, and supported effort; `gateway/grok-4.5:high` attested `grok-4.5-build` and correctly remained unavailable | `.agent-artifacts/quality-routing-goal/exact-live-probe-latest.json` |
+| Balanced E2E | PASS; `wf_2588513c-b438-4ebc-8c43-31fbc8a80405`; Sol medium → Opus high → Luna max → Fable high; deterministic verify stages had no model attempts | `.agent-artifacts/quality-routing-goal/e2e-balanced-latest.json` |
+| Critical E2E | PASS; `wf_dc1cf3ad-d18d-497e-a4a0-d2b966481b87`; Grok exact mismatch selected the configured Sol plan-review fallback; Opus → Sol → Fable → Sol maintained reviewer lineage independence; deterministic verify stages had no model attempts | `.agent-artifacts/quality-routing-goal/e2e-critical-latest.json` |
+| Snapshot fingerprints | balanced `3f18ee9c2d0c879b46d84b55841cae6f6ad1ba9d5d0b11a405f3ff13cb43f6b4`; critical `f2e9bfe9de2c8746dd934aa26a1249abdbb57c945f47f015e5737e32aa70c4b5` | fresh config validation |
+| Independent final review | Provider-attested Claude Fable 5 high; standards PASS; spec PASS; zero blocking findings; observed cost $1.7177825 | `.agent-artifacts/quality-routing-goal/fable-final-review-latest.json` |
+
+### Final-review repairs and focused evidence
+
+1. Applied work-package recovery now proves the persisted aggregate patch remains in the current worktree using read-only forward/reverse apply checks; reverted or ambiguous state fails closed.
+2. OpenAI Responses and Codex SSE/WebSocket aggregate lifecycle identity through terminal events, retain checkpoint evidence, reject conflicts, and invoke the response callback once. OpenAI Completions retains body `provider` as upstream metadata rather than transport identity.
+3. Strict effort validation prefers exact provider-scoped catalog facts.
+4. Required-role preflight fails closed only for active quality-route snapshots; legacy workflows continue through normal routing/attempt semantics.
+5. Fresh affected regression run: 207 pass / 118 skip / 0 fail across provider streams, Codex, identity receipt, model profile registry, routing snapshots/router/tool, work-package recovery, and availability compatibility.
+
+### Final gates
+
+| Gate | Fresh result |
+| --- | --- |
+| Provider regressions after formatting | 128 pass / 118 skip / 0 fail across 6 files |
+| Full workflow suite after formatting | 498 pass / 0 fail across 59 files |
+| `packages/ai` check | PASS (`biome check` + `check:types`) |
+| `packages/coding-agent` check | PASS (`biome check` + `check:types`) |
+| coding-agent build | PASS; binary build completed and generated inputs were reset |
+| Source-level changed-path smoke | Final balanced and critical E2Es both PASS; each completed with only `src/math.ts` changed |
+| Final independent review | Provider-attested PASS on both axes; zero blockers |
+
+Engineering delivery is verified. Goal closeout was attempted only after all gates passed, but `goal complete` returned `cannot complete goal because no goal is active`; two fresh `goal get` calls also returned no active Goal. No replacement Goal was created per the user constraint.

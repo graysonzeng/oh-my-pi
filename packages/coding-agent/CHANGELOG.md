@@ -7,6 +7,7 @@
 
 ### Added
 - Added custom-model validation for `compat.codexResponsesEndpoint`, enabling standard `/responses` WebSocket-to-SSE fallback on compatible gateways.
+- Added opt-in ordered `balanced` / `critical` workflow quality routes with immutable persisted profile snapshots, deterministic fallback audit, catalog-lineage reviewer independence, provider-attested execution receipts, and capture-before-apply strict write gates; configurations without quality routes retain legacy routing behavior.
 - Added provider-level `referenceProvider` for custom model gateways, allowing same-id metadata to inherit from a specific bundled upstream provider before falling back to generic proxy inference.
 - Added opt-in model optimization profiles for ordinary coding-agent sessions, with model-resolver-compatible matching and model-switch-safe prompt/tool scheduling updates that remain separate from workflow roles, permissions, aliases, budgets, and output schemas.
 - Added direct Moonshot Kimi K3 capability facts for parallel tool calls, native MFJS structured output, complete reasoning replay, and exact-prefix caching while keeping proxy routes conservative.
@@ -31,6 +32,7 @@
 
 ### Fixed
 - Fixed provider-level `referenceProvider` being ignored by proxy discovery, which replaced configured upstream metadata with generic fallback limits.
+- Fixed strict workflow evidence handling: provider response lifecycle envelopes now retain terminal model/checkpoint identity and reject conflicts, gateway upstream-provider metadata no longer impersonates transport identity, exact provider catalog facts own effort support, legacy preflight remains advisory without quality routes, and applied work-package recovery verifies the persisted patch is still present before resuming.
 - Fixed Codex MCP discovery ignoring `enabled = false` in `~/.codex/config.toml`, which caused disabled servers such as Computer Use to be spawned during OMP startup.
 - Map wall-clock `maxRuntimeMs` / "runtime limit exceeded" subagent aborts to retryable `WorkflowTimeoutError` (not hard `cancelled`); raise plan/code reviewer default `maxRuntimeMs` to 300s so slow gateway reviews can fall through profiles instead of terminal-cancelling the workflow.
 - Workflow tool alias Proxies no longer pass the Proxy as `Reflect.get` receiver, which broke class private-field getters (e.g. `BashTool.#asyncEnabled` via `description`) and blocked implement stages with a configuration TypeError.
