@@ -2,6 +2,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { Effort, Model } from "@oh-my-pi/pi-catalog";
+import {
+	getBundledModelReferenceIndex,
+	getBundledProviderModelReferenceIndex,
+	resolveModelReference,
+} from "@oh-my-pi/pi-catalog/identity";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Settings } from "../../config/settings";
 import { createAgentSession } from "../../sdk";
 import { getDefaultConfig } from "../default-config";
@@ -68,19 +75,44 @@ function providerFact<T>(value: T): { value: T; provenance: "provider_fact" } {
 	return { value, provenance: "provider_fact" };
 }
 
+/**
+ * Live fixed-model runs rewrite every profile onto one provider/model.
+ * Preserve supported efforts; otherwise prefer the model default (`max` when available),
+ * falling back to catalog clamp. deepseek-v4-flash defaults to max.
+ */
 export function buildLiveBenchmarkProfileOverrides(
 	provider: string,
 	model: string,
 	variant: BenchmarkRuntimeRequest["variant"],
 ): Record<string, Partial<ModelProfile>> {
 	const modelPattern = model.includes("/") ? model : `${provider}/${model}`;
+	const bareModel = model.includes("/") ? (model.split("/").pop() ?? model) : model;
+	const providerReferences = getBundledProviderModelReferenceIndex(provider);
+	const knownModel: Model | undefined =
+		(providerReferences ? resolveModelReference(bareModel, providerReferences) : undefined) ??
+		resolveModelReference(bareModel, getBundledModelReferenceIndex()) ??
+		resolveModelReference(model, getBundledModelReferenceIndex());
+	const supported = knownModel ? getSupportedEfforts(knownModel) : [];
 	const profiles: Record<string, Partial<ModelProfile>> = {};
-	for (const [id] of Object.entries(getDefaultConfig().profiles)) {
-		const liveIdentity = {
+	for (const [id, base] of Object.entries(getDefaultConfig().profiles)) {
+		let thinkingLevel: ModelProfile["thinkingLevel"] = base.thinkingLevel;
+		if (knownModel) {
+			if (supported.length === 0) {
+				thinkingLevel = undefined;
+			} else if (thinkingLevel && thinkingLevel !== "auto" && supported.includes(thinkingLevel as Effort)) {
+				// keep requested supported effort
+			} else if (supported.includes("max" as Effort)) {
+				thinkingLevel = "max";
+			} else {
+				thinkingLevel = clampThinkingLevelForModel(knownModel, thinkingLevel as Effort | undefined) ?? supported[0];
+			}
+		}
+		const liveIdentity: Partial<ModelProfile> = {
 			vendor: provider,
 			modelPattern,
 			maxRuntimeMs: 600_000,
 			retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: [] },
+			thinkingLevel,
 		};
 		profiles[id] =
 			variant === "baseline"
