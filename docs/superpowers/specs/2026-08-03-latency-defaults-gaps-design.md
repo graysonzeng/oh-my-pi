@@ -108,6 +108,14 @@ modelRoles:
 
 其余方向（§4.2 角色静态细分、§4.3 验证闭环、§4.5 eval 迁移）由实现者酌情考虑，合理即可实现。下文各方向按此优先级呈现，核心项标注为【必做】。
 
+### 4.0.1 用户后续设计决定（2026-08-03，修订 round 2 前）
+
+以下三条为用户在 round-1 review（NEEDS_REVISION）之后、修订发起前明确给出的设计决定，后续修订与复审必须遵守：
+
+- **决定 A：lineage 独立 stop condition 重新定义**。stop condition「reviewer/implementer lineage 独立」实际担忧的是 **agent 自审**（作者用自己的上下文评审自己的作品）。新开 subagent 做新 review、不包含之前上下文的干净独立 review，即使同模型族也算独立。后续所有 reviewer 独立性、lineage 与停止条件条款按此定义修订（独立性 = 干净上下文的新 subagent review，而非必须异模型）。
+- **决定 B：方向二分流路由目标改为 `gateway/deepseek-v4-flash:max`（非 luna）**。机械/格式类工作路由到 flash——质量相当、耗时大幅下降（flash TTFT ~4s，luna 16-17s，见 §1.1）。方向二的收益算术按 flash 4s 重算（非 luna 的 16-17s）。
+- **决定 C：round-2 复审模型改用 deepseek-v4-flash**。round-2 review 由 `gateway/deepseek-v4-flash`（新开干净 subagent，`.omp/agents/flash-reviewer.md`，无先前上下文）执行，不再触发 sol-xhigh（round-1 已由其完成）。
+
 ### 4.1 方向一：上下文体积的事前管理（最高隐藏杠杆，机制性、不依赖模型配合）【必做】
 
 - **依据**：[历史事实] TTFT 随上下文膨胀（<50k 8.1s → 100-150k 19.6s → 200-300k 28-29s → ≥350k 51s），影响**所有模型所有轮次**；[历史事实] 同一 spec 被 read 42 次、同一源文件 29 次；[当前能力事实] 普通会话 read 无 content dedupe，workflow 已有 ContextLedger exact-hash 去重。
