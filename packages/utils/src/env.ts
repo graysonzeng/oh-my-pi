@@ -101,16 +101,35 @@ export function filterChildShellEnv(
 	cwd: string = process.cwd(),
 ): Record<string, string> {
 	const result = filterProcessEnv(env);
+	// Prefer the true launch-time NODE_ENV (procfs / --no-env-file snapshot) over the
+	// post-autoload value: Bun selects its mode before parsing project dotenv files, and
+	// OMP/project dotenv can later mutate Bun.env.NODE_ENV.
+	const launchNodeEnv = launchEnvValues?.get("NODE_ENV");
+	const modes = new Set<string>();
+	const currentMode = env.NODE_ENV || "development";
+	modes.add(currentMode);
+	if (launchNodeEnv) modes.add(launchNodeEnv);
+	// Always cover Bun's common mode files so a mismatched mode cannot leak secrets.
+	for (const mode of ["development", "production", "test"]) modes.add(mode);
+
 	const projectEnv = parseEnvFile(path.join(cwd, ".env"));
-	const nodeEnvName = `.env.${env.NODE_ENV || "development"}`;
-	const modeEnv = parseEnvFile(path.join(cwd, nodeEnvName));
 	const localEnv = parseEnvFile(path.join(cwd, ".env.local"));
-	const launchEnv = { ...projectEnv, ...modeEnv, ...localEnv };
-	const expandedLaunchEnv = {
+	const modeFiles: Record<string, string>[] = [];
+	for (const mode of modes) {
+		modeFiles.push(parseEnvFile(path.join(cwd, `.env.${mode}`)));
+		// Bun also autoloads `.env.${mode}.local` (e.g. .env.production.local).
+		modeFiles.push(parseEnvFile(path.join(cwd, `.env.${mode}.local`)));
+	}
+	const launchEnv: Record<string, string> = { ...projectEnv };
+	for (const file of modeFiles) Object.assign(launchEnv, file);
+	Object.assign(launchEnv, localEnv);
+
+	const expandedLaunchEnv: Record<string, string> = {
 		...expandDotenvValues(projectEnv, result),
-		...expandDotenvValues(modeEnv, result),
-		...expandDotenvValues(localEnv, result),
 	};
+	for (const file of modeFiles) Object.assign(expandedLaunchEnv, expandDotenvValues(file, result));
+	Object.assign(expandedLaunchEnv, expandDotenvValues(localEnv, result));
+
 	for (const key in launchEnv) {
 		const launchValue = launchEnvValues?.get(key);
 		if (launchValue !== undefined) {

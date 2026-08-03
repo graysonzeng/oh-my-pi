@@ -426,13 +426,13 @@ export function evaluateWorkflowFinalCompletion(input: WorkflowFinalCompletionIn
 		unresolvedItems.push({ id: "implementation", kind: "implementation", status: "blocked" });
 	} else {
 		for (const [index, item] of (impl.unresolved ?? []).entries()) {
+			// priorPatch: is internal patch-history metadata for implementation-verify, not open work.
+			if (typeof item === "string" && item.startsWith("priorPatch:")) continue;
 			unresolvedItems.push({
 				id: `implementation:unresolved:${index}`,
 				kind: "implementation_unresolved",
 				status: "open",
 			});
-			// Keep label out of id; reason carries summary via checks.
-			void item;
 		}
 	}
 

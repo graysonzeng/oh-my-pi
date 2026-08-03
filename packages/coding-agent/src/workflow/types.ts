@@ -651,6 +651,8 @@ export interface WorkflowState {
 	version: number;
 	requestJson: string;
 	policyJson: string;
+	/** Exclusive runner owner id when a process holds the lock; undefined when free. */
+	runnerOwner?: string;
 }
 
 export interface Artifact {

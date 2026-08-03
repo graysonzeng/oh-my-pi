@@ -249,4 +249,34 @@ describe("Workflow tool policy (readonly planning)", () => {
 			expect(() => assertWorkflowCommandAllowed("ls src", policy)).not.toThrow();
 		}
 	});
+	it("rejects newline-separated second commands before whitespace collapse", () => {
+		expect(() =>
+			assertWorkflowCommandAllowed("bun test\nrm -rf src", {
+				allowedCommands: ["bun test"],
+			}),
+		).toThrow(/forbidden|workflow|policy/i);
+	});
+
+	it("rejects mutating flags on allowlisted validation prefixes", () => {
+		expect(() =>
+			assertWorkflowCommandAllowed("biome check --write package.json", {
+				allowedCommands: ["biome check"],
+			}),
+		).toThrow(/forbidden|workflow|policy/i);
+	});
+
+	it("forbids .git writes for implementer and repair", () => {
+		const factory = new ToolPolicyFactory();
+		for (const role of ["implementer", "repair"] as const) {
+			const policy = factory.getPolicyForRole(role);
+			expect(policy.forbiddenPaths).toContain(".git");
+			expect(() =>
+				assertWorkflowPathAllowed(".git/config", {
+					repoRoot: dir,
+					forbiddenPaths: policy.forbiddenPaths,
+				}),
+			).toThrow(/forbidden|workflow/i);
+		}
+	});
+
 });

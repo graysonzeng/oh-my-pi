@@ -23,7 +23,8 @@ async function preservePatchArtifact(
 	try {
 		const text = await Bun.file(patchPath).text();
 		const destDir = path.join(defaultWorkflowArtifactDir(), workflowId, "patches");
-		const dest = path.join(destDir, `${attemptId}.patch`);
+		// Unique name per invocation so schema retries / profile fallbacks do not overwrite recovery patches.
+		const dest = path.join(destDir, `${attemptId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.patch`);
 		await Bun.write(dest, text);
 		return dest;
 	} catch {

@@ -137,4 +137,18 @@ describe("write refuses read-selector misfires", () => {
 		expect(await Bun.file(path.join(dir, target)).text()).toBe("new");
 		await fs.rm(dir, { recursive: true, force: true });
 	});
+	it("rejects an archive path shaped as a selector list before mutating the archive", async () => {
+		const dir = await makeWorkspace();
+		const archivePath = path.join(dir, "bundle.zip");
+		await writeArchive(archivePath, "zip", [["src/foo.ts", "export const x = 1;\n"]]);
+		const before = await Bun.file(archivePath).bytes();
+		const write = new WriteTool(session(dir));
+		const target = "bundle.zip:src/foo.ts:1-2;b/c.txt:3-4";
+		await expect(write.execute("c", { path: target, content: "{}" })).rejects.toThrow(
+			/semicolon-joined list of 2 read-tool selectors/,
+		);
+		expect(await Bun.file(archivePath).bytes()).toEqual(before);
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
 });

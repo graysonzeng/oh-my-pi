@@ -192,11 +192,15 @@ function throwReadSelectorListMisfire(target: string, count: number): never {
 	);
 }
 
-async function assertNotReadSelectorMisfire(target: string, content: string, cwd: string): Promise<void> {
+async function assertNotReadSelectorListMisfire(target: string, cwd: string): Promise<void> {
 	const listCount = readSelectorListMisfire(target);
 	if (listCount !== undefined && (await probeLiteralPathExists(target, cwd)) === "missing") {
 		throwReadSelectorListMisfire(target, listCount);
 	}
+}
+
+async function assertNotReadSelectorMisfire(target: string, content: string, cwd: string): Promise<void> {
+	await assertNotReadSelectorListMisfire(target, cwd);
 	const sel = readSelectorForEmptyWrite(target, content);
 	if (sel === undefined) return;
 	if ((await probeLiteralPathExists(target, cwd)) !== "missing") return;
@@ -1218,6 +1222,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				}
 				return result;
 			}
+			// List-shaped read selectors must be refused before archive/sqlite routing:
+			// `a.zip:1-2;b/c.txt:3-4` would otherwise be treated as an archive member path.
+			// Single-selector empty-content guard stays after archive routing so literal archive members remain writable.
+			await assertNotReadSelectorListMisfire(path, this.session.cwd);
 			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
 			if (resolvedArchivePath) {
 				enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {

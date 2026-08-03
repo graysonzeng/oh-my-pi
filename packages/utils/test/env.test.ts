@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { filterProcessEnv, parseEnvFile } from "@oh-my-pi/pi-utils/env";
+import { filterChildShellEnv, filterProcessEnv, parseEnvFile } from "@oh-my-pi/pi-utils/env";
 
 const tempDirs: string[] = [];
 
@@ -119,5 +119,24 @@ describe("filterProcessEnv", () => {
 			"ProgramFiles(x86)": "C:\\Program Files (x86)",
 			"CommonProgramFiles(x86)": "C:\\Program Files (x86)\\Common Files",
 		});
+	});
+});
+
+
+describe("filterChildShellEnv", () => {
+	it("removes secrets loaded from .env.${NODE_ENV}.local mode-local files", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-mode-local-"));
+		tempDirs.push(dir);
+		fs.writeFileSync(path.join(dir, ".env.production.local"), "MODE_LOCAL_SECRET=super-secret-value\n");
+		const filtered = filterChildShellEnv(
+			{
+				NODE_ENV: "production",
+				MODE_LOCAL_SECRET: "super-secret-value",
+				KEEP_ME: "yes",
+			},
+			dir,
+		);
+		expect(filtered.MODE_LOCAL_SECRET).toBeUndefined();
+		expect(filtered.KEEP_ME).toBe("yes");
 	});
 });

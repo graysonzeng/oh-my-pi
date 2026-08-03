@@ -207,3 +207,27 @@ describe("evaluateWorkflowFinalCompletion", () => {
 		expect(result.failedGuards).toContain("unresolved_items_must_close");
 	});
 });
+
+	it("ignores priorPatch metadata in implementation unresolved list", () => {
+		const result = evaluateWorkflowFinalCompletion({
+			implementation: {
+				unresolved: [
+					"priorPatch:/tmp/wf/patches/att_old.patch",
+					"wire receipts",
+				],
+			},
+			openBlockingFindings: [],
+			verification: { passed: true, checks: [{ id: "noop", status: "passed" }] },
+			scopeStatus: "adhered",
+		});
+		expect(result.passed).toBe(false);
+		expect(result.failedGuards).toContain("unresolved_items_must_close");
+
+		const onlyPrior = evaluateWorkflowFinalCompletion({
+			implementation: { unresolved: ["priorPatch:/tmp/wf/patches/att_old.patch"] },
+			openBlockingFindings: [],
+			verification: { passed: true, checks: [{ id: "noop", status: "passed" }] },
+			scopeStatus: "adhered",
+		});
+		expect(onlyPrior.passed).toBe(true);
+	});

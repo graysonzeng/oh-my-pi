@@ -100,8 +100,13 @@ export class RepairStage {
 				patchPath,
 				branchName,
 				addressedStepIds: addressed,
-				// Preserve unrepaired finding ids for audit.
-				unresolved: input.findingIds.filter(id => !addressed.includes(id)),
+				// Union model-reported unresolved work with unrepaired finding ids.
+				unresolved: [
+					...new Set([
+						...(modelArtifact.unresolved ?? []),
+						...input.findingIds.filter(id => !addressed.includes(id)),
+					]),
+				],
 				commandsRun: modelArtifact.commandsRun ?? [],
 				changedFiles: modelArtifact.changedFiles ?? [],
 				summary: modelArtifact.summary ?? "repair",

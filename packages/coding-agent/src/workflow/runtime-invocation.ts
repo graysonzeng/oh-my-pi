@@ -422,7 +422,23 @@ export function prepareWorkflowInvocation(
 	session = wrapSessionForWorkflowIsolation(session, isolationRequested);
 
 	const policyFactory = new ToolPolicyFactory();
-	const policy = policyFactory.getPolicyForRole(request.role);
+	const rolePolicy = policyFactory.getPolicyForRole(request.role);
+	// Honor profile.toolPolicyId when it names a known policy id; otherwise keep role default.
+	const namedPolicyId = request.profile.toolPolicyId?.trim();
+	let policy = rolePolicy;
+	if (namedPolicyId && namedPolicyId !== rolePolicy.policyId) {
+		if (
+			namedPolicyId === "readonly-planning" ||
+			namedPolicyId === "readonly-review" ||
+			namedPolicyId === "readonly-default"
+		) {
+			policy = { ...policyFactory.getPolicyForRole("planner"), policyId: namedPolicyId };
+		} else if (namedPolicyId === "scoped-repair") {
+			policy = policyFactory.getPolicyForRole("repair");
+		} else if (namedPolicyId === "scoped-implementation") {
+			policy = policyFactory.getPolicyForRole("implementer");
+		}
+	}
 	if (!policy.readonly) {
 		session = {
 			...session,
@@ -432,10 +448,20 @@ export function prepareWorkflowInvocation(
 			},
 			workflowCommandPolicy: { allowedCommands: [...policy.allowedCommands] },
 		};
+	} else if (namedPolicyId && namedPolicyId !== rolePolicy.policyId) {
+		// Named readonly policy on a write role must still force readonly wrap.
+		session = wrapSessionForWorkflowRole(session, "planner");
 	}
-	const allowedTools = policyFactory.allowedToolsForRole(request.role);
+	const allowedTools: readonly string[] | undefined = policy.readonly
+		? policyFactory.allowedToolsForRole("planner")
+		: policy.allowedTools.length === 1 && policy.allowedTools[0] === "*"
+			? undefined
+			: policy.allowedTools;
 	const disabled = new Set(request.profile.disabledTools ?? []);
-	let effectiveTools = allowedTools && disabled.size > 0 ? allowedTools.filter(t => !disabled.has(t)) : allowedTools;
+	let effectiveTools =
+		allowedTools && disabled.size > 0
+			? allowedTools.filter((t: string) => !disabled.has(t))
+			: allowedTools;
 
 	// Capability compile (shadow by default). Role allowlist already computed;
 	// compiler never expands it. Existing profile/presentation/schema stay authoritative.

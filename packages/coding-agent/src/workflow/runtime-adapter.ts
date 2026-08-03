@@ -2,6 +2,7 @@ import type { SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../tools";
 import { withContextProviderUsage } from "./context-ledger";
 import {
+	BudgetExhaustedError,
 	WorkflowCancelledError,
 	WorkflowError,
 	WorkflowPolicyError,
@@ -161,12 +162,28 @@ export class RuntimeAdapter implements RuntimePort {
 		let accumulated = emptySchemaRepairReceipt(maxRetries);
 		let usedCostUsd = 0;
 		const startedAt = Date.now();
+		let accumulatedUsage: Usage | undefined;
 
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			try {
-				const result = await this.#runOnce<TArtifact>(working, {
+				// Carry remaining wall-clock budget into each schema retry invocation.
+				const elapsedMs = Date.now() - startedAt;
+				const profileMax = request.profile.maxRuntimeMs;
+				const remainingRuntime =
+					typeof profileMax === "number" && profileMax > 0
+						? Math.max(1, profileMax - elapsedMs)
+						: undefined;
+				const attemptRequest =
+					remainingRuntime !== undefined
+						? {
+								...working,
+								profile: { ...working.profile, maxRuntimeMs: remainingRuntime },
+							}
+						: working;
+				const result = await this.#runOnce<TArtifact>(attemptRequest, {
 					schemaRetryMaxRetries: maxRetries,
 				});
+				accumulatedUsage = mergeUsage(accumulatedUsage, result.usage as Usage | undefined);
 				// Layer1 deterministic success on this invocation.
 				if (result.schemaRepairReceipt) {
 					const r = result.schemaRepairReceipt as SchemaRepairReceiptV1;
@@ -194,6 +211,7 @@ export class RuntimeAdapter implements RuntimePort {
 						});
 						return {
 							...result,
+							usage: accumulatedUsage ?? result.usage,
 							schemaRepairReceipt: finalizeSchemaRepairReceipt(merged, {
 								maxRetries,
 								modelCalls: attempt + 1,
@@ -211,6 +229,7 @@ export class RuntimeAdapter implements RuntimePort {
 				if (attempt > 0) {
 					return {
 						...result,
+						usage: accumulatedUsage ?? result.usage,
 						schemaRepairReceipt: finalizeSchemaRepairReceipt(accumulated, {
 							maxRetries,
 							modelCalls: attempt + 1,
@@ -221,7 +240,7 @@ export class RuntimeAdapter implements RuntimePort {
 						}),
 					};
 				}
-				return result;
+				return { ...result, usage: accumulatedUsage ?? result.usage };
 			} catch (error) {
 				const normalized = this.#normalizeError(error);
 				if (!(normalized instanceof WorkflowSchemaError)) {
@@ -242,6 +261,7 @@ export class RuntimeAdapter implements RuntimePort {
 							? details.rawOutput
 							: normalized.message,
 				});
+				accumulatedUsage = mergeUsage(accumulatedUsage, details?.usage);
 				const usageCost = details?.usage?.cost?.total;
 				if (typeof usageCost === "number") usedCostUsd += usageCost;
 
@@ -402,6 +422,10 @@ export class RuntimeAdapter implements RuntimePort {
 
 			if (body.aborted) {
 				const abortText = `${body.abortReason ?? ""}\n${body.error ?? ""}`;
+				// Soft request budget is a budget stop, not caller cancellation.
+				if (/soft request budget exceeded/i.test(abortText)) {
+					throw new BudgetExhaustedError(1, "unknown", 0);
+				}
 				// Wall-clock profile maxRuntimeMs abort is a retryable timeout — not a user cancel.
 				if (/runtime limit exceeded|maxRuntimeMs|timed? ?out/i.test(abortText)) {
 					throw new WorkflowTimeoutError(
@@ -414,7 +438,9 @@ export class RuntimeAdapter implements RuntimePort {
 					abortReason: body.abortReason,
 				});
 			}
-			if (body.error) {
+			// Structured-invalid results must take the schema repair path even when executor
+			// also sets `error` (schema_violation headline). Do not throw generic WorkflowError first.
+			if (body.error && !(body.structuredOutput && body.structuredOutput.status !== "valid")) {
 				throw new WorkflowError(body.error, this.#classifyErrorKind(body.error), { exitCode: body.exitCode });
 			}
 			const identityReceipt = buildRuntimeIdentityReceipt(request.profile, identityCollector, body.resolvedModel);
@@ -609,6 +635,30 @@ export class RuntimeAdapter implements RuntimePort {
 	}
 }
 
+
+function mergeUsage(a: Usage | undefined, b: Usage | undefined): Usage | undefined {
+	if (!a) return b;
+	if (!b) return a;
+	const cost = {
+		input: (a.cost?.input ?? 0) + (b.cost?.input ?? 0),
+		output: (a.cost?.output ?? 0) + (b.cost?.output ?? 0),
+		cacheRead: (a.cost?.cacheRead ?? 0) + (b.cost?.cacheRead ?? 0),
+		cacheWrite: (a.cost?.cacheWrite ?? 0) + (b.cost?.cacheWrite ?? 0),
+		total: (a.cost?.total ?? 0) + (b.cost?.total ?? 0),
+	};
+	return {
+		input: (a.input ?? 0) + (b.input ?? 0),
+		output: (a.output ?? 0) + (b.output ?? 0),
+		cacheRead: (a.cacheRead ?? 0) + (b.cacheRead ?? 0),
+		cacheWrite: (a.cacheWrite ?? 0) + (b.cacheWrite ?? 0),
+		totalTokens: (a.totalTokens ?? 0) + (b.totalTokens ?? 0),
+		reasoningTokens:
+			a.reasoningTokens === undefined && b.reasoningTokens === undefined
+				? undefined
+				: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
+		cost,
+	};
+}
 function extractInvalidRaw(body: StructuredRunnerResult["result"]): string | undefined {
 	if (typeof body.rawOutput === "string" && body.rawOutput.length > 0) return body.rawOutput;
 	const data = body.structuredOutput?.data;

@@ -174,6 +174,7 @@ export class WorkflowStore {
 			version: row.version,
 			requestJson: row.request_json,
 			policyJson: row.policy_json,
+			runnerOwner: row.runner_owner ?? undefined,
 		};
 	}
 

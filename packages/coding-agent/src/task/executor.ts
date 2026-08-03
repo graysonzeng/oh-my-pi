@@ -569,12 +569,14 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	let abortedViaYield = false;
 	const hasYield = Array.isArray(yieldItems) && yieldItems.length > 0;
 	const hadFailureBeforeYield = exitCode !== 0 && stderr.trim().length > 0;
+	// Caller cancel while parked behind pending async work must not be normalized to success.
+	const cancelWhileParked = Boolean(signalAborted) && hasYield;
 
 	if (hasYield) {
 		const lastYield = yieldItems[yieldItems.length - 1];
 		if (lastYield?.status === "aborted") {
 			abortedViaYield = true;
-			exitCode = 0;
+			exitCode = cancelWhileParked ? 1 : 0;
 			stderr = lastYield.error || "Subagent aborted task";
 			try {
 				rawOutput = JSON.stringify({ aborted: true, error: lastYield.error }, null, 2);
@@ -688,6 +690,10 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		}
 	}
 
+	if (cancelWhileParked) {
+		exitCode = exitCode === 0 ? 1 : exitCode;
+		if (!stderr) stderr = "Subagent cancelled while parked on pending async work";
+	}
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
 }
 
@@ -2138,7 +2144,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		exitCode = 1;
 	}
 	const wasAborted =
-		runtimeLimitExceeded || abortedViaYield || (!hasYield && (done.aborted || signal?.aborted || false));
+		runtimeLimitExceeded ||
+		abortedViaYield ||
+		// Parked yield + caller abort is still an abort (pending jobs cancelled).
+		(hasYield && (signal?.aborted || done.aborted)) ||
+		(!hasYield && (done.aborted || signal?.aborted || false));
 	const finalAbortReason = wasAborted
 		? runtimeLimitExceeded
 			? monitor.resolveAbortReasonText()

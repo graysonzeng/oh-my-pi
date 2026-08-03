@@ -258,7 +258,7 @@ export class WorkflowEngine {
 	#router: ModelRouter;
 	readonly #configuredRouter: ModelRouter;
 	readonly #budgetLedger: BudgetLedger;
-	readonly #findingTracker: FindingTracker;
+	#findingTracker: FindingTracker;
 	readonly #adapter: RuntimePort;
 	readonly #availability: WorkflowAvailabilityPort | undefined;
 	readonly #verifier: VerifierPort;
@@ -591,6 +591,22 @@ export class WorkflowEngine {
 			if (TERMINAL.has(settled.status)) {
 				throw new WorkflowPolicyError("cannot_cancel_terminal", { status: settled.status });
 			}
+			return this.#persistCancellation(workflowId, reason);
+		}
+		// Foreign / unregistered runner: request cancel without clearing ownership or forcing
+		// a terminal transition that would race a live merger in another process.
+		const state = await this.#requireState(workflowId);
+		if (TERMINAL.has(state.status)) {
+			if (state.status === "cancelled") return state;
+			throw new WorkflowPolicyError("cannot_cancel_terminal", { status: state.status });
+		}
+		if (state.runnerOwner && state.runnerOwner !== this.#runnerOwnerId) {
+			// Do not terminalize or clear ownership while a foreign process holds the lock.
+			throw new WorkflowPolicyError("cancel_pending_foreign_runner", {
+				workflowId,
+				runnerOwner: state.runnerOwner,
+				reason,
+			});
 		}
 		return this.#persistCancellation(workflowId, reason);
 	}
@@ -650,24 +666,51 @@ export class WorkflowEngine {
 		if (TERMINAL.has(snapshot.state.status)) {
 			throw new WorkflowPolicyError("cannot_resume_terminal", { status: snapshot.state.status });
 		}
-		this.#activateQualityRouteFromPolicy(snapshot.state.policyJson, this.#qualityRouteExpected(snapshot));
-		if (snapshot.budgetTotals) {
-			this.#budgetLedger.restore(snapshot.budgetTotals as Partial<BudgetSnapshot>);
-		}
 		if (options.forceUnlock) {
 			await this.#store.clearRunnerOwner(workflowId);
 		}
-		// Rebuild plan-cycle count from durable transitions (survives new Engine instances).
-		this.#planCycles = snapshot.transitions.filter(
-			t => t.fromStatus === "plan_review" && t.toStatus === "planning",
-		).length;
-		// Reload latest artifacts of each kind from metadata + content when present
-		await this.#hydrateArtifacts(snapshot);
-		// Merge caller abort signal for this run
-		if (options.signal) {
-			this.#signal = options.signal;
+		// Re-read after forceUnlock (clear bumps version) so claim uses the current optimistic version.
+		const claimSnapshot = (await this.#store.resumeFromPersistedState(workflowId)) ?? snapshot;
+		if (TERMINAL.has(claimSnapshot.state.status)) {
+			throw new WorkflowPolicyError("cannot_resume_terminal", { status: claimSnapshot.state.status });
 		}
-		return this.#runLoop(workflowId, options.session ?? this.#session, options.singleStep === true);
+		// Claim exclusive ownership BEFORE authoritative hydration so we cannot race another
+		// runner that advanced the stage after our first snapshot read.
+		await this.#store.claimRunner(workflowId, this.#runnerOwnerId, claimSnapshot.state.version);
+		try {
+			const fresh = await this.#store.resumeFromPersistedState(workflowId);
+			if (!fresh) throw new WorkflowPolicyError("workflow_not_found", { workflowId });
+			if (TERMINAL.has(fresh.state.status)) {
+				throw new WorkflowPolicyError("cannot_resume_terminal", { status: fresh.state.status });
+			}
+			this.#activateQualityRouteFromPolicy(fresh.state.policyJson, this.#qualityRouteExpected(fresh));
+			if (fresh.budgetTotals) {
+				this.#budgetLedger.restore(fresh.budgetTotals as Partial<BudgetSnapshot>);
+			}
+			// Rebuild plan-cycle count from durable transitions (survives new Engine instances).
+			this.#planCycles = fresh.transitions.filter(
+				t => t.fromStatus === "plan_review" && t.toStatus === "planning",
+			).length;
+			// Reset mutable stage caches then hydrate from the post-claim snapshot.
+			this.#plan = undefined;
+			this.#planReview = undefined;
+			this.#implementation = undefined;
+			this.#verification = undefined;
+			this.#finalVerification = undefined;
+			this.#codeReview = undefined;
+			this.#findingTracker = new FindingTracker();
+			await this.#hydrateArtifacts(fresh);
+			if (options.signal) {
+				this.#signal = options.signal;
+			}
+			// runLoop must not re-claim; pass alreadyClaimed via singleStep loop path.
+			return await this.#runLoop(workflowId, options.session ?? this.#session, options.singleStep === true, {
+				alreadyClaimed: true,
+			});
+		} catch (error) {
+			await this.#store.releaseRunner(workflowId, this.#runnerOwnerId);
+			throw error;
+		}
 	}
 
 	/** Run from created through completion (or block/fail/cancel). */
@@ -679,6 +722,7 @@ export class WorkflowEngine {
 		workflowId: string,
 		session: ToolSession | undefined,
 		singleStep: boolean,
+		options: { alreadyClaimed?: boolean } = {},
 	): Promise<WorkflowRunResult> {
 		this.#activateQualityRouteFromPolicy((await this.#requireState(workflowId)).policyJson);
 		this.#syncSessionFallbackProfile(session);
@@ -708,10 +752,15 @@ export class WorkflowEngine {
 				if (TERMINAL.has(state.status)) break;
 
 				// Exclusive runner lock — second concurrent runner fails until release.
+				// When resume() already claimed, skip re-claim on the first loop iteration.
 				let claimed = false;
 				try {
-					await this.#store.claimRunner(workflowId, this.#runnerOwnerId, state.version);
-					claimed = true;
+					if (options.alreadyClaimed && steps === 1) {
+						claimed = true;
+					} else {
+						await this.#store.claimRunner(workflowId, this.#runnerOwnerId, state.version);
+						claimed = true;
+					}
 				} catch (error) {
 					if (error instanceof WorkflowPolicyError) throw error;
 					throw error;
@@ -1409,7 +1458,8 @@ export class WorkflowEngine {
 								this.#contextBuilder.buildRepairContext({
 									plan: this.#plan!,
 									findings: open,
-									verification: this.#verification,
+									// Prefer the latest final_verify failure when repairing after completion-gate/scope regressions.
+									verification: this.#finalVerification ?? this.#verification,
 									implementation: this.#implementation,
 									reviewExplanation: this.#codeReview?.explanation ?? this.#planReview?.explanation,
 									inclusion: resolveArtifactInclusion(profile),
@@ -1463,7 +1513,7 @@ export class WorkflowEngine {
 					modelFamily,
 					signal,
 				});
-				await this.#completeRepairStage(workflowId, attemptId, fresh, candidateImplementation, open);
+				await this.#completeRepairStage(workflowId, attemptId, fresh, candidateImplementation, open, { modelFamily });
 				return;
 			}
 			case "final_verify": {
@@ -1506,8 +1556,16 @@ export class WorkflowEngine {
 		fresh: WorkflowState,
 		implementation: ImplementationArtifactV1,
 		open: readonly ReviewFindingV1[],
+		evidence?: { modelFamily?: string | null },
 	): Promise<void> {
 		this.#implementation = implementation;
+		// Latest write author must drive independent-review exclusion after repair.
+		if (implementation.provider) this.#implementerVendor = implementation.provider;
+		if (evidence?.modelFamily) this.#implementerModelFamily = evidence.modelFamily;
+		else if (implementation.modelProfileId) {
+			const profile = this.#router.list().find(p => p.id === implementation.modelProfileId);
+			if (profile?.vendor) this.#implementerVendor = profile.vendor;
+		}
 		const resolvedIds = new Set(implementation.addressedStepIds);
 		for (const id of open.map(finding => finding.id)) {
 			if (resolvedIds.has(id)) this.#findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
@@ -2383,10 +2441,14 @@ export class WorkflowEngine {
 					}`;
 					continue;
 				}
-				if (this.#qualityRouteSnapshot && kindOk) {
+				// Credential/identity exhaustion → blocked; other last-candidate errors surface as-is
+				// (quality routes always block; legacy routes only block auth/quota/identity).
+				const credentialKind =
+					kind === "authentication" || kind === "quota" || kind === "identity_mismatch";
+				if (kindOk && (this.#qualityRouteSnapshot || credentialKind)) {
 					throw new WorkflowPolicyError("quality_route_candidates_exhausted", {
 						role,
-						qualityTier: this.#qualityRouteSnapshot.qualityTier,
+						qualityTier: this.#qualityRouteSnapshot?.qualityTier,
 						lastProfileId: route.profileId,
 						lastErrorKind: kind || "runtime_error",
 					});
@@ -2641,6 +2703,7 @@ export class WorkflowEngine {
 	}
 
 	async #hydrateArtifacts(snapshot: PersistedWorkflowSnapshot): Promise<void> {
+		let latestFindingsState: { findings?: Array<ReviewFindingV1 & { repairCycles?: number; blocking?: boolean; status?: string; id?: string }> } | undefined;
 		// Sort so findings-state applies after review findings are loaded
 		const artifacts = [...snapshot.artifacts].sort((a, b) => {
 			if (a.kind === "findings-state") return 1;
@@ -2705,16 +2768,9 @@ export class WorkflowEngine {
 						this.#findingTracker.add(f, { blocking });
 					}
 				} else if (parsed.kind === "findings-state") {
-					for (const f of parsed.findings ?? []) {
-						this.#findingTracker.add(f, { blocking: f.blocking });
-						if (f.status === "resolved" || f.status === "rejected") {
-							this.#findingTracker.resolve(f.id, f.status);
-						}
-						const cycles = (f as { repairCycles?: number }).repairCycles ?? 0;
-						for (let i = 0; i < cycles; i++) {
-							this.#findingTracker.recordRepairCycle(FindingTracker.fingerprint(f));
-						}
-					}
+					// Defer until after the scan: each findings-state is a full cumulative snapshot.
+					// Replaying every historical snapshot would double-count repairCycles.
+					latestFindingsState = parsed;
 				} else if (meta.kind === "scope-metrics") {
 					this.#lastScopeMetrics = parsed as unknown as ScopeMetricsV1;
 				} else if (parsed.kind === "work-package-state") {
@@ -2754,7 +2810,22 @@ export class WorkflowEngine {
 				// Other corrupt artifact bodies remain non-authoritative and are ignored.
 			}
 		}
+		if (latestFindingsState) {
+			// Reset then assign from the newest cumulative snapshot only.
+			this.#findingTracker = new FindingTracker();
+			for (const f of latestFindingsState.findings ?? []) {
+				this.#findingTracker.add(f as ReviewFindingV1, { blocking: Boolean((f as { blocking?: boolean }).blocking) });
+				const status = (f as { status?: string }).status;
+				if (status === "resolved" || status === "rejected") {
+					this.#findingTracker.resolve((f as { id: string }).id, status);
+				}
+				const cycles = (f as { repairCycles?: number }).repairCycles ?? 0;
+				const fp = FindingTracker.fingerprint(f as ReviewFindingV1);
+				for (let i = 0; i < cycles; i++) this.#findingTracker.recordRepairCycle(fp);
+			}
+		}
 	}
+
 	#audit(route: RoutingDecision): void {
 		this.#lastRouteProfileId = route.profileId;
 		this.#routingAudit.push({ ...route, at: new Date().toISOString() });

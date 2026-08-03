@@ -8424,7 +8424,12 @@ export class AgentSession {
 	}
 
 	async #continueAgent(): Promise<void> {
-		await this.ensureModelOptimization();
+		// Fast path: when no model-optimization reconcile is configured, avoid an extra
+		// await tick so post-prompt continue scheduling stays same-turn with callers that
+		// only flush one microtask (e.g. todo-reminder lifecycle tests).
+		if (this.#reconcileModelOptimization) {
+			await this.ensureModelOptimization();
+		}
 		await this.agent.continue();
 	}
 

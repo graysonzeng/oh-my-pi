@@ -20,10 +20,18 @@ export function assertWorkflowPathAllowed(targetPath: string, policy: WorkflowWr
 	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
 		throw new WorkflowPolicyError("workflow_path_outside_repo", { path: targetPath });
 	}
+	// Case-insensitive volumes (macOS default) can resolve Package.json → package.json.
 	const normalized = relative.split(path.sep).join("/");
+	const normalizedLower = normalized.toLowerCase();
 	const forbidden = policy.forbiddenPaths.some(entry => {
 		const candidate = path.normalize(entry).split(path.sep).join("/").replace(/\/+$/, "");
-		return normalized === candidate || normalized.startsWith(`${candidate}/`);
+		const candidateLower = candidate.toLowerCase();
+		return (
+			normalized === candidate ||
+			normalized.startsWith(`${candidate}/`) ||
+			normalizedLower === candidateLower ||
+			normalizedLower.startsWith(`${candidateLower}/`)
+		);
 	});
 	if (forbidden) {
 		throw new WorkflowPolicyError("workflow_path_forbidden", { path: normalized });
@@ -31,16 +39,30 @@ export function assertWorkflowPathAllowed(targetPath: string, policy: WorkflowWr
 }
 
 /** Shell metacharacters that turn a prefix-allowed command into a chain/expansion. */
-const WORKFLOW_COMMAND_SHELL_META = /[;|&`$()<>\n]/;
+const WORKFLOW_COMMAND_SHELL_META = /[;|&`$()<>]/;
+/** Control characters (including newline) must be rejected on the raw command before whitespace collapse. */
+const WORKFLOW_COMMAND_CONTROL = /[\u0000-\u001f\u007f]/;
+/** Flags that turn an allowlisted validation prefix into a mutating command. */
+const WORKFLOW_COMMAND_MUTATING_FLAGS = /(?:^|\s)(--write|--fix|--apply|-w)(?:\s|=|$)/i;
 
 export function assertWorkflowCommandAllowed(command: string, policy: WorkflowCommandPolicy): void {
+	// Fail closed on control characters / newlines before any normalization: collapsing
+	// whitespace would turn `bun test\nrm -rf src` into a single allowed prefix form while
+	// the shell still executes the second line.
+	if (WORKFLOW_COMMAND_CONTROL.test(command)) {
+		throw new WorkflowPolicyError("workflow_command_forbidden", { command, reason: "control_characters" });
+	}
+	if (WORKFLOW_COMMAND_SHELL_META.test(command)) {
+		throw new WorkflowPolicyError("workflow_command_forbidden", { command, reason: "shell_metacharacters" });
+	}
 	const normalized = command.trim().replace(/\s+/g, " ");
+	if (WORKFLOW_COMMAND_MUTATING_FLAGS.test(normalized)) {
+		throw new WorkflowPolicyError("workflow_command_forbidden", { command: normalized, reason: "mutating_flag" });
+	}
 	const allowed = policy.allowedCommands.some(entry => {
 		const expected = entry.trim().replace(/\s+/g, " ");
 		if (normalized === expected) return true;
 		if (!normalized.startsWith(`${expected} `)) return false;
-		// Prefix form may only append path-like args — not shell chaining / expansion.
-		if (WORKFLOW_COMMAND_SHELL_META.test(normalized)) return false;
 		return true;
 	});
 	if (!allowed) {
@@ -120,7 +142,8 @@ export class ToolPolicyFactory {
 				readonly: false,
 				policyId: "scoped-implementation",
 				allowedTools: SCOPED_IMPLEMENTATION_TOOLS,
-				forbiddenPaths: ["package.json", "bun.lock", "Cargo.lock", "lockfiles", "scripts/"],
+				// .git must stay forbidden: isolated worktrees expose a writable .git file into the real repo.
+				forbiddenPaths: [".git", "package.json", "bun.lock", "Cargo.lock", "lockfiles", "scripts/"],
 				// Prefix allowlist: `bun test test/foo.test.ts` is permitted; shell chaining is rejected.
 				// No bare `find`: prefix match would allow `find . -delete` / `-exec` and bypass path policy.
 				// Prefer glob/read for discovery; cat/head for small file peeks.
@@ -132,7 +155,7 @@ export class ToolPolicyFactory {
 				readonly: false,
 				policyId: "scoped-repair",
 				allowedTools: SCOPED_REPAIR_TOOLS,
-				forbiddenPaths: ["package.json", "bun.lock", "Cargo.lock"],
+				forbiddenPaths: [".git", "package.json", "bun.lock", "Cargo.lock"],
 				allowedCommands: ["bun test", "bun check", "pwd", "ls", "cat", "head"],
 			};
 		}
