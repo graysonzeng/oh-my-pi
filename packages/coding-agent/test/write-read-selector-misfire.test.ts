@@ -150,5 +150,4 @@ describe("write refuses read-selector misfires", () => {
 		expect(await Bun.file(archivePath).bytes()).toEqual(before);
 		await fs.rm(dir, { recursive: true, force: true });
 	});
-
 });

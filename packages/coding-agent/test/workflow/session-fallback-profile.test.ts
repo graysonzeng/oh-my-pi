@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { SESSION_FALLBACK_PROFILE_ID, sessionFallbackImplementerProfile } from "../../src/workflow/session-fallback-profile";
+import {
+	SESSION_FALLBACK_PROFILE_ID,
+	sessionFallbackImplementerProfile,
+} from "../../src/workflow/session-fallback-profile";
 import { fakeSession } from "./helpers";
 
 function sessionWithModel(model: string) {

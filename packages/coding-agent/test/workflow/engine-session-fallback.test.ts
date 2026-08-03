@@ -6,12 +6,19 @@ import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { WorkflowError } from "../../src/workflow/errors";
+import type { StructuredRunner } from "../../src/workflow/runtime-adapter";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { SESSION_FALLBACK_PROFILE_ID } from "../../src/workflow/session-fallback-profile";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
-import type { StructuredRunner } from "../../src/workflow/runtime-adapter";
 import type { ImplementationArtifactV1, ModelProfile } from "../../src/workflow/types";
-import { fakeSession, implArtifact, materializeSamplePatch, passVerifier, planArtifact, reviewArtifact } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	materializeSamplePatch,
+	passVerifier,
+	planArtifact,
+	reviewArtifact,
+} from "./helpers";
 
 const SESSION_MODEL = "deepseek/deepseek-v4-flash:max";
 
@@ -24,7 +31,8 @@ function chainRunner(opts: { failCount: number; seen: string[] }): StructuredRun
 		}
 		if (agent === "reviewer" || agent === "plan_reviewer" || agent === "code_reviewer") {
 			const assignment = request.assignment ?? "";
-			const subject = /code review|implementation/i.test(assignment) && !/plan/i.test(assignment) ? "implementation" : "plan";
+			const subject =
+				/code review|implementation/i.test(assignment) && !/plan/i.test(assignment) ? "implementation" : "plan";
 			return {
 				result: {
 					id: "review",

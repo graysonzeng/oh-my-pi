@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { runAvailabilityPreflight } from "../../src/workflow/availability-preflight";
+import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { ModelRouter } from "../../src/workflow/model-router";
-import { SESSION_FALLBACK_PROFILE_ID, sessionFallbackImplementerProfile } from "../../src/workflow/session-fallback-profile";
+import {
+	SESSION_FALLBACK_PROFILE_ID,
+	sessionFallbackImplementerProfile,
+} from "../../src/workflow/session-fallback-profile";
 import { fakeSession } from "./helpers";
 
 const SESSION_MODEL = "deepseek/deepseek-v4-flash:max";

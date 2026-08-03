@@ -278,5 +278,4 @@ describe("Workflow tool policy (readonly planning)", () => {
 			).toThrow(/forbidden|workflow/i);
 		}
 	});
-
 });

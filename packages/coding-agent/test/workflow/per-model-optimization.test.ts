@@ -77,7 +77,7 @@ describe("target models + quality-first defaults", () => {
 		expect(efforts.map(level => String(level))).toEqual(["max", "high", "max"]);
 		for (const p of implementers) {
 			const patterns = Array.isArray(p.modelPattern) ? p.modelPattern : [p.modelPattern];
-			for (const pattern of patterns) expect(pattern).not.toMatch(/[*?\[\]{}]/);
+			for (const pattern of patterns) expect(pattern).not.toMatch(/[*?[\]{}]/);
 		}
 		const ids = implementers.map(p => p.id);
 		expect(ids).not.toContain("glm_implementer");
