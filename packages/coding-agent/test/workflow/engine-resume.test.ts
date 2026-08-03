@@ -188,7 +188,7 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 		const engine2 = mk(store);
 		await engine2.resume(workflowId, { singleStep: true }); // run plan_review
 		expect(seenReviewerModels.length).toBe(1);
-		// gpt_plan_reviewer modelPattern starts with gpt-5.*; anthropic claude_* would be same-vendor as planner.
+		// gpt_plan_reviewer modelPattern starts with gpt-5.6-sol; anthropic claude_* would be same-vendor as planner.
 		expect(seenReviewerModels[0]).toMatch(/^gpt-/);
 		expect(engine2.routingAudit.some(a => a.profileId === "gpt_plan_reviewer")).toBe(true);
 		expect(engine2.routingAudit.some(a => a.profileId === "claude_plan_reviewer")).toBe(false);

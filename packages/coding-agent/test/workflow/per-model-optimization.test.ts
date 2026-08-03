@@ -30,12 +30,12 @@ function requestFor(profile: ModelProfile, role: WorkflowAgentRequest["role"] = 
 	};
 }
 
-describe("eight target models + quality-first defaults", () => {
-	it("covers all eight required model patterns in default profiles", () => {
+describe("target models + quality-first defaults", () => {
+	it("covers all required model patterns in default profiles", () => {
 		const coverage = defaultProfilesCoverTargetModels();
 		expect(coverage.missing).toEqual([]);
 		expect(coverage.ok).toBe(true);
-		expect(TARGET_MODEL_PATTERNS).toHaveLength(8);
+		expect(TARGET_MODEL_PATTERNS).toHaveLength(7);
 	});
 
 	it("registers all default profiles including toolAliases without error", () => {
@@ -50,9 +50,9 @@ describe("eight target models + quality-first defaults", () => {
 		const router = new ModelRouter(Object.values(DEFAULT_MODEL_PROFILES));
 		const plan = router.resolve("planner");
 		expect(["anthropic", "openai", "zhipu"]).toContain(plan.vendor);
-		// Primary planner is Fable-oriented claude_planner
+		// Primary planner is Opus-oriented claude_planner
 		expect(plan.profileId).toBe("claude_planner");
-		expect(String(plan.profile.modelPattern)).toMatch(/fable|claude/);
+		expect(String(plan.profile.modelPattern)).toMatch(/claude-opus-5/);
 
 		const review = router.resolve("code_reviewer", { implementerVendor: "xai" });
 		expect(["anthropic", "openai"]).toContain(review.vendor);

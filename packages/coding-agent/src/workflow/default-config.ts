@@ -13,9 +13,8 @@ import type {
 
 /** Eight models required by the quality-first per-model optimization design. */
 export const TARGET_MODEL_PATTERNS = [
-	"claude-opus-4.8",
 	"claude-sonnet-5",
-	"claude-fable-5",
+	"claude-opus-5",
 	"gpt-5.6-sol",
 	"gpt-5.6-luna",
 	"grok-4.5",
@@ -140,10 +139,11 @@ const grokOutput: OutputStrategy = {
 /**
  * Quality-first default profiles.
  * Role matrix (design § quality-first):
- * - Planning / review: Fable 5, GPT-5.6-sol (primary), GLM as cost-aware fallback
+ * - Planning / review: Opus 5 (xhigh), GPT-5.6-sol (primary), GLM as cost-aware fallback
  * - Implement: DeepSeek-V4-Flash, Grok 4.5, GPT-5.6-Luna, then the session model (last resort)
- * - Simple repair: Grok; complex repair: Sol / Fable
- * - Opus/Sonnet/DeepSeek available but demoted for critical paths
+ * - Simple repair: Grok; complex repair: Sol / Opus
+ * - Sonnet/DeepSeek available but demoted for critical paths
+ * - Exact model ids only — no wildcard fallback, silent model downgrade is forbidden
  *
  * Existing profile ids (claude_planner, grok_implementer, …) are preserved for engine tests.
  */
@@ -152,10 +152,11 @@ const WORKFLOW_MODEL_PROFILES = {
 	claude_planner: {
 		id: "claude_planner",
 		vendor: "anthropic",
-		modelPattern: ["claude-fable-5", "claude-fable-*", "claude-opus-*", "claude-sonnet-*"],
+		modelPattern: ["claude-opus-5"],
 		roles: ["planner"],
 		promptTemplate: "planner",
 		promptVersion: "1.0",
+		thinkingLevel: ThinkingLevel.XHigh,
 		toolPolicyId: "readonly-planning",
 		promptStrategy: conciseClaudePrompt,
 		toolStrategy: toolStrategy({ maxBytes: 4000, maxConcurrent: 8 }),
@@ -179,7 +180,7 @@ const WORKFLOW_MODEL_PROFILES = {
 	gpt_planner: {
 		id: "gpt_planner",
 		vendor: "openai",
-		modelPattern: ["gpt-5.6-sol", "gpt-5.*", "o3*"],
+		modelPattern: ["gpt-5.6-sol"],
 		roles: ["planner"],
 		promptTemplate: "planner",
 		promptVersion: "1.0",
@@ -206,7 +207,7 @@ const WORKFLOW_MODEL_PROFILES = {
 	glm_planner: {
 		id: "glm_planner",
 		vendor: "zhipu",
-		modelPattern: ["glm-5.2", "glm-5*"],
+		modelPattern: ["glm-5.2"],
 		roles: ["planner"],
 		promptTemplate: "planner",
 		promptVersion: "1.0",
@@ -232,10 +233,11 @@ const WORKFLOW_MODEL_PROFILES = {
 	claude_plan_reviewer: {
 		id: "claude_plan_reviewer",
 		vendor: "anthropic",
-		modelPattern: ["claude-fable-5", "claude-fable-*", "claude-opus-*", "claude-sonnet-*"],
+		modelPattern: ["claude-opus-5"],
 		roles: ["plan_reviewer"],
 		promptTemplate: "plan-reviewer",
 		promptVersion: "1.0",
+		thinkingLevel: ThinkingLevel.XHigh,
 		toolPolicyId: "readonly-review",
 		promptStrategy: conciseClaudePrompt,
 		toolStrategy: toolStrategy({ maxBytes: 4000 }),
@@ -259,7 +261,7 @@ const WORKFLOW_MODEL_PROFILES = {
 	gpt_plan_reviewer: {
 		id: "gpt_plan_reviewer",
 		vendor: "openai",
-		modelPattern: ["gpt-5.6-sol", "gpt-5.*", "o3*"],
+		modelPattern: ["gpt-5.6-sol"],
 		roles: ["plan_reviewer"],
 		promptTemplate: "plan-reviewer",
 		promptVersion: "1.0",
@@ -389,10 +391,11 @@ const WORKFLOW_MODEL_PROFILES = {
 	claude_reviewer: {
 		id: "claude_reviewer",
 		vendor: "anthropic",
-		modelPattern: ["claude-fable-5", "claude-fable-*", "claude-opus-4.8", "claude-opus-*", "claude-sonnet-*"],
+		modelPattern: ["claude-opus-5"],
 		roles: ["code_reviewer"],
 		promptTemplate: "code-reviewer",
 		promptVersion: "1.0",
+		thinkingLevel: ThinkingLevel.XHigh,
 		toolPolicyId: "readonly-review",
 		promptStrategy: conciseClaudePrompt,
 		toolStrategy: toolStrategy({ maxBytes: 4000 }),
@@ -416,7 +419,7 @@ const WORKFLOW_MODEL_PROFILES = {
 	gpt_reviewer: {
 		id: "gpt_reviewer",
 		vendor: "openai",
-		modelPattern: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.*", "o3*"],
+		modelPattern: ["gpt-5.6-sol", "gpt-5.6-terra"],
 		roles: ["code_reviewer"],
 		promptTemplate: "code-reviewer",
 		promptVersion: "1.0",
@@ -443,7 +446,7 @@ const WORKFLOW_MODEL_PROFILES = {
 	grok_repair: {
 		id: "grok_repair",
 		vendor: "xai",
-		modelPattern: ["grok-4.5", "grok-code-*", "grok-4*"],
+		modelPattern: ["grok-4.5"],
 		roles: ["repair"],
 		promptTemplate: "repair",
 		promptVersion: "1.0",
@@ -475,10 +478,11 @@ const WORKFLOW_MODEL_PROFILES = {
 	claude_repair: {
 		id: "claude_repair",
 		vendor: "anthropic",
-		modelPattern: ["claude-fable-5", "claude-opus-4.8", "claude-opus-*", "claude-sonnet-5", "claude-sonnet-*"],
+		modelPattern: ["claude-opus-5"],
 		roles: ["repair"],
 		promptTemplate: "repair",
 		promptVersion: "1.0",
+		thinkingLevel: ThinkingLevel.XHigh,
 		toolPolicyId: "scoped-repair",
 		promptStrategy: conciseClaudePrompt,
 		toolStrategy: toolStrategy({ maxBytes: 4000 }),
@@ -507,7 +511,7 @@ const WORKFLOW_MODEL_PROFILES = {
 	gpt_repair: {
 		id: "gpt_repair",
 		vendor: "openai",
-		modelPattern: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.*", "o3*"],
+		modelPattern: ["gpt-5.6-sol", "gpt-5.6-terra"],
 		roles: ["repair"],
 		promptTemplate: "repair",
 		promptVersion: "1.0",
@@ -540,7 +544,7 @@ const WORKFLOW_MODEL_PROFILES = {
 	claude_sonnet_bulk: {
 		id: "claude_sonnet_bulk",
 		vendor: "anthropic",
-		modelPattern: ["claude-sonnet-5", "claude-sonnet-*"],
+		modelPattern: ["claude-sonnet-5"],
 		roles: ["repair"],
 		promptTemplate: "repair",
 		promptVersion: "1.0",
@@ -567,7 +571,7 @@ const WORKFLOW_MODEL_PROFILES = {
 	claude_opus_long_context: {
 		id: "claude_opus_long_context",
 		vendor: "anthropic",
-		modelPattern: ["claude-opus-4.8", "claude-opus-*"],
+		modelPattern: ["claude-opus-5"],
 		roles: ["planner", "code_reviewer"],
 		promptTemplate: "planner",
 		promptVersion: "1.0",
