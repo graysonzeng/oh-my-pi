@@ -34,6 +34,7 @@ import {
 	normalizeModelProfile,
 } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
+import { sessionFallbackImplementerProfile } from "./session-fallback-profile";
 import { sha256Hex } from "./optimization-receipt";
 import {
 	compileQualityRouteSnapshot,
@@ -680,6 +681,7 @@ export class WorkflowEngine {
 		singleStep: boolean,
 	): Promise<WorkflowRunResult> {
 		this.#activateQualityRouteFromPolicy((await this.#requireState(workflowId)).policyJson);
+		this.#syncSessionFallbackProfile(session);
 		this.#controller = new AbortController();
 		registerWorkflowAbort(workflowId, this.#controller, this.#controller);
 		const parentSignal = this.#signal;
@@ -2286,6 +2288,20 @@ export class WorkflowEngine {
 	}
 
 	/**
+	 * Register the calling session's active model as the last legacy implementer candidate.
+	 * Legacy routes only: quality-route snapshots keep their own profile set and stay
+	 * fail-closed. Idempotent per run/resume — re-registers (overwrites by id) with the
+	 * effective session's model each invocation, so resume re-finds the profile for
+	 * work-package identity checks and artifact hydrate.
+	 */
+	#syncSessionFallbackProfile(session: ToolSession | undefined): void {
+		if (this.#qualityRouteSnapshot) return;
+		const fallback = sessionFallbackImplementerProfile(session);
+		if (!fallback) return;
+		this.#configuredRouter.register(fallback);
+	}
+
+	/**
 	 * Resolve profile, run, and on retryable provider failure mark the profile unavailable
 	 * and retry once via ModelRouter fallback / alternate candidates.
 	 */
@@ -2320,7 +2336,12 @@ export class WorkflowEngine {
 			...effectiveRouteOptions,
 			unavailableProfileIds: unavailable,
 		});
-		const maxAttempts = preferredProfileIds?.length ?? Math.max(1, probe.profile.retryPolicy?.maxAttempts ?? 2);
+		// Retry budget = distinct routable candidates for the role (legacy), not the primary
+		// profile's maxAttempts: a preflight-excluded primary must not truncate the chain
+		// (e.g. DeepSeek down ⇒ Grok → Luna → session model still get their attempts).
+		const maxAttempts =
+			preferredProfileIds?.length ??
+			Math.max(1, this.#router.list().filter(p => p.roles.includes(role) && !unavailable.has(p.id)).length);
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			if (attempt > 0 && !(await this.#budgetLedger.checkPreRetry())) {
 				const snap = this.#budgetLedger.snapshot();

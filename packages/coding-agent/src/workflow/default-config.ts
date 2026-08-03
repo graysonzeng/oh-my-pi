@@ -1,3 +1,4 @@
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { DEFAULT_MODEL_OPTIMIZATION_PROFILES } from "../model-optimization/default-profiles";
 import { DEFAULT_TRUNCATION_RULES } from "./tool-output-manager";
 import type {
@@ -16,10 +17,10 @@ export const TARGET_MODEL_PATTERNS = [
 	"claude-sonnet-5",
 	"claude-fable-5",
 	"gpt-5.6-sol",
-	"gpt-5.6-terra",
+	"gpt-5.6-luna",
 	"grok-4.5",
 	"glm-5.2",
-	"deepseek-v4-pro",
+	"deepseek-v4-flash",
 ] as const;
 
 export type TargetModelPattern = (typeof TARGET_MODEL_PATTERNS)[number];
@@ -140,7 +141,7 @@ const grokOutput: OutputStrategy = {
  * Quality-first default profiles.
  * Role matrix (design § quality-first):
  * - Planning / review: Fable 5, GPT-5.6-sol (primary), GLM as cost-aware fallback
- * - Implement: GLM-5.2, Grok 4.5, Terra
+ * - Implement: DeepSeek-V4-Flash, Grok 4.5, GPT-5.6-Luna, then the session model (last resort)
  * - Simple repair: Grok; complex repair: Sol / Fable
  * - Opus/Sonnet/DeepSeek available but demoted for critical paths
  *
@@ -281,34 +282,31 @@ const WORKFLOW_MODEL_PROFILES = {
 		},
 		contextPolicy: { ...baseContext, includeFullTranscript: false },
 	},
-	// Implementation: GLM first (quality/cost), then Grok, then Terra
-	glm_implementer: {
-		id: "glm_implementer",
-		vendor: "zhipu",
-		modelPattern: ["glm-5.2", "glm-5*"],
+	// Implementation: DeepSeek-V4-Flash first (quality/cost), then Grok-4.5, then GPT-5.6-Luna
+	deepseek_implementer: {
+		id: "deepseek_implementer",
+		vendor: "deepseek",
+		modelPattern: ["deepseek-v4-flash"],
 		roles: ["implementer"],
 		promptTemplate: "implementer",
 		promptVersion: "1.0",
 		toolPolicyId: "scoped-implementation",
-		promptStrategy: explicitGrokPrompt,
-		toolStrategy: toolStrategy({
-			maxBytes: 3500,
-			maxConcurrent: 8,
-			aliases: { bash: "run_command" },
-		}),
+		// No family prompt overlay for DeepSeek — see model-optimization/default-profiles
+		// (deepseek: "no Grok prompt inheritance"); keep prompt/output strategies off the grok style.
+		toolStrategy: toolStrategy({ maxBytes: 3500, maxConcurrent: 8, aliases: { bash: "run_command" } }),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: true,
 			maxFiles: 12,
 			keepRecentN: 10,
 		}),
-		outputStrategy: grokOutput,
+		thinkingLevel: ThinkingLevel.Max,
 		maxRequests: 200,
 		maxRuntimeMs: 600_000,
 		retryPolicy: {
 			maxAttempts: 2,
 			retryableErrorKinds: ["provider_transient", "timeout"],
-			fallbackProfileIds: ["grok_implementer", "gpt_terra_implementer"],
+			fallbackProfileIds: ["grok_implementer", "gpt_luna_implementer"],
 		},
 		contextPolicy: {
 			includePlan: true,
@@ -321,10 +319,11 @@ const WORKFLOW_MODEL_PROFILES = {
 	grok_implementer: {
 		id: "grok_implementer",
 		vendor: "xai",
-		modelPattern: ["grok-4.5", "grok-code-*", "grok-4*"],
+		modelPattern: ["grok-4.5"],
 		roles: ["implementer"],
 		promptTemplate: "implementer",
 		promptVersion: "1.0",
+		thinkingLevel: ThinkingLevel.High,
 		toolPolicyId: "scoped-implementation",
 		promptStrategy: explicitGrokPrompt,
 		toolStrategy: toolStrategy({
@@ -345,7 +344,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		argumentAliases: { read: { path: "file_path" } },
 		maxRequests: 200,
 		maxRuntimeMs: 600_000,
-		retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: ["glm_implementer"] },
+		retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: ["gpt_luna_implementer"] },
 		contextPolicy: {
 			includePlan: true,
 			includeReviewFindings: false,
@@ -354,11 +353,12 @@ const WORKFLOW_MODEL_PROFILES = {
 			maxArtifactBytes: 1024 * 1024,
 		},
 	},
-	gpt_terra_implementer: {
-		id: "gpt_terra_implementer",
+	gpt_luna_implementer: {
+		id: "gpt_luna_implementer",
 		vendor: "openai",
-		modelPattern: ["gpt-5.6-terra", "gpt-5.*"],
+		modelPattern: ["gpt-5.6-luna"],
 		roles: ["implementer"],
+		thinkingLevel: ThinkingLevel.Max,
 		promptTemplate: "implementer",
 		promptVersion: "1.0",
 		toolPolicyId: "scoped-implementation",
@@ -376,7 +376,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		retryPolicy: {
 			maxAttempts: 2,
 			retryableErrorKinds: ["provider_transient"],
-			fallbackProfileIds: ["grok_implementer"],
+			fallbackProfileIds: [],
 		},
 		contextPolicy: {
 			includePlan: true,
@@ -590,39 +590,6 @@ const WORKFLOW_MODEL_PROFILES = {
 			fallbackProfileIds: ["claude_planner"],
 		},
 		contextPolicy: { ...baseContext, maxArtifactBytes: 60_000 },
-	},
-	deepseek_bulk: {
-		id: "deepseek_bulk",
-		vendor: "deepseek",
-		modelPattern: ["deepseek-v4-pro", "deepseek-v4*", "deepseek-*"],
-		roles: ["implementer"],
-		promptTemplate: "implementer",
-		promptVersion: "1.0",
-		toolPolicyId: "scoped-implementation",
-		promptStrategy: explicitGrokPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 1500, maxLines: 30, maxConcurrent: 3 }),
-		contextStrategy: contextStrategy({
-			targetUtilization: 0.8,
-			repoMap: true,
-			maxFiles: 5,
-			keepRecentN: 5,
-			maxArtifactBytes: 10_000,
-		}),
-		outputStrategy: grokOutput,
-		maxRequests: 100,
-		maxRuntimeMs: 180_000,
-		retryPolicy: {
-			maxAttempts: 1,
-			retryableErrorKinds: ["provider_transient"],
-			fallbackProfileIds: ["grok_implementer"],
-		},
-		contextPolicy: {
-			includePlan: true,
-			includeReviewFindings: false,
-			includeVerification: false,
-			includeFullTranscript: false,
-			maxArtifactBytes: 20_000,
-		},
 	},
 } satisfies Record<string, ModelProfile>;
 

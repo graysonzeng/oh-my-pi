@@ -58,9 +58,31 @@ describe("eight target models + quality-first defaults", () => {
 		expect(["anthropic", "openai"]).toContain(review.vendor);
 
 		const implement = router.resolve("implementer");
-		// GLM first for implement in quality/cost balance
-		expect(["zhipu", "xai", "openai", "deepseek"]).toContain(implement.vendor);
-		expect(implement.profileId).toBe("glm_implementer");
+		// DeepSeek-V4-Flash first for implement (quality/cost), then Grok, then Luna
+		expect(["deepseek", "xai", "openai"]).toContain(implement.vendor);
+		expect(implement.profileId).toBe("deepseek_implementer");
+	});
+
+	it("default implementer chain: exact patterns, efforts, no wildcards, no GLM/Terra", () => {
+		const implementers = Object.values(DEFAULT_MODEL_PROFILES).filter(p => p.roles.includes("implementer"));
+		// Registration order = router preference; main_agent_fallback is a runtime-registered last resort.
+		expect(implementers.map(p => p.id)).toEqual(["deepseek_implementer", "grok_implementer", "gpt_luna_implementer"]);
+		const [deepseek, grok, luna] = implementers.map(p => p.modelPattern);
+		expect(deepseek).toEqual(["deepseek-v4-flash"]);
+		expect(grok).toEqual(["grok-4.5"]);
+		expect(luna).toEqual(["gpt-5.6-luna"]);
+		const efforts = Object.values(DEFAULT_MODEL_PROFILES)
+			.filter(p => p.roles.includes("implementer"))
+			.map(p => p.thinkingLevel);
+		expect(efforts.map(level => String(level))).toEqual(["max", "high", "max"]);
+		for (const p of implementers) {
+			const patterns = Array.isArray(p.modelPattern) ? p.modelPattern : [p.modelPattern];
+			for (const pattern of patterns) expect(pattern).not.toMatch(/[*?\[\]{}]/);
+		}
+		const ids = implementers.map(p => p.id);
+		expect(ids).not.toContain("glm_implementer");
+		expect(ids).not.toContain("gpt_terra_implementer");
+		expect(ids).not.toContain("deepseek_bulk");
 	});
 });
 

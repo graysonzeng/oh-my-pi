@@ -1,6 +1,7 @@
 import { WorkflowPolicyError } from "./errors";
 import type { FindingTracker } from "./finding-tracker";
 import { configuredIdentityForProfile } from "./model-profile-registry";
+import { SESSION_FALLBACK_PROFILE_ID } from "./session-fallback-profile";
 import type {
 	ModelIdentityProvenance,
 	ModelProfile,
@@ -189,7 +190,8 @@ export class ModelRouter {
 				profileId: primary.id,
 				vendor: primary.vendor,
 				reason: `fallback_from:${preferredPrimary.id}`,
-				degraded: false,
+				// Session-model last resort is a degraded route, not a quality tier.
+				degraded: primary.id === SESSION_FALLBACK_PROFILE_ID,
 			};
 		}
 

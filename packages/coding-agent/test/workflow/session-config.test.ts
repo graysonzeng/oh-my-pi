@@ -5,8 +5,13 @@ import * as path from "node:path";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
+import { WorkflowPolicyError } from "../../src/workflow/errors";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
-import { buildWorkflowConfigFromSessionSettings } from "../../src/workflow/session-config";
+import {
+	buildWorkflowConfigFromSessionSettings,
+	resolveWorkflowProfilesFromSettings,
+	resolveWorkflowQualityRoutesFromSettings,
+} from "../../src/workflow/session-config";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import { fakeSession, planArtifact } from "./helpers";
 
@@ -72,5 +77,47 @@ describe("buildWorkflowConfigFromSessionSettings profiles", () => {
 		await engine.resume(id, { singleStep: true });
 		expect(seenModels).toContain("settings-planner-model");
 		expect(engine.routingAudit.some(a => a.profileId === "settings_planner")).toBe(true);
+	});
+
+	it("partial override of a removed default id keeps the user entry without a base", () => {
+		// glm_implementer was removed from defaults; a leftover settings override must not
+		// silently inherit the old default — the user entry survives but is incomplete
+		// (migration requires a full custom profile).
+		const merged = resolveWorkflowProfilesFromSettings(
+			{ glm_implementer: { modelPattern: ["glm-5.2"] } },
+			DEFAULT_MODEL_PROFILES,
+		);
+		expect(merged.glm_implementer).toBeDefined();
+		expect(merged.glm_implementer?.modelPattern).toEqual(["glm-5.2"]);
+		expect(merged.glm_implementer?.maxRequests).toBeUndefined();
+		expect(DEFAULT_MODEL_PROFILES.glm_implementer).toBeUndefined();
+	});
+
+	it("quality routes referencing a removed profile id fail closed", () => {
+		const strict = (id: string, role: "planner" | "plan_reviewer" | "code_reviewer" | "repair") => ({
+			...DEFAULT_MODEL_PROFILES.deepseek_implementer,
+			id,
+			roles: [role],
+			strictIdentity: true,
+			modelPattern: [`test/${id}`],
+		});
+		const profiles = {
+			...DEFAULT_MODEL_PROFILES,
+			s_planner: strict("s_planner", "planner"),
+			s_pr: strict("s_pr", "plan_reviewer"),
+			s_cr: strict("s_cr", "code_reviewer"),
+			s_repair: strict("s_repair", "repair"),
+		};
+		const routes = {
+			balanced: {
+				planner: ["s_planner"],
+				plan_reviewer: ["s_pr"],
+				implementer: ["glm_implementer"],
+				code_reviewer: ["s_cr"],
+				repair: ["s_repair"],
+			},
+		};
+		expect(() => resolveWorkflowQualityRoutesFromSettings(routes, profiles)).toThrow(WorkflowPolicyError);
+		expect(() => resolveWorkflowQualityRoutesFromSettings(routes, profiles)).toThrow(/unknown_quality_route_profile/);
 	});
 });
