@@ -27,7 +27,7 @@ Default profile registration order is the router preference (see `DEFAULT_MODEL_
 | --- | --- |
 | planner | Claude (Fable) → GPT-Sol → GLM |
 | plan_reviewer | Claude (Fable) → GPT-Sol |
-| implementer | GLM → Grok → Terra |
+| implementer | DeepSeek-V4-Flash → Grok-4.5 → GPT-5.6-Luna → session model (last resort) |
 | code_reviewer | Claude (Fable) → GPT |
 | repair (simple) | Grok; complex escalation → Claude/GPT |
 

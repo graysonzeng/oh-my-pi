@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+- Default workflow implementer chain changed to **DeepSeek-V4-Flash (`max`) → Grok-4.5 (`high`) → GPT-5.6-Luna (`max`) → calling session model (last resort)**. Default `glm_implementer`, `gpt_terra_implementer`, and `deepseek_bulk` profiles were removed; implementer `modelPattern`s are exact (no wildcards) so routing can never downgrade to `gpt-5.*` / `deepseek-v4*` / `glm-5.*` variants. Existing `workflow.profiles` overrides for removed ids fail closed with `incomplete_model_profile` (orphan partial profiles no longer survive without a default base — migrate to a full custom profile), and `workflow.qualityRoutes` referencing removed ids fail closed with `unknown_quality_route_profile`.
+
 ### Removed
 - Removed workflow multi-vendor CLI runtimes (`codex_cli` / `claude_cli` adapters, process runner, CLI isolation, and runtime dispatcher). Multi-model workflows use the embedded `RuntimeAdapter` → `runStructuredSubagent` path only (omp provider models + `ModelProfile` strategies). Legacy `profile.runtime` in settings fails closed. Worker host (`__omp_worker_*`), task/structured-subagent isolation, and provider OAuth CLIs are unchanged.
+
+### Added
+- Added legacy-route session-model last resort for implement: the calling session's active model is registered as `main_agent_fallback` (last candidate, `degraded: true`, `fallback_from:<primary>`) when the three static implementer candidates are all unavailable at runtime; availability preflight real-probes it, resume re-finds it by id, and quality-route routers stay fail-closed (no session fallback). Retry budget for a role is now the distinct routable candidate count, so a preflight-excluded primary cannot truncate the fallback chain.
 
 ### Added
 - Added custom-model validation for `compat.codexResponsesEndpoint`, enabling standard `/responses` WebSocket-to-SSE fallback on compatible gateways.
@@ -31,6 +37,7 @@
 - Live provider smoke is opt-in and cost-bearing; automated tests use injectable runners only.
 
 ### Fixed
+- Fixed resolved tool-policy id being dropped from stage evidence: `PlanStage`, `PlanReviewStage`, `CodeReviewStage`, `ImplementStage`, and `RepairStage` now forward `resolvedToolPolicyId` from the prepared invocation into their results, so usage/evidence records for planning/plan-review/code-review/implementing/repairing carry the actually-applied policy id instead of null.
 - Fixed provider-level `referenceProvider` being ignored by proxy discovery, which replaced configured upstream metadata with generic fallback limits.
 - Split strict write-commit settlement: a live merger that reports success now persists durable `applied` state immediately after verifying the output patch path and SHA-256 (no recovery-style git proof); merger throw/cancel/unknown outcomes are reconciled against the tree, and every resume of `prepared`/`applied` state still requires strict reverse-applies / forward-does-not git proof, failing closed on missing, reverted, empty, hash-mismatched, or ambiguous patch evidence without rerunning implementers or the merge seam.
 - Merge/cancel atomicity: `cancel()` captures the registered runner settlement barrier before signalling, waits for the in-flight merge outcome to be persisted, and only then writes terminal `cancelled`; an apply that completes after cancellation is never a false pure-cancelled workflow.
