@@ -204,3 +204,4 @@ Release note：默认委派姿态改为 prefer 主动（自动并行感知 + 阶
 - §5 路由表 implement=`deepseek-v4-flash:max` + review=`gpt-5.6-sol:xhigh` 的配对下，flash 草稿 PASS 早于 opus 草稿是已知偏置（§10.1.4）——**不得把「PASS 早」当作实现模型合格的证据**；PASS 判定必须规格锚定（§10.2.3）。
 - §6.3 reviewer.md 变更除 frontmatter 模型外，prompt 正文须新增 §10.2 反锚定清单段。
 - 用户若经 `task.agentModelOverrides` 把 review 换成更弱模型，§10.2 清单是质量底线，不可省略（R10）。
+- **已定方案（2026-08-04）**：方案评审管线落地形态见 `docs/superpowers/specs/2026-08-04-plan-review-pipeline-design.md`——生成 `claude-opus-5:xhigh` / 评审 `gpt-5.6-sol:xhigh`（异家族）/ 仲裁 opus-5；本设计的 review 阶段（planner→reviewer→implement→reviewer 链）按该管线执行，§10.2 清单为 reviewer prompt 必含项。

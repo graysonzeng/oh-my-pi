@@ -277,3 +277,4 @@ modelRoles:
 - §4.2 方向二（机械类 review 走 luna/terra）：分流后的快速评审必须携带 §8.2 清单；「弱草稿 PASS 早」不得作为快速模型合格的验收依据。
 - §4.4 方向四（并行评审）：并行放大的每个 reviewer 均须满足 §8.2，避免并行放大攻击面偏置；finding 去重时保留规格引用。
 - 验收补充：涉及评审路由/并行的 arm，质量守卫增加「PASS 证据密度」与「反锚定清单遵守率」两项观察指标。
+- **已定方案（2026-08-04）**：方案评审管线落地形态见 `docs/superpowers/specs/2026-08-04-plan-review-pipeline-design.md`——生成 `claude-opus-5:xhigh` / 评审 `gpt-5.6-sol:xhigh`（异家族）/ 仲裁 opus-5；§8.2 清单为评审 prompt 必含项，PASS 判定规格锚定。
