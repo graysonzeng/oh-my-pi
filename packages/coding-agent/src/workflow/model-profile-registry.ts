@@ -136,6 +136,50 @@ export function configuredIdentityForProfile(profile: ModelProfile): ConfiguredM
 	};
 }
 
+/**
+ * Fields required on every model profile. Missing fields fail closed at the
+ * trust boundary — a partial profile must never reach the runtime where a
+ * missing contextPolicy would throw mid-stage or silently degrade limits.
+ */
+const REQUIRED_PROFILE_FIELDS = [
+	"id",
+	"vendor",
+	"modelPattern",
+	"roles",
+	"promptTemplate",
+	"promptVersion",
+	"toolPolicyId",
+] as const;
+
+function assertProfileCompleteness(profile: ModelProfile): void {
+	const missing = REQUIRED_PROFILE_FIELDS.filter(field => {
+		const value = (profile as unknown as Record<string, unknown>)[field];
+		if (field === "modelPattern") {
+			return !(
+				(typeof value === "string" && value.length > 0) ||
+				(Array.isArray(value) && value.length > 0 && value.every(entry => typeof entry === "string"))
+			);
+		}
+		if (field === "roles") {
+			return !(Array.isArray(value) && value.length > 0);
+		}
+		return typeof value !== "string" || value.length === 0;
+	});
+	if (missing.length > 0) {
+		throw new WorkflowPolicyError("incomplete_model_profile", {
+			profileId: profile.id ?? "<missing>",
+			missingFields: missing,
+			hint: "Provide id, vendor, modelPattern, roles, promptTemplate, promptVersion, toolPolicyId, and contextPolicy (or contextStrategy.artifactInclusion)",
+		});
+	}
+	if (!profile.contextPolicy && !profile.contextStrategy?.artifactInclusion) {
+		throw new WorkflowPolicyError("incomplete_model_profile", {
+			profileId: profile.id,
+			missingFields: ["contextPolicy|contextStrategy.artifactInclusion"],
+		});
+	}
+}
+
 function validateModelProfileIdentity(profile: ModelProfile): void {
 	if (profile.strictIdentity !== undefined && typeof profile.strictIdentity !== "boolean") {
 		throw new WorkflowPolicyError("invalid_strict_identity_policy", { profileId: profile.id });
@@ -144,6 +188,7 @@ function validateModelProfileIdentity(profile: ModelProfile): void {
 }
 
 export function normalizeModelProfile(profile: ModelProfile): ModelProfile {
+	assertProfileCompleteness(profile);
 	// Settings/JSON may still carry removed field; fail closed at the trust boundary.
 	const legacy = profile as ModelProfile & { runtime?: unknown };
 	if (legacy.runtime !== undefined) {

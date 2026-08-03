@@ -113,6 +113,15 @@ export type ToolPolicy = {
 	allowedCommands: string[];
 };
 
+/** Policy ids ToolPolicyFactory can resolve; unknown profile toolPolicyIds fail closed. */
+export const KNOWN_TOOL_POLICY_IDS: Readonly<Record<string, true>> = {
+	"readonly-planning": true,
+	"readonly-review": true,
+	"readonly-default": true,
+	"scoped-repair": true,
+	"scoped-implementation": true,
+};
+
 export function isReadonlyWorkflowRole(role: WorkflowRole | string): boolean {
 	return READONLY_WORKFLOW_ROLES.has(role as WorkflowRole);
 }

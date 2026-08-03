@@ -31,21 +31,8 @@ export function resolveWorkflowProfilesFromSettings(
 			id: typeof partial.id === "string" && partial.id.length > 0 ? partial.id : key,
 		} as ModelProfile;
 		// Orphan overrides without a default base may be incomplete migration leftovers.
-		// Keep them in the map for visibility, but only normalize/assert when required fields exist.
-		const complete =
-			typeof profile.vendor === "string" &&
-			profile.vendor.length > 0 &&
-			((typeof profile.modelPattern === "string" && profile.modelPattern.length > 0) ||
-				(Array.isArray(profile.modelPattern) && profile.modelPattern.length > 0)) &&
-			Array.isArray(profile.roles) &&
-			profile.roles.length > 0 &&
-			typeof profile.toolPolicyId === "string" &&
-			profile.toolPolicyId.length > 0;
-		if (!complete) {
-			// Preserve partial entry without normalization so migration can observe it.
-			merged[key] = profile;
-			continue;
-		}
+		// Fail closed: a partial profile must never reach the runtime (missing
+		// contextPolicy would throw mid-stage; a missing identity silently degrades).
 		const normalized = normalizeModelProfile(profile);
 		assertSupportedModelProfile(normalized);
 		merged[key] = normalized;

@@ -135,6 +135,7 @@ import {
 } from "./sqlite-reader";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import type { WorkflowToolOptimization } from "./workflow-session-fields";
 import { xdevDocs, xdevListing } from "./xdev";
 
 // Per-session memo for tree-sitter summaries. `summarizeCode` is a pure function
@@ -856,6 +857,31 @@ type SuffixMatchCache = Map<string, { absolutePath: string; displayPath: string 
  * Reads files with support for images, converted documents (via markit), and text.
  * Directories return a formatted listing with modification times.
  */
+
+/**
+ * Resolve a workflow-catalog `xd://tools/{name}` locator from the prepare-time
+ * capture when the child session has no xd registry mounted.
+ * - Non-allowlisted names are refused (catalog never elevates privileges).
+ * - Allowlisted names with no captured schema fail observably (no fake recovery).
+ */
+export function resolveWorkflowCatalogToolDocs(
+	name: string,
+	workflowOpt: Pick<WorkflowToolOptimization, "presentationToolSchemas" | "presentationAllowedTools">,
+): string {
+	const allowed = workflowOpt.presentationAllowedTools;
+	if (allowed && !allowed.includes(name)) {
+		throw new ToolError(`Tool "${name}" is outside the role allowlist; catalog expand refused.`);
+	}
+	const schema = workflowOpt.presentationToolSchemas.get(name);
+	if (schema === undefined) {
+		throw new ToolError(`No full schema registered for allowlisted tool "${name}".`, {
+			path: `xd://tools/${name}`,
+		});
+	}
+	const schemaJson = typeof schema === "string" ? schema : JSON.stringify(schema, null, 2);
+	return [`# Tool: ${name}`, "", "```json", schemaJson, "```", ""].join("\n");
+}
+
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
 	/** Model wire name when workflow toolAliases remaps read. */
@@ -3315,7 +3341,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
 					if (name && isResolutionDeviceName(name)) return resolutionDeviceUsage(name);
 					const xdev = this.session.xdev;
-					if (!xdev) throw new ToolError("xd:// is not mounted in this session.");
+					if (!xdev) {
+						// Workflow catalog mode runs in structured children that never mount an
+						// xd registry (restrictToolNames). Resolve the locators the workflow itself
+						// advertised from the prepare-time capture instead of a dead xd:// URL.
+						const workflowOpt = this.session.workflowToolOptimization;
+						if (name !== null && workflowOpt?.presentationToolSchemas) {
+							return resolveWorkflowCatalogToolDocs(name, workflowOpt);
+						}
+						throw new ToolError("xd:// is not mounted in this session.");
+					}
 					return name === null ? xdevListing(xdev) : xdevDocs(xdev, name);
 				},
 			},

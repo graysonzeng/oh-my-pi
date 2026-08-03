@@ -331,6 +331,8 @@ export interface WorkflowModelExecutionEvidenceV1 {
 	exactIdentityMatch: boolean | null;
 	effortSupported: boolean | null;
 	modelFamily: string | null;
+	/** Tool policy id actually applied for this execution (named override or role default). */
+	toolPolicyId?: string | null;
 }
 
 export interface WorkflowModelAttemptEvidenceV1 {
@@ -599,6 +601,8 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
 	/** Catalog-derived lineage from the attested execution identity. */
 	modelFamily?: string;
+	/** Tool policy id actually applied (named override or role default). */
+	resolvedToolPolicyId?: string;
 }
 
 export interface WorkflowRuntimeEvidence {
@@ -611,6 +615,8 @@ export interface WorkflowRuntimeEvidence {
 	optimizationReceipts?: unknown[];
 	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
 	modelFamily?: string;
+	/** Tool policy id actually applied (named override or role default). */
+	resolvedToolPolicyId?: string;
 	/** Relative artifact kind ref when scope-metrics was persisted. */
 	scopeMetricsKind?: string;
 }

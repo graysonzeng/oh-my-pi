@@ -82,7 +82,13 @@ export class XdProtocolHandler implements ProtocolHandler {
 				const available = skills.map(s => s.name).join(", ") || "none";
 				throw new Error(`Unknown skill: ${target.name}\nAvailable: ${available}`);
 			}
-			const content = await fs.readFile(skill.filePath, "utf-8");
+			// Prefer an in-memory body when present (workflow catalog forwards prepared
+			// skill content); fall back to the on-disk SKILL.md for discovered skills.
+			const content =
+				typeof (skill as { content?: unknown }).content === "string" &&
+				(skill as { content?: string }).content!.length > 0
+					? (skill as { content?: string }).content!
+					: await fs.readFile(skill.filePath, "utf-8");
 			return {
 				url: url.href,
 				content,

@@ -363,6 +363,8 @@ export interface PreparedWorkflowInvocation {
 	presentationPolicy: WorkflowPresentationPolicy;
 	/** Shared receipt log also referenced from session.workflowToolOptimization. */
 	optimizationReceipts: ToolOptimizationReceiptV1[];
+	/** Tool policy id actually applied (named override or role default). */
+	resolvedToolPolicyId: string;
 	/**
 	 * Capability-compiled policy (shadow by default). Does not replace role
 	 * allowlist / presentation / existing profile execution.
@@ -439,6 +441,22 @@ export function prepareWorkflowInvocation(
 			policy = policyFactory.getPolicyForRole("implementer");
 		}
 	}
+	const resolvedToolPolicyId = policy.policyId;
+	// A named readonly policy on a write role must still force readonly wrap
+	// (readonly-planning/review/default are the only ids that change surface).
+	if (!policy.readonly) {
+		session = {
+			...session,
+			workflowWritePolicy: {
+				repoRoot: request.session.cwd,
+				forbiddenPaths: [...policy.forbiddenPaths],
+			},
+			workflowCommandPolicy: { allowedCommands: [...policy.allowedCommands] },
+		};
+	} else if (namedPolicyId && namedPolicyId !== rolePolicy.policyId) {
+		// Named readonly policy on a write role must still force readonly wrap.
+		session = wrapSessionForWorkflowRole(session, "planner");
+	}
 	if (!policy.readonly) {
 		session = {
 			...session,
@@ -459,9 +477,7 @@ export function prepareWorkflowInvocation(
 			: policy.allowedTools;
 	const disabled = new Set(request.profile.disabledTools ?? []);
 	let effectiveTools =
-		allowedTools && disabled.size > 0
-			? allowedTools.filter((t: string) => !disabled.has(t))
-			: allowedTools;
+		allowedTools && disabled.size > 0 ? allowedTools.filter((t: string) => !disabled.has(t)) : allowedTools;
 
 	// Capability compile (shadow by default). Role allowlist already computed;
 	// compiler never expands it. Existing profile/presentation/schema stay authoritative.
@@ -746,6 +762,7 @@ export function prepareWorkflowInvocation(
 		assembledPromptText: assembledContext,
 		presentationPolicy,
 		optimizationReceipts,
+		resolvedToolPolicyId,
 		compiledPolicy: adaptedPolicy.compiledPolicy,
 		compiledReceipt: adaptedPolicy.receipt,
 	};

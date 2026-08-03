@@ -34,7 +34,6 @@ import {
 	normalizeModelProfile,
 } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
-import { sessionFallbackImplementerProfile } from "./session-fallback-profile";
 import { sha256Hex } from "./optimization-receipt";
 import {
 	compileQualityRouteSnapshot,
@@ -50,6 +49,7 @@ import {
 	type ScopeMetricsV1,
 } from "./scope-metrics";
 import { redactSecretsInText } from "./secret-redact";
+import { sessionFallbackImplementerProfile } from "./session-fallback-profile";
 import type { PersistedWorkflowSnapshot } from "./sqlite-store";
 import { WorkflowStore } from "./sqlite-store";
 import {
@@ -206,6 +206,7 @@ function modelExecutionEvidence(value: unknown): WorkflowModelExecutionEvidenceV
 		exactIdentityMatch: evidenceBoolean(record.exactIdentityMatch),
 		effortSupported: evidenceBoolean(record.effortSupported),
 		modelFamily: evidenceString(record.modelFamily),
+		toolPolicyId: evidenceString(record.toolPolicyId) ?? evidenceString(record.resolvedToolPolicyId),
 	};
 }
 
@@ -631,6 +632,7 @@ export class WorkflowEngine {
 			reason,
 			afterAttempt.currentAttemptId,
 			afterAttempt.version,
+			this.#ledgerBudgetSnapshot(),
 		);
 		await this.#store.clearRunnerOwner(workflowId);
 		return await this.#requireState(workflowId);
@@ -797,6 +799,7 @@ export class WorkflowEngine {
 							"start planning",
 							undefined,
 							state.version,
+							this.#ledgerBudgetSnapshot(),
 						);
 						if (singleStep) break;
 						continue;
@@ -812,6 +815,7 @@ export class WorkflowEngine {
 							"budget_exhausted",
 							state.currentAttemptId,
 							state.version,
+							this.#ledgerBudgetSnapshot(),
 						);
 						throw new BudgetExhaustedError(snap.requests, snap.costUsd ?? "unknown", snap.limitUsd);
 					}
@@ -854,6 +858,7 @@ export class WorkflowEngine {
 									redactedSummary,
 									s2.currentAttemptId,
 									s2.version,
+									this.#ledgerBudgetSnapshot(),
 								);
 							}
 							// Stage handlers that already transitioned (e.g. write_stage_interrupted) must still surface.
@@ -879,6 +884,7 @@ export class WorkflowEngine {
 									redactedSummary,
 									s2.currentAttemptId,
 									s2.version,
+									this.#ledgerBudgetSnapshot(),
 								);
 							}
 						}
@@ -1042,6 +1048,7 @@ export class WorkflowEngine {
 					toolCalls,
 					identityReceipt,
 					modelFamily,
+					resolvedToolPolicyId,
 				} = await this.#withProfileFallback("planner", {}, async profile => {
 					this.#plannerProfileId = profile.id;
 					this.#plannerVendor = profile.vendor;
@@ -1076,6 +1083,7 @@ export class WorkflowEngine {
 					toolCalls,
 					identityReceipt,
 					modelFamily,
+					resolvedToolPolicyId,
 				});
 				const next = getNextStage("planning", "approved");
 				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "plan ready", fresh.version);
@@ -1095,6 +1103,7 @@ export class WorkflowEngine {
 					toolCalls,
 					identityReceipt,
 					modelFamily,
+					resolvedToolPolicyId,
 				} = await this.#withProfileFallback(
 					"plan_reviewer",
 					{
@@ -1129,6 +1138,7 @@ export class WorkflowEngine {
 					toolCalls,
 					identityReceipt,
 					modelFamily,
+					resolvedToolPolicyId,
 				});
 				const next = getNextStage("plan_review", review.decision);
 				if (!next) throw new WorkflowPolicyError("invalid_review_decision", { decision: review.decision });
@@ -1143,6 +1153,7 @@ export class WorkflowEngine {
 							toStatus: "blocked",
 							reason: "max_plan_cycles_exceeded",
 							expectedVersion: fresh.version,
+							budget: this.#ledgerBudgetSnapshot(),
 						});
 						return;
 					}
@@ -1278,6 +1289,7 @@ export class WorkflowEngine {
 					toolCalls,
 					identityReceipt,
 					modelFamily,
+					resolvedToolPolicyId,
 				} = await this.#withProfileFallback(
 					"code_reviewer",
 					{
@@ -1333,6 +1345,7 @@ export class WorkflowEngine {
 					toolCalls,
 					identityReceipt,
 					modelFamily,
+					resolvedToolPolicyId,
 				});
 
 				const blocking = review.findings.filter(
@@ -1380,6 +1393,7 @@ export class WorkflowEngine {
 						toStatus: "blocked",
 						reason: "max_repair_cycles_exceeded",
 						expectedVersion: fresh.version,
+						budget: this.#ledgerBudgetSnapshot(),
 					});
 					throw new BudgetExhaustedError(snap.repairCycles, snap.costUsd ?? "unknown", snap.limitUsd);
 				}
@@ -1398,6 +1412,7 @@ export class WorkflowEngine {
 							toStatus: "blocked",
 							reason: "repeated_finding_block",
 							expectedVersion: fresh.version,
+							budget: this.#ledgerBudgetSnapshot(),
 						});
 						return;
 					}
@@ -1439,6 +1454,7 @@ export class WorkflowEngine {
 					optimizationReceipts,
 					identityReceipt,
 					modelFamily,
+					resolvedToolPolicyId,
 				} = await this.#withProfileFallback(
 					"repair",
 					{
@@ -1502,6 +1518,7 @@ export class WorkflowEngine {
 					promptAssemblyReceipt,
 					contextLedger,
 					optimizationReceipts,
+					resolvedToolPolicyId,
 					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 				});
 				candidateImplementation = await this.#commitValidatedWrite({
@@ -1513,7 +1530,9 @@ export class WorkflowEngine {
 					modelFamily,
 					signal,
 				});
-				await this.#completeRepairStage(workflowId, attemptId, fresh, candidateImplementation, open, { modelFamily });
+				await this.#completeRepairStage(workflowId, attemptId, fresh, candidateImplementation, open, {
+					modelFamily,
+				});
 				return;
 			}
 			case "final_verify": {
@@ -1644,6 +1663,7 @@ export class WorkflowEngine {
 					optimizationReceipts: result.optimizationReceipts,
 					identityReceipt: result.identityReceipt,
 					modelFamily: result.modelFamily,
+					resolvedToolPolicyId: result.resolvedToolPolicyId,
 				},
 			};
 		}
@@ -1714,6 +1734,7 @@ export class WorkflowEngine {
 						optimizationReceipts: result.optimizationReceipts,
 						identityReceipt: result.identityReceipt,
 						modelFamily: result.modelFamily,
+						resolvedToolPolicyId: result.resolvedToolPolicyId,
 					});
 				},
 			});
@@ -2390,10 +2411,6 @@ export class WorkflowEngine {
 			unavailableReasons,
 		};
 		let lastError: unknown;
-		const probe = this.#router.resolve(role, {
-			...effectiveRouteOptions,
-			unavailableProfileIds: unavailable,
-		});
 		// Retry budget = distinct routable candidates for the role (legacy), not the primary
 		// profile's maxAttempts: a preflight-excluded primary must not truncate the chain
 		// (e.g. DeepSeek down ⇒ Grok → Luna → session model still get their attempts).
@@ -2443,8 +2460,7 @@ export class WorkflowEngine {
 				}
 				// Credential/identity exhaustion → blocked; other last-candidate errors surface as-is
 				// (quality routes always block; legacy routes only block auth/quota/identity).
-				const credentialKind =
-					kind === "authentication" || kind === "quota" || kind === "identity_mismatch";
+				const credentialKind = kind === "authentication" || kind === "quota" || kind === "identity_mismatch";
 				if (kindOk && (this.#qualityRouteSnapshot || credentialKind)) {
 					throw new WorkflowPolicyError("quality_route_candidates_exhausted", {
 						role,
@@ -2512,6 +2528,7 @@ export class WorkflowEngine {
 							"write_stage_interrupted_no_rerun",
 							open.id,
 							refreshed.version,
+							this.#ledgerBudgetSnapshot(),
 						);
 					}
 					throw new WorkflowPolicyError("write_stage_interrupted_no_rerun", {
@@ -2526,6 +2543,11 @@ export class WorkflowEngine {
 			}
 		}
 		return this.#store.beginAttempt(workflowId, stage, undefined, state.version);
+	}
+
+	/** Ledger snapshot for atomic persistence with stage transitions. */
+	#ledgerBudgetSnapshot(): Record<string, unknown> {
+		return this.#budgetLedger.snapshot() as unknown as Record<string, unknown>;
 	}
 
 	async #completeTo(
@@ -2549,6 +2571,7 @@ export class WorkflowEngine {
 			toStatus: to,
 			reason,
 			expectedVersion: state.version,
+			budget: this.#ledgerBudgetSnapshot(),
 		});
 	}
 
@@ -2703,7 +2726,13 @@ export class WorkflowEngine {
 	}
 
 	async #hydrateArtifacts(snapshot: PersistedWorkflowSnapshot): Promise<void> {
-		let latestFindingsState: { findings?: Array<ReviewFindingV1 & { repairCycles?: number; blocking?: boolean; status?: string; id?: string }> } | undefined;
+		let latestFindingsState:
+			| {
+					findings?: Array<
+						ReviewFindingV1 & { repairCycles?: number; blocking?: boolean; status?: string; id?: string }
+					>;
+			  }
+			| undefined;
 		// Sort so findings-state applies after review findings are loaded
 		const artifacts = [...snapshot.artifacts].sort((a, b) => {
 			if (a.kind === "findings-state") return 1;
@@ -2814,7 +2843,9 @@ export class WorkflowEngine {
 			// Reset then assign from the newest cumulative snapshot only.
 			this.#findingTracker = new FindingTracker();
 			for (const f of latestFindingsState.findings ?? []) {
-				this.#findingTracker.add(f as ReviewFindingV1, { blocking: Boolean((f as { blocking?: boolean }).blocking) });
+				this.#findingTracker.add(f as ReviewFindingV1, {
+					blocking: Boolean((f as { blocking?: boolean }).blocking),
+				});
 				const status = (f as { status?: string }).status;
 				if (status === "resolved" || status === "rejected") {
 					this.#findingTracker.resolve((f as { id: string }).id, status);
@@ -2900,6 +2931,8 @@ export class WorkflowEngine {
 						repoMap: profile.contextStrategy?.repoMap?.enabled ?? false,
 						eviction: profile.contextStrategy?.eviction?.enabled ?? false,
 						schemaRetry: profile.outputStrategy?.retryOnSchemaViolation?.enabled ?? false,
+						toolPolicyId: profile.toolPolicyId ?? null,
+						resolvedToolPolicyId: evidence?.resolvedToolPolicyId ?? null,
 					}
 				: null,
 		});
@@ -2944,6 +2977,8 @@ export class WorkflowEngine {
 				effortSupported: evidence?.identityReceipt?.effortSupported ?? null,
 				modelFamily: evidence?.modelFamily ?? evidence?.identityReceipt?.modelFamily ?? null,
 				toolCalls: evidence?.toolCalls ?? null,
+				toolPolicyId: profile?.toolPolicyId ?? null,
+				resolvedToolPolicyId: evidence?.resolvedToolPolicyId ?? null,
 				scopeMetricsKind: evidence?.scopeMetricsKind ?? null,
 			});
 		}

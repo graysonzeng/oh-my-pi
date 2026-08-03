@@ -250,4 +250,35 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("done");
 	});
+
+	it("surfaces caller abort while parked on pending async work as an abort, not success", async () => {
+		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
+			if (promptIndex === 1) {
+				h.emitTerminalYield({ report: "STALE: build passing (job still running)" });
+				return;
+			}
+			// The quiescence notice prompts the model to stand by; the caller then
+			// cancels the run while it is parked behind the pending job.
+			if (promptIndex === 2) {
+				abortController.abort(new Error("caller cancelled while parked"));
+			}
+		});
+		mockCreateAgentSession(harness.session);
+
+		const abortController = new AbortController();
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: "quiescence-parked-cancel",
+			signal: abortController.signal,
+		});
+
+		// A parked yield + caller cancel must never normalize to a clean success:
+		// the pending jobs were cancelled, so the stale payload is not the deliverable.
+		expect(result.exitCode).toBe(1);
+		expect(result.aborted).toBe(true);
+		expect(result.error).toMatch(/cancelled while parked|cancel/i);
+	});
 });

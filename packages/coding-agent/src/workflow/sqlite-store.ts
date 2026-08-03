@@ -272,6 +272,8 @@ export class WorkflowStore {
 		usage?: unknown;
 		error?: { kind: string; summary: string };
 		expectedVersion?: number;
+		/** Ledger snapshot persisted in the same transaction as attempt + transition. */
+		budget?: Record<string, unknown> | null;
 	}): Promise<void> {
 		const {
 			workflowId,
@@ -283,6 +285,7 @@ export class WorkflowStore {
 			usage = {},
 			error,
 			expectedVersion,
+			budget,
 		} = params;
 		if (!isValidTransition(fromStatus, toStatus)) {
 			throw new WorkflowPolicyError("invalid_transition", { workflowId, fromStatus, toStatus });
@@ -339,6 +342,11 @@ export class WorkflowStore {
 					VALUES (?, ?, ?, ?, ?, ?)
 				`)
 				.run(workflowId, fromStatus, toStatus, reason, attemptId, now);
+			if (budget !== undefined) {
+				this.#db
+					.prepare("UPDATE workflows SET budget_json = ? WHERE id = ?")
+					.run(JSON.stringify(budget), workflowId);
+			}
 		})();
 	}
 
@@ -400,6 +408,8 @@ export class WorkflowStore {
 		reason: string,
 		attemptId?: string,
 		expectedVersion?: number,
+		/** Ledger snapshot persisted atomically with the transition. */
+		budget?: Record<string, unknown> | null,
 	): Promise<void> {
 		if (!isValidTransition(fromStatus, toStatus)) {
 			throw new WorkflowPolicyError("invalid_transition", { workflowId, fromStatus, toStatus });
@@ -438,6 +448,11 @@ export class WorkflowStore {
 					VALUES (?, ?, ?, ?, ?, ?)
 				`)
 				.run(workflowId, fromStatus, toStatus, reason, attemptId ?? null, now);
+			if (budget !== undefined) {
+				this.#db
+					.prepare("UPDATE workflows SET budget_json = ? WHERE id = ?")
+					.run(JSON.stringify(budget), workflowId);
+			}
 		})();
 	}
 

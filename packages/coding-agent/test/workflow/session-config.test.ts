@@ -79,18 +79,16 @@ describe("buildWorkflowConfigFromSessionSettings profiles", () => {
 		expect(engine.routingAudit.some(a => a.profileId === "settings_planner")).toBe(true);
 	});
 
-	it("partial override of a removed default id keeps the user entry without a base", () => {
+	it("partial override of a removed default id fails closed instead of surviving incomplete", () => {
 		// glm_implementer was removed from defaults; a leftover settings override must not
-		// silently inherit the old default — the user entry survives but is incomplete
-		// (migration requires a full custom profile).
-		const merged = resolveWorkflowProfilesFromSettings(
-			{ glm_implementer: { modelPattern: ["glm-5.2"] } },
-			DEFAULT_MODEL_PROFILES,
-		);
-		expect(merged.glm_implementer).toBeDefined();
-		expect(merged.glm_implementer?.modelPattern).toEqual(["glm-5.2"]);
-		expect(merged.glm_implementer?.maxRequests).toBeUndefined();
-		expect(DEFAULT_MODEL_PROFILES.glm_implementer).toBeUndefined();
+		// silently inherit the old default or survive as a partial entry that would crash
+		// mid-stage (missing contextPolicy). Migration requires a full custom profile.
+		expect(() =>
+			resolveWorkflowProfilesFromSettings(
+				{ glm_implementer: { modelPattern: ["glm-5.2"] } },
+				DEFAULT_MODEL_PROFILES,
+			),
+		).toThrow("incomplete_model_profile");
 	});
 
 	it("quality routes referencing a removed profile id fail closed", () => {

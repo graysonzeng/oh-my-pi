@@ -32,28 +32,45 @@ async function preservePatchArtifact(
 	}
 }
 
+/**
+ * Forward workflow tool-optimization fields onto the child session, preserving
+ * catalog presentation maps (schemas / allowlist / skill bodies) that the
+ * model wire stubs and the read tool's xd:// expand depend on. Exporting the
+ * pure merge keeps the production runner thin and unit-testable.
+ */
+export function prepareWorkflowRunnerSession(
+	session: StructuredRunnerRequest["session"],
+): StructuredRunnerRequest["session"] {
+	const baseOpt = session.workflowToolOptimization;
+	return {
+		...session,
+		workflowToolOptimization: {
+			processResult: baseOpt?.processResult ?? ((_t, o) => o),
+			toolAliases: baseOpt?.toolAliases,
+			argumentAliases: baseOpt?.argumentAliases,
+			maxConcurrentTools: baseOpt?.maxConcurrentTools,
+			remainingToolCalls: baseOpt?.remainingToolCalls,
+			remainingStageTimeMs: baseOpt?.remainingStageTimeMs,
+			resourceConflictMode: baseOpt?.resourceConflictMode,
+			transformTools: baseOpt?.transformTools,
+			optimizationReceipts: baseOpt?.optimizationReceipts,
+			lastOptimizationReceipt: baseOpt?.lastOptimizationReceipt,
+			// Catalog presentation maps must survive the child handoff or the
+			// advertised xd://tools/{name} / xd://skills/{name} locators cannot resolve.
+			presentationAllowedTools: baseOpt?.presentationAllowedTools,
+			presentationToolSchemas: baseOpt?.presentationToolSchemas,
+			presentationSkillBodies: baseOpt?.presentationSkillBodies,
+		},
+	};
+}
+
 const productionRunner: StructuredRunner = async (request: StructuredRunnerRequest) => {
 	const isolationRequested = request.isolation?.requested === true;
 	// Ensure processToolResult + transformTools from prepare land on the live session
 	// before createTools / agent loop consume them.
-	const baseOpt = request.session.workflowToolOptimization;
 	const session =
 		request.processToolResult || request.transformTools
-			? {
-					...request.session,
-					workflowToolOptimization: {
-						processResult: request.processToolResult ?? baseOpt?.processResult ?? ((_t, o) => o),
-						toolAliases: baseOpt?.toolAliases,
-						argumentAliases: baseOpt?.argumentAliases,
-						maxConcurrentTools: baseOpt?.maxConcurrentTools,
-						remainingToolCalls: baseOpt?.remainingToolCalls,
-						remainingStageTimeMs: baseOpt?.remainingStageTimeMs,
-						resourceConflictMode: baseOpt?.resourceConflictMode,
-						transformTools: request.transformTools ?? baseOpt?.transformTools,
-						optimizationReceipts: baseOpt?.optimizationReceipts,
-						lastOptimizationReceipt: baseOpt?.lastOptimizationReceipt,
-					},
-				}
+			? prepareWorkflowRunnerSession(request.session)
 			: request.session;
 
 	// Argument/tool aliases + catalog transform: prepareWorkflowInvocation installs

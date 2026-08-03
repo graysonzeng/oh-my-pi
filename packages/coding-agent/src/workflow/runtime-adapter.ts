@@ -170,9 +170,7 @@ export class RuntimeAdapter implements RuntimePort {
 				const elapsedMs = Date.now() - startedAt;
 				const profileMax = request.profile.maxRuntimeMs;
 				const remainingRuntime =
-					typeof profileMax === "number" && profileMax > 0
-						? Math.max(1, profileMax - elapsedMs)
-						: undefined;
+					typeof profileMax === "number" && profileMax > 0 ? Math.max(1, profileMax - elapsedMs) : undefined;
 				const attemptRequest =
 					remainingRuntime !== undefined
 						? {
@@ -441,7 +439,18 @@ export class RuntimeAdapter implements RuntimePort {
 			// Structured-invalid results must take the schema repair path even when executor
 			// also sets `error` (schema_violation headline). Do not throw generic WorkflowError first.
 			if (body.error && !(body.structuredOutput && body.structuredOutput.status !== "valid")) {
-				throw new WorkflowError(body.error, this.#classifyErrorKind(body.error), { exitCode: body.exitCode });
+				const kind = this.#classifyErrorKind(body.error);
+				// Schema failures surfaced only as an error headline (no structured block) must
+				// still reach the schema-retry loop — a generic WorkflowError would skip retry.
+				if (kind === "schema_violation") {
+					throw new WorkflowSchemaError(body.error, {
+						status: "invalid",
+						rawOutput: body.rawOutput ?? extractInvalidRaw(body),
+						exitCode: body.exitCode,
+						usage: body.usage,
+					});
+				}
+				throw new WorkflowError(body.error, kind, { exitCode: body.exitCode });
 			}
 			const identityReceipt = buildRuntimeIdentityReceipt(request.profile, identityCollector, body.resolvedModel);
 			if (request.profile.strictIdentity) assertStrictRuntimeIdentity(identityReceipt);
@@ -540,6 +549,7 @@ export class RuntimeAdapter implements RuntimePort {
 					prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
 				identityReceipt,
 				modelFamily: identityReceipt.modelFamily ?? undefined,
+				resolvedToolPolicyId: prepared.resolvedToolPolicyId,
 			};
 		} catch (error) {
 			throw this.#normalizeError(error);
@@ -600,6 +610,7 @@ export class RuntimeAdapter implements RuntimePort {
 				prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
 			identityReceipt,
 			modelFamily: identityReceipt.modelFamily ?? undefined,
+			resolvedToolPolicyId: prepared.resolvedToolPolicyId,
 			schemaRepairReceipt: receipt,
 		};
 	}
@@ -635,18 +646,31 @@ export class RuntimeAdapter implements RuntimePort {
 	}
 }
 
-
 function mergeUsage(a: Usage | undefined, b: Usage | undefined): Usage | undefined {
 	if (!a) return b;
 	if (!b) return a;
-	const cost = {
-		input: (a.cost?.input ?? 0) + (b.cost?.input ?? 0),
-		output: (a.cost?.output ?? 0) + (b.cost?.output ?? 0),
-		cacheRead: (a.cost?.cacheRead ?? 0) + (b.cost?.cacheRead ?? 0),
-		cacheWrite: (a.cost?.cacheWrite ?? 0) + (b.cost?.cacheWrite ?? 0),
-		total: (a.cost?.total ?? 0) + (b.cost?.total ?? 0),
-	};
-	return {
+	// Never invent cost: only emit a cost object when at least one side reported one,
+	// and only sum fields actually present. A fabricated total of 0 would make the
+	// budget ledger treat an unknown-cost retry as known-zero (budget bypass).
+	const hasCostA = a.cost !== undefined && Object.keys(a.cost).length > 0;
+	const hasCostB = b.cost !== undefined && Object.keys(b.cost).length > 0;
+	const cost = hasCostA || hasCostB ? { ...(a.cost ?? {}), ...(b.cost ?? {}) } : undefined;
+	if (cost) {
+		for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) {
+			const left = (a.cost as Record<string, number> | undefined)?.[key];
+			const right = (b.cost as Record<string, number> | undefined)?.[key];
+			if (typeof left === "number" && typeof right === "number") {
+				cost[key] = left + right;
+			} else if (typeof left === "number") {
+				cost[key] = left;
+			} else if (typeof right === "number") {
+				cost[key] = right;
+			} else {
+				delete (cost as Record<string, number>)[key];
+			}
+		}
+	}
+	const merged: Usage = {
 		input: (a.input ?? 0) + (b.input ?? 0),
 		output: (a.output ?? 0) + (b.output ?? 0),
 		cacheRead: (a.cacheRead ?? 0) + (b.cacheRead ?? 0),
@@ -656,8 +680,9 @@ function mergeUsage(a: Usage | undefined, b: Usage | undefined): Usage | undefin
 			a.reasoningTokens === undefined && b.reasoningTokens === undefined
 				? undefined
 				: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
-		cost,
 	};
+	if (cost !== undefined) merged.cost = cost;
+	return merged;
 }
 function extractInvalidRaw(body: StructuredRunnerResult["result"]): string | undefined {
 	if (typeof body.rawOutput === "string" && body.rawOutput.length > 0) return body.rawOutput;
