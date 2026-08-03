@@ -3307,6 +3307,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			cwd: this.session.cwd,
 			settings: this.session.settings,
 			signal,
+			lineage: this.session.getLineageContext ? await this.session.getLineageContext() : undefined,
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
 			xd: {

@@ -2638,12 +2638,16 @@ async function executeToolCalls(
 		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;
 		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
-		if (interrupted && perToolAborted && isError && !completedToolExecution) {
-			// This tool's own signal fired AND it failed to produce a result: `tool.execute()`
-			// never returned (it threw on the abort), so it was genuinely cut off before
-			// producing usable output. Report it as skipped.
+		if (perToolAborted && isError && !completedToolExecution) {
+			// This tool's own signal fired AND it failed to produce a result:
+			// `tool.execute()` was entered and cut off before producing usable
+			// output. This is a started-abort: side effects may already exist, so
+			// it is aborted (never skipped/not-executed, never walked as a
+			// never-invoked placeholder). The source names the runtime cause:
+			// user/system steering or peer IRC when a steering interrupt fired,
+			// otherwise the external abort.
 			record.skipped = true;
-			emitToolResult(record, createSkippedToolResult(interruptState.source), true);
+			emitToolResult(record, createStartedAbortedToolResult(interruptState.source), true);
 		} else {
 			// No interrupt on this signal, or the tool finished before the interrupt landed
 			// (`completedToolExecution`) — even if the signal aborted around completion. Keep
@@ -2866,7 +2870,7 @@ async function executeToolCalls(
 								text: "Skipped: resource conflict with an earlier tool call in this batch",
 							},
 						],
-						details: {},
+						details: { __synthetic: true, source: "prestart_resource_conflict", executed: false },
 					},
 					true,
 				);
@@ -2938,7 +2942,7 @@ async function executeToolCalls(
 				record,
 				{
 					content: [{ type: "text", text: "Skipped: tool-call budget exhausted for this stage" }],
-					details: {},
+					details: { __synthetic: true, source: "prestart_budget", executed: false },
 				},
 				true,
 			);
@@ -3080,41 +3084,61 @@ function resourceClaimsConflict(a: LoopResourceClaim, b: LoopResourceClaim, mode
 /**
  * Discriminator embedded in {@link AgentToolResult.details} and
  * {@link ToolResultMessage.details} for tool calls that were emitted by the
- * assistant but never actually invoked locally.
+ * assistant but never actually invoked locally, or whose local execution was
+ * cut off after `execute()` was entered.
  *
  * The synthetic result exists only to preserve the tool_use / tool_result
- * pairing the provider API requires; no `tool.execute()` ran. UI, telemetry,
- * and history consumers can key on `__synthetic === true` to render or
- * classify these as "call emitted, not executed" instead of a real local
- * tool failure — the mislabeling this discriminator was introduced to fix
- * (#4321): a provider-side stream error after tool-call emission (e.g. Codex
- * websocket close) was surfaced by the CLI as if the local tool had failed.
+ * pairing the provider API requires. UI, telemetry, and history consumers can
+ * key on `__synthetic === true` to render or classify these as "call emitted,
+ * not executed / aborted" instead of a real local tool failure — the
+ * mislabeling this discriminator was introduced to fix (#4321): a
+ * provider-side stream error after tool-call emission (e.g. Codex websocket
+ * close) was surfaced by the CLI as if the local tool had failed.
  *
- * `source` names the assistant-side termination state that prevented
- * execution; `upstreamError` is the provider-reported message when the turn
- * ended with `stopReason === "error"`.
+ * `source` is the sole causal discriminator. `executed` owns whether
+ * `tool.execute()` was entered: `executed:false` is legal only when
+ * `tool.execute()` was never invoked (pre-start or assistant-stop causes);
+ * `executed:true` marks a `started_aborted_*` cut-off whose side effects may
+ * already exist. `upstreamError` is the provider-reported message when the
+ * turn ended with `stopReason === "error"`.
  */
+export type SyntheticResultSource =
+	| "assistant_stop_aborted"
+	| "assistant_stop_error"
+	| "assistant_stop_skipped"
+	| "assistant_stop_length"
+	| "prestart_queued_steering"
+	| "prestart_budget"
+	| "prestart_user_cancel"
+	| "prestart_system_cancel"
+	| "prestart_irc_cancel"
+	| "prestart_resource_conflict"
+	| "started_aborted_user"
+	| "started_aborted_system"
+	| "started_aborted_irc"
+	| "started_aborted_external";
+
 export interface SyntheticToolResultDetails {
 	__synthetic: true;
-	source: "assistant_stop_aborted" | "assistant_stop_error" | "assistant_stop_skipped" | "assistant_stop_length";
-	executed: false;
+	source: SyntheticResultSource;
+	executed: boolean;
 	upstreamError?: string;
 }
 
 /**
- * Narrow an {@link AgentMessage} to a synthetic {@link ToolResultMessage} —
- * a tool_result emitted for a tool call the assistant never invoked (see
- * {@link SyntheticToolResultDetails}). Consumers use this to look past the
- * placeholder pairing back to the assistant turn that produced it, e.g.
- * `AgentSession.retry()` walking back over the synthetic results a
- * stalled/aborted mid-tool-call turn leaves behind.
+ * Narrow an {@link AgentMessage} to a synthetic {@link ToolResultMessage} that
+ * represents a tool call the assistant never invoked (see
+ * {@link SyntheticToolResultDetails}). Requires `executed === false` so a
+ * `started_aborted_*` result (which may carry side effects) is never treated
+ * as a never-invoked placeholder — retry must not re-execute it.
  */
 export function isSyntheticToolResultMessage(
 	message: AgentMessage | undefined,
 ): message is ToolResultMessage<SyntheticToolResultDetails> {
 	return (
 		message?.role === "toolResult" &&
-		(message.details as SyntheticToolResultDetails | undefined)?.__synthetic === true
+		(message.details as SyntheticToolResultDetails | undefined)?.__synthetic === true &&
+		(message.details as SyntheticToolResultDetails | undefined)?.executed === false
 	);
 }
 
@@ -3203,15 +3227,29 @@ function createAbortedToolResult(
 	return toolResultMessage;
 }
 
-function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<unknown> {
+/**
+ * Map a queued-steering interrupt source to its pre-start synthetic source.
+ * `user` queued steering and the generic `unknown` both use
+ * `prestart_queued_steering`; system advisories and peer IRC get their own
+ * variants so the matrix's "no collapse into queued steering" holds.
+ */
+function prestartSourceFor(source: SteeringInterruptSource | "irc" | undefined): SyntheticResultSource {
+	if (source === "system") return "prestart_system_cancel";
+	if (source === "irc") return "prestart_irc_cancel";
+	return "prestart_queued_steering";
+}
+
+function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<SyntheticToolResultDetails> {
 	const reason = abortReasonText(signal);
 	return {
 		content: [{ type: "text", text: `Tool was not executed because the run was aborted: ${reason}.` }],
-		details: {},
+		details: { __synthetic: true, source: "prestart_user_cancel", executed: false },
 	};
 }
 
-function createSkippedToolResult(source: SteeringInterruptSource | "irc" | undefined): AgentToolResult<any> {
+function createSkippedToolResult(
+	source: SteeringInterruptSource | "irc" | undefined,
+): AgentToolResult<SyntheticToolResultDetails> {
 	let reason = "pending steering message";
 	let blocker = "queued message";
 	if (source === "user") {
@@ -3231,6 +3269,34 @@ function createSkippedToolResult(source: SteeringInterruptSource | "irc" | undef
 				text: `Skipped due to ${reason}. Do not count this skipped result as completed work or verification. After the ${blocker} is handled on the next step, retry the skipped tool if it is still needed.`,
 			},
 		],
-		details: {},
+		details: { __synthetic: true, source: prestartSourceFor(source), executed: false },
+	};
+}
+
+/**
+ * Synthetic result for a tool whose `execute()` was entered and then cut off
+ * before usable output (steering/IRC/external abort). `executed:true` is
+ * deliberate: side effects may already have occurred, so this must never be
+ * walked as a never-invoked placeholder or presented as skipped.
+ */
+function createStartedAbortedToolResult(
+	source: SteeringInterruptSource | "irc" | undefined,
+): AgentToolResult<SyntheticToolResultDetails> {
+	const startedSource: SyntheticResultSource =
+		source === "user"
+			? "started_aborted_user"
+			: source === "system"
+				? "started_aborted_system"
+				: source === "irc"
+					? "started_aborted_irc"
+					: "started_aborted_external";
+	return {
+		content: [
+			{
+				type: "text",
+				text: "Tool execution was aborted after it started; its side effects may already have occurred. Treat this as aborted, not as not-executed, and do not blindly retry.",
+			},
+		],
+		details: { __synthetic: true, source: startedSource, executed: true },
 	};
 }

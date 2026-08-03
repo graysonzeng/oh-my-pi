@@ -25,7 +25,12 @@ RUNTIME
 
 # Skills & Rules
 {{#ifAny skills.length rules.length}}
-Read matching `skill://<name>` or `rule://<name>` before proceeding.
+Skills and rules load progressively — do NOT bulk-read the index.
+- Identify your goal and target paths first; load only what the current step needs.
+- Choose at most ONE primary routing/lifecycle skill (e.g. the engineering-flow or delivery-route skill for the task at hand) and read `skill://<name>` before forming a cross-module plan. Do not load sibling skills speculatively.
+- Load domain rules only when working in a known target path; choose the narrowest relevant set and read `rule://<name>` for those paths, not the whole index.
+- If a skill/rule body is already fully present in the current transcript, do NOT re-read it — immutable bodies are read once.
+- When paths are unknown, inspect only the smallest locator set (e.g. the root index or one glob), never every indexed skill/rule/spec.
 {{/ifAny}}
 {{#if skills.length}}
 <skills>

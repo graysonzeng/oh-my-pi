@@ -890,6 +890,12 @@ export interface ToolResultMessage<TDetails = unknown> {
 	content: (TextContent | ImageContent)[]; // Supports text and images
 	details?: TDetails;
 	isError: boolean;
+	/**
+	 * Materialized presentation status for surfaces that strip `details`
+	 * (sanitized share/export). Never a causal source: the structured details
+	 * remain the source of truth wherever they survive.
+	 */
+	presentationStatus?: "running" | "succeeded" | "failed" | "aborted" | "skipped";
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Timestamp when output was pruned (ms since epoch). Undefined if unpruned. */

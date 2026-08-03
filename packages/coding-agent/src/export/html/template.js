@@ -696,6 +696,23 @@
         return null;
       }
 
+      // Browser-side mirror of the shared ToolPresentation classifier. Shared
+      // sessions carry the materialized `presentationStatus`; local exports
+      // still have `details` and classify here so skipped/aborted never render
+      // as a raw `isError` failure.
+      function classifyToolResult(result) {
+        if (!result) return 'pending';
+        if (result.presentationStatus) return result.presentationStatus;
+        const details = result.details;
+        if (details && typeof details === 'object' && details.__synthetic === true) {
+          if (details.executed === false) return 'skipped';
+          const source = details.source;
+          if (typeof source === 'string' && source.startsWith('started_aborted')) return 'aborted';
+        }
+        if (result.isError === true) return 'failed';
+        return 'succeeded';
+      }
+
       function formatExpandableOutput(text, maxLines, lang) {
         text = replaceTabs(text);
         const lines = text.split('\n');
@@ -767,7 +784,7 @@
 
       function renderToolCall(call, sctx) {
         const result = findToolResult(call.id, sctx.entries);
-        const statusClass = result ? (result.isError ? 'error' : 'success') : 'pending';
+        const statusClass = classifyToolResult(result);
         const key = 'tv' + (++toolViewSeq);
         TOOL_VIEW_DATA.set(key, {
           name: call.name,

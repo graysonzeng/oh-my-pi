@@ -20,6 +20,7 @@ import { TtsrNotificationComponent } from "../../modes/components/ttsr-notificat
 import { createUsageRowBlock } from "../../modes/components/usage-row";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
+import { isSkippedSyntheticResult } from "../../presentation/tool-status";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
@@ -753,9 +754,12 @@ export class EventController {
 						// Creating either component now would lock the read into the wrong shape.
 						continue;
 					}
+					// Track args for EVERY read (grouped and full) so an end-before-start
+					// completion can reapply the grouping decision instead of dropping
+					// the result into the wrong card.
+					this.#trackReadToolCall(content.id, content.arguments);
 					if (readArgsCollapseIntoGroup(content.arguments)) {
 						if (!this.ctx.pendingTools.has(content.id)) this.#resolveDisplaceablePoll(content.name);
-						this.#trackReadToolCall(content.id, content.arguments);
 						const component = this.ctx.pendingTools.get(content.id);
 						if (component) {
 							component.updateArgs(content.arguments, content.id);
@@ -765,6 +769,9 @@ export class EventController {
 							this.ctx.pendingTools.set(content.id, group);
 							this.#toolTimelineComponents.set(content.id, group);
 						}
+						// A held completion for this read (its end event outran the
+						// streamed block) settles now that the group exists.
+						this.#settleHeldReadCompletionIfAny(content.id);
 						continue;
 					}
 					// Other internal-URL reads fall through to ToolExecutionComponent below.
@@ -1003,6 +1010,8 @@ export class EventController {
 					this.ctx.pendingTools.set(event.toolCallId, group);
 					this.#toolTimelineComponents.set(event.toolCallId, group);
 				}
+				// A held completion (end outran start) settles now that the group exists.
+				this.#settleHeldReadCompletionIfAny(event.toolCallId);
 				this.ctx.ui.requestRender();
 				return;
 			}
@@ -1028,6 +1037,7 @@ export class EventController {
 			this.ctx.chatContainer.addChild(component);
 			this.ctx.pendingTools.set(event.toolCallId, component);
 			this.#toolTimelineComponents.set(event.toolCallId, component);
+			this.#settleHeldReadCompletionIfAny(event.toolCallId);
 			this.ctx.ui.requestRender();
 		} else {
 			// The tool is about to run, so its arguments are final and validated.
@@ -1113,6 +1123,9 @@ export class EventController {
 	): void {
 		component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
 		this.ctx.pendingTools.delete(event.toolCallId);
+		if (event.toolName === "read") {
+			this.#clearReadToolCall(event.toolCallId);
+		}
 		if (
 			component instanceof ToolExecutionComponent &&
 			component.isDisplaceableBlock() &&
@@ -1132,6 +1145,21 @@ export class EventController {
 			this.#displaceableTodoComponent = component;
 		}
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Settle a held read completion against the component that was just created
+	 * for its call id (grouped or full) — see {@link #orphanedToolCompletions}.
+	 * Resolves the component from `pendingTools` because the creation site owns
+	 * the card; unknown ids stay observable instead of silently dropped.
+	 */
+	#settleHeldReadCompletionIfAny(toolCallId: string): void {
+		const event = this.#orphanedToolCompletions.get(toolCallId);
+		if (!event || event.toolName !== "read") return;
+		this.#orphanedToolCompletions.delete(toolCallId);
+		const component = this.ctx.pendingTools.get(toolCallId);
+		if (!component) return;
+		this.#settleHeldCompletion(component, event);
 	}
 
 	async #handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): Promise<void> {
@@ -1165,13 +1193,50 @@ export class EventController {
 			} else {
 				let component = this.ctx.pendingTools.get(event.toolCallId);
 				if (!component) {
-					const group = this.#getReadGroup();
+					// End-before-start: no component exists for this read yet. Reapply the
+					// grouping decision from the tracked args instead of blindly routing
+					// to the read group (which would drop a full `rule://` result and
+					// leave its full card unsettled). When args are not yet tracked,
+					// hold the completion until the start/streamed block creates the
+					// correct component — exactly-once settle, never a silent drop.
 					const args = this.#readToolCallArgs.get(event.toolCallId);
-					if (args) {
+					if (args && readArgsCollapseIntoGroup(args)) {
+						const group = this.#getReadGroup();
 						group.updateArgs(args, event.toolCallId);
+						component = group;
+						this.ctx.pendingTools.set(event.toolCallId, group);
+						this.#toolTimelineComponents.set(event.toolCallId, group);
+					} else if (args) {
+						// Full (non-collapsed) read, e.g. `rule://`: create the full
+						// card so the result lands instead of being orphaned.
+						const tool = this.ctx.viewSession.getToolByName("read");
+						const full = new ToolExecutionComponent(
+							"read",
+							args,
+							{
+								snapshots: getFileSnapshotStore(this.ctx.viewSession),
+								showImages: settings.get("terminal.showImages"),
+								editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
+								editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+								liveRegion: this.ctx.chatContainer,
+							},
+							tool,
+							this.ctx.ui,
+							this.ctx.sessionManager.getCwd(),
+							event.toolCallId,
+						);
+						full.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(full);
+						component = full;
+						this.ctx.pendingTools.set(event.toolCallId, full);
+						this.#toolTimelineComponents.set(event.toolCallId, full);
+					} else {
+						// Args not tracked yet — hold the completion until the start or
+						// streamed block creates the correct component (#orphanedToolCompletions).
+						this.#orphanedToolCompletions.set(event.toolCallId, event);
+						this.ctx.ui.requestRender();
+						return;
 					}
-					component = group;
-					this.ctx.pendingTools.set(event.toolCallId, group);
 				}
 				component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
 				this.ctx.pendingTools.delete(event.toolCallId);
@@ -1227,7 +1292,10 @@ export class EventController {
 			if (details?.phases) {
 				this.ctx.setTodos(details.phases);
 			}
-		} else if (event.toolName === "todo" && event.isError) {
+		} else if (event.toolName === "todo" && event.isError && !isSkippedSyntheticResult(event.result)) {
+			// A never-invoked todo call (e.g. queued steering skip) is error-shaped
+			// on the provider envelope but was NOT executed: it must not raise the
+			// stale-panel warning. Only real executed failures do.
 			const textContent = event.result.content.find(
 				(content: { type: string; text?: string }) => content.type === "text",
 			)?.text;

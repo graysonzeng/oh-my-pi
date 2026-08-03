@@ -1186,4 +1186,97 @@ describe("ACP event mapper", () => {
 		});
 		expectAcpStructureRejects(arkSessionNotification, { ...notification, sessionId: 42 });
 	});
+
+	it("maps a never-invoked skip to completed with the structured result in rawOutput", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-skip",
+				toolName: "bash",
+				isError: true,
+				result: {
+					content: [{ type: "text", text: "Skipped due to queued user message" }],
+					details: { __synthetic: true, source: "prestart_queued_steering", executed: false },
+				},
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		const update = updates[0]!.update as {
+			sessionUpdate: string;
+			status?: string;
+			rawOutput?: { details?: unknown };
+		};
+		expect(update.sessionUpdate).toBe("tool_call_update");
+		// Skipped is never ACP `failed` even though the provider envelope is error-shaped.
+		expect(update.status).toBe("completed");
+		expect(update.rawOutput?.details).toEqual({
+			__synthetic: true,
+			source: "prestart_queued_steering",
+			executed: false,
+		});
+	});
+
+	it("maps a started-abort to ACP failed with its started_aborted source in rawOutput", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-abort",
+				toolName: "bash",
+				isError: true,
+				result: {
+					content: [{ type: "text", text: "Tool execution was aborted after it started" }],
+					details: { __synthetic: true, source: "started_aborted_user", executed: true },
+				},
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		const update = updates[0]!.update as {
+			sessionUpdate: string;
+			status?: string;
+			rawOutput?: { details?: unknown };
+		};
+		expect(update.sessionUpdate).toBe("tool_call_update");
+		expect(update.status).toBe("failed");
+		expect(update.rawOutput?.details).toEqual({
+			__synthetic: true,
+			source: "started_aborted_user",
+			executed: true,
+		});
+	});
+
+	it("does not mutate the Todo plan for a skipped or aborted todo end", () => {
+		const skipped = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-todo-skip",
+				toolName: "todo",
+				isError: true,
+				result: {
+					content: [{ type: "text", text: "Skipped" }],
+					details: { __synthetic: true, source: "prestart_queued_steering", executed: false },
+				},
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		const aborted = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-todo-abort",
+				toolName: "todo",
+				isError: true,
+				result: {
+					content: [{ type: "text", text: "Aborted" }],
+					details: { __synthetic: true, source: "started_aborted_user", executed: true },
+				},
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		const planUpdates = [...skipped, ...aborted].filter(notification => notification.update.sessionUpdate === "plan");
+		expect(planUpdates).toEqual([]);
+	});
 });

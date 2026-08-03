@@ -7,6 +7,7 @@ import type {
 	ToolKind,
 } from "@agentclientprotocol/sdk";
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
+import { classifyToolPresentation } from "../../presentation/tool-status";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
@@ -258,10 +259,25 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 				...extractToolCallContent(event.result, options),
 			];
 			const content = mergeToolUpdateContent(buildToolStartContent(event.toolName, args), resultContent);
+			const presentation = classifyToolPresentation(event.result);
+			// ACP's ToolCallStatus is closed (`pending | in_progress | completed |
+			// failed`). `failed` is reserved for an executed failure; a pre-start
+			// skip is a valid non-execution status even when the provider result is
+			// error-shaped, and a started-abort is an execution that produced no
+			// usable output. The structured result (details) already travels in
+			// `rawOutput`, so status-aware clients can distinguish the three.
+			const status =
+				presentation === "skipped"
+					? "completed"
+					: presentation === "aborted"
+						? "failed"
+						: presentation === "failed"
+							? "failed"
+							: "completed";
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
-				status: event.isError ? "failed" : "completed",
+				status,
 				rawOutput: event.result,
 			};
 			if (content.length > 0) {
@@ -413,7 +429,9 @@ function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "complet
 function mapTodoResultToPlanUpdate(
 	event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 ): SessionUpdate | undefined {
-	if (event.toolName !== "todo" || event.isError) {
+	// Never-invoked skips, started-aborts, and executed failures all produce no
+	// plan mutation; only an executed success updates the Todo plan.
+	if (event.toolName !== "todo" || classifyToolPresentation(event.result) !== "succeeded") {
 		return undefined;
 	}
 	const phases = extractTodoPhases(event.result);

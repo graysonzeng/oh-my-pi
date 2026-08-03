@@ -2,6 +2,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
+import { classifyToolPresentation } from "../presentation/tool-status";
 import { renderStatusLine, WidthAwareText } from "../tui";
 import {
 	formatArgsInline,
@@ -13,7 +14,7 @@ import {
 	JSON_TREE_SCALAR_LEN_EXPANDED,
 	renderJsonTreeLines,
 } from "./json-tree";
-import { formatExpandHint, replaceTabs, truncateToWidth } from "./render-utils";
+import { formatExpandHint, replaceTabs, type ToolUIStatus, truncateToWidth } from "./render-utils";
 
 /** Inputs rendered by the fallback card used when a tool has no bespoke renderer. */
 export interface DefaultToolRenderInput {
@@ -38,13 +39,18 @@ export function formatDefaultToolExecution(
 ): string {
 	const lines: string[] = [];
 	const { options, result } = input;
-	const icon = options.isPartial
+	const presentation = result ? classifyToolPresentation(result) : undefined;
+	const icon: ToolUIStatus = options.isPartial
 		? options.spinnerFrame !== undefined
 			? "running"
 			: "pending"
-		: result?.isError
-			? "error"
-			: "done";
+		: presentation === "skipped"
+			? "skipped"
+			: presentation === "aborted"
+				? "aborted"
+				: result?.isError
+					? "error"
+					: "done";
 	lines.push(renderStatusLine({ icon, spinnerFrame: options.spinnerFrame, title: input.label }, uiTheme));
 
 	const args = isRecord(input.args) ? input.args : undefined;

@@ -55,7 +55,10 @@ describe("SessionManager session ids", () => {
 
 		const forkedId = expectUuidV7SessionId(session);
 		expect(forkedId).not.toBe(firstId);
-		expect(session.getHeader()?.parentSession).toBe(firstId);
+		// New fork writes persist the canonical absolute source session-file path
+		// (not the legacy ID) so fresh-process lineage resolution stays
+		// registry-free.
+		expect(session.getHeader()?.parentSession).toBe(forkResult.oldSessionFile);
 	});
 
 	it("preserves existing session ids when reopening a saved session", async () => {

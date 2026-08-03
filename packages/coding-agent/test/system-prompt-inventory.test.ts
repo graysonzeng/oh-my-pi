@@ -633,7 +633,7 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("hidden-workflow");
 	});
 
-	it("tells the agent to read matching skills before work", async () => {
+	it("tells the agent to load skills progressively, one primary skill at a time", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -652,14 +652,16 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		const text = systemPrompt.join("\n\n");
-		const instruction = "Read matching `skill://<name>` or `rule://<name>` before proceeding.";
-		expect(text.split(instruction)).toHaveLength(2);
+		// The staged contract replaces the broad bulk-read trigger.
+		expect(text).not.toContain("Read matching `skill://<name>` or `rule://<name>` before proceeding.");
+		expect(text).toContain("Choose at most ONE primary routing/lifecycle skill");
+		expect(text).toContain("do NOT bulk-read the index");
 
 		expect(text).toContain("<skills>");
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
 
-	it("lists matching rules and directs an on-demand read", async () => {
+	it("lists matching rules and gates the read on known paths", async () => {
 		const rulePath = path.join(tempDir, "typescript.md");
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
@@ -678,9 +680,8 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		const text = systemPrompt.join("\n\n");
-		const instruction = "Read matching `skill://<name>` or `rule://<name>` before proceeding.";
-
-		expect(text.split(instruction)).toHaveLength(2);
+		expect(text).not.toContain("Read matching `skill://<name>` or `rule://<name>` before proceeding.");
+		expect(text).toContain("Load domain rules only when working in a known target path");
 		expect(text).toContain("<domain-rules>");
 		expect(text).toContain("- typescript (**/*.ts): TypeScript constraints");
 	});

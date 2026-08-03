@@ -129,6 +129,42 @@ describe("EventController + Cursor todo bridge", () => {
 		expect(f.showWarning).toHaveBeenCalledWith("Todo update failed. Progress may be stale until todo succeeds.");
 	});
 
+	it("suppresses the failure warning for a never-invoked skipped todo", async () => {
+		// A queued-steering skip is error-shaped on the provider envelope but was
+		// NOT executed: it must not raise the stale-panel warning.
+		const f = createFixture();
+
+		await f.controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "todo-skip",
+			toolName: "todo",
+			isError: true,
+			result: {
+				content: [{ type: "text", text: "Skipped due to queued user message" }],
+				details: { __synthetic: true, source: "prestart_queued_steering", executed: false },
+			},
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+
+		expect(f.showWarning).not.toHaveBeenCalled();
+	});
+
+	it("still warns for a started-aborted todo (executed:true)", async () => {
+		const f = createFixture();
+
+		await f.controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "todo-abort",
+			toolName: "todo",
+			isError: true,
+			result: {
+				content: [{ type: "text", text: "Tool execution was aborted after it started" }],
+				details: { __synthetic: true, source: "started_aborted_user", executed: true },
+			},
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+
+		expect(f.showWarning).toHaveBeenCalledTimes(1);
+	});
+
 	it("settles a card whose completion arrived before the streamed block created it", async () => {
 		// The Cursor bridge's `tool_execution_end` is a synchronous callback fired
 		// mid-parse, while the `toolcall_start` for the same call is queued on

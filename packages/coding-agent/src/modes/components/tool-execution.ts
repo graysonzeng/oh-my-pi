@@ -18,6 +18,7 @@ import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
+import { classifyToolPresentation } from "../../presentation/tool-status";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
@@ -961,7 +962,16 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// Non-self-framing tools (custom/extension renderers and the generic
 		// fallback) get a padded, state-tinted block — built-ins that draw their
 		// own frame opt out below via the framed-component mark.
-		const stateBgKey = this.#isPartial ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
+		const presentation = this.#result ? classifyToolPresentation(this.#result) : undefined;
+		const stateBgKey = this.#isPartial
+			? "toolPendingBg"
+			: presentation === "skipped"
+				? "toolPendingBg"
+				: presentation === "aborted"
+					? "toolErrorBg"
+					: this.#result?.isError
+						? "toolErrorBg"
+						: "toolSuccessBg";
 		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
 
 		// Check for custom tool rendering

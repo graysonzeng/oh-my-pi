@@ -21,7 +21,33 @@ import { AgentRegistry } from "../registry/agent-registry";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import { sessionFilesFromDisk } from "./registry-helpers";
-import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+
+/**
+ * Session-scoped lineage session files: the current session plus its explicit
+ * bounded ancestors (nearest-first). `history://` searches these before any
+ * registry-derived or disk-scanned roots, so a fresh process without a
+ * registered `Main` still reaches persisted ancestors.
+ */
+function sessionFilesFromLineage(context: ResolveContext | undefined): Array<{ id: string; file: string }> {
+	const files: Array<{ id: string; file: string }> = [];
+	const seen = new Set<string>();
+	const add = (file: string | null | undefined, id: string | undefined) => {
+		if (!file || !id || seen.has(file)) return;
+		seen.add(file);
+		files.push({ id, file });
+	};
+	const lineage = context?.lineage;
+	if (lineage?.currentSessionFile) {
+		add(lineage.currentSessionFile, path.basename(lineage.currentSessionFile, ".jsonl"));
+	}
+	for (const root of lineage?.lineageRoots ?? []) {
+		add(root.canonicalPath, path.basename(root.canonicalPath, ".jsonl"));
+	}
+	return files;
+}
+
+import * as path from "node:path";
 
 /** Humanize a last-activity timestamp as `Ns/Nm/Nh/Nd ago`. */
 function formatAgo(timestamp: number): string {
@@ -55,7 +81,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "history";
 	readonly immutable = false;
 
-	async resolve(url: InternalUrl): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const agentId = url.rawHost || url.hostname;
 		const registry = AgentRegistry.global();
 		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
@@ -63,12 +89,32 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const visible = registry.list().filter(ref => ref.kind !== "advisor");
 
 		if (!agentId) {
-			const content = await this.#renderIndex(visible);
+			const content = await this.#renderIndex(visible, context);
 			return {
 				url: url.href,
 				content,
 				contentType: "text/markdown",
 				size: Buffer.byteLength(content, "utf-8"),
+			};
+		}
+
+		// Session-scoped lineage roots win over registry-derived and disk-scanned
+		// artifacts: a fresh process without `Main` still reaches ancestors, and
+		// two top-level sessions never cross-prioritize each other's lineage.
+		const lineageFiles = sessionFilesFromLineage(context);
+		const lineageHit = lineageFiles.find(
+			entry => entry.id === agentId || entry.id.toLowerCase() === agentId.toLowerCase(),
+		);
+		if (lineageHit) {
+			const messages = await loadSessionMessagesReadOnly(lineageHit.file);
+			const content = formatSessionHistoryMarkdown(messages, { title: `${lineageHit.id} (lineage)` });
+			return {
+				url: url.href,
+				content,
+				contentType: "text/markdown",
+				size: Buffer.byteLength(content, "utf-8"),
+				sourcePath: lineageHit.file,
+				notes: ["Source: session file (read-only, lineage)"],
 			};
 		}
 
@@ -147,7 +193,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async #renderIndex(refs: AgentRef[]): Promise<string> {
+	async #renderIndex(refs: AgentRef[], context?: ResolveContext): Promise<string> {
 		const entries: IndexEntry[] = refs.map(ref => ({
 			id: ref.id,
 			status: ref.status,
@@ -161,6 +207,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		for (const id of disk.keys()) {
 			if (registered.has(id)) continue;
 			entries.push({ id, status: "on disk", kind: "—", parent: "—", lastActivity: "—" });
+		}
+		// Merge session-scoped lineage roots (fresh-process ancestors).
+		for (const entry of sessionFilesFromLineage(context)) {
+			if (registered.has(entry.id)) continue;
+			entries.push({ id: entry.id, status: "lineage", kind: "—", parent: "—", lastActivity: "—" });
 		}
 
 		const lines: string[] = ["# Agents", ""];

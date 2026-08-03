@@ -20,7 +20,26 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { applyQuery, pathToQuery } from "./json-query";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
-import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+
+/**
+ * Artifacts dirs for the session-scoped lineage roots: each ancestor session
+ * file strips its `.jsonl` suffix to its artifacts dir (matching
+ * `artifactsDirectoryFor`). Ordered nearest-first; duplicates collapse.
+ */
+function artifactsDirsFromLineage(context: ResolveContext | undefined): string[] {
+	const dirs: string[] = [];
+	const addDir = (dir: string | null | undefined) => {
+		if (!dir) return;
+		if (!dirs.includes(dir)) dirs.push(dir);
+	};
+	const lineage = context?.lineage;
+	if (lineage?.currentSessionFile) addDir(lineage.currentSessionFile.slice(0, -6));
+	for (const root of lineage?.lineageRoots ?? []) {
+		addDir(root.canonicalPath.slice(0, -6));
+	}
+	return dirs;
+}
 
 /**
  * Handler for agent:// URLs.
@@ -32,7 +51,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	readonly scheme = "agent";
 	readonly immutable = true;
 
-	async resolve(url: InternalUrl): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
@@ -47,7 +66,11 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			throw new Error("agent:// URL cannot combine path extraction with ?q=");
 		}
 
-		const dirs = artifactsDirsFromRegistry();
+		// Session-scoped lineage roots (current session + explicit bounded
+		// ancestors) win over registry-derived current-process roots, so a fresh
+		// process without a registered `Main` still reaches persisted ancestors
+		// and two top-level sessions never cross-prioritize each other's lineage.
+		const dirs = [...artifactsDirsFromLineage(context), ...artifactsDirsFromRegistry()];
 		if (dirs.length === 0) {
 			throw new Error("No session - agent outputs unavailable");
 		}

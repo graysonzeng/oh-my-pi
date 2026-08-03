@@ -2260,6 +2260,13 @@ describe("agentLoop with AgentMessage", () => {
 		expect(skippedContent.text).toContain("Skipped due to queued user message");
 		expect(skippedContent.text).toContain("Do not count this skipped result as completed work");
 		expect(skippedContent.text).toContain("retry the skipped tool if it is still needed");
+		// The never-invoked sibling carries the structured pre-start marker so
+		// presentation consumers classify it as skipped, not failed.
+		expect(toolEnds[1].result.details).toEqual({
+			__synthetic: true,
+			source: "prestart_queued_steering",
+			executed: false,
+		});
 
 		// Queued message should appear in events after the tool results and before the next model call.
 		const eventSequence = events.flatMap(event => {
@@ -2522,6 +2529,77 @@ describe("agentLoop with AgentMessage", () => {
 		).toBe(true);
 	});
 
+	it("marks a started-then-aborted tool as executed with a started_aborted source", async () => {
+		// A steering interrupt lands while an interruptible tool is inside
+		// `execute()`, which then rejects on the aborted signal without producing
+		// usable output. This is a STARTED abort — `execute()` was entered — so
+		// the result must be `executed:true` with a `started_aborted_*` source,
+		// never `executed:false`, and must not be walkable as a never-invoked
+		// placeholder (retry must not re-execute a tool whose side effects may
+		// already exist).
+		const toolSchema = type({});
+		let steerReady = false;
+		let drained = false;
+		let observedAbort = false;
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "abortable",
+			label: "Abortable",
+			description: "Rejects when its signal aborts (mimics a tool cut off mid-run)",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				steerReady = true;
+				if (!signal?.aborted) {
+					const { promise, resolve } = Promise.withResolvers<void>();
+					signal?.addEventListener("abort", () => resolve(), { once: true });
+					await promise;
+				}
+				observedAbort = signal?.aborted === true;
+				throw new Error("execution cut off by abort");
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "abortable", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasSteeringMessages: () => steerReady && !drained,
+			getSteeringMessages: async () => {
+				if (steerReady && !drained) {
+					drained = true;
+					return [createUserMessage("interrupt")];
+				}
+				return [];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(observedAbort).toBe(true);
+		const toolEnds = events.filter(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		expect(toolEnds.length).toBe(1);
+		// Executed but aborted: not skipped, not a never-invoked placeholder.
+		expect(toolEnds[0]!.isError).toBe(true);
+		expect(toolEnds[0]!.result.details).toEqual({
+			__synthetic: true,
+			source: "started_aborted_user",
+			executed: true,
+		});
+	});
+
 	it("drains queued IRC interrupts by aborting an interruptible tool mid-wait", async () => {
 		const toolSchema = type({});
 		let ircReady = false;
@@ -2529,7 +2607,6 @@ describe("agentLoop with AgentMessage", () => {
 		let observedAbort = false;
 		let resolvedByTimeout = false;
 		const ircMessage = createUserMessage("irc interrupt");
-
 		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
 			name: "wait",
 			label: "Wait",

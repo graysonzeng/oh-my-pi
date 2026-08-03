@@ -24,6 +24,7 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
+import { classifyToolPresentation } from "../presentation/tool-status";
 import { obfuscateToolArguments, type SecretObfuscator } from "../secrets/obfuscator";
 import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
@@ -392,12 +393,19 @@ function redactShareMessage(
 				details: undefined,
 				content: redactShareContent(o, message.content, sharedRegexSecretValues),
 			} as AgentMessage;
-		case "toolResult":
+		case "toolResult": {
+			// Materialize a safe non-secret presentation status before the
+			// structured details are stripped: the HTML/share viewer must render
+			// skipped/aborted from this marker, never from raw `isError` alone
+			// (which stays error-shaped for never-invoked skips).
+			const presentationStatus = classifyToolPresentation(message);
 			return {
 				...message,
 				details: undefined,
+				presentationStatus,
 				content: redactShareContent(o, message.content, sharedRegexSecretValues) as (TextContent | ImageContent)[],
 			};
+		}
 		case "assistant":
 			// Drop opaque provider-replay state (encrypted reasoning / native history) the viewer
 			// never reads and we cannot redact field-by-field: `providerPayload`, any

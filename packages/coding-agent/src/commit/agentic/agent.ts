@@ -8,6 +8,7 @@ import typesDescriptionPrompt from "../../commit/prompts/types-description.md" w
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import { getMarkdownTheme } from "../../modes/theme/theme";
+import { classifyToolPresentation } from "../../presentation/tool-status";
 import { createAgentSession } from "../../sdk";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
@@ -133,7 +134,10 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 				toolArgsById.delete(event.toolCallId);
 				clearThinkingLine();
 				const toolLabel = formatToolLabel(stored.name);
-				const symbol = event.isError ? "" : "";
+				// A failure glyph requires an executed failure; a pre-start skip
+				// (error-shaped provider envelope) is a valid non-execution status.
+				const presentation = classifyToolPresentation(event.result);
+				const symbol = presentation === "failed" ? "\u2717" : presentation === "skipped" ? "\u21b7" : "\u2713";
 				process.stdout.write(`${symbol} ${toolLabel}\n`);
 				const argsLines = formatToolArgs(stored.args);
 				if (argsLines.length > 0) {

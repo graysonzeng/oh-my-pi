@@ -42,6 +42,15 @@ Use exactly this structure:
 1. [What should happen next]
 </output>
 
+<critical>
+The handoff document is load-bearing and self-contained. Every conclusion, decision, fact, and next step the reader needs MUST be written inline in this document.
+
+- Inline load-bearing content: objective, authorization, scope, confirmed facts, inferences, selected design, reviewer findings/verdicts (only those actually produced), acceptance criteria, and source citations. A fresh process MUST be able to continue from this document alone.
+- Cite stable repository sources by repository-relative path (e.g. `docs/superpowers/specs/….md`). Session artifacts (previous-session files, subagent outputs, transcripts) are cited by their canonical session-store reference (absolute path under the session root), never as repository-relative paths.
+- `agent://`, `history://`, `artifact://`, and `local://` URIs are EPHEMERAL session-scoped references. They MAY appear only as non-load-bearing provenance — and only when every conclusion they would support is already stated inline. NEVER present an ephemeral URI as a required next action or as the source of a load-bearing claim.
+- If an ephemeral URI would be load-bearing, either inline its content or rewrite it to a canonical session-store reference.
+</critical>
+
 {{#if additionalFocus}}
 <instruction>
 Additional focus: {{additionalFocus}}

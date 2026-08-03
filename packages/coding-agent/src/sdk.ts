@@ -1766,6 +1766,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
+			getLineageContext: () => sessionManager.getLineageContext(),
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
 			getEvalSessionId: () =>

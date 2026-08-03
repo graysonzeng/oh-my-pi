@@ -17,6 +17,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -73,6 +74,7 @@ function assistantMessage(content: Block[]): AssistantMessage {
 function createFixture() {
 	const chatContainer = new Container();
 	const sessionMock = { getToolByName: () => undefined, extensionRunner: undefined };
+	const tempCwd = "/tmp";
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
@@ -90,6 +92,7 @@ function createFixture() {
 		clearTransientSessionUi: () => {},
 		session: sessionMock,
 		viewSession: sessionMock,
+		sessionManager: { getCwd: () => tempCwd },
 	} as unknown as InteractiveModeContext;
 	return { controller: new EventController(ctx), chatContainer };
 }
@@ -194,5 +197,71 @@ describe("EventController read-group accretion", () => {
 		expect(hasImageComponent(assistant!)).toBe(false);
 		assistant?.setImagesVisible(true);
 		expect(hasImageComponent(assistant!)).toBe(true);
+	});
+
+	it("settles a grouped read exactly once when its end arrives before the start", async () => {
+		// End-before-start: the read's completion arrives with no component yet
+		// (the streamed block that would create the group has not been delivered).
+		// The controller must hold the completion, then settle the group exactly
+		// once when the block arrives — no dropped result, no empty orphan card.
+		const { controller, chatContainer } = createFixture();
+
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "read-early",
+			toolName: "read",
+			result: { content: [{ type: "text", text: "grouped result" }], isError: false },
+			isError: false,
+		} as AgentSessionEvent);
+
+		// No component yet; the completion is held, not dropped.
+		expect(readGroups(chatContainer)).toHaveLength(0);
+
+		// The streamed block uses the same tool-call id.
+		await streamCompletion(controller, [
+			{
+				type: "toolCall",
+				id: "read-early",
+				name: "read",
+				arguments: { path: "a.ts:1-50" },
+			} as Block,
+		]);
+		const groups = readGroups(chatContainer);
+		expect(groups).toHaveLength(1);
+		// The held result landed: the row resolved to its path and the pending
+		// spinner is gone (a settled success row, not an orphaned pending one).
+		const rendered = Bun.stripANSI(groups[0]!.render(120).join("\n"));
+		expect(rendered).toContain("a.ts:1-50");
+		expect(rendered).not.toContain("⏳");
+	});
+
+	it("routes an end-before-start full read to ToolExecutionComponent, not the group", async () => {
+		// A full (non-collapsed) read like `rule://...` must land on its full card
+		// even when its end arrives before the component exists — the previous
+		// fallback routed it to the read group where the unknown id was silently
+		// dropped, leaving the full card unsettled forever.
+		const { controller, chatContainer } = createFixture();
+
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "rule-read",
+			toolName: "read",
+			args: { path: "rule://oh-my-pi-catalog" },
+		} as AgentSessionEvent);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "rule-read",
+			toolName: "read",
+			result: { content: [{ type: "text", text: "rule body" }], isError: false },
+			isError: false,
+		} as AgentSessionEvent);
+
+		const fullCards = chatContainer.children.filter(
+			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
+		);
+		expect(fullCards).toHaveLength(1);
+		expect(fullCards[0]!.render(120).join("\n")).toContain("rule body");
+		// No group was created for the full read.
+		expect(readGroups(chatContainer)).toHaveLength(0);
 	});
 });

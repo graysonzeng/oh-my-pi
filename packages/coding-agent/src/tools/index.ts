@@ -26,6 +26,7 @@ import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
+import type { LineageContext } from "../session/session-lineage";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
@@ -239,6 +240,12 @@ export interface ToolSession {
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
+	/**
+	 * Session-scoped lineage context (current file + ordered ancestor roots)
+	 * derived live from the session manager per resolve. Absent on sessions
+	 * without lineage support (in-memory / headless tool hosts).
+	 */
+	getLineageContext?: () => Promise<LineageContext>;
 	/** Parent session journal used by tools that persist runtime lifecycle state. */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */

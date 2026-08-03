@@ -1331,6 +1331,7 @@ export class SelectorController {
 			hasUI: true,
 			settings: this.ctx.settings,
 			getSessionFile: () => this.ctx.sessionManager.getSessionFile() ?? null,
+			getLineageContext: () => this.ctx.sessionManager.getLineageContext(),
 			getSessionSpawns: () => null,
 			getPlanModeState: () => this.ctx.session.getPlanModeState(),
 		};

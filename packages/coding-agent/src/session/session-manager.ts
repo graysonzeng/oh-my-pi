@@ -56,6 +56,7 @@ import {
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
+import { type LineageContext, type LineageRoot, MAX_LINEAGE_DEPTH, normalizeParentSessionRef } from "./session-lineage";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
 import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
@@ -344,6 +345,7 @@ export type ReadonlySessionManager = Pick<
 	| "getUsageStatistics"
 	| "putBlob"
 	| "putBlobSync"
+	| "getLineageContext"
 >;
 
 interface SessionManagerStateSnapshot {
@@ -1282,7 +1284,9 @@ export class SessionManager {
 			timestamp,
 			cwd: this.#cwd,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
-			parentSession: parentSessionId,
+			// New writes persist a canonical absolute session-file path so
+			// fresh-process lineage resolution never depends on the registry.
+			parentSession: path.resolve(oldSessionFile),
 			providerPromptCacheKey: this.#header.providerPromptCacheKey ?? parentSessionId,
 		};
 		this.#sessionName = this.#header.title;
@@ -1702,6 +1706,47 @@ export class SessionManager {
 	getArtifactsDir(): string | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
 		return artifactsDirectoryFor(this.#sessionFile);
+	}
+
+	/**
+	 * Lineage roots for the current session: ordered ancestor session files
+	 * (nearest-first) resolved read-only from the persisted `parentSession`
+	 * chain, bounded by depth and cycle/missing/malformed/unsafe diagnostics.
+	 * Sessions without a file (in-memory) degrade to an empty context.
+	 */
+	async getLineageContext(): Promise<LineageContext> {
+		const file = this.getSessionFile();
+		if (!file) return { currentSessionFile: null, lineageRoots: [] };
+
+		const roots: LineageRoot[] = [];
+		const seen = new Set<string>([path.resolve(file)]);
+		let cursor = path.resolve(file);
+		for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth++) {
+			let headerParent: string | undefined;
+			try {
+				const entries = await loadEntriesFromFile(cursor, this.#storage);
+				headerParent = entries.find(entry => entry.type === "session")?.parentSession;
+			} catch {
+				// Missing/deleted/malformed parent: stop the walk, keep inline
+				// conclusions reachable.
+				break;
+			}
+			if (headerParent === undefined) break;
+			const { ref, diagnostic } = normalizeParentSessionRef(headerParent, this.#sessionDir, this.#cwd);
+			if (diagnostic) break;
+			if (!ref) break;
+			if (ref.kind === "legacy-session-id") {
+				// Legacy IDs resolve through bounded store lookup; no path is
+				// derivable from the header alone.
+				break;
+			}
+			const canonical = ref.canonicalPath;
+			if (seen.has(canonical)) break; // cycle
+			seen.add(canonical);
+			roots.push({ canonicalPath: canonical, depth });
+			cursor = canonical;
+		}
+		return { currentSessionFile: file, lineageRoots: roots };
 	}
 
 	adoptArtifactManager(manager: ArtifactManager): void {
@@ -2306,7 +2351,9 @@ export class SessionManager {
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
 		manager.#resetToNewSession(
 			{
-				parentSession: sourceHeader?.id,
+				// forkFrom persists the canonical absolute source path so
+				// fresh-process lineage resolution stays registry-free.
+				parentSession: path.resolve(sourcePath),
 				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
 			},
 			options?.sessionFile,
