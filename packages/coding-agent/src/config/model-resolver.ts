@@ -1108,9 +1108,25 @@ export function resolveAgentModelPatterns(options: AgentModelPatternResolutionOp
 	if (overridePatterns.length > 0) return overridePatterns;
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
-	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
 	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
+
+	// A multi-candidate agent model may list a session-inherited marker (e.g.
+	// "@task") as one fallback among literal candidates. Role expansion cannot
+	// resolve that marker — only the single-pattern form inherits — so expand it
+	// to the session fallback pattern (the main agent's model) here, keeping it
+	// a real candidate. Without a session pattern the marker is dropped.
+	let resolvedAgentModel = agentModel;
+	if (singleAgentPattern === undefined && normalizedAgentPatterns.some(isSessionInheritedAgentPattern)) {
+		const sessionFallback =
+			activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
+		const expanded = normalizedAgentPatterns.flatMap(pattern =>
+			isSessionInheritedAgentPattern(pattern) ? (sessionFallback ? [sessionFallback] : []) : [pattern],
+		);
+		resolvedAgentModel = expanded;
+	}
+
+	const configuredAgentPatterns = resolveConfiguredModelPatterns(resolvedAgentModel, settings);
 	if (configuredAgentPatterns.length > 0) {
 		if (
 			singleAgentPattern === formatModelRoleAlias("task") ||

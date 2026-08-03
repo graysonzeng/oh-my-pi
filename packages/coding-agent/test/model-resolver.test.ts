@@ -924,6 +924,31 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["openai/gpt-4o"]);
 	});
 
+	test("expands a session-inherited marker inside a candidate list to the session fallback", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: ["gateway/gpt-5.6-sol:xhigh", "gateway/claude-opus-5:max", "@task"],
+			settings,
+			activeModelPattern: "gateway/deepseek-v4-flash",
+		});
+
+		expect(result).toEqual(["gateway/gpt-5.6-sol:xhigh", "gateway/claude-opus-5:max", "gateway/deepseek-v4-flash"]);
+	});
+
+	test("drops a session-inherited marker when no session pattern exists", () => {
+		const settings = Settings.isolated();
+
+		const result = resolveAgentModelPatterns({
+			agentModel: ["gateway/gpt-5.6-sol:xhigh", "@task"],
+			settings,
+		});
+
+		expect(result).toEqual(["gateway/gpt-5.6-sol:xhigh"]);
+	});
+
 	test("slow priority falls forward to Opus 4.8 before older Opus aliases", () => {
 		const settings = Settings.isolated();
 		const patterns = resolveAgentModelPatterns({ agentModel: "@slow", settings });
