@@ -145,6 +145,7 @@ modelRoles:
   - settings：`workflow.qualityRoutes.<tier>.<role>` 扩层或 `modelRoles` 细分角色（如 `reviewer.mechanical` / `reviewer.deep`）；显式分流不靠 LLM 自猜。
   - 关键不变量：reviewer 与 implementer 异 lineage、provider attestation、effort 支持事实由 catalog 校验；任何分流变更都进 routing audit。
 - **实施步骤**：①定义显式 task class/severity 分类 → ②role route 扩展 → ③receipt/audit → ④focused tests → ⑤A/B arm（与 auto-thinking 对 gen 的影响分层，不双算）。
+- **评审质量约束**：「弱草稿 PASS 早」是评审偏置而非质量证据（§8.1.4），不得作为快速模型合格的验收依据；分流后的快速评审必须携带反锚定清单与规格锚定 FAIL（§8.2）。
 
 ### 4.3 方向三：验证闭环的机制化（确定性最高、成本最低）
 
@@ -167,6 +168,7 @@ modelRoles:
 - settings：`performance.orchestration.*`（默认关闭）：`parallelReview.enabled`、`parallelReview.maxConcurrent`、`concurrencyDeclaration` 合同。
 - receipt：每次并行发起记录声明边界、实际并发、汇合结果，进 routing audit 现有途径。
 - **实施步骤**：①gate 并发原语（显式并发组声明）→ ②reviewer 并行 + finding 聚合/去重 → ③work package/独立切片并行 → ④receipt + focused tests → ⑤A/B arm（父 blocked interval 与非 overlap ledger）。
+- **评审质量约束**：并行放大的每个 reviewer 均须满足 §8 反锚定清单（一致性要求），避免并行放大攻击面偏置；finding 去重时保留规格引用。
 
 ### 4.5 方向五：eval 门禁迁出 bridge（单次最长 13.9m）
 
@@ -222,6 +224,7 @@ modelRoles:
 - **收益量化结论**：[算术上限] 方向二（角色静态细分）40-60h > 方向一（上下文体积事前管理）10-18h > 方向四（门禁链并行）7-10h > 方向三 3-6h > 方向五 2-3h。核心必做项一、四覆盖「风险低、机制性」高收益；收益最大的方向二列为重点后续项深入设计（§4.2）；收益不得相加，组合 arm 只报 `S_combined`。
 - 所有方向复用现有 canonical owner，独立开关、A/B、回滚纪律与 long-session 设计一致；不新增第二套路由/压缩/等待/缓存/验证引擎。
 - 本设计为 design-only；review 后无论 verdict 如何均停止在设计阶段。
+- 评审质量约束（2026-08-04 用户补充，§8）：评审 PASS 是「内部一致性」信号而非「最优性」信号；所有评审路径必须携带反锚定清单（列草案未覆盖维度）+ 规格锚定 FAIL + PASS 证据密度；评审-refine 1-2 轮封顶，分歧升级强模型重写。
 
 ## 7. Handoff
 
@@ -230,6 +233,7 @@ modelRoles:
 - 评审输入：本设计文档（docs/superpowers/specs/2026-08-03-latency-defaults-gaps-design.md）+ 其引用输入（docs/long-session-latency-analysis.md、docs/superpowers/specs/2026-08-03-long-session-performance-optimization-design.md）。
 - 评审模型：gpt-5.6-sol xhigh（用户明确指定），与 author（deepseek-v4-flash:max）异模型。
 - 评审范围含用户指定的核心范围（§4.0）：上下文体积事前管理（普通会话 truncation）、workflow 门禁链/编排层并行、主 agent 并发编排边界——评审其杠杆、风险、实现边界与必做/酌情划分是否合理。
+- 评审范围含 2026-08-04 用户补充的 §8（评审质量背景与反锚定清单需求）——核验「PASS 早 ≠ 质量高」的机制判断、§8.2 清单的可行性，以及 §4.2/§4.4 的联动约束。
 - 评审方式：宿主原生只读 review agent（`.omp/agents/sol-xhigh-reviewer.md`），不通过 shell 启动模型 CLI，不由 author 自审。
 - 评审必须覆盖：背景事实准确性、现状评估（覆盖矩阵）合理性、方案 B 盲区判断、方向一~五的杠杆/风险/验收、推荐顺序、不双算规则、A/B 与停止条件。
 - 评审结论四选一：PASS / PASS_WITH_NOTES / NEEDS_REVISION / NEEDS_REDESIGN，附可复查证据。
@@ -244,3 +248,32 @@ modelRoles:
 
 本设计 implementation_authorization=design-only；评审完成后无论 verdict 如何都停止，不进入实现、不修改仓库代码。
 ```
+
+## 8. 评审质量背景与反锚定清单需求（2026-08-04 用户补充）
+
+### 8.1 背景思路：评审质量的调研结论
+
+针对「多模型评审 vs 单模型」「弱草稿+强评审 vs 强直接生成」的调研与用户反馈，结论如下（[文献] 外部研究；[本仓库观测] 本仓库事实；[推导] 推断）：
+
+1. **多模型投票不是普遍成立的**。[文献] MoA（arXiv 2406.04692，纯开源模型分层集成 AlpacaEval 2.0 LC win rate 65.1% > GPT-4o 57.5%）与 Self-Consistency（Wang et al. 2022，GSM8K +17.9%）的增益集中在**可验证答案类任务**，且依赖模型不同源、有聚合层；普林斯顿 Self-MoA（arXiv 2502.00674）显示混合弱模型反而拉低均值——**质量 > 多样性**。
+2. **弱草稿+强评审受草案覆盖度封顶**。[文献] 评审锚定在草案框架内：草案未覆盖的维度评审无从挑错；Huang et al.（ICLR 2024）显示无外部反馈的纯内部评审在推理任务上会降质——方案评审正属此风险区。
+3. **强草稿+强评审是开放质量类任务中上限最高的配置**。[文献] Self-Refine（NeurIPS 2023）同强模型 draft→critique→refine 平均 +20% absolute over 一步生成；CriticGPT（OpenAI 2024）证明强评审对强输出有真实增量（63% 案例评审更被标注者偏好）。但收益递减，评审-refine 1-2 轮封顶；可验证任务上采样投票更稳（arXiv 2607.28576）。
+4. **[本仓库观测] flash 出稿 + gpt-5.6-sol 评审的 PASS 早于 opus 出稿 + gpt-5.6-sol 评审**。[推导] 这不是弱草稿质量更好，而是评审偏置，三个机制：①**攻击面偏置**——评审是「找错」任务，输出量随被评审内容丰富度膨胀，平庸草稿找不到足够的错；②**遵从度不对称**——弱模型对 FAIL 意见顺从、快速收敛，强模型抵抗、收敛慢；③**家族偏置**——gpt-5.6-sol 对 claude 系（竞争家族）更挑剔（[文献] Yang et al. 2026 量化 judge 自偏好）。
+
+**结论：[推导] 评审 PASS 是「内部一致性」信号，不是「最优性」信号；PASS 早 ≠ 方案质量高。** 把「更早 PASS」当作快速模型合格的验收证据，会系统性偏袒弱草稿。
+
+### 8.2 反锚定清单需求（评审 prompt 必做项）
+
+适用对象：本设计全部评审路径——§4.2 方向二的分流评审、§4.4 方向四的并行评审、以及后续方案的 review 门禁（`.omp/agents/flash-reviewer.md`、`.omp/agents/sol-xhigh-reviewer.md`、`prompts/agents/reviewer.md` 等价物）。每条评审必须满足：
+
+1. **反锚定清单**：显式列出「草案**未覆盖**的约束、风险、备选方向」，而不是只对照草案找错——只挑错 = 困在草案框架内。
+2. **规格锚定 FAIL**：每个 FAIL/NEEDS_REVISION 意见必须引用被违反的具体规格条目（如「违反 §4.1 子项 1 的 X」）；禁止无规格依据的泛泛意见。
+3. **PASS 判定标准**：PASS 基于逐条核对规格清单，而非「没找到足够的错」；评审结论附证据密度（核对条目数、提出问题的具体条目数）。
+4. **收敛控制**：评审-refine 循环 1-2 轮封顶；分歧/高风险样本升级强模型重写，不在弱模型上反复打磨。
+5. **可验证维度走客观检查**：测试/lint/规格 check 是客观锚点，LLM 评审只负责开放维度。
+
+### 8.3 对本设计各方向的联动
+
+- §4.2 方向二（机械类 review 走 luna/terra）：分流后的快速评审必须携带 §8.2 清单；「弱草稿 PASS 早」不得作为快速模型合格的验收依据。
+- §4.4 方向四（并行评审）：并行放大的每个 reviewer 均须满足 §8.2，避免并行放大攻击面偏置；finding 去重时保留规格引用。
+- 验收补充：涉及评审路由/并行的 arm，质量守卫增加「PASS 证据密度」与「反锚定清单遵守率」两项观察指标。

@@ -132,6 +132,7 @@
 
 **默认模型路由 frontmatter 调整**：
 - `prompts/agents/reviewer.md`：`model: "@slow"` → `model: "gateway/gpt-5.6-sol:xhigh"`。
+- `prompts/agents/reviewer.md` prompt 正文新增反锚定清单段（§10.2）——评审不得只对照草案找错，须列草案未覆盖维度并以规格锚定 FAIL。
 - `task/agents.ts` 中 task worker 条目的 `model: "@task"` → `model: "gateway/deepseek-v4-flash:max"`（方案 A：仅影响默认 worker spawn；方案 B 改 `@task` 角色别名默认，波及面大，不推荐）。
 - `scout.md` / `librarian.md` / `designer.md`：不动。
 - 用户覆盖一律走既有 `task.agentModelOverrides`（`/agents` 面板）。
@@ -167,9 +168,39 @@ Release note：默认委派姿态改为 prefer 主动（自动并行感知 + 阶
 - **R8 planner 接线遗漏**：bundled agent 非目录扫描，`task/agents.ts` 的 `EMBEDDED_AGENT_DEFS` 漏接线 = agent 不存在。实施时与 `system-prompt.md` 措辞同 PR 落地，测试断言 `loadBundledAgents()` 含 planner。
 - **R9 planner 与既有 workflowz `planner.md` 命名**：`prompts/workflow/planner.md` 是 workflowz 专用 prompt（不经 agents 注册），新增 `prompts/agents/planner.md` 与之同名不同目录，互不冲突；agent 名 `planner` 不与现有 bundled agents 重名（接线测试覆盖）。
 - **R7 既有显式配置**：已存 `"default"` 配置与 boolean→enum 迁移不受默认翻转影响。
+- **R10 评审偏置（PASS ≠ 质量）**：implement 默认 flash 草稿 PASS 早于 opus 草稿是已知偏置（§10.1.4），不得把「PASS 早」作为质量或性能验收证据；PASS 判定必须规格锚定（§10.2.3），reviewer prompt 的 §10.2 清单是质量底线。
 
 ## 9. 实施顺序
 
 1. settings 默认翻转 + UI 文案（6.1）→ 2. 共享 eager 块（6.2）→ 3. 新增 `planner.md` + `task/agents.ts` 接线 + 模型路由 frontmatter（6.3）→ 4. 测试（6.4）→ 5. changelog（6.5）→ 6. 验证（§7）。
 
 改动面：3 个源文件（settings-schema / system-prompt.md / task-agents.ts）+ 2 个 agent md（新增 planner、改 reviewer）+ 1~2 个测试文件 + changelog，无架构变动、无 workflowz/eval 路径改动。
+
+## 10. 评审质量背景与反锚定清单需求（2026-08-04 用户补充）
+
+### 10.1 背景思路：评审质量的调研结论
+
+调研与用户反馈的一致结论：**「多个便宜模型评审 > 单一昂贵模型」与「弱草稿+强评审 > 强直接生成」都不是普遍成立的**（[文献] 外部研究；[本仓库观测] 本仓库事实；[推导] 推断）：
+
+1. **多模型投票不是普遍成立的**。[文献] MoA（arXiv 2406.04692，纯开源模型分层集成 AlpacaEval 2.0 65.1% > GPT-4o 57.5%）与 Self-Consistency（Wang et al. 2022，GSM8K +17.9%）的增益集中在可验证答案类任务，依赖模型不同源、有聚合层；普林斯顿 Self-MoA（arXiv 2502.00674）显示混合弱模型反而拉低均值——质量 > 多样性。
+2. **弱草稿+强评审受草案覆盖度封顶**。[文献] 评审锚定在草案框架内：草案未覆盖的维度评审无从挑错；Huang et al.（ICLR 2024）显示无外部反馈的纯内部评审在推理任务上会降质——方案评审正属此风险区。
+3. **强草稿+强评审是开放质量类任务中上限最高的配置**。[文献] Self-Refine（NeurIPS 2023）+20% absolute over 一步生成；CriticGPT（OpenAI 2024）证明强评审对强输出有真实增量。收益递减，评审-refine 1-2 轮封顶。
+4. **[本仓库观测] deepseek-v4-flash 出稿 + gpt-5.6-sol 评审的 PASS 早于 claude-opus-5 出稿 + gpt-5.6-sol 评审**。[推导] 这是评审偏置而非草稿质量差异：①**攻击面偏置**——评审输出量随草稿内容丰富度膨胀，平庸草稿找不到足够的错；②**遵从度不对称**——弱模型对 FAIL 顺从、收敛快，强模型抵抗、收敛慢；③**家族偏置**——gpt-5.6-sol 对 claude 系（竞争家族）更挑剔（[文献] Yang et al. 2026 量化 judge 自偏好）。
+
+**结论：[推导] 评审 PASS 是「内部一致性」信号，不是「最优性」信号；PASS 早 ≠ 方案质量高。**
+
+### 10.2 反锚定清单需求（reviewer agent prompt 必做项）
+
+适用对象：本设计阶段链中的 review 阶段（planner → reviewer → implement → reviewer 的 reviewer 均指 `prompts/agents/reviewer.md`）。评审 prompt 必须满足：
+
+1. **反锚定清单**：显式列出「草案**未覆盖**的约束、风险、备选方向」，而不是只对照草案找错。
+2. **规格锚定 FAIL**：每个 FAIL 意见必须引用被违反的具体规格/需求条目；禁止无依据的泛泛意见。
+3. **PASS 判定标准**：PASS 基于逐条核对规格清单，而非「没找到足够的错」；评审结论附证据密度。
+4. **收敛控制**：评审-refine 1-2 轮封顶；分歧/高风险样本升级强模型重写。
+5. **可验证维度走客观检查**：测试/lint/规格 check 是客观锚点，LLM 评审只负责开放维度。
+
+### 10.3 对本设计的影响
+
+- §5 路由表 implement=`deepseek-v4-flash:max` + review=`gpt-5.6-sol:xhigh` 的配对下，flash 草稿 PASS 早于 opus 草稿是已知偏置（§10.1.4）——**不得把「PASS 早」当作实现模型合格的证据**；PASS 判定必须规格锚定（§10.2.3）。
+- §6.3 reviewer.md 变更除 frontmatter 模型外，prompt 正文须新增 §10.2 反锚定清单段。
+- 用户若经 `task.agentModelOverrides` 把 review 换成更弱模型，§10.2 清单是质量底线，不可省略（R10）。
