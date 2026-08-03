@@ -217,3 +217,93 @@ Skeptic gap closure (2026-07-26T12:02Z): re-executed full workflow suite + check
 | Final independent review | Provider-attested PASS on both axes; zero blockers |
 
 Engineering delivery is verified. Goal closeout was attempted only after all gates passed, but `goal complete` returned `cannot complete goal because no goal is active`; two fresh `goal get` calls also returned no active Goal. No replacement Goal was created per the user constraint.
+
+---
+
+## Quality-routing reliability review — partial handoff checkpoint
+
+| Field | Value |
+| --- | --- |
+| updated_at | 2026-08-02 |
+| branch / HEAD | `workflow` / `6c66726938686150bbbd9a94effbfd2f3af26ff4` |
+| fixed review point | `bbde26097` |
+| status | `partial_handoff_requested_by_user`; completion gates not rerun |
+| handoff | `docs/superpowers/plans/2026-08-02-quality-routing-reliability-handoff.md` |
+| lifecycle | Existing Goal Mode/design owner; Aegis adapter + systematic debugging |
+| worktree | Preserved; no reset/checkout/clean/commit/push. Unrelated `docs/research-async-compaction.md` appeared untracked and was not touched. |
+
+### Completed local repair slices
+
+1. Canonical identity collector rejects conflicting model/checkpoint coordinates within one provider response.
+2. Quality resume rejects invalid policy JSON, missing required snapshot, and mismatched/corrupt snapshot artifacts before attempts; valid legacy policies retain legacy routing.
+3. Quality start preflight runs before workflow-row persistence, preventing unreachable `created` rows on fail-closed preflight errors.
+4. Work packages containing `dependsOn` conservatively fall back to one whole-plan serial implementation call.
+5. Runtime prompt assembly no longer uses artifact-inclusion byte limits or heuristic eviction for artifactless untyped/assembled context; provider payload and receipt/ledger assembly remain aligned.
+6. Self-reported policy experiment receipts cannot activate production levers without a verifiable benchmark rollout authority; compiler remains shadow-only.
+7. Pre-existing Codex SSE regression fix (`preferWebsockets: false`) retained.
+
+### Fresh partial evidence
+
+- Changed workflow focused group: 104 pass / 0 fail across 11 files.
+- Post-format quality + policy group: 21 pass / 0 fail.
+- Provider response + Codex stream: 84 pass / 0 fail.
+- `packages/coding-agent` `bun check`: PASS.
+
+These checks are partial checkpoint evidence only. Full workflow/model/catalog suites, package checks, build, CLI smoke, local config validation, exact probes, balanced/critical live E2Es, and independent Standards/Spec reviews remain required after all source repairs.
+
+### Open blocking slices
+
+1. Durable ordinary strict implement/repair write-commit state and applied-patch resume without model/merge replay.
+2. Merge/cancel atomic point: an apply completing after cancel must not become a false pure-cancelled workflow.
+3. Live benchmark runtime provenance from verified child stage attestations/routing audit; fallback/missing/mixed identity must fail closed.
+4. Full BenchmarkReport/current candidate/model-facts/approval binding only if policy activation is re-enabled; otherwise keep compiler shadow.
+5. Remaining context persistence/integrity negative coverage and every original fresh completion gate.
+
+---
+
+## Quality-routing reliability — completion checkpoint
+
+| Field | Value |
+| --- | --- |
+| updated_at | 2026-08-03 |
+| branch / HEAD | `workflow` (dirty worktree preserved; no reset/checkout/clean/commit/push) |
+| status | `delivery_verified` — all reliability blockers closed; every original fresh gate re-run |
+| lifecycle | Existing Goal Mode owner; Aegis adapter mode, `verification-before-completion` receipt emitted |
+| reviewer | Provider-attested Claude Fable 5 high, cross-lineage (author = deepseek lineage) |
+
+### Source repairs completed this checkpoint
+
+1. **Merge-settlement contract split** (`engine.ts`): a successful live merger return now persists durable `applied` immediately after verifying output patch path + SHA-256, without recovery-style git proof (insertion-only hunks and legitimately applied patches previously reported false drift). Merger throw/cancel/unknown outcomes reconcile the persisted patch against the tree; every resume of `prepared`/`applied` state retains strict `reverseApplies=true && forwardApplies=false` proof and fails closed on missing/reverted/empty/hash-mismatched/ambiguous evidence. No model/merge replay when applied is proven.
+2. **Merge/cancel atomicity**: `cancel()` captures the registered runner settlement barrier before signalling and waits for the in-flight merge outcome to be persisted before writing terminal `cancelled`; internal abort paths persist cancellation directly (no self-deadlock). New failure-injection tests cover crash-after-merge-before-applied-persist resume (zero model/merge calls) for ordinary strict implement AND repair, plus the cancel-during-merge barrier.
+3. **Test fixture correctness**: work-package fixture patches now match real fixture file content (`-before-a`/`+after-a`), and `SAMPLE_PATCH` uses the canonical git insertion form with context, so test mergers' genuine `git apply` succeeds and the reverse/forward proof is unambiguous.
+4. **Negative evidence coverage**: missing (unreadable), empty (ambiguous), hash-mismatched, and ambiguous (both-direction apply) persisted patch evidence fail closed on resume; reverted was already covered.
+5. **Live benchmark child provenance** (prior slice, verified): derived solely from child runtime-evidence + routing-audit; outer session model never used; fallback/missing/mixed fail closed.
+6. **Policy compiler shadow** (verified): `decidePolicy` always appends `verified_rollout_authority_unavailable`, so no self-consistent receipt can reach `active`; `validatePolicyExperimentReceipt` recomputes the decision, rejecting forged receipts. No canonical BenchmarkReport authority producer exists — shadow is the sanctioned state per the objective.
+7. **Pre-existing `packages/ai` flake fixed**: `resolveAwsCredentials` detached single-flight promise rejection was unhandled after all callers aborted (hung `credential_process`/IMDS), corrupting later test files; a promise sink keeps it handled while `raceWithSignal` still delivers rejections to callers.
+
+### Fresh verification evidence (all after the last source edit)
+
+| Gate | Result |
+| --- | --- |
+| Focused engine group (6 files) | 81 pass / 0 fail |
+| Expanded focused group (10 files) | 115 pass / 0 fail |
+| Full workflow suite | 511 pass / 0 fail across 59 files |
+| model-policy + model-optimization + catalog suites | 605 pass / 0 fail across 80 files |
+| Full `packages/ai` suite | 3795 pass (337 skip) / 0 fail across 328 files |
+| `packages/coding-agent` check | PASS (biome + tsgo) |
+| `packages/ai` check | PASS |
+| `packages/catalog` check | PASS |
+| coding-agent binary build | PASS; generated inputs reset, no leftovers |
+| CLI smoke | `omp/17.1.8` version + help render |
+| Local config validation | balanced/critical snapshots compile; fingerprints match frozen `3f18ee9c…`/`f2e9bfe9…`; `maxBudgetUsd=5`; `degradedMode=false` |
+| Exact live probes | 6/8 exact-available; `fable-5:max`→opus-4-8 and `grok-4.5:high`→`grok-4.5-build` mismatches fail closed |
+| Fresh balanced E2E | PASS; `wf_71bb5364…` completed; Sol→Opus→Luna→Fable; only `src/math.ts` changed; $0.74 |
+| Fresh critical E2E | PASS; `wf_03ee0919…` completed; grok plan-review mismatch → Sol fallback; opus code-reviewer skipped for author-lineage conflict; only `src/math.ts` changed; $1.17 |
+| E2E total live spend | ~$1.91 + ~$1.40 review + probes — under the $5 cap |
+| Cross-lineage review | Fable 5 high, provider-attested; Standards PASS / Spec PASS; 0 blockers; 29 non-blocking notes |
+
+### Residual risks (accepted, non-blocking)
+
+- Canonical BenchmarkReport rollout authority intentionally NOT implemented; compiler stays shadow per the objective's sanctioned alternative.
+- Live E2Es are single-run per tier (not repeated); they prove route availability/execution identity, not statistical quality.
+- Probe-time gateway negotiation can report a tuple unavailable that later executes exactly (fable-5:max); both paths enforce exact-match fail-closed, so this is observation noise, not a routing defect.

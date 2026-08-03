@@ -54,9 +54,9 @@ State lives in SQLite (`workflow.storagePath` or default `workflow.db`). Artifac
 
 Exclusive `runner_owner` claims prevent two runners from advancing the same workflow silently.
 
-Applied work-package recovery does not trust persisted `changesApplied` state alone. The engine reads the persisted aggregate patch and proceeds only when the reverse patch applies to the current worktree while the forward patch does not; missing, reverted, or ambiguous evidence fails closed without rerunning implementers or the merge seam.
+Strict write stages commit through a durable `prepared → applied` state machine. Before the merge starts, the engine persists a `prepared` state with the validated implementation artifact, the aggregate patch path + SHA-256, identity receipt, approved scope, and stage/attempt. A live merger that reports success is trusted to have applied: the engine verifies the persisted patch is byte-identical to the prepared hash and persists `applied` immediately, without recovery-style git proof. A merger that throws, is cancelled, or reports failure is reconciled against the tree. On every resume of `prepared`/`applied` state, the engine independently proves the persisted aggregate patch is still present and applicable only in reverse (reverse applies, forward does not); missing, reverted, empty, hash-mismatched, or ambiguous evidence fails closed without rerunning implementers or the merge seam.
 
-Stuck lock after a hard crash (previous process died holding the lock): resume with `forceUnlock: true` (tool: `workflow op=resume forceUnlock=true`), or call engine `forceUnlock(workflowId)`. **Do not** use `cancel` solely to clear a lock if you still intend to resume — cancel is terminal. In-process cancel also aborts any registered running engine via the abort registry.
+Stuck lock after a hard crash (previous process died holding the lock): resume with `forceUnlock: true` (tool: `workflow op=resume forceUnlock=true`), or call engine `forceUnlock(workflowId)`. **Do not** use `cancel` solely to clear a lock if you still intend to resume — cancel is terminal. In-process cancel also aborts any registered running engine via the abort registry and waits for that runner's settlement barrier, so an in-flight merge outcome is persisted before the terminal `cancelled` state is written.
 
 ## Blocked states
 
@@ -117,7 +117,7 @@ Strict implement/repair calls run isolated with `apply: false`. The engine verif
 - New review findings enter engine state as `open`; only evidence-bearing engine actions resolve/reject them
 - Final verify fails closed on every unresolved **blocking** finding (including P2/P3 from `changes_requested`)
 - Write-stage crash → `blocked` (no silent re-run)
-- Abort registration is owner-scoped so concurrent resume/cancel cannot unregister another runner
+- Abort registration is owner-scoped so concurrent resume/cancel cannot unregister another runner; `cancel` waits for the in-flight runner to settle before persisting terminal `cancelled` state
 - Authentication / transient provider errors advance through explicit profile fallbacks before failing
 - Secret-like content redacted in durable artifacts, error summaries, and verifier logs
 - Context templates live under `prompts/workflow/context-*.hbs.md`

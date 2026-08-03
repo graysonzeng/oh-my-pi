@@ -5,6 +5,7 @@
 ### Fixed
 
 - Added an explicit standard `/responses` endpoint mode for Codex Responses transports so custom gateways can use WebSockets and fall back to HTTP/SSE on the same URL.
+- Sunk the detached single-flight AWS credential resolution promise: its late rejection (hung `credential_process`, SSO, or IMDS timeout) after every caller aborted was an unhandled rejection that corrupted the host process and made later test files fail; it is now delivered to racing callers via `raceWithSignal` and otherwise swallowed.
 - Fixed Moonshot MFJS tool schemas that combine root object constraints with `anyOf`/`oneOf` by distributing compatible constraints into each object branch.
 
 ### Added
