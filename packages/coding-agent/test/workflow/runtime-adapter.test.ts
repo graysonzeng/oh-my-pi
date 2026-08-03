@@ -1,7 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ArtifactManager } from "../../src/session/artifacts";
+import type { ContextEntry } from "../../src/workflow/context-ledger";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import {
 	RuntimeAdapter,
@@ -44,6 +47,27 @@ function baseRequest(signal?: AbortSignal, overrides: Partial<WorkflowAgentReque
 		signal,
 		...overrides,
 	};
+}
+
+const LARGE_CONTEXT_ATTACHMENT = "ATTACHMENT_LARGE_PROVIDER_SENTINEL\n".repeat(128);
+
+function contextFailureEntries(): ContextEntry[] {
+	return [
+		{
+			id: "attachment-primary",
+			bucket: "artifacts",
+			kind: "attachment",
+			content: LARGE_CONTEXT_ATTACHMENT,
+		},
+		{
+			id: "attachment-duplicate",
+			bucket: "artifacts",
+			kind: "attachment",
+			content: LARGE_CONTEXT_ATTACHMENT,
+		},
+		{ id: "history-tail", bucket: "history", kind: "other", content: "HISTORY_TAIL" },
+		{ id: "handoff-tail", bucket: "handoff", kind: "other", content: "HANDOFF_TAIL" },
+	];
 }
 
 function okResult(data: unknown, extra: Partial<StructuredRunnerResult["result"]> = {}): StructuredRunnerResult {
@@ -481,6 +505,115 @@ describe("RuntimeAdapter", () => {
 				expect(["same attachment", "old tool body"]).toContain(recovered);
 			}
 		} finally {
+			await fs.rm(artifactDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps oversized attachment, history, and handoff inline after artifact persistence failure", async () => {
+		const artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-context-persist-fail-"));
+		const manager = new ArtifactManager(artifactDir);
+		const allocationSpy = vi
+			.spyOn(manager, "allocatePath")
+			.mockRejectedValue(new Error("injected context artifact persistence failure"));
+		let calls = 0;
+		let seenContext = "";
+		try {
+			const adapter = new RuntimeAdapter(async request => {
+				calls += 1;
+				seenContext = request.context ?? "";
+				return okResult(implArtifact());
+			});
+			const profile = baseRequest().profile;
+			const result = await adapter.run(
+				baseRequest(undefined, {
+					profile: { ...profile, contextPolicy: { ...profile.contextPolicy, maxArtifactBytes: 1 } },
+					session: fakeSession({ getArtifactManager: () => manager }),
+					contextEntries: contextFailureEntries(),
+				}),
+			);
+
+			expect(calls).toBe(1);
+			expect(allocationSpy).toHaveBeenCalled();
+			expect(seenContext).toContain(LARGE_CONTEXT_ATTACHMENT);
+			expect(seenContext.split(LARGE_CONTEXT_ATTACHMENT)).toHaveLength(3);
+			expect(seenContext).toContain("HISTORY_TAIL");
+			expect(seenContext.endsWith("HISTORY_TAIL\n\nHANDOFF_TAIL")).toBe(true);
+			expect(result.promptAssemblyReceipt?.totalBytes).toBe(Buffer.byteLength(seenContext, "utf8"));
+			expect(result.contextLedger?.buckets.artifacts.bytes).toBe(
+				Buffer.byteLength(LARGE_CONTEXT_ATTACHMENT, "utf8") * 2,
+			);
+			expect(result.contextLedger?.buckets.history.bytes).toBe(Buffer.byteLength("HISTORY_TAIL", "utf8"));
+			expect(result.contextLedger?.buckets.handoff.bytes).toBe(
+				Buffer.byteLength("## Context\nctx", "utf8") + Buffer.byteLength("HANDOFF_TAIL", "utf8"),
+			);
+			expect(result.contextLedger?.artifactRefs).toEqual([]);
+			expect(result.contextLedger?.optimizationReceipts).toEqual([]);
+			expect(await fs.readdir(artifactDir)).toEqual([]);
+		} finally {
+			allocationSpy.mockRestore();
+			await fs.rm(artifactDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps oversized attachment, history, and handoff inline after artifact verification failure", async () => {
+		const artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-context-verify-fail-"));
+		const manager = new ArtifactManager(artifactDir);
+		const realReadFile = nodeFs.promises.readFile.bind(nodeFs.promises);
+		const artifactReads = new Map<string, number>();
+		const readFileSpy = vi.spyOn(nodeFs.promises, "readFile").mockImplementation((async (
+			file: string,
+			encoding?: BufferEncoding,
+		) => {
+			const target = String(file);
+			if (target.startsWith(artifactDir) && target.endsWith(".log")) {
+				const reads = (artifactReads.get(target) ?? 0) + 1;
+				artifactReads.set(target, reads);
+				if (reads === 2) {
+					const error = new Error("injected context artifact verification failure") as NodeJS.ErrnoException;
+					error.code = "EIO";
+					throw error;
+				}
+			}
+			if (encoding === undefined) return realReadFile(file);
+			return realReadFile(file, encoding);
+		}) as typeof nodeFs.promises.readFile);
+		let calls = 0;
+		let seenContext = "";
+		try {
+			const adapter = new RuntimeAdapter(async request => {
+				calls += 1;
+				seenContext = request.context ?? "";
+				return okResult(implArtifact());
+			});
+			const profile = baseRequest().profile;
+			const result = await adapter.run(
+				baseRequest(undefined, {
+					profile: { ...profile, contextPolicy: { ...profile.contextPolicy, maxArtifactBytes: 1 } },
+					session: fakeSession({ getArtifactManager: () => manager }),
+					contextEntries: contextFailureEntries(),
+				}),
+			);
+
+			expect(calls).toBe(1);
+			expect(artifactReads.size).toBe(1);
+			expect([...artifactReads.values()]).toEqual([2]);
+			expect(seenContext).toContain(LARGE_CONTEXT_ATTACHMENT);
+			expect(seenContext.split(LARGE_CONTEXT_ATTACHMENT)).toHaveLength(3);
+			expect(seenContext).toContain("HISTORY_TAIL");
+			expect(seenContext.endsWith("HISTORY_TAIL\n\nHANDOFF_TAIL")).toBe(true);
+			expect(result.promptAssemblyReceipt?.totalBytes).toBe(Buffer.byteLength(seenContext, "utf8"));
+			expect(result.contextLedger?.buckets.artifacts.bytes).toBe(
+				Buffer.byteLength(LARGE_CONTEXT_ATTACHMENT, "utf8") * 2,
+			);
+			expect(result.contextLedger?.buckets.history.bytes).toBe(Buffer.byteLength("HISTORY_TAIL", "utf8"));
+			expect(result.contextLedger?.buckets.handoff.bytes).toBe(
+				Buffer.byteLength("## Context\nctx", "utf8") + Buffer.byteLength("HANDOFF_TAIL", "utf8"),
+			);
+			expect(result.contextLedger?.artifactRefs).toEqual([]);
+			expect(result.contextLedger?.optimizationReceipts).toEqual([]);
+			expect(await fs.readdir(artifactDir)).toEqual([]);
+		} finally {
+			readFileSpy.mockRestore();
 			await fs.rm(artifactDir, { recursive: true, force: true });
 		}
 	});

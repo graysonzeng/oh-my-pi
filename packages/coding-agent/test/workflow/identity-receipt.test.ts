@@ -254,6 +254,39 @@ describe("strict availability identity receipt", () => {
 		expect(result.attestedCheckpoint).toBeUndefined();
 	});
 
+	it("fails closed when one response conflicts between header and body model coordinates", async () => {
+		const response = providerEchoMetadata();
+		response.metadata = { model: "gpt-5.6-terra" };
+
+		const result = await probe(profile(), model(), [response]);
+
+		expect(result).toMatchObject({
+			status: "indeterminate",
+			identityProvenance: "unknown",
+			exactIdentityMatch: null,
+			errorKind: "missing_attestation",
+		});
+		expect(result.attestedProvider).toBeUndefined();
+		expect(result.attestedModel).toBeUndefined();
+		expect(result.actualProvider).toBeUndefined();
+		expect(result.actualModel).toBeUndefined();
+	});
+
+	it("fails closed when one response conflicts between checkpoint coordinates", async () => {
+		const response = providerEchoMetadata();
+		response.metadata = { model: "gpt-5.6-sol", checkpoint: "different-checkpoint" };
+
+		const result = await probe(profile(), model(), [response]);
+
+		expect(result).toMatchObject({
+			status: "indeterminate",
+			identityProvenance: "unknown",
+			exactIdentityMatch: null,
+			errorKind: "missing_attestation",
+		});
+		expect(result.attestedCheckpoint).toBeUndefined();
+	});
+
 	it("fails closed on an exact provider/model mismatch", async () => {
 		const result = await probe(profile(), model(), [providerEchoMetadata("gpt-5.6-terra")]);
 

@@ -5,6 +5,8 @@
 interface AbortRegistration {
 	controller: AbortController;
 	owner: object;
+	settled: Promise<void>;
+	resolveSettled: () => void;
 }
 
 const controllers = new Map<string, AbortRegistration>();
@@ -15,14 +17,27 @@ export function registerWorkflowAbort(
 	owner: object = controller,
 ): object {
 	if (controllers.has(workflowId)) return owner;
-	controllers.set(workflowId, { controller, owner });
+	const settled = Promise.withResolvers<void>();
+	controllers.set(workflowId, {
+		controller,
+		owner,
+		settled: settled.promise,
+		resolveSettled: settled.resolve,
+	});
 	return owner;
 }
 
 export function unregisterWorkflowAbort(workflowId: string, owner: object): boolean {
 	const registration = controllers.get(workflowId);
 	if (!registration || registration.owner !== owner) return false;
-	return controllers.delete(workflowId);
+	controllers.delete(workflowId);
+	registration.resolveSettled();
+	return true;
+}
+
+/** Current runner settlement barrier, captured before signalling cancellation. */
+export function workflowAbortSettlement(workflowId: string): Promise<void> | undefined {
+	return controllers.get(workflowId)?.settled;
 }
 
 /** Abort a running workflow if this process holds its controller. Returns true if signaled. */

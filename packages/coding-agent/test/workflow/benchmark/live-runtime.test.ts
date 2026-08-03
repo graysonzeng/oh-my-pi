@@ -6,8 +6,10 @@ import {
 	buildLiveBenchmarkProfileOverrides,
 	createLiveWorkflowBenchmarkRuntime,
 	runBenchmarkSuite,
+	verifyLiveWorkflowProvenance,
 } from "../../../src/workflow/benchmark";
 import type { BenchmarkRuntimeProvenance } from "../../../src/workflow/benchmark/types";
+import type { WorkflowModelBackedStage, WorkflowRole, WorkflowStatusReportV1 } from "../../../src/workflow/types";
 
 const FIXTURE_PROVENANCE: BenchmarkRuntimeProvenance = {
 	source: "runtime_observed",
@@ -18,6 +20,86 @@ const FIXTURE_PROVENANCE: BenchmarkRuntimeProvenance = {
 	adapter: "coding-agent:createAgentSession",
 	parser: "pi-ai:openai-completions",
 };
+
+function exactChildReport(): WorkflowStatusReportV1 {
+	const stages: WorkflowModelBackedStage[] = ["planning", "plan_review", "implementing", "code_review"];
+	const roles: Record<WorkflowModelBackedStage, WorkflowRole> = {
+		planning: "planner",
+		plan_review: "plan_reviewer",
+		implementing: "implementer",
+		code_review: "code_reviewer",
+		repairing: "repair",
+	};
+	return {
+		schemaVersion: 1,
+		workflowId: "wf-live",
+		status: "completed",
+		currentStage: "completed",
+		version: 9,
+		attemptCount: stages.length,
+		artifactCount: stages.length * 2,
+		transitionCount: stages.length + 1,
+		budgetTotals: null,
+		qualityRoute: {
+			status: "verified",
+			qualityTier: "balanced",
+			snapshotFingerprint: "route-fingerprint",
+			configuredStages: ([...stages, "repairing"] as WorkflowModelBackedStage[]).map(stage => ({
+				stage,
+				role: roles[stage],
+				orderedProfileIds: [`profile-${stage}`],
+			})),
+		},
+		modelAttempts: stages.map((stage, index) => ({
+			attemptId: `attempt-${stage}`,
+			stage,
+			role: roles[stage],
+			ordinal: index + 1,
+			status: "completed",
+			configuredProfileId: `profile-${stage}`,
+			evidenceStatus: "verified",
+			routing: [
+				{
+					selectedProfileId: `profile-${stage}`,
+					configuredProfileIds: [`profile-${stage}`],
+					reason: "primary",
+					fallbackFrom: null,
+					skipped: [],
+				},
+			],
+			executions: [
+				{
+					profileId: `profile-${stage}`,
+					configuredIdentity: {
+						profileId: `profile-${stage}`,
+						provider: "fixture-provider",
+						model: "fixture-model",
+						checkpoint: null,
+						provenance: "configured",
+						modelPattern: "fixture-provider/fixture-model",
+						requestedEffort: "high",
+						modelFamily: "fixture",
+					},
+					localResolution: {
+						provider: "fixture-provider",
+						model: "fixture-model",
+						checkpoint: null,
+						provenance: "local_resolution",
+					},
+					attestedIdentity: {
+						provider: "fixture-provider",
+						model: "fixture-model",
+						checkpoint: "checkpoint-1",
+						provenance: "provider_echo",
+					},
+					exactIdentityMatch: true,
+					effortSupported: true,
+					modelFamily: "fixture",
+				},
+			],
+		})),
+	};
+}
 
 describe("live workflow benchmark runtime", () => {
 	it("uses the agent seam, verifies the fixture, and reports provider facts without synthetic quality", async () => {
@@ -43,6 +125,7 @@ describe("live workflow benchmark runtime", () => {
 					toolCalls: 2,
 					usageObservable: true,
 					runtimeProvenance: FIXTURE_PROVENANCE,
+					fallbackCount: 0,
 				};
 			},
 		});
@@ -87,6 +170,7 @@ describe("live workflow benchmark runtime", () => {
 					costUsd: 0,
 					toolCalls: 1,
 					runtimeProvenance: FIXTURE_PROVENANCE,
+					fallbackCount: 0,
 				};
 			},
 		});
@@ -196,6 +280,49 @@ describe("live workflow benchmark runtime", () => {
 		expect(result?.scopeStatus).toBe("violation");
 		expect(result?.error).toContain("untracked.txt");
 	}, 10_000);
+
+	it("accepts one exact child identity across every required stage with known zero fallback", () => {
+		const verified = verifyLiveWorkflowProvenance(exactChildReport(), "fixture-provider", "fixture-model");
+		expect(verified.errors).toEqual([]);
+		expect(verified.fallbackCount).toBe(0);
+		expect(verified.runtimeProvenance).toMatchObject({
+			provider: "fixture-provider",
+			model: "fixture-model",
+			checkpoint: "checkpoint-1",
+		});
+	});
+
+	it("fails closed when a required child stage lacks runtime evidence", () => {
+		const report = exactChildReport();
+		report.modelAttempts.find(attempt => attempt.stage === "code_review")!.executions = [];
+		const verified = verifyLiveWorkflowProvenance(report, "fixture-provider", "fixture-model");
+		expect(verified.runtimeProvenance).toBeUndefined();
+		expect(verified.errors).toContain("child runtime evidence missing: code_review");
+	});
+
+	it("fails closed when child checkpoints are mixed", () => {
+		const report = exactChildReport();
+		report.modelAttempts[0]!.executions[0]!.attestedIdentity!.checkpoint = "checkpoint-2";
+		const verified = verifyLiveWorkflowProvenance(report, "fixture-provider", "fixture-model");
+		expect(verified.runtimeProvenance).toBeUndefined();
+		expect(verified.errors).toContain("child runtime identity mixed or missing: 2");
+	});
+
+	it("fails closed on child fallback or skipped routing evidence", () => {
+		const report = exactChildReport();
+		const routing = report.modelAttempts[0]!.routing;
+		routing.push({
+			selectedProfileId: "profile-planning",
+			configuredProfileIds: ["profile-planning"],
+			reason: "fallback_from:unavailable-planner",
+			fallbackFrom: "unavailable-planner",
+			skipped: [{ profileId: "unavailable-planner", reason: "unavailable" }],
+		});
+		const verified = verifyLiveWorkflowProvenance(report, "fixture-provider", "fixture-model");
+		expect(verified.runtimeProvenance).toBeUndefined();
+		expect(verified.fallbackCount).toBeGreaterThan(0);
+		expect(verified.errors).toContain("child fallback or routing ambiguity: planning");
+	});
 
 	it("still reports scope evidence when the agent seam throws before completion", async () => {
 		const suite = buildDefaultBenchmarkSuite();

@@ -37,7 +37,7 @@ const usage: Usage = {
 
 /** Trusted isolation evidence used by engine verify stages in tests. */
 export const SAMPLE_PATCH =
-	"diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+const x = 1\n";
+	"diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,2 @@\n before\n+const x = 1\n";
 
 /** Persist a readable patch under cwd so implementation_verify can fail closed on trust, not ENOENT. */
 export async function materializeSamplePatch(cwd: string, relativePath = "patches/x.patch"): Promise<string> {

@@ -236,7 +236,13 @@ function decidePolicy(
 	}
 	if (input.combinationRun) reasons.push("combination_run_shadow_only");
 	reasons.push(...evidenceReasons(input.lever, input.evidence));
-	if (PRODUCTION_LEVERS[input.lever] !== true) reasons.push("lever_not_production_mappable");
+	if (PRODUCTION_LEVERS[input.lever] === true) {
+		// A self-consistent SHA-256 receipt is not rollout authority. No canonical benchmark-report
+		// approval producer is wired yet, so production-mappable levers remain shadow-only.
+		reasons.push("verified_rollout_authority_unavailable");
+	} else {
+		reasons.push("lever_not_production_mappable");
+	}
 
 	const hardFailure = input.evidence.hardGateFailures.length > 0 || !input.evidence.qualityGatePassed;
 	if (hardFailure) return { decision: "rejected", applied: false, reasons };

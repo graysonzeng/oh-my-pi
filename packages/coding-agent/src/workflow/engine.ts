@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ToolSession } from "../tools";
 import * as git from "../utils/git";
-import { abortRegisteredWorkflow, registerWorkflowAbort, unregisterWorkflowAbort } from "./abort-registry";
+import {
+	abortRegisteredWorkflow,
+	registerWorkflowAbort,
+	unregisterWorkflowAbort,
+	workflowAbortSettlement,
+} from "./abort-registry";
 import { resolveArtifactInclusion } from "./artifact-inclusion";
 import { ArtifactStore } from "./artifact-store";
 import {
@@ -28,6 +34,7 @@ import {
 	normalizeModelProfile,
 } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
+import { sha256Hex } from "./optimization-receipt";
 import {
 	compileQualityRouteSnapshot,
 	qualityRouteProfileIds,
@@ -100,6 +107,7 @@ import {
 	renderWorkPackageAssignment,
 	WorkPackageExecutionError,
 	withWorkPackageMerge,
+	withWorkPackageMergePrepared,
 } from "./work-packages";
 
 const TERMINAL: ReadonlySet<WorkflowStatus> = new Set(["completed", "blocked", "cancelled", "failed"]);
@@ -392,20 +400,29 @@ export class WorkflowEngine {
 			degradedMode: routeSnapshot ? false : this.#config.degradedMode,
 			requireIndependentReview: this.#config.requireIndependentReview,
 			...policyOverrides,
-			...(routeSnapshot ? { degradedMode: false, qualityRouteSnapshot: routeSnapshot } : {}),
+			...(routeSnapshot
+				? { degradedMode: false, qualityRouteRequired: true, qualityRouteSnapshot: routeSnapshot }
+				: {}),
 		};
-		const workflowId = await this.#store.createWorkflow(persistedRequest, policy);
+		const preflightWorkflowId = `wf_preflight_${randomUUID()}`;
 		const availability = await this.#runPreflight({
-			workflowId,
+			workflowId: preflightWorkflowId,
 			operation: "start",
 			status: "created",
 			singleStep: false,
 			session: this.#session,
 			signal: this.#signal,
 			failClosed: routeSnapshot !== undefined,
+			persistBudget: false,
 		});
-		this.#lastAvailability = availability;
-		return { workflowId, availability };
+		const workflowId = await this.#store.createWorkflow(persistedRequest, policy);
+		await this.#store.saveBudgetTotals(
+			workflowId,
+			this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
+		);
+		const persistedAvailability = { ...availability, workflowId };
+		this.#lastAvailability = persistedAvailability;
+		return { workflowId, availability: persistedAvailability };
 	}
 
 	/**
@@ -563,9 +580,21 @@ export class WorkflowEngine {
 
 	/** Cancel: abort in-flight work, finish open attempts, and persist cancelled. */
 	async cancel(workflowId: string, reason = "caller cancelled"): Promise<WorkflowState> {
-		// Signal any in-process runner registered under this workflow id (other engine instances).
-		abortRegisteredWorkflow(workflowId, reason);
-		this.#controller?.abort();
+		const settlement = workflowAbortSettlement(workflowId);
+		const runnerSignalled = abortRegisteredWorkflow(workflowId, reason);
+		this.#controller?.abort(reason);
+		if (runnerSignalled && settlement) {
+			await settlement;
+			const settled = await this.#requireState(workflowId);
+			if (settled.status === "cancelled") return settled;
+			if (TERMINAL.has(settled.status)) {
+				throw new WorkflowPolicyError("cannot_cancel_terminal", { status: settled.status });
+			}
+		}
+		return this.#persistCancellation(workflowId, reason);
+	}
+
+	async #persistCancellation(workflowId: string, reason: string): Promise<WorkflowState> {
 		const state = await this.#requireState(workflowId);
 		if (TERMINAL.has(state.status)) {
 			if (state.status === "cancelled") return state;
@@ -586,7 +615,6 @@ export class WorkflowEngine {
 			afterAttempt.currentAttemptId,
 			afterAttempt.version,
 		);
-		// Cancel also clears exclusive locks (including foreign/stuck owners).
 		await this.#store.clearRunnerOwner(workflowId);
 		return await this.#requireState(workflowId);
 	}
@@ -621,7 +649,7 @@ export class WorkflowEngine {
 		if (TERMINAL.has(snapshot.state.status)) {
 			throw new WorkflowPolicyError("cannot_resume_terminal", { status: snapshot.state.status });
 		}
-		this.#activateQualityRouteFromPolicy(snapshot.state.policyJson);
+		this.#activateQualityRouteFromPolicy(snapshot.state.policyJson, this.#qualityRouteExpected(snapshot));
 		if (snapshot.budgetTotals) {
 			this.#budgetLedger.restore(snapshot.budgetTotals as Partial<BudgetSnapshot>);
 		}
@@ -670,7 +698,7 @@ export class WorkflowEngine {
 			while (steps < maxSteps) {
 				steps += 1;
 				if (this.#controller.signal.aborted) {
-					await this.cancel(workflowId, "aborted");
+					await this.#persistCancellation(workflowId, "aborted");
 					break;
 				}
 
@@ -746,7 +774,7 @@ export class WorkflowEngine {
 						await this.#executeCurrentStage(workflowId, state, session);
 					} catch (error) {
 						if (error instanceof WorkflowCancelledError || this.#controller.signal.aborted) {
-							await this.cancel(workflowId, "cancelled during stage");
+							await this.#persistCancellation(workflowId, "cancelled during stage");
 							break;
 						}
 						if (error instanceof BudgetExhaustedError) throw error;
@@ -838,16 +866,30 @@ export class WorkflowEngine {
 		}
 	}
 
+	#qualityRouteExpected(snapshot: PersistedWorkflowSnapshot): boolean {
+		let requestTierPresent = false;
+		try {
+			const request = JSON.parse(snapshot.state.requestJson) as Record<string, unknown>;
+			requestTierPresent = request.qualityTier === "balanced" || request.qualityTier === "critical";
+		} catch {
+			requestTierPresent = false;
+		}
+		return requestTierPresent || snapshot.artifacts.some(artifact => artifact.kind === "quality-route-snapshot");
+	}
+
 	#activateQualityRoute(snapshot: QualityRouteSnapshotV1): void {
 		const verified = verifyQualityRouteSnapshot(snapshot);
 		this.#qualityRouteSnapshot = verified;
 		this.#router = new ModelRouter(qualityRouteProfiles(verified));
 	}
 
-	#activateQualityRouteFromPolicy(policyJson: string): void {
+	#activateQualityRouteFromPolicy(policyJson: string, qualityRouteExpected = false): void {
 		const policy = this.#parsePolicy(policyJson);
 		const rawSnapshot = policy.qualityRouteSnapshot;
 		if (rawSnapshot === undefined) {
+			if (qualityRouteExpected || policy.qualityRouteRequired === true) {
+				throw new WorkflowPolicyError("quality_route_snapshot_missing");
+			}
 			this.#qualityRouteSnapshot = undefined;
 			this.#router = this.#configuredRouter;
 			return;
@@ -878,6 +920,7 @@ export class WorkflowEngine {
 		session: ToolSession | undefined;
 		signal?: AbortSignal;
 		failClosed: boolean;
+		persistBudget?: boolean;
 	}): Promise<WorkflowAvailabilityReport> {
 		if (!this.#availability || !options.session) {
 			if (options.failClosed) {
@@ -912,10 +955,12 @@ export class WorkflowEngine {
 			}
 			if (row.source === "live") this.#budgetLedger.recordRequest(row.usage, row.profileId);
 		}
-		await this.#store.saveBudgetTotals(
-			options.workflowId,
-			this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
-		);
+		if (options.persistBudget !== false) {
+			await this.#store.saveBudgetTotals(
+				options.workflowId,
+				this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
+			);
+		}
 		if (options.failClosed) assertRequiredRolesAvailable(report);
 		return report;
 	}
@@ -1094,6 +1139,7 @@ export class WorkflowEngine {
 						cwd,
 						artifact: impl,
 						identityReceipt: execution.evidence?.identityReceipt,
+						modelFamily: execution.evidence?.modelFamily,
 						signal,
 					});
 				}
@@ -1252,6 +1298,26 @@ export class WorkflowEngine {
 			}
 			case "repairing": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
+				const open = this.#findingTracker.getOpen();
+				if (
+					this.#workPackageState?.stage === "repairing" &&
+					(this.#workPackageState.merge.status === "prepared" || this.#workPackageState.merge.status === "applied")
+				) {
+					const recovered = await this.#recoverAppliedWorkPackageImplementation(
+						workflowId,
+						attemptId,
+						cwd,
+						"repairing",
+					);
+					const recoveredFingerprints = new Set<string>();
+					for (const finding of open) {
+						if (recoveredFingerprints.has(finding.fingerprint)) continue;
+						recoveredFingerprints.add(finding.fingerprint);
+						this.#findingTracker.recordRepairCycle(finding.fingerprint);
+					}
+					await this.#completeRepairStage(workflowId, attemptId, fresh, recovered.artifact, open);
+					return;
+				}
 				// Repair-cycle cap only applies when *entering* repair, not post-repair verify.
 				if (!(await this.#budgetLedger.checkPreRepair())) {
 					const snap = this.#budgetLedger.snapshot();
@@ -1266,7 +1332,6 @@ export class WorkflowEngine {
 					});
 					throw new BudgetExhaustedError(snap.repairCycles, snap.costUsd ?? "unknown", snap.limitUsd);
 				}
-				const open = this.#findingTracker.getOpen();
 				// One cycle per unique fingerprint (not per finding id) so duplicate IDs do not skip repair.
 				const seenFingerprints = new Set<string>();
 				for (const f of open) {
@@ -1393,25 +1458,10 @@ export class WorkflowEngine {
 					cwd,
 					artifact: candidateImplementation,
 					identityReceipt,
+					modelFamily,
 					signal,
 				});
-				this.#implementation = candidateImplementation;
-				// Resolve only explicitly addressed finding IDs after the validated patch is applied.
-				const resolvedIds = new Set(repaired.addressedStepIds);
-				for (const id of open.map(f => f.id)) {
-					if (resolvedIds.has(id)) this.#findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
-				}
-				this.#implementationArtifactRef = await this.#persistArtifact(
-					workflowId,
-					attemptId,
-					"implementation",
-					this.#implementation,
-				);
-				await this.#persistFindingsState(workflowId, attemptId);
-				// One completed repair attempt toward maxRepairCycles.
-				this.#budgetLedger.recordRepairCycle();
-				const next = getNextStage("repairing", null);
-				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "repair complete", fresh.version);
+				await this.#completeRepairStage(workflowId, attemptId, fresh, candidateImplementation, open);
 				return;
 			}
 			case "final_verify": {
@@ -1448,6 +1498,30 @@ export class WorkflowEngine {
 		}
 	}
 
+	async #completeRepairStage(
+		workflowId: string,
+		attemptId: string,
+		fresh: WorkflowState,
+		implementation: ImplementationArtifactV1,
+		open: readonly ReviewFindingV1[],
+	): Promise<void> {
+		this.#implementation = implementation;
+		const resolvedIds = new Set(implementation.addressedStepIds);
+		for (const id of open.map(finding => finding.id)) {
+			if (resolvedIds.has(id)) this.#findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
+		}
+		this.#implementationArtifactRef = await this.#persistArtifact(
+			workflowId,
+			attemptId,
+			"implementation",
+			this.#implementation,
+		);
+		await this.#persistFindingsState(workflowId, attemptId);
+		this.#budgetLedger.recordRepairCycle();
+		const next = getNextStage("repairing", null);
+		await this.#completeTo(workflowId, attemptId, fresh.status, next!, "repair complete", fresh.version);
+	}
+
 	async #executeImplementation(
 		workflowId: string,
 		attemptId: string,
@@ -1461,8 +1535,11 @@ export class WorkflowEngine {
 		usage?: unknown;
 		evidence?: WorkflowRuntimeEvidence;
 	}> {
-		if (this.#workPackageState?.merge.status === "applied") {
-			return this.#recoverAppliedWorkPackageImplementation(workflowId, attemptId, session.cwd);
+		if (
+			this.#workPackageState?.stage === "implementing" &&
+			(this.#workPackageState.merge.status === "prepared" || this.#workPackageState.merge.status === "applied")
+		) {
+			return this.#recoverAppliedWorkPackageImplementation(workflowId, attemptId, session.cwd, "implementing");
 		}
 		const configuredConcurrency = session.settings?.get?.("task.maxConcurrency" as never);
 		const maxConcurrency = typeof configuredConcurrency === "number" ? configuredConcurrency : 0;
@@ -1607,40 +1684,17 @@ export class WorkflowEngine {
 			"patches",
 			`${attemptId}.packages.patch`,
 		);
-		let merge: CapturedChangesMergeResult;
-		try {
-			merge = await mergeCapturedChanges({
-				workflowId,
-				attemptId,
-				cwd: session.cwd,
-				patches,
-				outputPatchPath,
-				signal,
-			});
-		} catch (error) {
-			const failedMerge: CapturedChangesMergeResult = {
-				patchPath: outputPatchPath,
-				changesApplied: false,
-				summary: redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500),
-			};
-			const failedState = withWorkPackageMerge(completed.workPackageState, attemptId, failedMerge);
-			await this.#persistWorkPackageState(workflowId, attemptId, failedState);
-			if (error instanceof WorkflowCancelledError) throw error;
-			throw new WorkflowError("Work-package merge failed without applying changes", "merge_conflict", {
-				order: failedState.merge.order,
-				patchPath: failedMerge.patchPath,
-				summary: failedMerge.summary,
-			});
-		}
-		const mergedState = withWorkPackageMerge(completed.workPackageState, attemptId, merge);
-		await this.#persistWorkPackageState(workflowId, attemptId, mergedState);
-		if (!merge.changesApplied) {
-			throw new WorkflowError("Work-package merge failed without applying changes", "merge_conflict", {
-				order: mergedState.merge.order,
-				patchPath: merge.patchPath,
-				summary: merge.summary,
-			});
-		}
+		const committed = await this.#mergePreparedWriteCommit({
+			workflowId,
+			attemptId,
+			cwd: session.cwd,
+			state: completed.workPackageState,
+			patches,
+			outputPatchPath,
+			signal,
+		});
+		const mergedState = committed.state;
+		const merge = committed.merge;
 		return {
 			artifact: aggregateWorkPackageImplementations({
 				workflowId,
@@ -1658,21 +1712,336 @@ export class WorkflowEngine {
 		workflowId: string,
 		attemptId: string,
 		cwd: string,
+		expectedStage: "implementing" | "repairing",
 	): Promise<{
 		artifact: ImplementationArtifactV1;
 		usageRecorded: boolean;
 		writeCommitted: boolean;
 	}> {
-		const state = this.#workPackageState;
+		let state = this.#workPackageState;
 		if (
-			state?.merge.status !== "applied" ||
-			state.merge.changesApplied !== true ||
+			!state ||
+			state.stage !== expectedStage ||
+			(state.merge.status !== "prepared" && state.merge.status !== "applied") ||
 			!state.merge.patchPath ||
 			state.packages.some(execution => execution.status !== "succeeded" || !execution.implementation)
 		) {
-			throw new WorkflowPolicyError("work_package_applied_state_invalid");
+			throw new WorkflowPolicyError("work_package_applied_state_invalid", { expectedStage });
 		}
+		if (state.merge.status === "prepared") {
+			state = await this.#settlePreparedWriteCommit(workflowId, attemptId, cwd, state, {
+				patchPath: state.merge.patchPath,
+				changesApplied: true,
+				summary: "Recovered applied patch from prepared write-commit state",
+			});
+			if (state.merge.status !== "applied") {
+				throw new WorkflowPolicyError("work_package_prepared_patch_not_applied", {
+					patchPath: state.merge.patchPath,
+				});
+			}
+		} else if ((await this.#inspectPersistedWritePatch(state, cwd)) !== "applied") {
+			throw new WorkflowPolicyError("work_package_applied_patch_drift", {
+				patchPath: state.merge.patchPath,
+			});
+		}
+		if (state.scopeStatus !== undefined && state.scopeStatus !== "adhered") {
+			throw new WorkflowPolicyError("work_package_applied_scope_not_approved", {
+				scopeStatus: state.scopeStatus,
+			});
+		}
+		const packageProfileIds = state.packages.map(
+			execution => execution.identityReceipt?.configured.profileId ?? execution.implementation?.modelProfileId,
+		);
+		const profileIds = new Set(packageProfileIds.filter((profileId): profileId is string => Boolean(profileId)));
+		if (profileIds.size !== 1 || packageProfileIds.some(profileId => !profileId)) {
+			throw new WorkflowPolicyError("work_package_applied_profile_ambiguous", {
+				profileIds: [...profileIds],
+			});
+		}
+		const profileId = [...profileIds][0];
+		const expectedRole: WorkflowRole = expectedStage === "repairing" ? "repair" : "implementer";
+		const profile = profileId ? this.#router.list().find(candidate => candidate.id === profileId) : undefined;
+		if (!profile?.roles.includes(expectedRole)) {
+			throw new WorkflowPolicyError("work_package_applied_profile_missing", { profileId, expectedRole });
+		}
+		for (const execution of state.packages) {
+			this.#assertStrictWriteIdentity(profile, execution.identityReceipt);
+		}
+		this.#assertStrictWriteScope(profile);
+		const merge: CapturedChangesMergeResult = {
+			patchPath: state.merge.patchPath!,
+			changesApplied: true,
+			summary: state.merge.summary ?? "Recovered previously applied workflow merge",
+		};
+		let artifact: ImplementationArtifactV1;
+		if (state.packages.length === 1) {
+			artifact = {
+				...state.packages[0]!.implementation!,
+				workflowId,
+				attemptId,
+				stage: expectedStage,
+				patchPath: merge.patchPath,
+				branchName: undefined,
+			};
+		} else {
+			if (expectedStage !== "implementing") {
+				throw new WorkflowPolicyError("work_package_repair_aggregate_ambiguous");
+			}
+			artifact = aggregateWorkPackageImplementations({ workflowId, attemptId, profile, state, merge });
+		}
+		if (expectedStage === "implementing") {
+			this.#implementerVendor = profile.vendor;
+			this.#implementerModelFamily =
+				state.packages
+					.map(execution => execution.modelFamily ?? execution.identityReceipt?.modelFamily)
+					.find((family): family is string => typeof family === "string") ?? this.#implementerModelFamily;
+		}
+		return { artifact, usageRecorded: true, writeCommitted: true };
+	}
+
+	async #commitValidatedWrite(options: {
+		workflowId: string;
+		attemptId: string;
+		cwd: string;
+		artifact: ImplementationArtifactV1;
+		identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+		modelFamily?: string;
+		signal?: AbortSignal;
+	}): Promise<ImplementationArtifactV1> {
+		const profile = this.#router.list().find(candidate => candidate.id === options.artifact.modelProfileId);
+		if (!profile?.strictIdentity) return options.artifact;
+		this.#assertStrictWriteIdentity(profile, options.identityReceipt);
+		this.#assertStrictWriteScope(profile);
+		if (!options.artifact.patchPath) {
+			throw new WorkflowPolicyError("strict_write_patch_missing", { profileId: profile.id });
+		}
+		if (options.artifact.stage !== "implementing" && options.artifact.stage !== "repairing") {
+			throw new WorkflowPolicyError("strict_write_stage_invalid", { stage: options.artifact.stage });
+		}
+		const packageId = `validated-${options.artifact.stage}`;
+		const state: WorkPackageStateArtifactV1 = {
+			kind: "work-package-state",
+			schemaVersion: 1,
+			workflowId: options.workflowId,
+			attemptId: options.attemptId,
+			stage: options.artifact.stage,
+			createdAt: new Date().toISOString(),
+			revision: this.#workPackageState?.revision ?? 0,
+			mode: "capture_then_apply",
+			packages: [
+				{
+					id: packageId,
+					assignment: `Validated ${options.artifact.stage} write`,
+					paths: [...options.artifact.changedFiles],
+					dependsOn: [],
+					status: "succeeded",
+					invocationAttemptId: options.attemptId,
+					implementation: structuredClone(options.artifact),
+					identityReceipt: options.identityReceipt,
+					modelFamily: options.modelFamily ?? options.identityReceipt?.modelFamily ?? undefined,
+				},
+			],
+			merge: { status: "pending", order: [packageId] },
+		};
+		const committed = await this.#mergePreparedWriteCommit({
+			workflowId: options.workflowId,
+			attemptId: options.attemptId,
+			cwd: options.cwd,
+			state,
+			patches: [{ packageId, patchPath: options.artifact.patchPath }],
+			outputPatchPath: path.join(
+				this.#artifactStore.baseDir,
+				options.workflowId,
+				"patches",
+				`${options.attemptId}.validated.patch`,
+			),
+			signal: options.signal,
+		});
+		return { ...options.artifact, patchPath: committed.merge.patchPath, branchName: undefined };
+	}
+
+	async #mergePreparedWriteCommit(options: {
+		workflowId: string;
+		attemptId: string;
+		cwd: string;
+		state: WorkPackageStateArtifactV1;
+		patches: readonly { packageId: string; patchPath: string }[];
+		outputPatchPath: string;
+		signal?: AbortSignal;
+	}): Promise<{ state: WorkPackageStateArtifactV1; merge: CapturedChangesMergeResult }> {
+		const mergeCapturedChanges = this.#adapter.mergeCapturedChanges;
+		if (!mergeCapturedChanges) throw new WorkflowPolicyError("strict_write_commit_seam_unavailable");
+		const prepared = await this.#prepareWriteCommitState(options);
+		let reported: CapturedChangesMergeResult;
+		try {
+			reported = await mergeCapturedChanges({
+				workflowId: options.workflowId,
+				attemptId: options.attemptId,
+				cwd: options.cwd,
+				patches: options.patches,
+				outputPatchPath: options.outputPatchPath,
+				signal: options.signal,
+			});
+		} catch (error) {
+			const summary = redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500);
+			const reconciled = await this.#settlePreparedWriteCommit(
+				options.workflowId,
+				options.attemptId,
+				options.cwd,
+				prepared,
+				{ patchPath: options.outputPatchPath, changesApplied: false, summary },
+			);
+			if (reconciled.merge.status !== "applied") {
+				if (error instanceof WorkflowCancelledError) throw error;
+				throw new WorkflowError("Validated workflow patch was not applied", "merge_conflict", {
+					patchPath: options.outputPatchPath,
+					summary,
+				});
+			}
+			return {
+				state: reconciled,
+				merge: {
+					patchPath: reconciled.merge.patchPath!,
+					changesApplied: true,
+					summary: reconciled.merge.summary ?? "Recovered applied merge after merger error",
+				},
+			};
+		}
+		const reconciled = await this.#settlePreparedWriteCommit(
+			options.workflowId,
+			options.attemptId,
+			options.cwd,
+			prepared,
+			reported,
+			reported.changesApplied === true,
+		);
+		if (reconciled.merge.status !== "applied") {
+			throw new WorkflowError("Validated workflow patch was not applied", "merge_conflict", {
+				patchPath: reconciled.merge.patchPath,
+				summary: reconciled.merge.summary,
+			});
+		}
+		return {
+			state: reconciled,
+			merge: {
+				patchPath: reconciled.merge.patchPath!,
+				changesApplied: true,
+				summary: reconciled.merge.summary ?? reported.summary,
+			},
+		};
+	}
+
+	async #prepareWriteCommitState(options: {
+		workflowId: string;
+		attemptId: string;
+		cwd: string;
+		state: WorkPackageStateArtifactV1;
+		patches: readonly { packageId: string; patchPath: string }[];
+		outputPatchPath: string;
+	}): Promise<WorkPackageStateArtifactV1> {
+		const scopeStatus = this.#lastScopeMetrics?.status;
+		if (scopeStatus !== "adhered") {
+			throw new WorkflowPolicyError("strict_write_scope_not_approved", { scopeStatus: scopeStatus ?? "missing" });
+		}
+		const patchTexts: string[] = [];
+		for (const patch of options.patches) {
+			const resolved = path.isAbsolute(patch.patchPath) ? patch.patchPath : path.join(options.cwd, patch.patchPath);
+			try {
+				const text = await Bun.file(resolved).text();
+				patchTexts.push(text.length === 0 || text.endsWith("\n") ? text : `${text}\n`);
+			} catch (error) {
+				throw new WorkflowPolicyError("strict_write_patch_unreadable", {
+					packageId: patch.packageId,
+					patchPath: patch.patchPath,
+					reason: redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500),
+				});
+			}
+		}
+		const patchText = patchTexts.join("");
+		if (!patchText.trim()) throw new WorkflowPolicyError("strict_write_patch_empty");
+		await fs.mkdir(path.dirname(options.outputPatchPath), { recursive: true });
+		try {
+			const handle = await fs.open(options.outputPatchPath, "w");
+			try {
+				await handle.writeFile(patchText, "utf8");
+				await handle.sync();
+			} finally {
+				await handle.close();
+			}
+		} catch (error) {
+			await fs.rm(options.outputPatchPath, { force: true }).catch(() => undefined);
+			throw new WorkflowPolicyError("strict_write_patch_persistence_failed", {
+				patchPath: options.outputPatchPath,
+				reason: redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500),
+			});
+		}
+		const prepared = withWorkPackageMergePrepared(options.state, options.attemptId, {
+			patchPath: options.outputPatchPath,
+			patchSha256: sha256Hex(patchText),
+			scopeStatus,
+		});
+		try {
+			await this.#persistWorkPackageState(options.workflowId, options.attemptId, prepared);
+		} catch (error) {
+			await fs.rm(options.outputPatchPath, { force: true }).catch(() => undefined);
+			throw error;
+		}
+		return prepared;
+	}
+
+	async #settlePreparedWriteCommit(
+		workflowId: string,
+		attemptId: string,
+		cwd: string,
+		state: WorkPackageStateArtifactV1,
+		reported: CapturedChangesMergeResult,
+		trustMerger = false,
+	): Promise<WorkPackageStateArtifactV1> {
+		if (!state.merge.patchPath) throw new WorkflowPolicyError("work_package_prepared_patch_missing");
+		const expectedPath = path.isAbsolute(state.merge.patchPath)
+			? state.merge.patchPath
+			: path.join(cwd, state.merge.patchPath);
+		const reportedPath = path.isAbsolute(reported.patchPath)
+			? reported.patchPath
+			: path.join(cwd, reported.patchPath);
+		if (path.resolve(reportedPath) !== path.resolve(expectedPath)) {
+			throw new WorkflowPolicyError("work_package_merge_patch_path_mismatch", {
+				expectedPath: state.merge.patchPath,
+				reportedPath: reported.patchPath,
+			});
+		}
+		let changesApplied: boolean;
+		if (trustMerger) {
+			// A live merger reported success and already applied the canonical
+			// aggregate. Verify the persisted patch is byte-identical to the
+			// prepared hash, then persist `applied` immediately. Recovery-style
+			// reverse/forward git proof is deliberately NOT required here: it is
+			// only authoritative against an uncertain tree state (crash/unknown
+			// outcome), and reports drift for legitimately applied patches (e.g.
+			// insertion-only hunks whose forward check still succeeds after apply).
+			// Resume keeps the strict proof; a changed patch body still fails closed.
+			await this.#verifyPersistedWritePatchBytes(state, cwd);
+			changesApplied = true;
+		} else {
+			const observed = await this.#inspectPersistedWritePatch(state, cwd);
+			changesApplied = observed === "applied";
+		}
+		const reconciled = withWorkPackageMerge(state, attemptId, {
+			patchPath: state.merge.patchPath,
+			changesApplied,
+			summary: reported.summary,
+		});
+		await this.#persistWorkPackageState(workflowId, attemptId, reconciled);
+		return reconciled;
+	}
+
+	/**
+	 * Verify the persisted aggregate patch is readable, non-empty, and byte-identical
+	 * to the prepared SHA-256. Never trust a changed patch body.
+	 */
+	async #verifyPersistedWritePatchBytes(state: WorkPackageStateArtifactV1, cwd: string): Promise<string> {
 		const persistedPatchPath = state.merge.patchPath;
+		if (!persistedPatchPath) throw new WorkflowPolicyError("work_package_applied_patch_unreadable");
 		const resolvedPatchPath = path.isAbsolute(persistedPatchPath)
 			? persistedPatchPath
 			: path.join(cwd, persistedPatchPath);
@@ -1691,6 +2060,21 @@ export class WorkflowEngine {
 				reason: "empty_patch",
 			});
 		}
+		if (state.merge.status === "prepared" && !state.merge.patchSha256) {
+			throw new WorkflowPolicyError("work_package_prepared_patch_hash_missing", { patchPath: persistedPatchPath });
+		}
+		if (state.merge.patchSha256 && sha256Hex(persistedPatchText) !== state.merge.patchSha256) {
+			throw new WorkflowPolicyError("work_package_applied_patch_hash_mismatch", { patchPath: persistedPatchPath });
+		}
+		return persistedPatchText;
+	}
+
+	async #inspectPersistedWritePatch(
+		state: WorkPackageStateArtifactV1,
+		cwd: string,
+	): Promise<"applied" | "not_applied"> {
+		const persistedPatchText = await this.#verifyPersistedWritePatchBytes(state, cwd);
+		const persistedPatchPath = state.merge.patchPath!;
 		let reverseApplies: boolean;
 		let forwardApplies: boolean;
 		try {
@@ -1704,87 +2088,13 @@ export class WorkflowEngine {
 				reason: redactSecretsInText(error instanceof Error ? error.message : String(error)).slice(0, 500),
 			});
 		}
-		if (reverseApplies !== true || forwardApplies !== false) {
-			throw new WorkflowPolicyError("work_package_applied_patch_drift", {
-				patchPath: persistedPatchPath,
-				reverseApplies,
-				forwardApplies,
-			});
-		}
-		const packageProfileIds = state.packages.map(
-			execution => execution.identityReceipt?.configured.profileId ?? execution.implementation?.modelProfileId,
-		);
-		const profileIds = new Set(packageProfileIds.filter((profileId): profileId is string => Boolean(profileId)));
-		if (profileIds.size !== 1 || packageProfileIds.some(profileId => !profileId)) {
-			throw new WorkflowPolicyError("work_package_applied_profile_ambiguous", {
-				profileIds: [...profileIds],
-			});
-		}
-		const profileId = profileIds.values().next().value;
-		const profile = this.#router.list().find(candidate => candidate.id === profileId);
-		if (!profile?.roles.includes("implementer")) {
-			throw new WorkflowPolicyError("work_package_applied_profile_missing", { profileId });
-		}
-		for (const execution of state.packages) {
-			this.#assertStrictWriteIdentity(profile, execution.identityReceipt);
-		}
-		this.#assertStrictWriteScope(profile);
-		const merge: CapturedChangesMergeResult = {
-			patchPath: state.merge.patchPath,
-			changesApplied: true,
-			summary: state.merge.summary ?? "Recovered previously applied work-package merge",
-		};
-		this.#implementerVendor = profile.vendor;
-		this.#implementerModelFamily =
-			state.packages
-				.map(execution => execution.modelFamily ?? execution.identityReceipt?.modelFamily)
-				.find((family): family is string => typeof family === "string") ?? this.#implementerModelFamily;
-		return {
-			artifact: aggregateWorkPackageImplementations({ workflowId, attemptId, profile, state, merge }),
-			usageRecorded: true,
-			writeCommitted: true,
-		};
-	}
-
-	async #commitValidatedWrite(options: {
-		workflowId: string;
-		attemptId: string;
-		cwd: string;
-		artifact: ImplementationArtifactV1;
-		identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
-		signal?: AbortSignal;
-	}): Promise<ImplementationArtifactV1> {
-		const profile = this.#router.list().find(candidate => candidate.id === options.artifact.modelProfileId);
-		if (!profile?.strictIdentity) return options.artifact;
-		this.#assertStrictWriteIdentity(profile, options.identityReceipt);
-		this.#assertStrictWriteScope(profile);
-		if (!options.artifact.patchPath) {
-			throw new WorkflowPolicyError("strict_write_patch_missing", { profileId: profile.id });
-		}
-		const mergeCapturedChanges = this.#adapter.mergeCapturedChanges;
-		if (!mergeCapturedChanges) {
-			throw new WorkflowPolicyError("strict_write_commit_seam_unavailable", { profileId: profile.id });
-		}
-		const merge = await mergeCapturedChanges({
-			workflowId: options.workflowId,
-			attemptId: options.attemptId,
-			cwd: options.cwd,
-			patches: [{ packageId: profile.id, patchPath: options.artifact.patchPath }],
-			outputPatchPath: path.join(
-				this.#artifactStore.baseDir,
-				options.workflowId,
-				"patches",
-				`${options.attemptId}.validated.patch`,
-			),
-			signal: options.signal,
+		if (reverseApplies === true && forwardApplies === false) return "applied";
+		if (reverseApplies === false && forwardApplies === true) return "not_applied";
+		throw new WorkflowPolicyError("work_package_applied_patch_drift", {
+			patchPath: persistedPatchPath,
+			reverseApplies,
+			forwardApplies,
 		});
-		if (!merge.changesApplied) {
-			throw new WorkflowError("Validated workflow patch was not applied", "merge_conflict", {
-				patchPath: merge.patchPath,
-				summary: merge.summary,
-			});
-		}
-		return { ...options.artifact, patchPath: merge.patchPath, branchName: undefined };
 	}
 
 	#assertStrictWriteIdentity(profile: ModelProfile, receipt: WorkflowRuntimeIdentityReceiptV1 | undefined): void {
@@ -2079,14 +2389,17 @@ export class WorkflowEngine {
 			);
 			if (open) {
 				const writeStage = stage === "implementing" || stage === "repairing";
-				const packageState = stage === "implementing" ? this.#workPackageState : undefined;
+				const packageState = writeStage ? this.#workPackageState : undefined;
 				const resumablePackageCapture =
 					packageState?.mode === "capture_then_apply" && packageState.merge.status === "pending";
+				const recoverablePreparedMerge =
+					packageState?.mode === "capture_then_apply" && packageState.merge.status === "prepared";
 				const recoverableAppliedMerge =
 					packageState?.mode === "capture_then_apply" &&
 					packageState.merge.status === "applied" &&
 					packageState.merge.changesApplied === true;
-				const recoverablePackageState = resumablePackageCapture || recoverableAppliedMerge;
+				const recoverablePackageState =
+					resumablePackageCapture || recoverablePreparedMerge || recoverableAppliedMerge;
 				await this.#store.completeAttempt(
 					workflowId,
 					open.id,
@@ -2097,11 +2410,13 @@ export class WorkflowEngine {
 						summary:
 							writeStage && !recoverablePackageState
 								? "write_stage_interrupted_no_rerun"
-								: recoverableAppliedMerge
-									? "work_package_merge_already_applied_resume"
-									: resumablePackageCapture
-										? "work_package_capture_interrupted_resumable"
-										: "stale_in_progress_on_resume",
+								: recoverablePreparedMerge
+									? "work_package_merge_prepared_resume"
+									: recoverableAppliedMerge
+										? "work_package_merge_already_applied_resume"
+										: resumablePackageCapture
+											? "work_package_capture_interrupted_resumable"
+											: "stale_in_progress_on_resume",
 					},
 				);
 				if (writeStage && !recoverablePackageState) {
@@ -2329,7 +2644,16 @@ export class WorkflowEngine {
 				};
 				const ref = this.#refFromMeta(meta, loaded.content);
 				if (meta.kind === "quality-route-snapshot") {
-					verifyQualityRouteSnapshot(parsed);
+					const verifiedArtifact = verifyQualityRouteSnapshot(parsed);
+					if (
+						!this.#qualityRouteSnapshot ||
+						verifiedArtifact.fingerprint !== this.#qualityRouteSnapshot.fingerprint
+					) {
+						throw new WorkflowPolicyError("quality_route_artifact_mismatch", {
+							policyFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
+							artifactFingerprint: verifiedArtifact.fingerprint,
+						});
+					}
 					this.#qualityRouteArtifactPersisted = true;
 					continue;
 				}
@@ -2399,8 +2723,14 @@ export class WorkflowEngine {
 						this.#verificationArtifactRef = ref;
 					}
 				}
-			} catch {
-				// ignore corrupt bodies; hash already verified
+			} catch (error) {
+				if (meta.kind === "quality-route-snapshot") {
+					if (error instanceof WorkflowPolicyError) throw error;
+					throw new WorkflowPolicyError("quality_route_artifact_invalid", {
+						reason: error instanceof Error ? error.message : String(error),
+					});
+				}
+				// Other corrupt artifact bodies remain non-authoritative and are ignored.
 			}
 		}
 	}
@@ -2530,9 +2860,15 @@ export class WorkflowEngine {
 
 	#parsePolicy(policyJson: string): Record<string, unknown> {
 		try {
-			return JSON.parse(policyJson) as Record<string, unknown>;
-		} catch {
-			return {};
+			const parsed = JSON.parse(policyJson);
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				throw new Error("policy must be a JSON object");
+			}
+			return parsed as Record<string, unknown>;
+		} catch (error) {
+			throw new WorkflowPolicyError("quality_route_policy_invalid", {
+				reason: error instanceof Error ? error.message : String(error),
+			});
 		}
 	}
 

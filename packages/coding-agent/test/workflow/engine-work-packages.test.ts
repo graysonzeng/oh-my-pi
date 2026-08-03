@@ -7,7 +7,8 @@ import type { ToolSession } from "../../src/tools";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import type { WorkflowDefaultConfig } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
-import { WorkflowError, WorkflowPolicyError } from "../../src/workflow/errors";
+import { WorkflowCancelledError, WorkflowError, WorkflowPolicyError } from "../../src/workflow/errors";
+import { sha256Hex } from "../../src/workflow/optimization-receipt";
 import {
 	RuntimeAdapter,
 	type StructuredRunner,
@@ -23,6 +24,7 @@ import type {
 	ModelProfile,
 	PlanArtifactV1,
 	ReviewArtifactV1,
+	ReviewFindingV1,
 	VerifierPort,
 	WorkflowAvailabilityPort,
 	WorkflowQualityRoutes,
@@ -32,6 +34,7 @@ import type {
 	WorkPackageV1,
 } from "../../src/workflow/types";
 import { executeWorkPackagePlan, type WorkPackageExecutionPlan } from "../../src/workflow/work-packages";
+import { reviewArtifact } from "./helpers";
 
 type ScriptValue<T> = T | (() => T);
 type ImplementScript = (
@@ -157,34 +160,39 @@ function availableProfiles(): WorkflowAvailabilityPort {
 	};
 }
 
-function strictPackageReceipt(): WorkflowRuntimeIdentityReceiptV1 {
+function strictPackageReceipt(
+	profileId = "strict_implementer",
+	provider = "xai",
+	model = "grok-4.5",
+	modelFamily = "xai",
+): WorkflowRuntimeIdentityReceiptV1 {
 	return {
 		schemaVersion: 1,
 		configured: {
-			profileId: "strict_implementer",
-			provider: "xai",
-			model: "grok-4.5",
+			profileId,
+			provider,
+			model,
 			checkpoint: null,
 			provenance: "configured",
-			modelPattern: "xai/grok-4.5",
+			modelPattern: `${provider}/${model}`,
 			requestedEffort: MEDIUM,
-			modelFamily: "xai",
+			modelFamily,
 		},
 		localResolution: {
-			provider: "xai",
-			model: "grok-4.5",
+			provider,
+			model,
 			checkpoint: null,
 			provenance: "local_resolution",
 		},
 		attested: {
-			provider: "xai",
-			model: "grok-4.5",
+			provider,
+			model,
 			checkpoint: null,
 			provenance: "provider_echo",
 		},
 		exactMatch: true,
 		effortSupported: true,
-		modelFamily: "xai",
+		modelFamily,
 	};
 }
 
@@ -268,7 +276,8 @@ function patchText(
 ): string {
 	return changedFiles
 		.map(file => {
-			const replacement = replacements[file] ?? { before: "before", after: "after" };
+			const stem = path.basename(file, path.extname(file));
+			const replacement = replacements[file] ?? { before: `before-${stem}`, after: `after-${stem}` };
 			return [
 				`diff --git a/${file} b/${file}`,
 				`--- a/${file}`,
@@ -389,7 +398,16 @@ function combinedMerger(calls: CapturedChangesMergeRequest[]): CapturedChangesMe
 			}),
 		);
 		await fs.mkdir(path.dirname(request.outputPatchPath), { recursive: true });
-		await Bun.write(request.outputPatchPath, contents.join("\n"));
+		await Bun.write(
+			request.outputPatchPath,
+			contents.map(content => (content.length === 0 || content.endsWith("\n") ? content : `${content}\n`)).join(""),
+		);
+		const applied = Bun.spawn(["git", "apply", request.outputPatchPath], {
+			cwd: request.cwd,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		if ((await applied.exited) !== 0) throw new Error(await new Response(applied.stderr).text());
 		return {
 			patchPath: request.outputPatchPath,
 			changesApplied: true,
@@ -424,6 +442,10 @@ describe("WorkflowEngine work-package execution", () => {
 		await Bun.write(path.join(cwd, "src/a.ts"), "before-a\n");
 		await Bun.write(path.join(cwd, "src/b.ts"), "before-b\n");
 		await Bun.write(path.join(cwd, "src/c.ts"), "before-c\n");
+		await fs.mkdir(path.join(cwd, "src/shared-a"), { recursive: true });
+		await fs.mkdir(path.join(cwd, "src/shared-b"), { recursive: true });
+		await Bun.write(path.join(cwd, "src/shared-a/a.ts"), "before-a\n");
+		await Bun.write(path.join(cwd, "src/shared-b/b.ts"), "before-b\n");
 	});
 
 	afterEach(async () => {
@@ -469,6 +491,77 @@ describe("WorkflowEngine work-package execution", () => {
 			content: JSON.stringify(state),
 		});
 		await store.addArtifact(stored);
+	}
+
+	/**
+	 * Persist a strict write-commit state as if the engine crashed right after the
+	 * merger applied the canonical patch but before the applied-state write, plus
+	 * the approved scope metrics the recovery path rehydrates.
+	 */
+	async function persistStrictWriteRecoveryState(options: {
+		workflowId: string;
+		staleAttemptId: string;
+		stage: "implementing" | "repairing";
+		packageId: string;
+		profileId: string;
+		receipt: WorkflowRuntimeIdentityReceiptV1;
+		patchPath: string;
+		changedFiles: string[];
+		mergeStatus: "prepared" | "applied";
+		patchSha256?: string;
+		addressedStepIds?: string[];
+		revision?: number;
+	}) {
+		const state: WorkPackageStateArtifactV1 = {
+			kind: "work-package-state",
+			schemaVersion: 1,
+			workflowId: options.workflowId,
+			attemptId: options.staleAttemptId,
+			stage: options.stage,
+			createdAt: new Date().toISOString(),
+			revision: options.revision ?? 4,
+			mode: "capture_then_apply",
+			packages: [
+				{
+					id: options.packageId,
+					assignment: `Validated ${options.stage} write`,
+					paths: [...options.changedFiles],
+					dependsOn: [],
+					status: "succeeded",
+					invocationAttemptId: `${options.staleAttemptId}:${options.packageId}`,
+					implementation: {
+						...makeImplementation(options.patchPath, options.changedFiles, `recovered ${options.stage}`),
+						modelProfileId: options.profileId,
+						...(options.addressedStepIds ? { addressedStepIds: [...options.addressedStepIds] } : {}),
+					},
+					identityReceipt: options.receipt,
+					modelFamily: options.receipt.modelFamily ?? undefined,
+				},
+			],
+			scopeStatus: "adhered",
+			merge: {
+				status: options.mergeStatus,
+				order: [options.packageId],
+				patchPath: options.patchPath,
+				changesApplied: options.mergeStatus === "applied",
+				summary: "fabricated recovery fixture",
+				...(options.patchSha256 ? { patchSha256: options.patchSha256 } : {}),
+			},
+		};
+		await persistPackageState(options.workflowId, options.staleAttemptId, state);
+		const scopeMetrics = buildScopeMetrics({
+			plannedFiles: options.changedFiles,
+			changedFiles: options.changedFiles,
+		});
+		const storedScope = await artifactStore.store({
+			workflowId: options.workflowId,
+			attemptId: options.staleAttemptId,
+			kind: "scope-metrics",
+			schemaVersion: 1,
+			relativePath: "",
+			content: JSON.stringify(scopeMetrics),
+		});
+		await store.addArtifact(storedScope);
 	}
 
 	it("runs a package-less plan through exactly one whole-plan implementer call without merging", async () => {
@@ -574,35 +667,40 @@ describe("WorkflowEngine work-package execution", () => {
 		]);
 	});
 
-	it("waits for every dependency wave and keeps merge order deterministic", async () => {
+	it("falls back to one whole-plan implementation when one package consumes a predecessor API", async () => {
 		const packages: WorkPackageV1[] = [
-			{ id: "b", assignment: "Implement B after A", paths: ["src/b.ts"], dependsOn: ["a"] },
-			{ id: "c", assignment: "Implement C", paths: ["src/c.ts"], dependsOn: [] },
-			{ id: "a", assignment: "Implement A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Consume the API added by A", paths: ["src/b.ts"], dependsOn: ["a"] },
+			{ id: "c", assignment: "Implement independent C", paths: ["src/c.ts"], dependsOn: [] },
+			{ id: "a", assignment: "Add the shared API", paths: ["src/a.ts"], dependsOn: [] },
 		];
-		const events: string[] = [];
+		const packageCalls: string[] = [];
+		const wholePlanContexts: string[] = [];
 		const mergeCalls: CapturedChangesMergeRequest[] = [];
 		const runner = scriptedRunner({
 			plan: makePlan(packages),
 			planReview: makeReview("plan"),
-			implement: async (_request, packageId) => {
-				if (!packageId) return makeImplementation("patches/whole-plan.patch", ["src/a.ts"]);
-				events.push(`${packageId}:start`);
-				events.push(`${packageId}:done`);
-				return makeImplementation(`patches/${packageId}.patch`, [`src/${packageId}.ts`], packageId);
+			implement: async (request, packageId) => {
+				if (packageId) {
+					packageCalls.push(packageId);
+					return makeImplementation(`patches/${packageId}.patch`, [`src/${packageId}.ts`], packageId);
+				}
+				wholePlanContexts.push(request.context ?? "");
+				return makeImplementation("patches/whole-plan.patch", ["src/a.ts", "src/b.ts", "src/c.ts"]);
 			},
 			codeReview: makeReview("implementation"),
 		});
 		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2);
-		const workflowId = await engine.startWorkflow({ request: "run dependency waves" });
+		const workflowId = await engine.startWorkflow({ request: "run dependent packages safely" });
 
 		const result = await engine.run(workflowId, fakeSession(cwd, 2));
 
 		expect(result.state.status).toBe("completed");
-		expect(events.indexOf("b:start")).toBeGreaterThan(events.indexOf("a:done"));
-		expect(mergeCalls).toHaveLength(1);
-		expect(mergeCalls[0]?.patches.map(patch => patch.packageId)).toEqual(["a", "c", "b"]);
-		expect(result.workPackageState?.merge.order).toEqual(["a", "c", "b"]);
+		expect(packageCalls).toEqual([]);
+		expect(wholePlanContexts).toHaveLength(1);
+		expect(wholePlanContexts[0]).toContain("Add the shared API");
+		expect(wholePlanContexts[0]).toContain("Consume the API added by A");
+		expect(mergeCalls).toHaveLength(0);
+		expect(result.workPackageState).toBeUndefined();
 	});
 
 	it("falls back to one serial whole-plan call for overlap, cycles, and an effectively serial limit", async () => {
@@ -1392,5 +1490,402 @@ describe("WorkflowEngine work-package execution", () => {
 		expect(stale?.status).toBe("failed");
 		expect(stale?.errorSummary).toBe("write_stage_interrupted_no_rerun");
 		expect(implementCalls).toBe(0);
+	});
+
+	it("resumes a crash-interrupted strict implement merge with zero model and merge calls", async () => {
+		const config = strictPackageConfig();
+		const captureEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(),
+				planReview: makeReview("plan"),
+				implement: async () => {
+					throw new Error("capture engine must not run the implementer");
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			undefined,
+			1,
+			config,
+		);
+		const workflowId = await captureEngine.startWorkflow({
+			request: "crash resume strict implement",
+			qualityTier: "balanced",
+		});
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		const implementingState = await captureEngine.getState(workflowId);
+		expect(implementingState?.status).toBe("implementing");
+		const staleAttemptId = await store.beginAttempt(
+			workflowId,
+			"implementing",
+			undefined,
+			implementingState!.version,
+		);
+
+		// The merger applied the canonical patch, then the process died before the
+		// applied-state write; the persisted state still says "prepared".
+		const patchPath = "patches/crash-implement.patch";
+		await writePatchFile(cwd, patchPath, ["src/a.ts"]);
+		const patchText = await Bun.file(path.join(cwd, patchPath)).text();
+		await $`git apply ${patchPath}`.cwd(cwd).quiet();
+		expect(await Bun.file(path.join(cwd, "src/a.ts")).text()).toBe("after-a\n");
+		await persistStrictWriteRecoveryState({
+			workflowId,
+			staleAttemptId,
+			stage: "implementing",
+			packageId: "validated-implementing",
+			profileId: "strict_implementer",
+			receipt: strictPackageReceipt(),
+			patchPath,
+			changedFiles: ["src/a.ts"],
+			mergeStatus: "prepared",
+			patchSha256: sha256Hex(patchText),
+		});
+
+		let implementCalls = 0;
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const resumeEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(),
+				planReview: makeReview("plan"),
+				implement: async () => {
+					implementCalls += 1;
+					return makeImplementation("patches/should-not-run.patch", ["src/a.ts"]);
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			combinedMerger(mergeCalls),
+			1,
+			config,
+		);
+
+		const result = await resumeEngine.resume(workflowId, {
+			forceUnlock: true,
+			session: fakeSession(cwd, 1),
+		});
+
+		expect(result.state.status).toBe("completed");
+		expect(implementCalls).toBe(0);
+		expect(mergeCalls).toHaveLength(0);
+		expect(await Bun.file(path.join(cwd, "src/a.ts")).text()).toBe("after-a\n");
+		expect(result.workPackageState?.merge).toMatchObject({ status: "applied", changesApplied: true });
+		const stale = (await store.listAttempts(workflowId)).find(attempt => attempt.id === staleAttemptId);
+		expect(stale?.status).toBe("failed");
+		expect(stale?.errorSummary).toBe("work_package_merge_prepared_resume");
+	});
+
+	it("resumes a crash-interrupted strict repair merge with zero model and merge calls", async () => {
+		const config = strictPackageConfig();
+		const blockingFinding: ReviewFindingV1 = {
+			id: "f-blocking",
+			priority: "P1",
+			category: "correctness",
+			status: "open",
+			confidence: 0.99,
+			summary: "blocking correctness finding",
+			explanation: "must be repaired",
+			suggestedOwner: "implementer",
+		};
+		const reviewWithFindings = reviewArtifact("changes_requested", "implementation", [blockingFinding]);
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const driver = makeEngine(
+			scriptedRunner({
+				plan: makePlan(),
+				planReview: makeReview("plan"),
+				implement: async () => makeImplementation("patches/impl.patch", ["src/a.ts"]),
+				codeReview: reviewWithFindings,
+				identityMode: () => "valid",
+			}),
+			combinedMerger(mergeCalls),
+			1,
+			config,
+		);
+		const workflowId = await driver.startWorkflow({
+			request: "crash resume strict repair",
+			qualityTier: "balanced",
+		});
+		for (let step = 0; step < 6; step++) {
+			await driver.resume(workflowId, { singleStep: true });
+		}
+		const repairingState = await driver.getState(workflowId);
+		expect(repairingState?.status).toBe("repairing");
+		const staleAttemptId = await store.beginAttempt(workflowId, "repairing", undefined, repairingState!.version);
+
+		const patchPath = "patches/crash-repair.patch";
+		await writePatchFile(cwd, patchPath, ["src/a.ts"], {
+			"src/a.ts": { before: "after-a", after: "repaired-a" },
+		});
+		const patchText = await Bun.file(path.join(cwd, patchPath)).text();
+		await $`git apply ${patchPath}`.cwd(cwd).quiet();
+		await persistStrictWriteRecoveryState({
+			workflowId,
+			staleAttemptId,
+			stage: "repairing",
+			packageId: "validated-repairing",
+			profileId: "strict_repair",
+			receipt: strictPackageReceipt("strict_repair", "anthropic", "claude-fable-5", "anthropic"),
+			patchPath,
+			changedFiles: ["src/a.ts"],
+			mergeStatus: "prepared",
+			patchSha256: sha256Hex(patchText),
+			addressedStepIds: ["f-blocking"],
+			revision: 8,
+		});
+
+		let implementCalls = 0;
+		const repairCalls = 0;
+		const resumeMergeCalls: CapturedChangesMergeRequest[] = [];
+		const resumeEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(),
+				planReview: makeReview("plan"),
+				implement: async () => {
+					implementCalls += 1;
+					return makeImplementation("patches/should-not-run.patch", ["src/a.ts"]);
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			combinedMerger(resumeMergeCalls),
+			1,
+			config,
+		);
+
+		const result = await resumeEngine.resume(workflowId, {
+			forceUnlock: true,
+			session: fakeSession(cwd, 1),
+		});
+
+		expect(result.state.status).toBe("completed");
+		expect(implementCalls).toBe(0);
+		expect(repairCalls).toBe(0);
+		expect(resumeMergeCalls).toHaveLength(0);
+		expect(result.workPackageState?.merge).toMatchObject({ status: "applied", changesApplied: true });
+		const stale = (await store.listAttempts(workflowId)).find(attempt => attempt.id === staleAttemptId);
+		expect(stale?.status).toBe("failed");
+		expect(stale?.errorSummary).toBe("work_package_merge_prepared_resume");
+	});
+
+	it("fails closed on missing, empty, hash-mismatched, and ambiguous persisted patch evidence", async () => {
+		const config = strictPackageConfig();
+		const cases: Array<{
+			label: string;
+			patchPath: string;
+			patchText: string;
+			applyToTree: boolean;
+			writeFile: boolean;
+			patchSha256?: string;
+			expected: RegExp;
+		}> = [
+			{
+				label: "missing patch file",
+				patchPath: "patches/ghost.patch",
+				patchText: "",
+				applyToTree: false,
+				writeFile: false,
+				expected: /work_package_applied_patch_unreadable/,
+			},
+			{
+				label: "empty patch body",
+				patchPath: "patches/empty.patch",
+				patchText: "",
+				applyToTree: false,
+				writeFile: true,
+				expected: /work_package_applied_patch_ambiguous/,
+			},
+			{
+				label: "hash mismatch",
+				patchPath: "patches/mismatch.patch",
+				patchText:
+					"diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-before-a\n+after-a\n",
+				applyToTree: false,
+				writeFile: true,
+				patchSha256: "0".repeat(64),
+				expected: /work_package_applied_patch_hash_mismatch/,
+			},
+			{
+				label: "ambiguous insertion evidence",
+				patchPath: "patches/ambiguous.patch",
+				patchText: "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -2,0 +2,1 @@\n+X\n",
+				applyToTree: true,
+				writeFile: true,
+				expected: /work_package_applied_patch_drift/,
+			},
+		];
+
+		for (const testCase of cases) {
+			const captureEngine = makeEngine(
+				scriptedRunner({
+					plan: makePlan(),
+					planReview: makeReview("plan"),
+					implement: async () => {
+						throw new Error("capture engine must not run the implementer");
+					},
+					codeReview: makeReview("implementation"),
+					identityMode: () => "valid",
+				}),
+				undefined,
+				1,
+				config,
+			);
+			const workflowId = await captureEngine.startWorkflow({
+				request: `evidence ${testCase.label}`,
+				qualityTier: "balanced",
+			});
+			await captureEngine.resume(workflowId, { singleStep: true });
+			await captureEngine.resume(workflowId, { singleStep: true });
+			await captureEngine.resume(workflowId, { singleStep: true });
+			const implementingState = await captureEngine.getState(workflowId);
+			expect(implementingState?.status).toBe("implementing");
+			const staleAttemptId = await store.beginAttempt(
+				workflowId,
+				"implementing",
+				undefined,
+				implementingState!.version,
+			);
+
+			const patchPath = testCase.patchPath;
+			if (testCase.writeFile) {
+				await fs.mkdir(path.dirname(path.join(cwd, patchPath)), { recursive: true });
+				await Bun.write(path.join(cwd, patchPath), testCase.patchText);
+				if (testCase.applyToTree) {
+					await Bun.write(path.join(cwd, "src/a.ts"), "a\nb\nc\n");
+					await $`git apply ${patchPath}`.cwd(cwd).quiet();
+				}
+			}
+			await persistStrictWriteRecoveryState({
+				workflowId,
+				staleAttemptId,
+				stage: "implementing",
+				packageId: "validated-implementing",
+				profileId: "strict_implementer",
+				receipt: strictPackageReceipt(),
+				patchPath,
+				changedFiles: ["src/a.ts"],
+				mergeStatus: "applied",
+				patchSha256: testCase.patchSha256,
+			});
+
+			let implementCalls = 0;
+			const mergeCalls: CapturedChangesMergeRequest[] = [];
+			const resumeEngine = makeEngine(
+				scriptedRunner({
+					plan: makePlan(),
+					planReview: makeReview("plan"),
+					implement: async () => {
+						implementCalls += 1;
+						return makeImplementation("patches/should-not-run.patch", ["src/a.ts"]);
+					},
+					codeReview: makeReview("implementation"),
+				}),
+				combinedMerger(mergeCalls),
+				1,
+				config,
+			);
+
+			await expect(
+				resumeEngine.resume(workflowId, { forceUnlock: true, session: fakeSession(cwd, 1) }),
+			).rejects.toThrow(testCase.expected);
+			expect(implementCalls).toBe(0);
+			expect(mergeCalls).toHaveLength(0);
+			const stale = (await store.listAttempts(workflowId)).find(attempt => attempt.id === staleAttemptId);
+			expect(stale?.status).toBe("failed");
+			expect(stale?.errorSummary).toBe("work_package_merge_already_applied_resume");
+		}
+	});
+
+	it("waits for the merge settlement barrier when cancelled mid-merge and never re-runs work", async () => {
+		const config = strictPackageConfig();
+		const midMerge = deferred<void>();
+		let implementCalls = 0;
+		let mergerEntered = false;
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const blockingMerger: CapturedChangesMerger = async request => {
+			mergeCalls.push({ ...request, patches: request.patches.map(patch => ({ ...patch })) });
+			mergerEntered = true;
+			const contents = await Promise.all(
+				request.patches.map(async patch => {
+					const fullPath = path.isAbsolute(patch.patchPath)
+						? patch.patchPath
+						: path.join(request.cwd, patch.patchPath);
+					return Bun.file(fullPath).text();
+				}),
+			);
+			await fs.mkdir(path.dirname(request.outputPatchPath), { recursive: true });
+			await Bun.write(
+				request.outputPatchPath,
+				contents
+					.map(content => (content.length === 0 || content.endsWith("\n") ? content : `${content}\n`))
+					.join(""),
+			);
+			const applied = Bun.spawn(["git", "apply", request.outputPatchPath], {
+				cwd: request.cwd,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			if ((await applied.exited) !== 0) throw new Error(await new Response(applied.stderr).text());
+			midMerge.resolve();
+			// Simulate a cancellation arriving mid-merge: wait for the abort signal,
+			// then surface the cancellation to the engine's uncertain-outcome path.
+			await new Promise<void>(resolve => {
+				if (request.signal?.aborted) resolve();
+				else request.signal?.addEventListener("abort", () => resolve(), { once: true });
+			});
+			throw new WorkflowCancelledError("cancelled during merge");
+		};
+
+		const engine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(),
+				planReview: makeReview("plan"),
+				implement: async () => {
+					implementCalls += 1;
+					return makeImplementation("patches/whole-plan.patch", ["src/a.ts"]);
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			blockingMerger,
+			1,
+			config,
+		);
+		const workflowId = await engine.startWorkflow({ request: "cancel during merge", qualityTier: "balanced" });
+		const runPromise = engine.run(workflowId, fakeSession(cwd, 1));
+
+		await midMerge.promise;
+		expect(mergerEntered).toBe(true);
+		expect(await Bun.file(path.join(cwd, "src/a.ts")).text()).toBe("after-a\n");
+		const cancelledState = await engine.cancel(workflowId, "caller cancelled mid-merge");
+		const runResult = await runPromise;
+
+		expect(cancelledState.status).toBe("cancelled");
+		expect(implementCalls).toBe(1);
+		expect(mergeCalls).toHaveLength(1);
+		expect(runResult.workPackageState?.merge).toMatchObject({ status: "applied", changesApplied: true });
+		expect((await engine.getState(workflowId))?.status).toBe("cancelled");
+
+		let resumeCalls = 0;
+		const freshEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(),
+				planReview: makeReview("plan"),
+				implement: async () => {
+					resumeCalls += 1;
+					return makeImplementation("patches/should-not-run.patch", ["src/a.ts"]);
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			combinedMerger(mergeCalls),
+			1,
+			config,
+		);
+		await expect(freshEngine.resume(workflowId, { forceUnlock: true, session: fakeSession(cwd, 1) })).rejects.toThrow(
+			/cannot_resume_terminal/,
+		);
+		expect(resumeCalls).toBe(0);
 	});
 });

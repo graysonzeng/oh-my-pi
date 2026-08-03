@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -237,7 +238,16 @@ function captureMerger(calls: CapturedChangesMergeRequest[]): CapturedChangesMer
 			}),
 		);
 		await fs.mkdir(path.dirname(request.outputPatchPath), { recursive: true });
-		await Bun.write(request.outputPatchPath, content.join("\n"));
+		await Bun.write(
+			request.outputPatchPath,
+			content.map(text => (text.length === 0 || text.endsWith("\n") ? text : `${text}\n`)).join(""),
+		);
+		const applied = Bun.spawn(["git", "apply", request.outputPatchPath], {
+			cwd: request.cwd,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		if ((await applied.exited) !== 0) throw new Error(await new Response(applied.stderr).text());
 		return { patchPath: request.outputPatchPath, changesApplied: true, summary: "captured" };
 	};
 }
@@ -389,13 +399,13 @@ describe("WorkflowEngine quality routes", () => {
 		const initialPolicy = JSON.parse(initialState!.policyJson) as {
 			qualityRouteSnapshot: { fingerprint: string; routes: Record<string, string[]> };
 		};
-		const initialPlanner = initial.profiles["balanced_planner"]!;
+		const initialPlanner = initial.profiles.balanced_planner!;
 		const initialPlannerModel = Array.isArray(initialPlanner.modelPattern)
 			? initialPlanner.modelPattern[0]!
 			: initialPlanner.modelPattern;
 
 		active = qualityConfig("mutated");
-		expect(active.profiles["balanced_planner_mutated"]?.modelPattern).not.toBe(initialPlanner.modelPattern);
+		expect(active.profiles.balanced_planner_mutated?.modelPattern).not.toBe(initialPlanner.modelPattern);
 		await tool.execute("resume-planning", { op: "resume", workflowId, singleStep: true });
 
 		expect(calls).toEqual([{ stage: "planning", model: initialPlannerModel }]);
@@ -409,6 +419,134 @@ describe("WorkflowEngine quality routes", () => {
 		expect(snapshotMeta).toBeDefined();
 		const persisted = await artifactStore.load(snapshotMeta!.relativePath, snapshotMeta!.sha256);
 		expect(JSON.parse(persisted!.content!).fingerprint).toBe(initialPolicy.qualityRouteSnapshot.fingerprint);
+	});
+
+	it("fails closed before attempts when a persisted quality policy is truncated", async () => {
+		const dbPath = path.join(os.tmpdir(), `wf-quality-corrupt-${crypto.randomUUID()}.db`);
+		const persistedStore = new WorkflowStore(dbPath);
+		const calls: RunnerCall[] = [];
+		const session = fakeSession({ cwd });
+		const artifactStore = new ArtifactStore(artifactDir);
+		try {
+			const engine = makeEngine({
+				store: persistedStore,
+				artifactStore,
+				session,
+				config: qualityConfig(),
+				runner: qualityRunner({ calls }),
+				availability: availableProfiles(),
+			});
+			const { workflowId } = await engine.start({ request: "corrupt frozen route", qualityTier: "balanced" });
+
+			const database = new Database(dbPath);
+			try {
+				database.run("UPDATE workflows SET policy_json = ? WHERE id = ?", ['{"degradedMode":false', workflowId]);
+			} finally {
+				database.close();
+			}
+
+			const resumed = makeEngine({
+				store: persistedStore,
+				artifactStore,
+				session,
+				config: qualityConfig("mutated"),
+				runner: qualityRunner({ calls }),
+				availability: availableProfiles(),
+			});
+			await expect(resumed.resume(workflowId, { singleStep: true, session })).rejects.toThrow(
+				/quality_route_policy_invalid/,
+			);
+			expect(calls).toHaveLength(0);
+			expect(await persistedStore.listAttempts(workflowId)).toHaveLength(0);
+		} finally {
+			persistedStore.close();
+			await fs.rm(dbPath, { force: true });
+		}
+	});
+
+	it("fails closed before attempts when valid quality policy JSON loses its snapshot", async () => {
+		const dbPath = path.join(os.tmpdir(), `wf-quality-missing-${crypto.randomUUID()}.db`);
+		const persistedStore = new WorkflowStore(dbPath);
+		const calls: RunnerCall[] = [];
+		const session = fakeSession({ cwd });
+		const artifactStore = new ArtifactStore(artifactDir);
+		try {
+			const engine = makeEngine({
+				store: persistedStore,
+				artifactStore,
+				session,
+				config: qualityConfig(),
+				runner: qualityRunner({ calls }),
+				availability: availableProfiles(),
+			});
+			const { workflowId } = await engine.start({ request: "remove frozen route", qualityTier: "balanced" });
+			const state = await persistedStore.getCurrentState(workflowId);
+			const policy = JSON.parse(state!.policyJson) as Record<string, unknown>;
+			delete policy.qualityRouteSnapshot;
+
+			const database = new Database(dbPath);
+			try {
+				database.run("UPDATE workflows SET policy_json = ? WHERE id = ?", [JSON.stringify(policy), workflowId]);
+			} finally {
+				database.close();
+			}
+
+			const resumed = makeEngine({
+				store: persistedStore,
+				artifactStore,
+				session,
+				config: qualityConfig("mutated"),
+				runner: qualityRunner({ calls }),
+				availability: availableProfiles(),
+			});
+			await expect(resumed.resume(workflowId, { singleStep: true, session })).rejects.toThrow(
+				/quality_route_snapshot_missing/,
+			);
+			expect(calls).toHaveLength(0);
+			expect(await persistedStore.listAttempts(workflowId)).toHaveLength(0);
+		} finally {
+			persistedStore.close();
+			await fs.rm(dbPath, { force: true });
+		}
+	});
+
+	it("does not persist an unreachable workflow when quality preflight fails", async () => {
+		const dbPath = path.join(os.tmpdir(), `wf-quality-preflight-${crypto.randomUUID()}.db`);
+		const persistedStore = new WorkflowStore(dbPath);
+		const calls: RunnerCall[] = [];
+		const session = fakeSession({ cwd });
+		try {
+			const engine = makeEngine({
+				store: persistedStore,
+				artifactStore: new ArtifactStore(artifactDir),
+				session,
+				config: qualityConfig(),
+				runner: qualityRunner({ calls }),
+				availability: {
+					async probe({ profile }) {
+						if (profile.roles.includes("planner")) {
+							return { status: "unavailable", latencyMs: 1, errorKind: "quota" };
+						}
+						return availableProfiles().probe({ profile, role: profile.roles[0]!, session });
+					},
+				},
+			});
+
+			await expect(engine.start({ request: "preflight must fail", qualityTier: "balanced" })).rejects.toThrow(
+				/required_role_unavailable/,
+			);
+			expect(calls).toHaveLength(0);
+			const database = new Database(dbPath);
+			try {
+				const row = database.query("SELECT COUNT(*) AS count FROM workflows").get() as { count: number };
+				expect(row.count).toBe(0);
+			} finally {
+				database.close();
+			}
+		} finally {
+			persistedStore.close();
+			await fs.rm(dbPath, { force: true });
+		}
 	});
 
 	it("blocks a critical code reviewer with the implementer's model lineage before invoking it", async () => {
@@ -431,7 +569,9 @@ describe("WorkflowEngine quality routes", () => {
 		expect(result.state.status).toBe("blocked");
 		expect(calls.filter(call => call.stage === "code_review")).toHaveLength(0);
 		expect(mergeCalls).toHaveLength(1);
-		expect(await Bun.file(sourcePath).text()).toBe("before\n");
+		// Implement/merge completed with attested identity and approved scope; the
+		// lineage block happens only when selecting the code reviewer afterwards.
+		expect(await Bun.file(sourcePath).text()).toBe("before\nconst x = 1\n");
 		const codeReviewAttempt = (await store.listAttempts(id)).find(attempt => attempt.stage === "code_review");
 		expect(codeReviewAttempt?.status).toBe("failed");
 		expect(codeReviewAttempt?.errorSummary).toMatch(/independent_reviewer_unavailable/);

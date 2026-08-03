@@ -69,10 +69,12 @@ export interface WorkPackageExecutionV1 extends WorkPackageV1 {
 }
 
 export interface WorkPackageMergeV1 {
-	status: "pending" | "applied" | "failed";
+	status: "pending" | "prepared" | "applied" | "failed";
 	order: string[];
 	patchPath?: string;
 	changesApplied?: boolean;
+	/** SHA-256 of the durable aggregate patch written before merge starts. */
+	patchSha256?: string;
 	summary?: string;
 }
 
@@ -82,6 +84,8 @@ export interface WorkPackageStateArtifactV1 extends ArtifactHeader {
 	mode: "capture_then_apply";
 	packages: WorkPackageExecutionV1[];
 	merge: WorkPackageMergeV1;
+	/** Scope decision captured at the write-commit boundary. */
+	scopeStatus?: "adhered" | "warning" | "violation" | "indeterminate";
 }
 
 export interface CapturedChangesMergeRequest {

@@ -310,7 +310,9 @@ export async function runBenchmarkSuite(opts: BenchmarkRunOptions): Promise<Benc
 							}
 						}
 						const fallbackCount = response.stage?.fallbacks?.value;
-						if (typeof fallbackCount === "number" && fallbackCount > 0) {
+						if (typeof fallbackCount !== "number") {
+							identityErrors.push("fixed-model live run fallback evidence missing");
+						} else if (fallbackCount > 0) {
 							identityErrors.push(`fixed-model live run observed ${fallbackCount} fallback(s)`);
 						}
 					}

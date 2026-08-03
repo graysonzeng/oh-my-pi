@@ -58,13 +58,34 @@ function normalizedAttestedIdentity(
 	response: ProviderResponseMetadata,
 	localModel: Model<Api> | undefined,
 ): CapturedAttestation | undefined {
-	const gatewayModel = firstHeader(response.headers, GATEWAY_MODEL_HEADERS);
-	const providerModel = firstHeader(response.headers, PROVIDER_MODEL_HEADERS);
-	const metadataModel = metadataString(response.metadata, ["resolvedModel", "model", "modelId"]);
-	const modelValue = gatewayModel ?? providerModel ?? metadataModel;
-	if (!modelValue) return undefined;
+	const headerValues = (names: readonly string[]): string[] =>
+		names.map(name => response.headers[name]?.trim()).filter((value): value is string => Boolean(value));
+	const metadataValues = (names: readonly string[]): string[] =>
+		names
+			.map(name => response.metadata?.[name])
+			.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+			.map(value => value.trim());
+	const gatewayModels = headerValues(GATEWAY_MODEL_HEADERS);
+	const providerModels = headerValues(PROVIDER_MODEL_HEADERS);
+	const metadataModels = metadataValues(["resolvedModel", "model", "modelId"]);
+	const modelValues = [...gatewayModels, ...providerModels, ...metadataModels];
+	if (modelValues.length === 0) return undefined;
+	const attestedModels = new Set(modelValues.map(value => parseModelString(value)?.id ?? value));
+	if (attestedModels.size !== 1) return undefined;
+
+	const checkpointValues = [
+		...headerValues(CHECKPOINT_HEADERS),
+		...metadataValues(["checkpoint", "modelCheckpoint", "modelVersion"]),
+	];
+	const checkpoints = new Set(checkpointValues);
+	if (checkpoints.size > 1) return undefined;
+
+	const gatewayModel = gatewayModels[0];
+	const providerModel = providerModels[0];
+	const metadataModel = metadataModels[0];
+	const modelValue = gatewayModel ?? providerModel ?? metadataModel!;
 	const parsed = parseModelString(modelValue);
-	const attestedModel = parsed?.id ?? modelValue;
+	const attestedModel = attestedModels.values().next().value;
 	const attestedProvider = gatewayModel
 		? (parsed?.provider ?? localModel?.provider)
 		: (firstHeader(response.headers, PROVIDER_HEADERS) ??
@@ -75,10 +96,7 @@ function normalizedAttestedIdentity(
 	return {
 		provider: attestedProvider,
 		model: attestedModel,
-		checkpoint:
-			firstHeader(response.headers, CHECKPOINT_HEADERS) ??
-			metadataString(response.metadata, ["checkpoint", "modelCheckpoint", "modelVersion"]) ??
-			null,
+		checkpoint: checkpointValues[0] ?? null,
 		provenance: gatewayModel ? "gateway_attestation" : "provider_echo",
 	};
 }

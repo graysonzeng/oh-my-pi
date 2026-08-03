@@ -88,6 +88,11 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 			inflight.delete(cacheKey);
 		}
 	})();
+	// The single-flight promise is deliberately detached from any caller's signal, so its
+	// late rejection (hung credential_process, SSO, or IMDS timeout) can outlive every
+	// caller. Deliver it to racers via raceWithSignal, but sink it here so a late failure
+	// after all callers aborted is not an unhandled rejection that corrupts the host process.
+	promise.catch(() => undefined);
 	inflight.set(cacheKey, promise);
 	return raceWithSignal(promise, opts.signal);
 }

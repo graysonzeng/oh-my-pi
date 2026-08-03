@@ -27,6 +27,7 @@ export type WorkflowToolDetails = {
 	status?: WorkflowStatus;
 	approvalTier: "read" | "write";
 	availability?: WorkflowAvailabilityReport;
+	statusReport?: WorkflowStatusReportV1;
 };
 
 /**
@@ -149,6 +150,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 						workflowId,
 						status: report.status,
 						approvalTier: tier,
+						statusReport: report,
 					},
 				};
 			}

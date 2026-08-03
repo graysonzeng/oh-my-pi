@@ -186,6 +186,7 @@ describe("WorkflowTool", () => {
 		if (content?.type !== "text") throw new Error("status must return text content");
 
 		expect(status.details?.status).toBe("planning");
+		expect(status.details?.statusReport).toMatchObject({ workflowId, qualityRoute: { status: "verified" } });
 		expect(content.text).toContain("Configured routes: planner=[status_planner]");
 		expect(content.text).toContain("Model attempt: stage=planning role=planner");
 		expect(content.text).toContain("profile=status_planner configured=openai/gpt-5.6-sol:high");

@@ -65,21 +65,20 @@ describe("PolicyExperimentV1", () => {
 		).toEqual({ compilerShadow: true, compilerActive: false });
 	});
 
-	it("maps one valid approved receipt to exactly its supported lever", () => {
+	it("keeps self-reported live evidence shadowed without a verifiable rollout authority", () => {
 		const receipt = evaluatePolicyLever(eligibleInput);
 		expect(validatePolicyExperimentReceipt(receipt)).toBe(true);
 		expect(receipt).toMatchObject({
 			schemaVersion: 1,
 			kind: "policy_experiment_receipt",
 			lever: "tool_concurrency_ceiling",
-			decision: "active",
-			applied: true,
+			decision: "shadow",
+			applied: false,
 		});
-		expect(receipt.policyFingerprint.length).toBe(64);
+		expect(receipt.reasons).toContain("verified_rollout_authority_unavailable");
 		expect(featureGatesFromExperiment(receipt)).toEqual({
 			compilerShadow: true,
-			compilerActive: true,
-			activeLever: "tool_concurrency_ceiling",
+			compilerActive: false,
 		});
 		expect(
 			productionPolicyFeatureGates(
@@ -88,8 +87,7 @@ describe("PolicyExperimentV1", () => {
 			),
 		).toEqual({
 			compilerShadow: true,
-			compilerActive: true,
-			activeLever: "tool_concurrency_ceiling",
+			compilerActive: false,
 			contextCache: true,
 		});
 	});
@@ -98,7 +96,7 @@ describe("PolicyExperimentV1", () => {
 		const receipt = evaluatePolicyLever(eligibleInput);
 		const mutated = structuredClone(receipt);
 		mutated.evidence.repetitions = 4;
-		const forged = { ...receipt, decision: "shadow" as const, applied: false };
+		const forged = { ...receipt, decision: "active" as const, applied: true };
 		const forgedFingerprint = { ...receipt, policyFingerprint: "0".repeat(64) };
 
 		expect(validatePolicyExperimentReceipt(mutated)).toBe(false);
@@ -207,11 +205,11 @@ describe("PolicyExperimentV1", () => {
 		expect(receipt.applied).toBe(false);
 	});
 
-	it("records eligibility without changing production when rollout approval is absent", () => {
+	it("keeps an unapproved self-reported receipt shadowed", () => {
 		const receipt = evaluatePolicyLever({ ...eligibleInput, rolloutApproved: false });
-		expect(receipt.decision).toBe("eligible");
+		expect(receipt.decision).toBe("shadow");
 		expect(receipt.applied).toBe(false);
-		expect(receipt.reasons).toContain("explicit_rollout_approval_required");
+		expect(receipt.reasons).toContain("verified_rollout_authority_unavailable");
 		expect(featureGatesFromExperiment(receipt)).toEqual({ compilerShadow: true, compilerActive: false });
 	});
 

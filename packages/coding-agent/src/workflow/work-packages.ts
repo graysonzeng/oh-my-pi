@@ -80,6 +80,7 @@ export function buildWorkPackageExecutionPlan(
 	maxConcurrency: number,
 ): WorkPackageExecutionPlan | null {
 	if (!input || input.length < 2) return null;
+	if (input.some(candidate => candidate.dependsOn.length > 0)) return null;
 	const normalizedMax = Number.isFinite(maxConcurrency) ? Math.trunc(maxConcurrency) : 0;
 	if (normalizedMax === 1) return null;
 
@@ -255,6 +256,32 @@ export async function executeWorkPackagePlan(input: ExecuteWorkPackagePlanInput)
 		if (aborted) throw new WorkflowCancelledError("cancelled after work-package wave");
 	}
 	return structuredClone(state);
+}
+
+export function withWorkPackageMergePrepared(
+	state: WorkPackageStateArtifactV1,
+	attemptId: string,
+	options: {
+		patchPath: string;
+		patchSha256: string;
+		scopeStatus: NonNullable<WorkPackageStateArtifactV1["scopeStatus"]>;
+	},
+): WorkPackageStateArtifactV1 {
+	return {
+		...structuredClone(state),
+		attemptId,
+		createdAt: new Date().toISOString(),
+		revision: state.revision + 1,
+		scopeStatus: options.scopeStatus,
+		merge: {
+			...state.merge,
+			status: "prepared",
+			patchPath: options.patchPath,
+			changesApplied: false,
+			patchSha256: options.patchSha256,
+			summary: "validated patch prepared before merge",
+		},
+	};
 }
 
 export function withWorkPackageMerge(

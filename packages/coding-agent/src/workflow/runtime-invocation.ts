@@ -39,7 +39,6 @@ import {
 import { assemblePrompt, type PromptAssemblyReceiptV1 } from "./prompt-assembly";
 import { applyPromptStrategy, buildStablePromptSections } from "./prompt-strategy";
 import { enhanceSchemaForProfile, type ToolDescriptor, transformToolsForProfile } from "./schema-enhancer";
-import { applyContextStrategyEviction } from "./tool-optimization";
 import { processToolOutputDetailed } from "./tool-output-manager";
 import { isReadonlyWorkflowRole, ToolPolicyFactory, wrapSessionForWorkflowRole } from "./tool-policy";
 import type { ModelProfile, WorkflowAgentRequest, WorkflowIsolationControls } from "./types";
@@ -180,6 +179,12 @@ export async function persistSessionArtifact(
 function createSessionContextArtifactAdapter(session: ToolSession): ContextArtifactAdapter | null {
 	if (!session.getArtifactManager?.() && !session.getArtifactsDir?.()) return null;
 	const storedPaths = new Map<string, string>();
+	const removeStoredPath = async (uri: string): Promise<void> => {
+		const filePath = storedPaths.get(uri);
+		if (!filePath) return;
+		storedPaths.delete(uri);
+		await fs.promises.rm(filePath, { force: true }).catch(() => undefined);
+	};
 	return {
 		async persist(entry, sha256) {
 			const stored = await persistSessionArtifact(session, entry.content, `context-${entry.kind}`, sha256);
@@ -200,8 +205,11 @@ function createSessionContextArtifactAdapter(session: ToolSession): ContextArtif
 			}
 			if (!filePath) return false;
 			try {
-				return sha256Hex(await fs.promises.readFile(filePath, "utf8")) === sha256;
+				const verified = sha256Hex(await fs.promises.readFile(filePath, "utf8")) === sha256;
+				if (!verified) await removeStoredPath(uri);
+				return verified;
 			} catch {
+				await removeStoredPath(uri);
 				return false;
 			}
 		},
@@ -405,27 +413,10 @@ export function prepareWorkflowInvocation(
 	const styleMarker = stableParts.styleMarker;
 
 	// Dynamic-only body: stage handoff / repo notes from the request — never re-inject style or role.
-	const maxBytes = request.profile.contextPolicy?.maxArtifactBytes ?? Number.POSITIVE_INFINITY;
-	let dynamicContext = request.context?.trim() ?? "";
+	const dynamicContext = request.context?.trim() ?? "";
 	const outputPrefix = request.profile.outputStrategy?.outputPrefixPrompt?.trim();
 	// outputPrefix is profile-stable but short; keep it with role policy rather than dynamic body.
 	const rolePolicyWithPrefix = [stableParts.rolePolicy, outputPrefix].filter(Boolean).join("\n\n");
-	if (dynamicContext && dynamicContext.length > maxBytes) {
-		dynamicContext = `${dynamicContext.slice(0, Math.max(0, maxBytes - 32))}\n/* truncated by contextPolicy */`;
-	}
-
-	// Optional repo-map / contextStrategy artifact cap on dynamic handoff only.
-	const strategyMax = request.profile.contextStrategy?.artifactInclusion?.maxArtifactBytes;
-	if (strategyMax && dynamicContext && dynamicContext.length > strategyMax) {
-		dynamicContext = `${dynamicContext.slice(0, Math.max(0, strategyMax - 32))}\n/* truncated by contextStrategy */`;
-	}
-
-	// CWL-style eviction under utilization pressure (production call site for evictContext).
-	const evictionBudget =
-		request.profile.contextStrategy?.artifactInclusion?.maxArtifactBytes ??
-		request.profile.contextPolicy?.maxArtifactBytes ??
-		maxBytes;
-	dynamicContext = applyContextStrategyEviction(dynamicContext, request.profile.contextStrategy, evictionBudget) ?? "";
 
 	let session = wrapSessionForWorkflowRole(request.session, request.role);
 	session = wrapSessionForWorkflowIsolation(session, isolationRequested);
@@ -699,15 +690,8 @@ export function prepareWorkflowInvocation(
 
 	// Always install optimization on the session so bash/read/grep honor processResult
 	// and customWireName on the real tool path (not only via PreparedWorkflowInvocation helpers).
-	// Runner-facing context is the assembled prompt (stable prefix + dynamic handoff),
-	// then clamped by contextPolicy.maxArtifactBytes so pre-P2 budget contracts hold.
-	let assembledContext = assembled.text || dynamicContext || "";
-	if (assembledContext.length > maxBytes) {
-		assembledContext = `${assembledContext.slice(0, Math.max(0, maxBytes - 32))}\n/* truncated by contextPolicy */`;
-	}
-	if (strategyMax && assembledContext.length > strategyMax) {
-		assembledContext = `${assembledContext.slice(0, Math.max(0, strategyMax - 32))}\n/* truncated by contextStrategy */`;
-	}
+	// Runner-facing context is exactly the assembled prompt measured by the receipt and ledger.
+	const assembledContext = assembled.text || dynamicContext || "";
 	session = {
 		...session,
 		workflowToolOptimization,

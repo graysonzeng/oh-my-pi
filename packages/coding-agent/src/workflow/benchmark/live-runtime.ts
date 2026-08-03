@@ -5,7 +5,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "../../config/settings";
 import { createAgentSession } from "../../sdk";
 import { getDefaultConfig } from "../default-config";
-import type { ModelProfile } from "../types";
+import type { ModelProfile, WorkflowModelBackedStage, WorkflowStatusReportV1 } from "../types";
 import { materializeBenchmarkFixture } from "./fixtures";
 import type { BenchmarkRuntime, BenchmarkRuntimeRequest, BenchmarkRuntimeResponse } from "./runner";
 import type { BenchmarkRuntimeProvenance } from "./types";
@@ -13,6 +13,7 @@ import type { BenchmarkRuntimeProvenance } from "./types";
 interface WorkflowToolDetails {
 	workflowId?: string;
 	status?: string;
+	statusReport?: WorkflowStatusReportV1;
 }
 
 interface WorkflowToolInput {
@@ -50,6 +51,7 @@ export interface LiveBenchmarkAgentResult {
 	runtimeProvenance?: BenchmarkRuntimeProvenance;
 	/** Actual fallback count when observable; omitted means unknown. */
 	fallbackCount?: number;
+	identityError?: string;
 }
 
 export type LiveBenchmarkAgentRunner = (
@@ -141,7 +143,7 @@ async function executeWorkflow(
 	tool: WorkflowToolPort,
 	request: BenchmarkRuntimeRequest,
 	maxResumeSteps: number,
-): Promise<string> {
+): Promise<{ workflowId: string; terminalStatus: string; statusReport?: WorkflowStatusReportV1 }> {
 	const started = await tool.execute(`workflow-bench-start-${request.repetition}`, {
 		op: "start",
 		request: request.case.request,
@@ -150,16 +152,127 @@ async function executeWorkflow(
 	const workflowId = workflowIdFrom(started);
 	if (!workflowId) throw new Error("Workflow start did not return a workflowId");
 
-	let status = started.details?.status ?? "created";
-	for (let step = 0; step < maxResumeSteps && !/^(completed|blocked|cancelled|failed)$/.test(status); step++) {
+	let terminalStatus = started.details?.status ?? "created";
+	for (let step = 0; step < maxResumeSteps && !/^(completed|blocked|cancelled|failed)$/.test(terminalStatus); step++) {
 		const resumed = await tool.execute(`workflow-bench-resume-${request.repetition}-${step}`, {
 			op: "resume",
 			workflowId,
 			singleStep: true,
 		} satisfies WorkflowToolInput);
-		status = resumed.details?.status ?? status;
+		terminalStatus = resumed.details?.status ?? terminalStatus;
 	}
-	return status;
+	const status = await tool.execute(`workflow-bench-status-${request.repetition}`, {
+		op: "status",
+		workflowId,
+	} satisfies WorkflowToolInput);
+	return { workflowId, terminalStatus, statusReport: status.details?.statusReport };
+}
+
+const REQUIRED_LIVE_MODEL_STAGES: readonly WorkflowModelBackedStage[] = [
+	"planning",
+	"plan_review",
+	"implementing",
+	"code_review",
+];
+
+export interface LiveWorkflowProvenanceVerification {
+	runtimeProvenance?: BenchmarkRuntimeProvenance;
+	fallbackCount: number;
+	errors: string[];
+}
+
+/** Verify fixed-model provenance exclusively from hash-checked child workflow evidence. */
+export function verifyLiveWorkflowProvenance(
+	report: WorkflowStatusReportV1 | undefined,
+	provider: string,
+	model: string,
+): LiveWorkflowProvenanceVerification {
+	if (!report) return { fallbackCount: 0, errors: ["child workflow status evidence missing"] };
+	const errors: string[] = [];
+	let fallbackCount = 0;
+	if (report.qualityRoute.status !== "verified") {
+		errors.push(`child quality route evidence ${report.qualityRoute.status}`);
+	}
+	const expectedModel = model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
+	const configuredProfilesByStage = new Map(
+		report.qualityRoute.configuredStages.map(stage => [stage.stage, stage.orderedProfileIds] as const),
+	);
+	const attemptsByStage = new Map<WorkflowModelBackedStage, typeof report.modelAttempts>();
+	for (const attempt of report.modelAttempts) {
+		const prior = attemptsByStage.get(attempt.stage) ?? [];
+		prior.push(attempt);
+		attemptsByStage.set(attempt.stage, prior);
+	}
+	for (const stage of REQUIRED_LIVE_MODEL_STAGES) {
+		if ((attemptsByStage.get(stage)?.length ?? 0) === 0) errors.push(`child stage evidence missing: ${stage}`);
+	}
+
+	const identities = new Map<string, BenchmarkRuntimeProvenance>();
+	for (const attempt of report.modelAttempts) {
+		const configuredProfiles = configuredProfilesByStage.get(attempt.stage);
+		if (attempt.status !== "completed") errors.push(`child stage attempt not completed: ${attempt.stage}`);
+		if (attempt.evidenceStatus !== "verified") {
+			errors.push(`child stage evidence not verified: ${attempt.stage}`);
+		}
+		if (!attempt.configuredProfileId) errors.push(`child configured profile missing: ${attempt.stage}`);
+		if (!configuredProfiles?.length) errors.push(`child configured route missing: ${attempt.stage}`);
+		else if (attempt.configuredProfileId && !configuredProfiles.includes(attempt.configuredProfileId)) {
+			errors.push(`child profile outside configured route: ${attempt.stage}`);
+		}
+		if (attempt.routing.length === 0) {
+			errors.push(`child routing audit missing: ${attempt.stage}`);
+		} else {
+			const ambiguousRouting = attempt.routing.some(
+				route =>
+					!route.selectedProfileId ||
+					route.fallbackFrom !== null ||
+					route.skipped.length > 0 ||
+					(configuredProfiles !== null &&
+						configuredProfiles !== undefined &&
+						!configuredProfiles.includes(route.selectedProfileId)),
+			);
+			const attemptFallbacks = Math.max(0, attempt.routing.length - 1) + (ambiguousRouting ? 1 : 0);
+			fallbackCount += attemptFallbacks;
+			if (attemptFallbacks > 0) errors.push(`child fallback or routing ambiguity: ${attempt.stage}`);
+		}
+		if (attempt.executions.length === 0) errors.push(`child runtime evidence missing: ${attempt.stage}`);
+		for (const execution of attempt.executions) {
+			const configured = execution.configuredIdentity;
+			const attested = execution.attestedIdentity;
+			if (
+				execution.exactIdentityMatch !== true ||
+				execution.effortSupported !== true ||
+				!configured ||
+				!attested ||
+				(attested.provenance !== "provider_echo" && attested.provenance !== "gateway_attestation") ||
+				configured.provider !== provider ||
+				configured.model !== expectedModel ||
+				attested.provider !== provider ||
+				attested.model !== expectedModel ||
+				!execution.profileId ||
+				execution.profileId !== attempt.configuredProfileId
+			) {
+				errors.push(`child exact identity not verified: ${attempt.stage}`);
+				continue;
+			}
+			const provenance: BenchmarkRuntimeProvenance = {
+				source: "runtime_observed",
+				provider: attested.provider,
+				model: attested.model,
+				checkpoint: attested.checkpoint,
+				api: null,
+				adapter: "coding-agent:workflow-child-evidence",
+				parser: "workflow-status-report:v1",
+			};
+			identities.set(JSON.stringify([provenance.provider, provenance.model, provenance.checkpoint]), provenance);
+		}
+	}
+	if (identities.size !== 1) errors.push(`child runtime identity mixed or missing: ${identities.size}`);
+	return {
+		fallbackCount,
+		errors: [...new Set(errors)],
+		...(errors.length === 0 && identities.size === 1 ? { runtimeProvenance: identities.values().next().value! } : {}),
+	};
 }
 
 function pathAllowed(file: string, allowedPaths: readonly string[]): boolean {
@@ -192,11 +305,11 @@ async function runProductionWorkflow(
 	try {
 		const tool = session.getToolByName("workflow") as WorkflowToolPort | undefined;
 		if (!tool) throw new Error("Workflow tool is unavailable in the live benchmark session");
-		const terminalStatus = await executeWorkflow(tool, request, options.maxResumeSteps ?? 32);
+		const workflow = await executeWorkflow(tool, request, options.maxResumeSteps ?? 32);
+		const verified = verifyLiveWorkflowProvenance(workflow.statusReport, options.provider, options.model);
 		const stats = session.getSessionStats();
-		const runtimeModel = session.model;
 		return {
-			terminalStatus,
+			terminalStatus: workflow.terminalStatus,
 			inputTokens: stats.tokens.input,
 			outputTokens: stats.tokens.output,
 			cacheReadTokens: stats.tokens.cacheRead,
@@ -206,19 +319,9 @@ async function runProductionWorkflow(
 			usageObservable: false,
 			costUsd: stats.cost,
 			toolCalls: stats.toolCalls,
-			...(runtimeModel
-				? {
-						runtimeProvenance: {
-							source: "runtime_observed" as const,
-							provider: runtimeModel.provider,
-							model: runtimeModel.id,
-							checkpoint: null,
-							api: runtimeModel.api,
-							adapter: "coding-agent:createAgentSession",
-							parser: `pi-ai:${runtimeModel.api}`,
-						},
-					}
-				: {}),
+			fallbackCount: verified.fallbackCount,
+			identityError: verified.errors.join("; ") || undefined,
+			...(verified.runtimeProvenance ? { runtimeProvenance: verified.runtimeProvenance } : {}),
 		};
 	} finally {
 		await session.dispose();
@@ -276,7 +379,10 @@ async function runLiveCase(
 		const passed =
 			agentResult.terminalStatus === "completed" &&
 			verification.every(result => result.exitCode === 0) &&
-			scope.scopeStatus === "adhered";
+			scope.scopeStatus === "adhered" &&
+			Boolean(agentResult.runtimeProvenance) &&
+			agentResult.fallbackCount === 0 &&
+			!agentResult.identityError;
 		return {
 			passed,
 			firstPassed: passed,
@@ -286,7 +392,13 @@ async function runLiveCase(
 			scopeStatus: scope.scopeStatus,
 			error: passed
 				? undefined
-				: `workflow=${agentResult.terminalStatus}; verification=${verification.map(v => v.exitCode).join(",")}; changed=${scope.changedFiles.join(",")}`,
+				: [
+						`workflow=${agentResult.terminalStatus}`,
+						`verification=${verification.map(result => result.exitCode).join(",")}`,
+						`changed=${scope.changedFiles.join(",")}`,
+						...(agentResult.identityError ? [`identity=${agentResult.identityError}`] : []),
+						...(agentResult.fallbackCount === undefined ? ["fallbacks=unknown"] : []),
+					].join("; "),
 			tokens: {
 				...(agentResult.usageObservable
 					? {

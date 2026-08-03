@@ -5130,6 +5130,7 @@ describe("openai-codex streaming", () => {
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const options = {
 			fetch: fetchMock as FetchImpl,
+			preferWebsockets: false,
 			apiKey: token,
 			sessionId: "turn-state-session",
 			providerSessionState,

@@ -61,7 +61,10 @@ describe("prepareWorkflowInvocation", () => {
 		}
 	});
 
-	it("truncates context by profile contextPolicy", () => {
+	it("keeps untyped and nonreplaceable context inline regardless of artifact inclusion cap", () => {
+		const currentToolResult = `current-tool-result-${"x".repeat(500)}-CURRENT-TAIL`;
+		const attachment = `attachment-${"y".repeat(500)}-ATTACHMENT-TAIL`;
+		const handoff = `## Context\n${"z".repeat(500)}\n[raw output: artifact://42]\n## History\nHISTORY-TAIL`;
 		const prepared = prepareWorkflowInvocation(
 			baseRequest({
 				profile: {
@@ -71,11 +74,27 @@ describe("prepareWorkflowInvocation", () => {
 						maxArtifactBytes: 80,
 					},
 				},
-				context: "x".repeat(500),
+				context: handoff,
+				contextEntries: [
+					{
+						id: "tool-current",
+						bucket: "tool_results",
+						kind: "tool_result",
+						content: currentToolResult,
+						replaceable: false,
+					},
+					{ id: "attachment", bucket: "artifacts", kind: "attachment", content: attachment },
+				],
 			}),
 		);
-		expect(prepared.context?.length ?? 0).toBeLessThan(200);
-		expect(prepared.context).toContain("truncated by contextPolicy");
+
+		expect(prepared.context).toContain("CURRENT-TAIL");
+		expect(prepared.context).toContain("ATTACHMENT-TAIL");
+		expect(prepared.context).toContain("HISTORY-TAIL");
+		expect(prepared.context).toContain("[raw output: artifact://42]");
+		expect(prepared.promptAssemblyReceipt.totalBytes).toBe(Buffer.byteLength(prepared.context ?? "", "utf8"));
+		expect(prepared.contextLedger.buckets.tool_results.bytes).toBe(Buffer.byteLength(currentToolResult, "utf8"));
+		expect(prepared.contextLedger.buckets.artifacts.bytes).toBe(Buffer.byteLength(attachment, "utf8"));
 	});
 
 	it("attaches deterministic compiled policy without expanding role allowlist", () => {

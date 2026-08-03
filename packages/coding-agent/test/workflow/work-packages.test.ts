@@ -139,21 +139,19 @@ describe("work-package planning", () => {
 		expect(buildWorkPackageExecutionPlan([first, workPackage("nested", "src/first/child.ts")], 2)).toBeNull();
 	});
 
-	it("builds stable dependency waves and merge order with ids sorted within each wave", () => {
-		const plan = requiredPlan([
-			workPackage("child-z", "src/child-z.ts", ["root-a"]),
-			workPackage("root-b", "src/root-b.ts"),
-			workPackage("child-a", "src/child-a.ts", ["root-b"]),
-			workPackage("root-a", "src/root-a.ts"),
-		]);
+	it("falls back to whole-plan serial execution when one package consumes a predecessor API", () => {
+		const plan = buildWorkPackageExecutionPlan(
+			[
+				workPackage("create-api", "src/api.ts"),
+				workPackage("consume-api", "src/consumer.ts", ["create-api"]),
+				workPackage("independent", "src/independent.ts"),
+			],
+			2,
+		);
 
-		expect(plan.packages.map(candidate => candidate.id)).toEqual(["child-a", "child-z", "root-a", "root-b"]);
-		expect(plan.waves.map(wave => wave.map(candidate => candidate.id))).toEqual([
-			["root-a", "root-b"],
-			["child-a", "child-z"],
-		]);
-		expect(plan.mergeOrder).toEqual(["root-a", "root-b", "child-a", "child-z"]);
-		expect(plan.maxConcurrency).toBe(2);
+		// A dependent package cannot run from the original isolation baseline; null preserves
+		// the existing whole-plan implementation path until predecessor patches seed that baseline.
+		expect(plan).toBeNull();
 	});
 });
 
@@ -220,100 +218,6 @@ describe("work-package execution", () => {
 		expect(final.kind).toBe("work-package-state");
 		expect(final.packages.every(candidate => candidate.status === "succeeded")).toBe(true);
 		expect(final.merge.status).toBe("pending");
-	});
-
-	it("does not launch a dependent package until its dependency has succeeded", async () => {
-		const packages = [
-			workPackage("dependent", "src/dependent.ts", ["base"]),
-			workPackage("sibling", "src/sibling.ts"),
-			workPackage("base", "src/base.ts"),
-		];
-		const plan = requiredPlan(packages, 2);
-		for (const candidate of packages) await writePatch(cwd, `patches/${candidate.id}.patch`, candidate.paths[0]!);
-
-		const baseRelease = Promise.withResolvers<void>();
-		const baseStarted = Promise.withResolvers<void>();
-		const events: string[] = [];
-		const run = executeWorkPackagePlan({
-			workflowId: WORKFLOW_ID,
-			attemptId: "dependency-attempt",
-			cwd,
-			plan,
-			execute: async candidate => {
-				events.push(`${candidate.id}:start`);
-				if (candidate.id === "base") {
-					baseStarted.resolve();
-					await baseRelease.promise;
-				}
-				events.push(`${candidate.id}:success`);
-				return implementationResult(candidate.id, `patches/${candidate.id}.patch`);
-			},
-			persist: async () => {},
-		});
-
-		await waitFor(baseStarted.promise, "base implementation");
-		expect(events).toContain("base:start");
-		expect(events).not.toContain("dependent:start");
-		baseRelease.resolve();
-		await run;
-
-		expect(events.indexOf("dependent:start")).toBeGreaterThan(events.indexOf("base:success"));
-	});
-
-	it("reuses readable succeeded captures and only invokes the pending dependent", async () => {
-		const packages = [
-			workPackage("dependent", "src/dependent.ts", ["base"]),
-			workPackage("sibling", "src/sibling.ts"),
-			workPackage("base", "src/base.ts"),
-		];
-		const plan = requiredPlan(packages, 2);
-		for (const candidate of packages) await writePatch(cwd, `patches/${candidate.id}.patch`, candidate.paths[0]!);
-
-		const prior = stateArtifact(
-			[
-				{
-					...packages[2]!,
-					status: "succeeded",
-					invocationAttemptId: "prior-base",
-					implementation: implementationArtifact("base", "patches/base.patch"),
-				},
-				{
-					...packages[1]!,
-					status: "succeeded",
-					invocationAttemptId: "prior-sibling",
-					implementation: implementationArtifact("sibling", "patches/sibling.patch"),
-				},
-				{ ...packages[0]!, status: "pending" },
-			],
-			plan.mergeOrder,
-			9,
-		);
-		const calls: string[] = [];
-		const snapshots: WorkPackageStateArtifactV1[] = [];
-
-		const final = await executeWorkPackagePlan({
-			workflowId: WORKFLOW_ID,
-			attemptId: "resume-attempt",
-			cwd,
-			plan,
-			priorState: prior,
-			reuseSucceeded: true,
-			execute: async candidate => {
-				calls.push(candidate.id);
-				return implementationResult(candidate.id, `patches/${candidate.id}.patch`);
-			},
-			persist: async state => {
-				snapshots.push(state);
-			},
-		});
-
-		expect(calls).toEqual(["dependent"]);
-		expect(snapshots[0]?.revision).toBe(10);
-		expect(final.revision).toBeGreaterThan(prior.revision);
-		expect(final.packages.every(candidate => candidate.status === "succeeded")).toBe(true);
-		expect(final.packages.find(candidate => candidate.id === "base")?.implementation?.patchPath).toBe(
-			"patches/base.patch",
-		);
 	});
 
 	it("records runtime failures with package id and kind without applying a merge", async () => {
