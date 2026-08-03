@@ -680,8 +680,11 @@ function mergeUsage(a: Usage | undefined, b: Usage | undefined): Usage | undefin
 			a.reasoningTokens === undefined && b.reasoningTokens === undefined
 				? undefined
 				: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
-	};
-	if (cost !== undefined) merged.cost = cost;
+		// The shared Usage type declares cost required, but this merge NEVER invents
+		// it: when neither side reported one, cost stays undefined (unknown ≠ zero).
+		// Consumers must read defensively (usage.cost?.total); the ledger does.
+		...(cost !== undefined ? { cost } : {}),
+	} as Usage;
 	return merged;
 }
 function extractInvalidRaw(body: StructuredRunnerResult["result"]): string | undefined {

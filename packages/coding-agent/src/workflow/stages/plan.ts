@@ -33,6 +33,8 @@ export interface PlanStageResult {
 	toolCalls?: number;
 	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
 	modelFamily?: string;
+	/** Tool policy actually applied to this stage (named profile policy or role default). */
+	resolvedToolPolicyId?: string;
 }
 
 export class PlanStage {
@@ -83,6 +85,7 @@ export class PlanStage {
 			promptAssemblyReceipt: result.promptAssemblyReceipt,
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,
+			resolvedToolPolicyId: result.resolvedToolPolicyId,
 		};
 	}
 }

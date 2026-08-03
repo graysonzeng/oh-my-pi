@@ -12,8 +12,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { XdProtocolHandler } from "../../src/internal-urls/xd-protocol";
-import { resolveWorkflowCatalogToolDocs } from "../../src/tools/read";
+import type { ToolSession } from "../../src/tools";
+import { ReadTool, resolveWorkflowCatalogToolDocs } from "../../src/tools/read";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { WorkflowPolicyError } from "../../src/workflow/errors";
@@ -24,7 +26,7 @@ import { prepareWorkflowInvocation } from "../../src/workflow/runtime-invocation
 import { containsSecret, redactSecretsInText } from "../../src/workflow/secret-redact";
 import { resolveWorkflowProfilesFromSettings } from "../../src/workflow/session-config";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
-import type { ModelProfile, WorkflowAgentRequest } from "../../src/workflow/types";
+import type { ModelProfile, WorkflowAgentRequest, WorkflowState } from "../../src/workflow/types";
 import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
 
 const COMPLETE_PROFILE: ModelProfile = {
@@ -239,7 +241,7 @@ describe("M12: cross-attempt usage aggregation never invents cost", () => {
 					result: {
 						id: "bad",
 						structuredOutput: { status: "invalid", error: "bad" },
-						usage: { input: 10, output: 5, totalTokens: 15 },
+						usage: { input: 10, output: 5, totalTokens: 15 } as Usage,
 					},
 				};
 			}
@@ -247,7 +249,7 @@ describe("M12: cross-attempt usage aggregation never invents cost", () => {
 				result: {
 					id: "ok",
 					structuredOutput: { status: "valid", data: implArtifact() },
-					usage: { input: 20, output: 10, totalTokens: 30 },
+					usage: { input: 20, output: 10, totalTokens: 30 } as Usage,
 				},
 			};
 		});
@@ -276,7 +278,7 @@ describe("M12: cross-attempt usage aggregation never invents cost", () => {
 					result: {
 						id: "bad",
 						structuredOutput: { status: "invalid", error: "bad" },
-						usage: { input: 1, totalTokens: 1, cost: { input: 0.01, total: 0.01 } },
+						usage: { input: 1, totalTokens: 1, cost: { input: 0.01, total: 0.01 } } as Usage,
 					},
 				};
 			}
@@ -284,7 +286,7 @@ describe("M12: cross-attempt usage aggregation never invents cost", () => {
 				result: {
 					id: "ok",
 					structuredOutput: { status: "valid", data: implArtifact() },
-					usage: { input: 2, totalTokens: 2, cost: { input: 0.02, total: 0.02 } },
+					usage: { input: 2, totalTokens: 2, cost: { input: 0.02, total: 0.02 } } as Usage,
 				},
 			};
 		});
@@ -355,6 +357,52 @@ describe("M14: resolved toolPolicyId flows through prepare and evidence", () => 
 		const planning = report?.modelAttempts.find(attempt => attempt.stage === "planning");
 		expect(planning?.executions[0]?.toolPolicyId).toBe("readonly-planning");
 	});
+
+	it("repair-stage evidence records the resolved tool policy id", async () => {
+		const engine = new WorkflowEngine({
+			store,
+			adapter: new RuntimeAdapter(
+				scriptedRunner({
+					plan: planArtifact(),
+					planReview: reviewArtifact("approved", "plan"),
+					implement: implArtifact(),
+					codeReview: reviewArtifact("changes_requested", "implementation", [
+						{
+							id: "f1",
+							priority: "P0",
+							category: "correctness",
+							status: "open",
+							confidence: 0.9,
+							summary: "bug",
+							explanation: "fix it",
+							suggestedOwner: "implementer",
+							blocking: true,
+						},
+					]),
+					// Repair must address f1 so the finding resolves and the loop can move on.
+					repair: implArtifact({ addressedStepIds: ["f1"], summary: "repaired" }),
+				}),
+			),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+		});
+		const workflowId = await engine.startWorkflow({ request: "repair policy evidence" });
+		let state: WorkflowState | null = null;
+		for (let i = 0; i < 12; i++) {
+			state = await engine.getState(workflowId);
+			if (state && ["repairing", "completed", "blocked", "failed"].includes(state.status)) break;
+			await engine.resume(workflowId, { singleStep: true });
+		}
+		expect(state?.status).toBe("repairing");
+		// Entering "repairing" is the post-code-review transition; the next step
+		// executes RepairStage itself, which persists the runtime evidence.
+		await engine.resume(workflowId, { singleStep: true });
+		const report = await engine.getStatusReport(workflowId);
+		const repairing = report?.modelAttempts.find(attempt => attempt.stage === "repairing");
+		expect(repairing?.executions.length).toBeGreaterThan(0);
+		expect(repairing?.executions[0]?.toolPolicyId).toBe("scoped-repair");
+	});
 });
 
 describe("M16: workflow catalog presentation fields survive the child handoff", () => {
@@ -415,6 +463,96 @@ describe("M16: workflow catalog presentation fields survive the child handoff", 
 				presentationAllowedTools: ["read", "bash", "yield"],
 			}),
 		).toThrow(/No full schema registered/);
+	});
+});
+
+/** Extract text parts from a tool result for assertions. */
+function toolText(result: { content: Array<{ type: string; text?: string }> }): string {
+	return result.content
+		.filter(c => c.type === "text" && typeof c.text === "string")
+		.map(c => c.text as string)
+		.join("\n");
+}
+
+/**
+ * M16 e2e: the child-session `read` tool itself resolves the advertised
+ * xd:// locators — not just the pure resolver helpers. Covers the full
+ * path ReadTool.execute → InternalUrlRouter → XdProtocolHandler.
+ */
+describe("M16 e2e: child read tool resolves workflow-catalog locators", () => {
+	it("xd://skills/{name} returns the in-memory body forwarded by prepare", async () => {
+		const session = fakeSession({
+			skills: [
+				{
+					name: "repo",
+					description: "repo skill",
+					filePath: "/nonexistent/SKILL.md",
+					content: "# in-memory body\n\nforwarded instructions",
+				},
+			] as unknown as ToolSession["skills"],
+		});
+		const tool = new ReadTool(session);
+		const result = await tool.execute("m16-skill-inmem", { path: "xd://skills/repo" });
+		expect(toolText(result)).toContain("# in-memory body");
+	});
+
+	it("xd://skills/{name} falls back to the on-disk SKILL.md for discovered skills", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-m16-skills-"));
+		try {
+			await Bun.write(path.join(dir, "SKILL.md"), "# disk body\n\nreal skill instructions");
+			const session = fakeSession({
+				skills: [
+					{ name: "repo", description: "repo skill", filePath: path.join(dir, "SKILL.md") },
+				] as unknown as ToolSession["skills"],
+			});
+			const tool = new ReadTool(session);
+			const result = await tool.execute("m16-skill-disk", { path: "xd://skills/repo" });
+			expect(toolText(result)).toContain("# disk body");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("xd://skills/{name} fails observably for unknown skills", async () => {
+		const session = fakeSession({
+			skills: [
+				{ name: "repo", description: "repo skill", filePath: "/x/SKILL.md" },
+			] as unknown as ToolSession["skills"],
+		});
+		const tool = new ReadTool(session);
+		await expect(tool.execute("m16-skill-unknown", { path: "xd://skills/nope" })).rejects.toThrow(/Unknown skill/);
+	});
+
+	it("xd://tools/{name} resolves the captured schema without an xd registry", async () => {
+		const schemas = new Map<string, unknown>([
+			["bash", { type: "object", properties: { command: { type: "string" } } }],
+		]);
+		const session = fakeSession({
+			workflowToolOptimization: {
+				processResult: (_t: string, o: string) => o,
+				presentationToolSchemas: schemas,
+				presentationAllowedTools: ["read", "bash", "yield"],
+			},
+		});
+		const tool = new ReadTool(session);
+		const result = await tool.execute("m16-tools-bash", { path: "xd://tools/bash" });
+		expect(toolText(result)).toContain("# Tool: bash");
+		expect(toolText(result)).toContain('"command"');
+	});
+
+	it("xd://tools/{name} refuses out-of-allowlist tools on the full path", async () => {
+		const schemas = new Map<string, unknown>([["bash", { type: "object" }]]);
+		const session = fakeSession({
+			workflowToolOptimization: {
+				processResult: (_t: string, o: string) => o,
+				presentationToolSchemas: schemas,
+				presentationAllowedTools: ["read", "bash", "yield"],
+			},
+		});
+		const tool = new ReadTool(session);
+		await expect(tool.execute("m16-tools-task", { path: "xd://tools/task" })).rejects.toThrow(
+			/outside the role allowlist/,
+		);
 	});
 });
 

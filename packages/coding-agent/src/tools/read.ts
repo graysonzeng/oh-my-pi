@@ -872,7 +872,7 @@ export function resolveWorkflowCatalogToolDocs(
 	if (allowed && !allowed.includes(name)) {
 		throw new ToolError(`Tool "${name}" is outside the role allowlist; catalog expand refused.`);
 	}
-	const schema = workflowOpt.presentationToolSchemas.get(name);
+	const schema = workflowOpt.presentationToolSchemas?.get(name);
 	if (schema === undefined) {
 		throw new ToolError(`No full schema registered for allowlisted tool "${name}".`, {
 			path: `xd://tools/${name}`,

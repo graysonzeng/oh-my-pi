@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { Effort } from "@oh-my-pi/pi-catalog";
 import {
 	applyKnownGoodBenchmarkSolution,
 	buildDefaultBenchmarkSuite,
@@ -8,9 +9,9 @@ import {
 	runBenchmarkSuite,
 	verifyLiveWorkflowProvenance,
 } from "../../../src/workflow/benchmark";
-import { resolveWorkflowProfilesFromSettings } from "../../../src/workflow/session-config";
-import { getDefaultConfig } from "../../../src/workflow/default-config";
 import type { BenchmarkRuntimeProvenance } from "../../../src/workflow/benchmark/types";
+import { getDefaultConfig } from "../../../src/workflow/default-config";
+import { resolveWorkflowProfilesFromSettings } from "../../../src/workflow/session-config";
 import type { WorkflowModelBackedStage, WorkflowRole, WorkflowStatusReportV1 } from "../../../src/workflow/types";
 
 const FIXTURE_PROVENANCE: BenchmarkRuntimeProvenance = {
@@ -255,22 +256,22 @@ describe("live workflow benchmark runtime", () => {
 	it("clamps live fixed-model efforts to deepseek-v4-flash max default", () => {
 		const baseline = buildLiveBenchmarkProfileOverrides("gateway", "deepseek-v4-flash", "baseline");
 		// Default claude profiles request xhigh; deepseek-v4-flash supports high/max and defaults to max.
-		expect(baseline.claude_planner?.thinkingLevel).toBe("max");
-		expect(baseline.claude_plan_reviewer?.thinkingLevel).toBe("max");
-		expect(baseline.claude_reviewer?.thinkingLevel).toBe("max");
-		expect(baseline.deepseek_implementer?.thinkingLevel).toBe("max");
+		expect(baseline.claude_planner?.thinkingLevel).toBe(Effort.Max);
+		expect(baseline.claude_plan_reviewer?.thinkingLevel).toBe(Effort.Max);
+		expect(baseline.claude_reviewer?.thinkingLevel).toBe(Effort.Max);
+		expect(baseline.deepseek_implementer?.thinkingLevel).toBe(Effort.Max);
 		// Profiles without an effort still get the deepseek default for fixed-model live runs.
-		expect(baseline.gpt_planner?.thinkingLevel).toBe("max");
+		expect(baseline.gpt_planner?.thinkingLevel).toBe(Effort.Max);
 		// Already-supported efforts are preserved (grok_implementer defaults to high).
-		expect(baseline.grok_implementer?.thinkingLevel).toBe("high");
+		expect(baseline.grok_implementer?.thinkingLevel).toBe(Effort.High);
 
 		const merged = resolveWorkflowProfilesFromSettings(baseline, getDefaultConfig().profiles);
 		for (const profile of Object.values(merged)) {
 			expect(profile.modelPattern).toBe("gateway/deepseek-v4-flash");
-			expect(["high", "max"]).toContain(profile.thinkingLevel);
+			expect(profile.thinkingLevel === Effort.High || profile.thinkingLevel === Effort.Max).toBe(true);
 		}
-		expect(merged.claude_planner?.thinkingLevel).toBe("max");
-		expect(merged.grok_implementer?.thinkingLevel).toBe("high");
+		expect(merged.claude_planner?.thinkingLevel).toBe(Effort.Max);
+		expect(merged.grok_implementer?.thinkingLevel).toBe(Effort.High);
 	});
 
 	it("includes untracked files in the live scope verdict", async () => {

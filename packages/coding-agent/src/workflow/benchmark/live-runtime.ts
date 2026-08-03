@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { Effort, Model } from "@oh-my-pi/pi-catalog";
+import { Effort, type Model } from "@oh-my-pi/pi-catalog";
 import {
 	getBundledModelReferenceIndex,
 	getBundledProviderModelReferenceIndex,
@@ -101,8 +101,8 @@ export function buildLiveBenchmarkProfileOverrides(
 				thinkingLevel = undefined;
 			} else if (thinkingLevel && thinkingLevel !== "auto" && supported.includes(thinkingLevel as Effort)) {
 				// keep requested supported effort
-			} else if (supported.includes("max" as Effort)) {
-				thinkingLevel = "max";
+			} else if (supported.includes(Effort.Max)) {
+				thinkingLevel = Effort.Max;
 			} else {
 				thinkingLevel = clampThinkingLevelForModel(knownModel, thinkingLevel as Effort | undefined) ?? supported[0];
 			}
