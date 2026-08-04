@@ -18,7 +18,9 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
 	TaskTool,
+	__classifyAcquireAbortReasonForTests,
 	__getTaskTimeoutMetricsForTests,
+	__makeQueuedTimeoutReasonForTests,
 	__resetTaskTimeoutMetricsForTests,
 } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -379,6 +381,147 @@ describe("task spawn routing", () => {
 		expect(thirdJob.status).toBe("completed");
 		// Metric stays once-per-job even if inspected again.
 		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(1);
+	});
+
+	it("keeps cancel as first cause when timeout timer fires after cancel (same-tick race)", async () => {
+		__resetTaskTimeoutMetricsForTests();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const started: string[] = [];
+		const gates = new Map<string, Deferred>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			const gate = deferred();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: {
+					"task.maxConcurrency": 1,
+					// Long enough that cancel can win; short enough to still fire in-test.
+					"task.queuedStartupTimeoutMs": 80,
+					"task.maxRuntimeMs": 0,
+				},
+			}),
+		);
+
+		const first = await tool.execute("tc-hold-cancel", {
+			agent: "task",
+			name: "Holder",
+			task: "Hold the only permit.",
+		} as TaskParams);
+		const firstJob = manager.getJob(first.details!.async!.jobId)!;
+		await pollUntil(() => started.length === 1);
+
+		const second = await tool.execute("tc-queued-cancel", {
+			agent: "task",
+			name: "Queued",
+			task: "Wait behind holder, then cancel.",
+		} as TaskParams);
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+		expect(secondJob.queued).toBe(true);
+
+		// Cancel wins first-cause before the queued-startup timer.
+		expect(manager.cancel(secondJob.id)).toBe(true);
+		await secondJob.promise;
+		// Allow any late timer tick; clearTimeout + first-cause must still keep cancel attribution.
+		await Bun.sleep(120);
+
+		expect(secondJob.status).toBe("cancelled");
+		expect(secondJob.errorText ?? "").not.toContain("queued startup timeout");
+		expect(started).toEqual(["Holder"]);
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(0);
+
+		gates.get("Holder")!.resolve();
+		await firstJob.promise;
+	});
+
+	it("classifies cancel-then-timeout by combinedSignal.reason only (no secondary OR)", () => {
+		const cancel = new AbortController();
+		const queued = new AbortController();
+		const combined = AbortSignal.any([cancel.signal, queued.signal]);
+		cancel.abort(new Error("user-cancel"));
+		queued.abort(__makeQueuedTimeoutReasonForTests(80));
+
+		// Production must trust AbortSignal.any first-cause only.
+		expect(__classifyAcquireAbortReasonForTests(combined.reason)).toBe("aborted");
+		// Secondary timeout reason is present but must not rewrite first-cause.
+		expect(__classifyAcquireAbortReasonForTests(queued.signal.reason)).toBe("queued_timeout");
+	});
+
+	it("classifies timeout-then-cancel by combinedSignal.reason only", () => {
+		const cancel = new AbortController();
+		const queued = new AbortController();
+		const combined = AbortSignal.any([cancel.signal, queued.signal]);
+		queued.abort(__makeQueuedTimeoutReasonForTests(40));
+		cancel.abort(new Error("user-cancel"));
+
+		expect(__classifyAcquireAbortReasonForTests(combined.reason)).toBe("queued_timeout");
+	});
+
+	it("keeps queued timeout as first cause when timeout beats a later cancel", async () => {
+		__resetTaskTimeoutMetricsForTests();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const started: string[] = [];
+		const gates = new Map<string, Deferred>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			const gate = deferred();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: {
+					"task.maxConcurrency": 1,
+					"task.queuedStartupTimeoutMs": 40,
+					"task.maxRuntimeMs": 0,
+				},
+			}),
+		);
+
+		const first = await tool.execute("tc-hold-timeout-first", {
+			agent: "task",
+			name: "Holder",
+			task: "Hold the only permit.",
+		} as TaskParams);
+		const firstJob = manager.getJob(first.details!.async!.jobId)!;
+		await pollUntil(() => started.length === 1);
+
+		const second = await tool.execute("tc-queued-timeout-first", {
+			agent: "task",
+			name: "Queued",
+			task: "Wait behind holder until timeout.",
+		} as TaskParams);
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+		expect(secondJob.queued).toBe(true);
+
+		await secondJob.promise;
+		// Timeout already settled the job; a late cancel must not rewrite attribution.
+		expect(manager.cancel(secondJob.id)).toBe(false);
+		expect(secondJob.status).toBe("failed");
+		expect(secondJob.errorText ?? "").toContain("queued startup timeout");
+		expect(started).toEqual(["Holder"]);
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(1);
+
+		gates.get("Holder")!.resolve();
+		await firstJob.promise;
 	});
 
 	for (const maxConcurrency of [0, 0.5]) {

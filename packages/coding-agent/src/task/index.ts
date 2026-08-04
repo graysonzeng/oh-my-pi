@@ -489,6 +489,19 @@ export function __getTaskTimeoutMetricsForTests(): Readonly<Record<TimeoutMetric
 	return { ...timeoutMetricTotals };
 }
 
+/** Test-only: build the abort reason payload used by queued-startup timeout. */
+export function __makeQueuedTimeoutReasonForTests(timeoutMs: number): {
+	reason: typeof QUEUED_TIMEOUT_TOKEN;
+	timeoutMs: number;
+} {
+	return { reason: QUEUED_TIMEOUT_TOKEN, timeoutMs };
+}
+
+/** Test-only: classify acquire abort by AbortSignal.any first-cause only (no secondary OR). */
+export function __classifyAcquireAbortReasonForTests(combinedReason: unknown): "queued_timeout" | "aborted" {
+	return isQueuedTimeoutReason(combinedReason) ? "queued_timeout" : "aborted";
+}
+
 function isQueuedTimeoutReason(reason: unknown): reason is { reason: typeof QUEUED_TIMEOUT_TOKEN; timeoutMs: number } {
 	return (
 		typeof reason === "object" &&
@@ -1192,14 +1205,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// abort cannot leave a permit untracked.
 					semaphoreHeld = true;
 				} catch {
+					// AbortSignal.any first-cause only: never OR queuedAbortController.reason
+					// (timer may still fire after cancel won the race).
 					const reason = combinedSignal.reason;
-					if (isQueuedTimeoutReason(reason) || isQueuedTimeoutReason(queuedAbortController.signal.reason)) {
-						const timeoutMs = isQueuedTimeoutReason(reason)
-							? reason.timeoutMs
-							: isQueuedTimeoutReason(queuedAbortController.signal.reason)
-								? queuedAbortController.signal.reason.timeoutMs
-								: queuedTimeoutMs;
-						failQueuedTimeout(timeoutMs);
+					if (isQueuedTimeoutReason(reason)) {
+						failQueuedTimeout(reason.timeoutMs);
 					}
 					failAbortedBeforeExecution();
 				} finally {
@@ -1208,8 +1218,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const acquiredAt = Date.now();
 				// Post-acquire double-check: timeout/cancel may have won the race
 				// after acquire returned but before we markRunning.
-				if (combinedSignal.aborted || runSignal.aborted || queuedAbortController.signal.aborted) {
-					const reason = combinedSignal.reason ?? queuedAbortController.signal.reason ?? runSignal.reason;
+				if (combinedSignal.aborted) {
+					const reason = combinedSignal.reason;
 					if (isQueuedTimeoutReason(reason)) {
 						failQueuedTimeout(reason.timeoutMs);
 					}
