@@ -457,6 +457,55 @@ export function composeSpawnAdvisory(args: {
 /** Sentinel for async jobs whose subagent finished with a failing result; progress is already updated. */
 class TaskJobError extends Error {}
 
+/** Unique first-cause token for queued-startup timeout (design §5.2.4 / F1). */
+const QUEUED_TIMEOUT_TOKEN = Symbol("queued-startup-timeout");
+
+type TimeoutMetricName = "queued_timeout_triggered" | "runtime_timeout_triggered";
+
+/** Per-job once-only counters for P0 timeout observability (F8 metrics owner: TaskTool). */
+const timeoutMetricOnce = new Set<string>();
+const timeoutMetricTotals: Record<TimeoutMetricName, number> = {
+	queued_timeout_triggered: 0,
+	runtime_timeout_triggered: 0,
+};
+
+function recordTimeoutMetric(name: TimeoutMetricName, jobKey: string): void {
+	const onceKey = `${name}:${jobKey}`;
+	if (timeoutMetricOnce.has(onceKey)) return;
+	timeoutMetricOnce.add(onceKey);
+	timeoutMetricTotals[name] += 1;
+	logger.warn(`task timeout metric: ${name}`, { jobKey, total: timeoutMetricTotals[name] });
+}
+
+/** Test-only: reset per-job timeout metric de-duplication. */
+export function __resetTaskTimeoutMetricsForTests(): void {
+	timeoutMetricOnce.clear();
+	timeoutMetricTotals.queued_timeout_triggered = 0;
+	timeoutMetricTotals.runtime_timeout_triggered = 0;
+}
+
+/** Test-only: read timeout metric totals. */
+export function __getTaskTimeoutMetricsForTests(): Readonly<Record<TimeoutMetricName, number>> {
+	return { ...timeoutMetricTotals };
+}
+
+function isQueuedTimeoutReason(reason: unknown): reason is { reason: typeof QUEUED_TIMEOUT_TOKEN; timeoutMs: number } {
+	return (
+		typeof reason === "object" &&
+		reason !== null &&
+		"reason" in reason &&
+		(reason as { reason: unknown }).reason === QUEUED_TIMEOUT_TOKEN
+	);
+}
+
+function queuedTimeoutErrorText(timeoutMs: number): string {
+	return (
+		`queued startup timeout: spawn request timed out after ${timeoutMs}ms waiting for semaphore permit ` +
+		`(task.queuedStartupTimeoutMs=${timeoutMs}). This usually means maxConcurrency is saturated ` +
+		`by stuck jobs. Consider cancelling hung jobs or increasing task.maxConcurrency.`
+	);
+}
+
 /**
  * Process-level memo for create-time agent discovery, keyed by resolved cwd.
  *
@@ -1086,6 +1135,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const startedAt = Date.now();
 				const semaphore = this.#getSpawnSemaphore();
 				let semaphoreHeld = false;
+				let settled = false;
+				const settleOnce = (failed: boolean) => {
+					if (settled) return;
+					settled = true;
+					onSettled?.(failed);
+				};
+				// Freeze at job start so mid-run settings edits cannot change this job's policy.
+				const queuedTimeoutMsRaw = this.session.settings.get("task.queuedStartupTimeoutMs");
+				const queuedTimeoutMs =
+					typeof queuedTimeoutMsRaw === "number" && Number.isFinite(queuedTimeoutMsRaw) && queuedTimeoutMsRaw > 0
+						? Math.floor(queuedTimeoutMsRaw)
+						: 0;
 				// Every release funnels through here: the flag flips before the
 				// release so no path — acquire-time abort, executor failure, or a
 				// future refactor that reorders the branches — can return a permit
@@ -1097,21 +1158,62 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					semaphoreHeld = false;
 					this.#releaseSpawnSemaphore();
 				};
-				try {
-					await semaphore.acquire(runSignal);
-					semaphoreHeld = true;
-				} catch {
-					// Fall through so an acquire-time abort goes through the same
-					// path as the post-acquire race below: progress + onSettled
-					// have to fire even when the spawn never reached the executor,
-					// otherwise the batch aggregate state stays "running" forever.
-				}
-				const acquiredAt = Date.now();
-				if (!semaphoreHeld || runSignal.aborted) {
+				const failQueuedTimeout = (timeoutMs: number): never => {
+					releasePermit();
+					progress.status = "failed";
+					progress.durationMs = Math.max(0, Date.now() - startedAt);
+					settleOnce(true);
+					recordTimeoutMetric("queued_timeout_triggered", agentId);
+					throw new TaskJobError(queuedTimeoutErrorText(timeoutMs));
+				};
+				const failAbortedBeforeExecution = (): never => {
 					releasePermit();
 					progress.status = "aborted";
-					onSettled?.(true);
+					progress.durationMs = Math.max(0, Date.now() - startedAt);
+					settleOnce(true);
 					throw new Error("Aborted before execution");
+				};
+				const queuedAbortController = new AbortController();
+				const queuedTimeoutHandle =
+					queuedTimeoutMs > 0
+						? setTimeout(() => {
+								queuedAbortController.abort({
+									reason: QUEUED_TIMEOUT_TOKEN,
+									timeoutMs: queuedTimeoutMs,
+								});
+						  }, queuedTimeoutMs)
+						: undefined;
+				const combinedSignal =
+					queuedTimeoutMs > 0 ? AbortSignal.any([runSignal, queuedAbortController.signal]) : runSignal;
+				// Isolated acquire: timeout token must not be rewritten by outer catch.
+				try {
+					await semaphore.acquire(combinedSignal);
+					// Set held immediately after acquire returns so interleaving
+					// abort cannot leave a permit untracked.
+					semaphoreHeld = true;
+				} catch {
+					const reason = combinedSignal.reason;
+					if (isQueuedTimeoutReason(reason) || isQueuedTimeoutReason(queuedAbortController.signal.reason)) {
+						const timeoutMs = isQueuedTimeoutReason(reason)
+							? reason.timeoutMs
+							: isQueuedTimeoutReason(queuedAbortController.signal.reason)
+								? queuedAbortController.signal.reason.timeoutMs
+								: queuedTimeoutMs;
+						failQueuedTimeout(timeoutMs);
+					}
+					failAbortedBeforeExecution();
+				} finally {
+					if (queuedTimeoutHandle) clearTimeout(queuedTimeoutHandle);
+				}
+				const acquiredAt = Date.now();
+				// Post-acquire double-check: timeout/cancel may have won the race
+				// after acquire returned but before we markRunning.
+				if (combinedSignal.aborted || runSignal.aborted || queuedAbortController.signal.aborted) {
+					const reason = combinedSignal.reason ?? queuedAbortController.signal.reason ?? runSignal.reason;
+					if (isQueuedTimeoutReason(reason)) {
+						failQueuedTimeout(reason.timeoutMs);
+					}
+					failAbortedBeforeExecution();
 				}
 				try {
 					markRunning();
@@ -1162,6 +1264,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// A missing result means the sync path failed at the tool level
 					// (results: []) — treat it as a failure, not success.
 					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;
+					if (
+						singleResult?.aborted &&
+						typeof singleResult.abortReason === "string" &&
+						singleResult.abortReason.includes("runtime limit exceeded")
+					) {
+						recordTimeoutMetric("runtime_timeout_triggered", agentId);
+					}
+					// F8: runtime timeout keeps AgentProgress.status="aborted"; AsyncJob becomes failed via TaskJobError.
 					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
 					progress.tokens = singleResult?.tokens ?? 0;
@@ -1179,7 +1289,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						delete progress.resolvedModel;
 						delete progress.resolvedModelIsFallback;
 					}
-					onSettled?.(resultFailed);
+					settleOnce(resultFailed);
 					const statusText = resultFailed
 						? `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
@@ -1196,7 +1306,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					}
 					progress.status = "failed";
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
-					onSettled?.(true);
+					settleOnce(true);
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);

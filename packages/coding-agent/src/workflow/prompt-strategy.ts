@@ -14,6 +14,7 @@ export const SYSTEM_PROMPT_STYLES: Readonly<Record<string, string>> = {
 const ROLE_DESCRIPTION: Record<WorkflowRole, string> = {
 	planner: "produce a strict plan artifact",
 	plan_reviewer: "review the plan for correctness and feasibility",
+	plan_arbitrator: "arbitrate a bounded plan-review disagreement",
 	implementer: "implement the approved plan",
 	code_reviewer: "review the implementation against the plan",
 	repair: "repair open findings from review",

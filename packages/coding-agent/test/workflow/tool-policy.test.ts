@@ -31,6 +31,7 @@ function baseRequest(
 	const profileByRole = {
 		planner: DEFAULT_MODEL_PROFILES.claude_planner,
 		plan_reviewer: DEFAULT_MODEL_PROFILES.claude_reviewer,
+		plan_arbitrator: DEFAULT_MODEL_PROFILES.grok_plan_arbitrator ?? DEFAULT_MODEL_PROFILES.claude_reviewer,
 		implementer: DEFAULT_MODEL_PROFILES.grok_implementer,
 		code_reviewer: DEFAULT_MODEL_PROFILES.claude_reviewer,
 		repair: DEFAULT_MODEL_PROFILES.grok_repair ?? DEFAULT_MODEL_PROFILES.grok_implementer,

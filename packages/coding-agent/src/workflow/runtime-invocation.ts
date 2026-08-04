@@ -486,7 +486,8 @@ export function prepareWorkflowInvocation(
 		request.policyExperimentReceipt,
 	);
 	const adaptedPolicy: AdaptedCompiledPolicy = compileFromWorkflowRequestFields({
-		role: request.role,
+		// plan_arbitrator reuses the plan-reviewer adapter/task-class surface.
+		role: request.role === "plan_arbitrator" ? "plan_reviewer" : request.role,
 		assignment: request.assignment,
 		allowedToolIds: effectiveTools,
 		outputSchema: enhancedSchema,

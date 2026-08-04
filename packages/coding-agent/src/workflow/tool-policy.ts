@@ -78,6 +78,7 @@ export function assertWorkflowCommandAllowed(command: string, policy: WorkflowCo
 export const READONLY_WORKFLOW_ROLES: ReadonlySet<WorkflowRole> = new Set([
 	"planner",
 	"plan_reviewer",
+	"plan_arbitrator",
 	"code_reviewer",
 ]);
 
@@ -137,7 +138,7 @@ export class ToolPolicyFactory {
 				allowedCommands: ["echo", "rg", "git status"],
 			};
 		}
-		if (role === "plan_reviewer" || role === "code_reviewer") {
+		if (role === "plan_reviewer" || role === "plan_arbitrator" || role === "code_reviewer") {
 			return {
 				readonly: true,
 				policyId: "readonly-review",

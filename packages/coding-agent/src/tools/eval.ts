@@ -406,13 +406,23 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
 		const session = this.session;
-		const evalGateArmEnabled = session.settings.get("latency.arms.evalGateMigration") === true;
-		const evalGateControl = recordOrRequireEvalParity(undefined, evalGateArmEnabled);
+		const maybeArm = session as unknown as { isLatencyArmEnabled?: (arm: string) => boolean };
+		const frozenArm =
+			typeof maybeArm.isLatencyArmEnabled === "function"
+				? maybeArm.isLatencyArmEnabled("eval_gate_migration")
+				: session.settings.get("latency.arms.evalGateMigration") === true;
+		const evalGateArmEnabled = frozenArm === true;
+		// Optional session-provided parity receipt (tests / offline proven receipt).
+		const sessionReceipt = (session as { evalGateParityReceipt?: unknown }).evalGateParityReceipt;
+		const evalGateControl = recordOrRequireEvalParity(
+			sessionReceipt as import("../latency/eval-parity").EvalGateParityReceiptV1 | undefined,
+			evalGateArmEnabled,
+		);
 		const evalGateNotice =
 			evalGateArmEnabled
 				? evalGateControl === "native-control"
-					? "[eval-gate] native migration target unavailable; bridge control retained"
-					: "[eval-gate] migration not proven; parity receipt unavailable; bridge control retained"
+					? "[eval-gate] native-control selected from proven parity receipt; bridge retained until native owner cutover"
+					: "[eval-gate] migration not proven; parity receipt unavailable/unproven; bridge control retained"
 				: undefined;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 

@@ -4827,19 +4827,38 @@ export const SETTINGS_SCHEMA = {
 
 	"task.maxRuntimeMs": {
 		type: "number",
-		default: 0,
+		default: 3_600_000, // 1h [拟议验收目标]; 0 disables
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
 			label: "Max Subagent Runtime",
 			description:
-				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason.",
+				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a runtime-limit reason. Default 1 hour is a proposed acceptance target pending p95 baseline.",
 			options: [
-				{ value: "0", label: "Unlimited", description: "Default" },
+				{ value: "0", label: "Unlimited" },
 				{ value: "300000", label: "5 minutes" },
 				{ value: "900000", label: "15 minutes" },
 				{ value: "1800000", label: "30 minutes" },
-				{ value: "3600000", label: "1 hour" },
+				{ value: "3600000", label: "1 hour", description: "Default" },
+			],
+		},
+	},
+
+	"task.queuedStartupTimeoutMs": {
+		type: "number",
+		default: 120_000, // 2min [拟议验收目标]; 0 disables
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Queued Startup Timeout",
+			description:
+				"How long a spawn may wait for a task.maxConcurrency permit before failing (ms). 0 disables the guard. Default 2 minutes is a proposed acceptance target; useful when stuck jobs saturate the semaphore.",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "30000", label: "30 seconds" },
+				{ value: "60000", label: "1 minute" },
+				{ value: "120000", label: "2 minutes", description: "Default" },
+				{ value: "300000", label: "5 minutes" },
 			],
 		},
 	},

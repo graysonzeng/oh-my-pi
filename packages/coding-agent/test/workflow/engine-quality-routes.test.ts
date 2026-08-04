@@ -94,6 +94,7 @@ function qualityConfig(suffix = "", criticalSameLineage = false): QualityConfigF
 	const routesFor = (tier: "balanced" | "critical"): Readonly<Record<WorkflowRole, readonly string[]>> => ({
 		planner: [id(tier, "planner")],
 		plan_reviewer: [id(tier, "plan_reviewer")],
+		plan_arbitrator: [],
 		implementer: [id(tier, "implementer")],
 		code_reviewer: [id(tier, "code_reviewer")],
 		repair: [id(tier, "repair")],

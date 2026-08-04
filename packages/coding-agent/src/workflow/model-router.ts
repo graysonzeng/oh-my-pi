@@ -84,6 +84,20 @@ function isFlashProfile(profile: ModelProfile): boolean {
 	return profile.vendor === "deepseek" && patterns.some(pattern => pattern.toLowerCase().includes("flash"));
 }
 
+function narrowMechanicalFlashCandidates<T extends { profile?: ModelProfile } | ModelProfile>(
+	candidates: readonly T[],
+	options: Pick<RouteOptions, "mechanicalClass" | "roleStaticSplitEnabled">,
+	role: WorkflowRole,
+	getProfile: (candidate: T) => ModelProfile,
+): T[] {
+	if (role !== "repair") return [...candidates];
+	if (!isMechanicalFlashEligible(options.mechanicalClass, options.roleStaticSplitEnabled === true)) {
+		return [...candidates];
+	}
+	const flash = candidates.filter(candidate => isFlashProfile(getProfile(candidate)));
+	return flash.length > 0 ? flash : [...candidates];
+}
+
 export class ModelRouter {
 	readonly #profiles = new Map<string, ModelProfile>();
 
@@ -134,13 +148,7 @@ export class ModelRouter {
 			}
 		}
 
-		if (
-			role === "repair" &&
-			isMechanicalFlashEligible(options.mechanicalClass, options.roleStaticSplitEnabled === true)
-		) {
-			const flash = candidates.filter(isFlashProfile);
-			if (flash.length > 0) candidates = flash;
-		}
+		candidates = narrowMechanicalFlashCandidates(candidates, options, role, profile => profile);
 
 		if (role === "repair" && !preferReasoning) {
 			const mechanical = candidates.filter(p => p.vendor === "xai");
@@ -298,13 +306,12 @@ export class ModelRouter {
 			}
 			candidates.push({ profile, modelFamily });
 		}
-		if (
-			role === "repair" &&
-			isMechanicalFlashEligible(options.mechanicalClass, options.roleStaticSplitEnabled === true)
-		) {
-			const flash = candidates.filter(candidate => isFlashProfile(candidate.profile));
-			if (flash.length > 0) candidates = flash;
-		}
+		candidates = narrowMechanicalFlashCandidates(
+			candidates,
+			options,
+			role,
+			candidate => candidate.profile,
+		);
 		const selected = candidates[0];
 		if (!selected) {
 			throw new WorkflowPolicyError(
@@ -343,11 +350,7 @@ export class ModelRouter {
 		const unavailable = new Set(options.unavailableProfileIds ?? []);
 		const avoided = new Set(options.avoidModelFamilies ?? []);
 		const candidates = this.list()
-			.filter(profile => {
-				const id = profile.id.toLowerCase();
-				const roles = profile.roles as readonly string[];
-				return roles.includes("plan_arbitrator") || id.includes("plan_arbitrator") || id.includes("arbitrator");
-			})
+			.filter(profile => profile.roles.includes("plan_arbitrator"))
 			.filter(profile => !unavailable.has(profile.id))
 			.filter(profile => options.allowDegradedFallback === true || profile.vendor !== "anthropic")
 			.flatMap(profile => {

@@ -144,7 +144,6 @@ import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-ur
 import type { IrcMessage } from "../irc/bus";
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import {
-	emptyLatencyArms,
 	freezeLatencyArmSnapshot,
 	type LatencyArmSnapshotV1,
 } from "../latency/arms";
@@ -3169,24 +3168,19 @@ export class AgentSession {
 									? source.value
 									: rawPath;
 			const contentSha256 = sha256Hex(originalText);
+			// Unknown branch/revision/provider-view identity must fail open (no synthetic hit key).
 			const providerViewIdentity =
-				"providerViewIdentity" in details
-					? typeof details.providerViewIdentity === "string"
-						? details.providerViewIdentity
-						: ""
-					: `content:${contentSha256}`;
+				"providerViewIdentity" in details && typeof details.providerViewIdentity === "string"
+					? details.providerViewIdentity
+					: "";
 			const contentOrRevisionIdentity =
-				"contentOrRevisionIdentity" in details
-					? typeof details.contentOrRevisionIdentity === "string"
-						? details.contentOrRevisionIdentity
-						: ""
-					: `content:${contentSha256}`;
+				"contentOrRevisionIdentity" in details && typeof details.contentOrRevisionIdentity === "string"
+					? details.contentOrRevisionIdentity
+					: "";
 			const branchOrWorktreeScope =
-				"branchOrWorktreeScope" in details
-					? typeof details.branchOrWorktreeScope === "string"
-						? details.branchOrWorktreeScope
-						: ""
-					: `${this.sessionManager.getSessionFile() ?? this.sessionId}|${this.sessionManager.getCwd()}`;
+				"branchOrWorktreeScope" in details && typeof details.branchOrWorktreeScope === "string"
+					? details.branchOrWorktreeScope
+					: "";
 			const outputMode =
 				"outputMode" in details
 					? details.outputMode === "raw" ||
@@ -4666,11 +4660,25 @@ export class AgentSession {
 
 	#ensureLatencyArmSnapshot(): LatencyArmSnapshotV1 {
 		if (this.#latencyArmSnapshot) return this.#latencyArmSnapshot;
-		const arms = emptyLatencyArms();
-		arms.context_optimization = this.settings.get("modelOptimization.enabled");
-		arms.read_dedupe = this.settings.get("latency.arms.readDedupe");
-		this.#latencyArmSnapshot = freezeLatencyArmSnapshot({ arms });
+		this.#latencyArmSnapshot = freezeLatencyArmSnapshot({
+			getSetting: path => {
+				try {
+					return this.settings.get(path as Parameters<typeof this.settings.get>[0]);
+				} catch {
+					return false;
+				}
+			},
+		});
 		return this.#latencyArmSnapshot;
+	}
+
+	/** Session-frozen latency arm lookup for tools/workflow owners. */
+	isLatencyArmEnabled(arm: keyof LatencyArmSnapshotV1["arms"]): boolean {
+		return this.#ensureLatencyArmSnapshot().arms[arm] === true;
+	}
+
+	getLatencyArmSnapshot(): LatencyArmSnapshotV1 {
+		return this.#ensureLatencyArmSnapshot();
 	}
 
 	#clearLatencyArmSnapshot(): void {

@@ -38,6 +38,7 @@ function qualityTestProfile(id: string, role: WorkflowRole): ModelProfile {
 	const identityByRole: Record<WorkflowRole, { vendor: string; modelPattern: string }> = {
 		planner: { vendor: "anthropic", modelPattern: "anthropic/claude-fable-5" },
 		plan_reviewer: { vendor: "openai", modelPattern: "openai/gpt-5.6-sol" },
+		plan_arbitrator: { vendor: "xai", modelPattern: "grok-4.5" },
 		implementer: { vendor: "xai", modelPattern: "xai/grok-4.5" },
 		code_reviewer: { vendor: "openai", modelPattern: "openai/gpt-5.6-terra" },
 		repair: { vendor: "anthropic", modelPattern: "anthropic/claude-fable-5" },
@@ -106,6 +107,7 @@ describe("availability fail-closed (required role unavailable)", () => {
 					balanced: {
 						planner: ["planner_a"],
 						plan_reviewer: ["reviewer_a"],
+						plan_arbitrator: [],
 						implementer: ["impl_a"],
 						code_reviewer: ["code_a"],
 						repair: ["repair_a"],
@@ -113,6 +115,7 @@ describe("availability fail-closed (required role unavailable)", () => {
 					critical: {
 						planner: ["planner_a"],
 						plan_reviewer: ["reviewer_a"],
+						plan_arbitrator: [],
 						implementer: ["impl_a"],
 						code_reviewer: ["code_a"],
 						repair: ["repair_a"],

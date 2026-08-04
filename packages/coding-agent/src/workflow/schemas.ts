@@ -29,6 +29,20 @@ const ArtifactHeaderSchema = z
 	})
 	.strict();
 
+const ArtifactHeaderV2Schema = z
+	.object({
+		schemaVersion: z.literal(2),
+		workflowId: z.string().min(1),
+		attemptId: z.string().min(1),
+		stage: z.literal("plan_review"),
+		createdAt: z.string().datetime(),
+		modelProfileId: z.string().nullable(),
+		provider: z.string().nullable(),
+		model: z.string().nullable(),
+		promptVersion: z.string().min(1),
+	})
+	.strict();
+
 const WorkPackageSchema = z
 	.object({
 		id: z.string().min(1),
@@ -119,6 +133,152 @@ export const ReviewArtifactSchema = ArtifactHeaderSchema.extend({
 			});
 		}
 	});
+
+const FindingBasisSchema = z.enum([
+	"spec_requirement",
+	"user_requirement",
+	"repo_evidence",
+	"safety_invariant",
+	"missing_authority",
+]);
+
+const RequirementCoverageSchema = z
+	.object({
+		requirementId: z.string().min(1),
+		source: z.enum(["spec_requirement", "user_requirement"]),
+		mandatory: z.boolean(),
+		status: z.enum(["satisfied", "violated", "not_applicable", "missing_authority"]),
+		evidenceRefs: z.array(z.string().min(1)),
+		rationale: z.string().min(1),
+	})
+	.strict();
+
+const PlanReviewFindingV2Schema = ReviewFindingSchema.extend({
+	basis: FindingBasisSchema,
+	requirementId: z.string().min(1).nullable(),
+	sourceRefs: z.array(z.string().min(1)),
+	missingAuthority: z.string().min(1).nullable(),
+}).strict();
+
+const AuthorResponseSchema = z
+	.object({
+		findingId: z.string().min(1),
+		disposition: z.enum(["accepted", "rejected", "clarified"]),
+		explanation: z.string().min(1),
+		evidenceRefs: z.array(z.string()),
+	})
+	.strict();
+
+export const PlanReviewArtifactV2Schema = ArtifactHeaderV2Schema.extend({
+	kind: z.literal("review"),
+	subject: z.literal("plan"),
+	reviewKind: z.enum(["initial", "rereview", "arbitration", "human"]),
+	decision: z.enum(["approved", "changes_requested", "blocked"]),
+	findings: z.array(PlanReviewFindingV2Schema),
+	explanation: z.string().min(1),
+	confidence: z.number().min(0).max(1),
+	requirementsSnapshotRef: z.string().min(1),
+	requirementsSnapshotSha256: z.string().regex(/^[0-9a-f]{64}$/),
+	coverage: z.array(RequirementCoverageSchema),
+	uncoveredDimensions: z.array(z.string()),
+	antiAnchoringRationale: z.string().min(1),
+	reviewRound: z.union([z.literal(1), z.literal(2)]),
+	authorResponses: z.array(AuthorResponseSchema),
+	triggerReason: z
+		.enum(["contradiction", "suspicious_pass", "max_cycles_author_reject"])
+		.nullable(),
+	routeSelectionReceiptRef: z.string().min(1).nullable(),
+	cleanContextReceiptRef: z.string().min(1).nullable(),
+	specEvidenceReceiptRef: z.string().min(1).nullable(),
+	authorityReceiptRef: z.string().min(1).nullable(),
+})
+	.strict()
+	.superRefine((data, ctx) => {
+		if (data.decision === "changes_requested") {
+			if (data.reviewKind === "arbitration" || data.reviewKind === "human") {
+				ctx.addIssue({
+					code: "custom",
+					message: "arbitration/human cannot request changes",
+					path: ["decision"],
+				});
+			}
+			if (data.findings.length === 0) {
+				ctx.addIssue({
+					code: "custom",
+					message: "changes_requested requires at least one finding",
+					path: ["findings"],
+				});
+			}
+		}
+		const missingAuthority = data.findings.some(f => f.basis === "missing_authority");
+		if (missingAuthority && data.decision !== "blocked") {
+			ctx.addIssue({
+				code: "custom",
+				message: "missing_authority findings require blocked decision",
+				path: ["decision"],
+			});
+		}
+		if (data.decision === "approved") {
+			const mandatory = data.coverage.filter(c => c.mandatory && c.status !== "not_applicable");
+			const uncovered = mandatory.filter(c => c.status !== "satisfied");
+			if (uncovered.length > 0) {
+				ctx.addIssue({
+					code: "custom",
+					message: "approved requires 100% applicable mandatory coverage",
+					path: ["coverage"],
+				});
+			}
+			if (data.findings.some(f => f.status === "open" && (f.blocking === true || f.priority === "P0" || f.priority === "P1"))) {
+				ctx.addIssue({
+					code: "custom",
+					message: "approved cannot leave open blocking findings",
+					path: ["findings"],
+				});
+			}
+		}
+		if (data.reviewKind === "human" && !data.authorityReceiptRef) {
+			ctx.addIssue({
+				code: "custom",
+				message: "human review requires authorityReceiptRef",
+				path: ["authorityReceiptRef"],
+			});
+		}
+		if (data.reviewKind !== "human" && data.authorityReceiptRef) {
+			ctx.addIssue({
+				code: "custom",
+				message: "model review cannot set authorityReceiptRef",
+				path: ["authorityReceiptRef"],
+			});
+		}
+	});
+
+export const PlanReviewArtifactSchema = z.union([ReviewArtifactSchema, PlanReviewArtifactV2Schema]);
+
+export const PlanReviewControlStateSchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		kind: z.literal("plan_review_control_state"),
+		substate: z.enum([
+			"initial_review",
+			"awaiting_replan",
+			"rereview",
+			"arbitration",
+			"awaiting_human",
+		]),
+		reviewRound: z.union([z.literal(1), z.literal(2)]),
+		planRejectionCount: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+		arbitrationCycles: z.union([z.literal(0), z.literal(1)]),
+		arbitrationTrigger: z
+			.enum(["contradiction", "suspicious_pass", "max_cycles_author_reject"])
+			.nullable(),
+		latestPlanArtifactRef: z.string().nullable(),
+		latestReviewArtifactRef: z.string().nullable(),
+		authorResponsesArtifactRef: z.string().nullable(),
+		routeSelectionReceiptRef: z.string().nullable(),
+		humanRequestReason: z.string().nullable(),
+		updatedAt: z.string().datetime(),
+	})
+	.strict();
 
 export const ImplementationArtifactSchema = ArtifactHeaderSchema.extend({
 	kind: z.literal("implementation"),

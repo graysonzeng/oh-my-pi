@@ -38,7 +38,7 @@ export type WorkflowStatus =
 	| "failed";
 
 export interface ArtifactHeader {
-	schemaVersion: 1;
+	schemaVersion: 1 | 2;
 	workflowId: string;
 	attemptId: string;
 	stage: WorkflowStatus;
@@ -152,12 +152,120 @@ export interface ReviewFindingV1 {
 }
 
 export interface ReviewArtifactV1 extends ArtifactHeader {
+	schemaVersion: 1;
 	kind: "review";
 	subject: "plan" | "implementation";
 	decision: "approved" | "changes_requested" | "blocked";
 	findings: ReviewFindingV1[];
 	explanation: string;
 	confidence: number;
+}
+
+export type FindingBasisV1 =
+	| "spec_requirement"
+	| "user_requirement"
+	| "repo_evidence"
+	| "safety_invariant"
+	| "missing_authority";
+
+export type PlanReviewKindV1 = "initial" | "rereview" | "arbitration" | "human";
+export type PlanReviewTriggerReasonV1 =
+	| "contradiction"
+	| "suspicious_pass"
+	| "max_cycles_author_reject"
+	| null;
+
+export interface RequirementCoverageV1 {
+	requirementId: string;
+	source: "spec_requirement" | "user_requirement";
+	mandatory: boolean;
+	status: "satisfied" | "violated" | "not_applicable" | "missing_authority";
+	evidenceRefs: string[];
+	rationale: string;
+}
+
+export interface PlanReviewFindingV2 extends ReviewFindingV1 {
+	basis: FindingBasisV1;
+	requirementId: string | null;
+	sourceRefs: string[];
+	missingAuthority: string | null;
+}
+
+export interface AuthorResponseV1 {
+	findingId: string;
+	disposition: "accepted" | "rejected" | "clarified";
+	explanation: string;
+	evidenceRefs: string[];
+}
+
+export interface PlanReviewArtifactV2 {
+	schemaVersion: 2;
+	workflowId: string;
+	attemptId: string;
+	stage: "plan_review";
+	createdAt: string;
+	modelProfileId: string | null;
+	provider: string | null;
+	model: string | null;
+	promptVersion: string;
+	kind: "review";
+	subject: "plan";
+	reviewKind: PlanReviewKindV1;
+	decision: "approved" | "changes_requested" | "blocked";
+	findings: PlanReviewFindingV2[];
+	explanation: string;
+	confidence: number;
+	requirementsSnapshotRef: string;
+	requirementsSnapshotSha256: string;
+	coverage: RequirementCoverageV1[];
+	uncoveredDimensions: string[];
+	antiAnchoringRationale: string;
+	reviewRound: 1 | 2;
+	authorResponses: AuthorResponseV1[];
+	triggerReason: PlanReviewTriggerReasonV1;
+	routeSelectionReceiptRef: string | null;
+	cleanContextReceiptRef: string | null;
+	specEvidenceReceiptRef: string | null;
+	authorityReceiptRef: string | null;
+}
+
+export type PlanReviewArtifact = ReviewArtifactV1 | PlanReviewArtifactV2;
+
+export type PlanReviewSubstateV1 =
+	| "initial_review"
+	| "awaiting_replan"
+	| "rereview"
+	| "arbitration"
+	| "awaiting_human";
+
+export interface PlanReviewControlStateV1 {
+	schemaVersion: 1;
+	kind: "plan_review_control_state";
+	substate: PlanReviewSubstateV1;
+	reviewRound: 1 | 2;
+	planRejectionCount: 0 | 1 | 2;
+	arbitrationCycles: 0 | 1;
+	arbitrationTrigger: Exclude<PlanReviewTriggerReasonV1, null> | null;
+	latestPlanArtifactRef: string | null;
+	latestReviewArtifactRef: string | null;
+	authorResponsesArtifactRef: string | null;
+	routeSelectionReceiptRef: string | null;
+	humanRequestReason: string | null;
+	updatedAt: string;
+}
+
+export interface PlanReviewRouteSelectionV1 {
+	schemaVersion: 1;
+	kind: "plan_review_route_selection";
+	profileId: string;
+	provider: string;
+	model: string;
+	modelFamily: string | null;
+	attestedProvider: string;
+	attestedModel: string;
+	exactMatch: boolean | null;
+	snapshotFingerprint: string | null;
+	createdAt: string;
 }
 
 export interface ImplementationArtifactV1 extends ArtifactHeader {
@@ -237,7 +345,13 @@ export interface StageHandoffArtifactRef {
 	recoveryUri: string;
 }
 
-export type WorkflowRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer" | "repair";
+export type WorkflowRole =
+	| "planner"
+	| "plan_reviewer"
+	| "plan_arbitrator"
+	| "implementer"
+	| "code_reviewer"
+	| "repair";
 export type WorkflowQualityTier = "balanced" | "critical";
 
 export type ModelIdentityProvenance =

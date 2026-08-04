@@ -125,6 +125,7 @@ function strictPackageConfig(
 	const route: Readonly<Record<WorkflowRole, readonly string[]>> = {
 		planner: ["strict_planner"],
 		plan_reviewer: ["strict_plan_reviewer"],
+		plan_arbitrator: [],
 		implementer: [implementerProfile.id],
 		code_reviewer: ["strict_code_reviewer"],
 		repair: ["strict_repair"],

@@ -130,7 +130,10 @@ describe("ContextLedgerV1", () => {
 	});
 
 	it("fails open when a retained read artifact cannot be verified", async () => {
-		const first = readEntry("verify-1", "same read body");
+		const first = {
+			...readEntry("verify-1", "same read body"),
+			artifactRef: "artifact://retained-stale",
+		};
 		const second = readEntry("verify-2", "same read body");
 		const result = await optimizeContextEntries([first, second], artifactAdapter({ verify: false }));
 

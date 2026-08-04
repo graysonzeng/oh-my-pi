@@ -62,6 +62,7 @@ function snapshotConfig(
 			balanced: {
 				planner: [...plannerOrder],
 				plan_reviewer: ["plan_reviewer_primary", "plan_reviewer_backup"],
+				plan_arbitrator: [],
 				implementer: ["implementer_primary", "implementer_backup"],
 				code_reviewer: ["reviewer_primary", "reviewer_backup"],
 				repair: ["repair_primary", "repair_backup"],
@@ -69,6 +70,7 @@ function snapshotConfig(
 			critical: {
 				planner: [...plannerOrder].reverse(),
 				plan_reviewer: ["plan_reviewer_backup", "plan_reviewer_primary"],
+				plan_arbitrator: [],
 				implementer: ["implementer_backup", "implementer_primary"],
 				code_reviewer: ["reviewer_backup", "reviewer_primary"],
 				repair: ["repair_backup", "repair_primary"],

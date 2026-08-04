@@ -5,6 +5,7 @@ import type { AvailabilityRequirement, ModelProfile, WorkflowRole, WorkflowStatu
 export const AVAILABILITY_ROLE_ORDER: readonly WorkflowRole[] = [
 	"planner",
 	"plan_reviewer",
+	"plan_arbitrator",
 	"implementer",
 	"code_reviewer",
 	"repair",

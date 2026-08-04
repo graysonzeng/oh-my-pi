@@ -123,6 +123,7 @@ export type StructuredRunner = (request: StructuredRunnerRequest) => Promise<Str
 export const WORKFLOW_ROLE_TO_AGENT: Readonly<Record<WorkflowAgentRequest["role"], string>> = {
 	planner: "designer",
 	plan_reviewer: "reviewer",
+	plan_arbitrator: "reviewer",
 	implementer: "task",
 	code_reviewer: "reviewer",
 	repair: "task",

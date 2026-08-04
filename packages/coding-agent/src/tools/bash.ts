@@ -595,8 +595,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		let advisoryEnabled = false;
 		let boundedInjectionEnabled = false;
 		try {
-			advisoryEnabled = this.session.settings.get("latency.arms.bashAdvisory");
-			boundedInjectionEnabled = this.session.settings.get("latency.arms.bashBoundedInjection");
+			const frozen = (this.session as { isLatencyArmEnabled?: (arm: string) => boolean }).isLatencyArmEnabled;
+			if (typeof frozen === "function") {
+				advisoryEnabled = frozen.call(this.session, "bash_advisory") === true;
+				boundedInjectionEnabled = frozen.call(this.session, "bash_bounded_injection") === true;
+			} else {
+				advisoryEnabled = this.session.settings.get("latency.arms.bashAdvisory");
+				boundedInjectionEnabled = this.session.settings.get("latency.arms.bashBoundedInjection");
+			}
 		} catch {
 			return [];
 		}
@@ -903,6 +909,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						notices: options.notices ?? [],
 						wallTimeMs,
 					});
+					// Canonical attempt ledger covers managed async/auto-background jobs too.
+					this.#recordBashAttempt({
+						command: options.command,
+						cwd: options.commandCwd,
+						env: options.resolvedEnv,
+						result,
+						startedAt: new Date(Date.now() - wallTimeMs).toISOString(),
+					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
 					// Hand the detailed result to the foreground auto-background
@@ -920,6 +934,26 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;
+					const wallTimeMs = performance.now() - wallTimeStart;
+					this.#recordBashAttempt({
+						command: options.command,
+						cwd: options.commandCwd,
+						env: options.resolvedEnv,
+						result: {
+							exitCode: undefined,
+							timedOut: false,
+							cancelled: runSignal.aborted,
+							stdout: message,
+							stderr: "",
+							output: message,
+							truncated: false,
+							totalLines: 1,
+							totalBytes: Buffer.byteLength(message, "utf8"),
+							noOutput: message.length === 0,
+							durationMs: wallTimeMs,
+						} as unknown as BashResult,
+						startedAt: new Date(Date.now() - wallTimeMs).toISOString(),
+					});
 					completion.resolve({ kind: "failed", error });
 					await reportProgress(message, { async: { state: "failed", jobId, type: "bash" } });
 					throw error;

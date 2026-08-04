@@ -20,6 +20,9 @@ const QUALITY_ROUTE_ROLES: readonly WorkflowRole[] = [
 	"repair",
 ];
 
+/** Optional role: empty route is allowed so arbitration remains default-off. */
+const OPTIONAL_QUALITY_ROUTE_ROLES: readonly WorkflowRole[] = ["plan_arbitrator"];
+
 interface QualityRouteSnapshotPayloadV1 {
 	schemaVersion: 1;
 	qualityTier: WorkflowQualityTier;
@@ -79,9 +82,15 @@ export function compileQualityRouteSnapshot(
 	const profileSnapshots: QualityRouteProfileSnapshotV1[] = [];
 	const seenProfiles = new Set<string>();
 	const routes = {} as Record<WorkflowRole, readonly string[]>;
-	for (const role of QUALITY_ROUTE_ROLES) {
+	const allRoles: readonly WorkflowRole[] = [...QUALITY_ROUTE_ROLES, ...OPTIONAL_QUALITY_ROUTE_ROLES];
+	for (const role of allRoles) {
 		const profileIds = configuredRoutes[role];
+		const optional = (OPTIONAL_QUALITY_ROUTE_ROLES as readonly string[]).includes(role);
 		if (!Array.isArray(profileIds) || profileIds.length === 0) {
+			if (optional) {
+				routes[role] = [];
+				continue;
+			}
 			throw new WorkflowPolicyError("empty_quality_route_role", { qualityTier, role });
 		}
 		routes[role] = [...profileIds];

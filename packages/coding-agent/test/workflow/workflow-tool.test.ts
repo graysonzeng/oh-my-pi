@@ -130,6 +130,7 @@ describe("WorkflowTool", () => {
 		const route: Readonly<Record<WorkflowRole, readonly string[]>> = {
 			planner: ["status_planner"],
 			plan_reviewer: ["status_plan_reviewer"],
+			plan_arbitrator: [],
 			implementer: ["status_implementer"],
 			code_reviewer: ["status_code_reviewer"],
 			repair: ["status_repair"],

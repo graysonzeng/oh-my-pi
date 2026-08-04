@@ -50,16 +50,13 @@ describe("WorkflowConcurrencyDeclarationV1 lowering", () => {
 				active += 1;
 				peak = Math.max(peak, active);
 				if (active === 2) release.resolve();
-				await Promise.race([
-					release.promise,
-					new Promise<void>(resolve => {
-						if (signal.aborted) {
-							resolve();
-							return;
-						}
-						signal.addEventListener("abort", () => resolve(), { once: true });
-					}),
-				]);
+				const abortWait = Promise.withResolvers<void>();
+					if (signal.aborted) {
+						abortWait.resolve();
+					} else {
+						signal.addEventListener("abort", () => abortWait.resolve(), { once: true });
+					}
+				await Promise.race([release.promise, abortWait.promise]);
 				active -= 1;
 				return unit.id;
 			},

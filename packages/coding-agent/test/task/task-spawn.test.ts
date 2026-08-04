@@ -16,7 +16,11 @@ import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import {
+	TaskTool,
+	__getTaskTimeoutMetricsForTests,
+	__resetTaskTimeoutMetricsForTests,
+} from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -298,6 +302,83 @@ describe("task spawn routing", () => {
 		expect(firstJob.status).toBe("completed");
 		expect(thirdJob.status).toBe("completed");
 		expect(fourthJob.status).toBe("completed");
+	});
+
+	it("fails a spawn that waits too long for a semaphore permit (queued startup timeout)", async () => {
+		__resetTaskTimeoutMetricsForTests();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const started: string[] = [];
+		const gates = new Map<string, Deferred>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			const gate = deferred();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: {
+					"task.maxConcurrency": 1,
+					"task.queuedStartupTimeoutMs": 40,
+					// Keep runtime unlimited so only the queue guard can fire.
+					"task.maxRuntimeMs": 0,
+				},
+			}),
+		);
+
+		const first = await tool.execute("tc-hold", {
+			agent: "task",
+			name: "Holder",
+			task: "Hold the only permit.",
+		} as TaskParams);
+		const firstJob = manager.getJob(first.details!.async!.jobId)!;
+		await pollUntil(() => started.length === 1);
+		expect(started).toEqual(["Holder"]);
+
+		const second = await tool.execute("tc-queued", {
+			agent: "task",
+			name: "Queued",
+			task: "Wait behind holder.",
+		} as TaskParams);
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+		expect(secondJob.queued).toBe(true);
+
+		await secondJob.promise;
+		expect(secondJob.status).toBe("failed");
+		expect(secondJob.errorText ?? "").toContain("queued startup timeout");
+		expect(secondJob.errorText ?? "").toContain("task.queuedStartupTimeoutMs=40");
+		expect(started).toEqual(["Holder"]);
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(1);
+
+		// Permit must not leak: after holder finishes, a third spawn can acquire.
+		const third = await tool.execute("tc-after", {
+			agent: "task",
+			name: "After",
+			task: "Should start after holder releases.",
+		} as TaskParams);
+		const thirdJob = manager.getJob(third.details!.async!.jobId)!;
+		// Still held by Holder until we release it.
+		await Bun.sleep(20);
+		expect(started).toEqual(["Holder"]);
+		expect(thirdJob.queued).toBe(true);
+
+		gates.get("Holder")!.resolve();
+		await firstJob.promise;
+		await pollUntil(() => started.includes("After"));
+		expect(started).toEqual(["Holder", "After"]);
+		gates.get("After")!.resolve();
+		await thirdJob.promise;
+		expect(thirdJob.status).toBe("completed");
+		// Metric stays once-per-job even if inspected again.
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(1);
 	});
 
 	for (const maxConcurrency of [0, 0.5]) {

@@ -415,6 +415,21 @@ describe("Settings", () => {
 			expect(getDefault("providers.maxInFlightRequests")).toEqual({});
 		});
 
+		it("defaults subagent runtime and queued-startup timeouts to proposed acceptance targets", () => {
+			const settings = Settings.isolated();
+			expect(settings.get("task.maxRuntimeMs")).toBe(3_600_000);
+			expect(getDefault("task.maxRuntimeMs")).toBe(3_600_000);
+			expect(settings.get("task.queuedStartupTimeoutMs")).toBe(120_000);
+			expect(getDefault("task.queuedStartupTimeoutMs")).toBe(120_000);
+			// 0 remains the independent disable/rollback switch for each lever.
+			const disabled = Settings.isolated({
+				"task.maxRuntimeMs": 0,
+				"task.queuedStartupTimeoutMs": 0,
+			});
+			expect(disabled.get("task.maxRuntimeMs")).toBe(0);
+			expect(disabled.get("task.queuedStartupTimeoutMs")).toBe(0);
+		});
+
 		it("exposes all tool calling mode options", () => {
 			const values = getEnumValues("tools.format");
 			expect(values).toEqual([
