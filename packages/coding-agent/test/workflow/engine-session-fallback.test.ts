@@ -24,10 +24,19 @@ const SESSION_MODEL = "deepseek/deepseek-v4-flash:max";
 
 /** Runner that fails the first `failCount` implementer invocations with provider_transient. */
 function chainRunner(opts: { failCount: number; seen: string[] }): StructuredRunner {
+	// Plan-review identity pin requires resolvedModel (or identity receipt) from the runner,
+	// matching production RuntimeAdapter + scriptedRunner fixtures.
+	const resolvedModel = "xai/grok-code-test";
 	return async request => {
 		const agent = request.agent ?? "";
 		if (agent === "designer" || agent === "planner") {
-			return { result: { id: "plan", structuredOutput: { status: "valid" as const, data: planArtifact() } } };
+			return {
+				result: {
+					id: "plan",
+					structuredOutput: { status: "valid" as const, data: planArtifact() },
+					resolvedModel,
+				},
+			};
 		}
 		if (agent === "reviewer" || agent === "plan_reviewer" || agent === "code_reviewer") {
 			const assignment = request.assignment ?? "";
@@ -37,6 +46,7 @@ function chainRunner(opts: { failCount: number; seen: string[] }): StructuredRun
 				result: {
 					id: "review",
 					structuredOutput: { status: "valid" as const, data: reviewArtifact("approved", subject) },
+					resolvedModel,
 				},
 			};
 		}
@@ -55,6 +65,7 @@ function chainRunner(opts: { failCount: number; seen: string[] }): StructuredRun
 					structuredOutput: { status: "valid" as const, data: artifact },
 					patchPath: artifact.patchPath,
 					branchName: artifact.branchName,
+					resolvedModel: model.includes("/") ? model : resolvedModel,
 					usage: {
 						input: 10,
 						output: 20,

@@ -169,11 +169,7 @@ export type FindingBasisV1 =
 	| "missing_authority";
 
 export type PlanReviewKindV1 = "initial" | "rereview" | "arbitration" | "human";
-export type PlanReviewTriggerReasonV1 =
-	| "contradiction"
-	| "suspicious_pass"
-	| "max_cycles_author_reject"
-	| null;
+export type PlanReviewTriggerReasonV1 = "contradiction" | "suspicious_pass" | "max_cycles_author_reject" | null;
 
 export interface RequirementCoverageV1 {
 	requirementId: string;
@@ -231,12 +227,7 @@ export interface PlanReviewArtifactV2 {
 
 export type PlanReviewArtifact = ReviewArtifactV1 | PlanReviewArtifactV2;
 
-export type PlanReviewSubstateV1 =
-	| "initial_review"
-	| "awaiting_replan"
-	| "rereview"
-	| "arbitration"
-	| "awaiting_human";
+export type PlanReviewSubstateV1 = "initial_review" | "awaiting_replan" | "rereview" | "arbitration" | "awaiting_human";
 
 export interface PlanReviewControlStateV1 {
 	schemaVersion: 1;
@@ -345,13 +336,7 @@ export interface StageHandoffArtifactRef {
 	recoveryUri: string;
 }
 
-export type WorkflowRole =
-	| "planner"
-	| "plan_reviewer"
-	| "plan_arbitrator"
-	| "implementer"
-	| "code_reviewer"
-	| "repair";
+export type WorkflowRole = "planner" | "plan_reviewer" | "plan_arbitrator" | "implementer" | "code_reviewer" | "repair";
 export type WorkflowQualityTier = "balanced" | "critical";
 
 export type ModelIdentityProvenance =

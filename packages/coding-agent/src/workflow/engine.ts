@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { WorkflowConcurrencyDeclarationV1 } from "../latency/concurrency-declaration";
+import {
+	readyConcurrencyUnits,
+	resolveEffectiveConcurrency,
+	shouldAutoParallel,
+	validateConcurrencyDeclaration,
+} from "../latency/concurrency-declaration";
+import type { WorkflowMechanicalClassV1 } from "../latency/mechanical-class";
 import type { ToolSession } from "../tools";
 import * as git from "../utils/git";
 import {
@@ -26,14 +34,6 @@ import {
 	WorkflowError,
 	WorkflowPolicyError,
 } from "./errors";
-import {
-	readyConcurrencyUnits,
-	resolveEffectiveConcurrency,
-	shouldAutoParallel,
-	validateConcurrencyDeclaration,
-} from "../latency/concurrency-declaration";
-import type { WorkflowConcurrencyDeclarationV1 } from "../latency/concurrency-declaration";
-import type { WorkflowMechanicalClassV1 } from "../latency/mechanical-class";
 import { FindingTracker } from "./finding-tracker";
 import { assertStrictRuntimeIdentity } from "./identity-receipt";
 import {
@@ -43,6 +43,7 @@ import {
 } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
 import { sha256Hex } from "./optimization-receipt";
+import { derivePlanReviewTrigger } from "./plan-review-trigger";
 import {
 	compileQualityRouteSnapshot,
 	qualityRouteProfileIds,
@@ -72,9 +73,8 @@ import { FinalVerifyStage } from "./stages/final-verify";
 import { ImplementStage } from "./stages/implement";
 import { changedFilesFromPatch, ImplementationVerifyStage } from "./stages/implementation-verify";
 import { PlanStage } from "./stages/plan";
-import { PlanReviewStage } from "./stages/plan-review";
 import type { PlanReviewStageResult } from "./stages/plan-review";
-import { derivePlanReviewTrigger } from "./plan-review-trigger";
+import { PlanReviewStage } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
 import type {
@@ -120,10 +120,10 @@ import {
 	buildWorkPackageExecutionPlan,
 	executeWorkPackagePlan,
 	renderWorkPackageAssignment,
-	workPackagesToConcurrencyDeclaration,
 	WorkPackageExecutionError,
 	withWorkPackageMerge,
 	withWorkPackageMergePrepared,
+	workPackagesToConcurrencyDeclaration,
 } from "./work-packages";
 
 const TERMINAL: ReadonlySet<WorkflowStatus> = new Set(["completed", "blocked", "cancelled", "failed"]);
@@ -1251,11 +1251,7 @@ export class WorkflowEngine {
 				if (control.substate === "arbitration" && control.arbitrationCycles < 1) {
 					const resumeTrigger = control.arbitrationTrigger;
 					if (!resumeTrigger) {
-						await this.#setPlanReviewAwaitingHuman(
-							workflowId,
-							attemptId,
-							"arbitration resume missing trigger",
-						);
+						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "arbitration resume missing trigger");
 						return;
 					}
 					const arbitration = await this.#runPlanArbitration(
@@ -1267,20 +1263,10 @@ export class WorkflowEngine {
 						resumeTrigger,
 					);
 					if (!arbitration) {
-						await this.#setPlanReviewAwaitingHuman(
-							workflowId,
-							attemptId,
-							"no eligible plan arbitrator route",
-						);
+						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "no eligible plan arbitrator route");
 						return;
 					}
-					await this.#finishSuccessfulArbitration(
-						workflowId,
-						attemptId,
-						fresh.status,
-						fresh.version,
-						arbitration,
-					);
+					await this.#finishSuccessfulArbitration(workflowId, attemptId, fresh.status, fresh.version, arbitration);
 					return;
 				}
 				this.#budgetLedger.recordReviewerCycle();
@@ -1375,9 +1361,7 @@ export class WorkflowEngine {
 				this.#planReviewLegacy = !isV2Review;
 				this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
 				const nextRejectionCount =
-					review.decision === "changes_requested"
-						? control.planRejectionCount + 1
-						: control.planRejectionCount;
+					review.decision === "changes_requested" ? control.planRejectionCount + 1 : control.planRejectionCount;
 				const hasMissingAuthority =
 					isV2Review && review.schemaVersion === 2 && review.findings.some(f => f.basis === "missing_authority");
 				const triggerReason: PlanReviewTriggerReasonV1 | null =
@@ -1444,20 +1428,10 @@ export class WorkflowEngine {
 						arbitrationTrigger,
 					);
 					if (!arbitration) {
-						await this.#setPlanReviewAwaitingHuman(
-							workflowId,
-							attemptId,
-							"no eligible plan arbitrator route",
-						);
+						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "no eligible plan arbitrator route");
 						return;
 					}
-					await this.#finishSuccessfulArbitration(
-						workflowId,
-						attemptId,
-						fresh.status,
-						fresh.version,
-						arbitration,
-					);
+					await this.#finishSuccessfulArbitration(workflowId, attemptId, fresh.status, fresh.version, arbitration);
 					return;
 				}
 
@@ -3084,12 +3058,7 @@ export class WorkflowEngine {
 	): Promise<void> {
 		this.#planReview = arbitration.artifact;
 		this.#planReviewLegacy = false;
-		this.#planReviewArtifactRef = await this.#persistArtifact(
-			workflowId,
-			attemptId,
-			"review",
-			arbitration.artifact,
-		);
+		this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", arbitration.artifact);
 		if (this.#planReviewControl) {
 			this.#planReviewControl = {
 				...this.#planReviewControl,

@@ -6,9 +6,7 @@ import type { PlanReviewArtifactV2, PlanReviewTriggerReasonV1 } from "./types";
  *
  * ponytail: no suspicious_pass heuristics; add when product defines pass-score signals.
  */
-export function derivePlanReviewTrigger(
-	review: PlanReviewArtifactV2,
-): Exclude<PlanReviewTriggerReasonV1, null> | null {
+export function derivePlanReviewTrigger(review: PlanReviewArtifactV2): Exclude<PlanReviewTriggerReasonV1, null> | null {
 	const statusesByRequirement = new Map<string, Set<string>>();
 	for (const row of review.coverage) {
 		let statuses = statusesByRequirement.get(row.requirementId);

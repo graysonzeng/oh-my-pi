@@ -184,9 +184,7 @@ export const PlanReviewArtifactV2Schema = ArtifactHeaderV2Schema.extend({
 	antiAnchoringRationale: z.string().min(1),
 	reviewRound: z.union([z.literal(1), z.literal(2)]),
 	authorResponses: z.array(AuthorResponseSchema),
-	triggerReason: z
-		.enum(["contradiction", "suspicious_pass", "max_cycles_author_reject"])
-		.nullable(),
+	triggerReason: z.enum(["contradiction", "suspicious_pass", "max_cycles_author_reject"]).nullable(),
 	routeSelectionReceiptRef: z.string().min(1).nullable(),
 	cleanContextReceiptRef: z.string().min(1).nullable(),
 	specEvidenceReceiptRef: z.string().min(1).nullable(),
@@ -228,7 +226,11 @@ export const PlanReviewArtifactV2Schema = ArtifactHeaderV2Schema.extend({
 					path: ["coverage"],
 				});
 			}
-			if (data.findings.some(f => f.status === "open" && (f.blocking === true || f.priority === "P0" || f.priority === "P1"))) {
+			if (
+				data.findings.some(
+					f => f.status === "open" && (f.blocking === true || f.priority === "P0" || f.priority === "P1"),
+				)
+			) {
 				ctx.addIssue({
 					code: "custom",
 					message: "approved cannot leave open blocking findings",
@@ -250,31 +252,37 @@ export const PlanReviewArtifactV2Schema = ArtifactHeaderV2Schema.extend({
 				path: ["authorityReceiptRef"],
 			});
 		}
-		// Engine-owned trigger/context fields: models may only carry them on arbitration/human.
-		if (data.reviewKind !== "arbitration" && data.reviewKind !== "human") {
-			if (data.triggerReason != null) {
-				ctx.addIssue({
-					code: "custom",
-					message: "initial/rereview cannot set triggerReason",
-					path: ["triggerReason"],
-				});
-			}
-			if (data.cleanContextReceiptRef != null) {
-				ctx.addIssue({
-					code: "custom",
-					message: "initial/rereview cannot set cleanContextReceiptRef",
-					path: ["cleanContextReceiptRef"],
-				});
-			}
-			if (data.specEvidenceReceiptRef != null) {
-				ctx.addIssue({
-					code: "custom",
-					message: "initial/rereview cannot set specEvidenceReceiptRef",
-					path: ["specEvidenceReceiptRef"],
-				});
-			}
-		}
 	});
+
+/**
+ * Stage-parse schema: rejects engine-owned fields on initial/rereview so models cannot forge them
+ * at the stage boundary. Persisted artifacts use {@link PlanReviewArtifactV2Schema}, which allows
+ * the engine to stamp `triggerReason` / receipt refs after a successful stage parse.
+ */
+export const PlanReviewArtifactV2StageSchema = PlanReviewArtifactV2Schema.superRefine((data, ctx) => {
+	if (data.reviewKind === "arbitration" || data.reviewKind === "human") return;
+	if (data.triggerReason != null) {
+		ctx.addIssue({
+			code: "custom",
+			message: "initial/rereview cannot set triggerReason",
+			path: ["triggerReason"],
+		});
+	}
+	if (data.cleanContextReceiptRef != null) {
+		ctx.addIssue({
+			code: "custom",
+			message: "initial/rereview cannot set cleanContextReceiptRef",
+			path: ["cleanContextReceiptRef"],
+		});
+	}
+	if (data.specEvidenceReceiptRef != null) {
+		ctx.addIssue({
+			code: "custom",
+			message: "initial/rereview cannot set specEvidenceReceiptRef",
+			path: ["specEvidenceReceiptRef"],
+		});
+	}
+});
 
 export const PlanReviewArtifactSchema = z.union([ReviewArtifactSchema, PlanReviewArtifactV2Schema]);
 
@@ -282,19 +290,11 @@ export const PlanReviewControlStateSchema = z
 	.object({
 		schemaVersion: z.literal(1),
 		kind: z.literal("plan_review_control_state"),
-		substate: z.enum([
-			"initial_review",
-			"awaiting_replan",
-			"rereview",
-			"arbitration",
-			"awaiting_human",
-		]),
+		substate: z.enum(["initial_review", "awaiting_replan", "rereview", "arbitration", "awaiting_human"]),
 		reviewRound: z.union([z.literal(1), z.literal(2)]),
 		planRejectionCount: z.number().int().min(0),
 		arbitrationCycles: z.union([z.literal(0), z.literal(1)]),
-		arbitrationTrigger: z
-			.enum(["contradiction", "suspicious_pass", "max_cycles_author_reject"])
-			.nullable(),
+		arbitrationTrigger: z.enum(["contradiction", "suspicious_pass", "max_cycles_author_reject"]).nullable(),
 		latestPlanArtifactRef: z.string().nullable(),
 		latestReviewArtifactRef: z.string().nullable(),
 		authorResponsesArtifactRef: z.string().nullable(),

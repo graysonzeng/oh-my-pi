@@ -6,8 +6,8 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
-import { ModelRouter } from "../../src/workflow/model-router";
 import { normalizeModelProfile } from "../../src/workflow/model-profile-registry";
+import { ModelRouter } from "../../src/workflow/model-router";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import type { ModelProfile } from "../../src/workflow/types";
@@ -320,6 +320,17 @@ describe("plan review identity pin + arbitration", () => {
 				transition => transition.fromStatus === "plan_review" && transition.toStatus === "planning",
 			),
 		).toHaveLength(0);
+		// Persisted stamped review must re-parse under the durable (non-stage) Zod schema.
+		const { PlanReviewArtifactV2Schema } = await import("../../src/workflow/schemas");
+		const reviewMeta = (await store.listArtifacts(workflowId)).filter(a => a.kind === "review").at(-1);
+		expect(reviewMeta).toBeDefined();
+		const loaded = await new ArtifactStore(artifactDir).load(reviewMeta!.relativePath, reviewMeta!.sha256);
+		const parsed = PlanReviewArtifactV2Schema.safeParse(JSON.parse(loaded!.content ?? "{}"));
+		expect(parsed.success).toBe(true);
+		if (parsed.success) {
+			expect(parsed.data.triggerReason).toBe("contradiction");
+			expect(parsed.data.reviewKind).toBe("initial");
+		}
 	});
 
 	it("C2: maxPlanCycles>2 stops after uncapped rejections", async () => {
@@ -356,6 +367,110 @@ describe("plan review identity pin + arbitration", () => {
 				transition => transition.fromStatus === "plan_review" && transition.toStatus === "planning",
 			),
 		).toHaveLength(2);
+	});
+
+	it("F5: resume re-enters arbitration when cycles still 0 after crash window", async () => {
+		let planReviews = 0;
+		let arbitrationCalls = 0;
+		const exactArbitrator = normalizeModelProfile({
+			...DEFAULT_MODEL_PROFILES.grok_plan_arbitrator,
+			id: "exact_xai_arbitrator_f5",
+			modelPattern: "xai/grok-4.5",
+			thinkingLevel: Effort.Medium,
+		});
+		const router = new ModelRouter([
+			...Object.values(DEFAULT_MODEL_PROFILES).filter(profile => !profile.roles.includes("plan_arbitrator")),
+			exactArbitrator,
+		]);
+		const baseRunner = scriptedRunner({
+			plan: planArtifact(),
+			planReview: () => {
+				planReviews += 1;
+				return planReviewArtifactV2("approved", [], {
+					explanation: "arbitrator recovers after crash",
+					reviewKind: "arbitration",
+					triggerReason: "contradiction",
+				});
+			},
+		});
+		const makeEngine = () =>
+			new WorkflowEngine({
+				store,
+				router,
+				adapter: new RuntimeAdapter(async request => {
+					if (/arbitrate/i.test(request.assignment)) arbitrationCalls += 1;
+					return baseRunner(request);
+				}),
+				artifactStore: new ArtifactStore(artifactDir),
+				session: fakeSession(),
+			});
+
+		const engine = makeEngine();
+		const workflowId = await engine.startWorkflow({ request: "f5 crash window" });
+		await engine.resume(workflowId, { singleStep: true }); // → planning
+		await engine.resume(workflowId, { singleStep: true }); // planning → plan_review
+		const mid = await engine.getState(workflowId);
+		expect(mid?.status).toBe("plan_review");
+		const attemptId = (await store.listAttempts(workflowId)).at(-1)?.id;
+		expect(attemptId).toBeTruthy();
+
+		// Simulate crash after single-write arbitration entry (cycles still 0, no arbitration artifact).
+		const control = {
+			schemaVersion: 1 as const,
+			kind: "plan_review_control_state" as const,
+			substate: "arbitration" as const,
+			reviewRound: 1 as const,
+			planRejectionCount: 0,
+			arbitrationCycles: 0 as const,
+			arbitrationTrigger: "contradiction" as const,
+			latestPlanArtifactRef: null,
+			latestReviewArtifactRef: null,
+			authorResponsesArtifactRef: null,
+			routeSelectionReceiptRef: null,
+			humanRequestReason: null,
+			updatedAt: new Date().toISOString(),
+		};
+		const content = JSON.stringify(control);
+		const stored = await new ArtifactStore(artifactDir).store({
+			workflowId,
+			attemptId: attemptId!,
+			kind: "plan-review-control-state",
+			schemaVersion: 1,
+			relativePath: "",
+			content,
+		});
+		await store.addArtifact({
+			workflowId,
+			attemptId: attemptId!,
+			kind: "plan-review-control-state",
+			schemaVersion: 1,
+			relativePath: stored.relativePath,
+			sha256: stored.sha256,
+			content,
+		});
+
+		const resumed = makeEngine();
+		for (let i = 0; i < 6; i++) {
+			const state = await resumed.getState(workflowId);
+			if (!state || state.status === "implementing" || state.status === "blocked" || state.status === "failed") {
+				break;
+			}
+			await resumed.resume(workflowId, { singleStep: true });
+		}
+		const final = await resumed.getState(workflowId);
+		expect(final?.status).toBe("implementing");
+		expect(arbitrationCalls).toBe(1);
+		expect(planReviews).toBe(1);
+		const controlMeta = (await store.listArtifacts(workflowId))
+			.filter(a => a.kind === "plan-review-control-state")
+			.at(-1);
+		const controlBody = controlMeta
+			? await new ArtifactStore(artifactDir).load(controlMeta.relativePath, controlMeta.sha256)
+			: null;
+		expect(controlBody ? JSON.parse(controlBody.content ?? "{}") : null).toMatchObject({
+			substate: "arbitration",
+			arbitrationCycles: 1,
+		});
 	});
 
 	it("C3: missing_authority reaches terminal blocked with awaiting_human control", async () => {

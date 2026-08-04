@@ -2,7 +2,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../../tools";
 import { PlanReviewArtifactV2JsonSchema, ReviewArtifactJsonSchema } from "../json-schemas";
 import { coerceIsoDatetime, parseWorkflowArtifact } from "../parse-artifact";
-import { PlanReviewArtifactV2Schema, ReviewArtifactSchema } from "../schemas";
+import { PlanReviewArtifactV2StageSchema, ReviewArtifactSchema } from "../schemas";
 import type {
 	AuthorResponseV1,
 	ContextLedgerV1,
@@ -115,7 +115,7 @@ export class PlanReviewStage {
 		const modelArtifact = result.artifact as Partial<PlanReviewArtifactV2>;
 		const reviewKind = input.reviewKind ?? modelArtifact.reviewKind ?? "initial";
 		const artifact = parseWorkflowArtifact(
-			PlanReviewArtifactV2Schema,
+			PlanReviewArtifactV2StageSchema,
 			{
 				...modelArtifact,
 				kind: "review",
@@ -146,10 +146,8 @@ export class PlanReviewStage {
 				triggerReason: input.triggerReason !== undefined ? input.triggerReason : null,
 				routeSelectionReceiptRef:
 					input.routeSelectionReceiptRef !== undefined ? input.routeSelectionReceiptRef : null,
-				cleanContextReceiptRef:
-					input.cleanContextReceiptRef !== undefined ? input.cleanContextReceiptRef : null,
-				specEvidenceReceiptRef:
-					input.specEvidenceReceiptRef !== undefined ? input.specEvidenceReceiptRef : null,
+				cleanContextReceiptRef: input.cleanContextReceiptRef !== undefined ? input.cleanContextReceiptRef : null,
+				specEvidenceReceiptRef: input.specEvidenceReceiptRef !== undefined ? input.specEvidenceReceiptRef : null,
 				authorityReceiptRef: input.authorityReceiptRef ?? modelArtifact.authorityReceiptRef ?? null,
 			},
 			"PlanReviewArtifactV2",
