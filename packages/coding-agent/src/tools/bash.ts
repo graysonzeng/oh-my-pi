@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import type {
 	AgentTool,
@@ -14,6 +15,17 @@ import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
+import {
+	appendBashAttempt,
+	buildBashCommandFingerprint,
+	buildBashFailureFingerprint,
+	buildBashStateFingerprint,
+	createBashAttemptLedger,
+	digestBashStream,
+	getBashAttemptLedgerStore,
+	lookupRepeatedBashFailure,
+	type BashAttemptTerminal,
+} from "../latency/bash-attempt-ledger";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
@@ -573,6 +585,88 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const outputText = normalizeResultOutput(result);
 		return outputText || "(no output)";
 	}
+	#recordBashAttempt(input: {
+		command: string;
+		cwd: string;
+		env?: Record<string, string>;
+		result: BashResult | BashInteractiveResult;
+		startedAt: string;
+	}): string[] {
+		let advisoryEnabled = false;
+		let boundedInjectionEnabled = false;
+		try {
+			advisoryEnabled = this.session.settings.get("latency.arms.bashAdvisory");
+			boundedInjectionEnabled = this.session.settings.get("latency.arms.bashBoundedInjection");
+		} catch {
+			return [];
+		}
+		if (!advisoryEnabled && !boundedInjectionEnabled) return [];
+
+		try {
+			const commandFingerprint = buildBashCommandFingerprint({ command: input.command, cwd: input.cwd });
+			const stateFingerprint = buildBashStateFingerprint({
+				cwd: input.cwd,
+				envNames: Object.keys(input.env ?? {}),
+			});
+			const terminal: BashAttemptTerminal = input.result.timedOut
+				? { kind: "timeout" }
+				: input.result.cancelled
+					? { kind: "cancelled" }
+					: input.result.exitCode !== undefined
+						? { kind: "exit", exitCode: input.result.exitCode }
+						: { kind: "error", messageDigest: digestBashStream(normalizeResultOutput(input.result)) };
+			const failureFingerprint = buildBashFailureFingerprint({
+				terminal,
+				stdoutExcerpt: normalizeResultOutput(input.result),
+			});
+			const store = getBashAttemptLedgerStore(this.session);
+			if (!store) return [];
+			const priorLedger = store.get(commandFingerprint, stateFingerprint);
+			const prior = lookupRepeatedBashFailure(priorLedger ? [priorLedger] : [], {
+				commandFingerprint,
+				stateFingerprint,
+				failureFingerprint,
+			});
+			const mode = boundedInjectionEnabled ? "bounded_injection" : "advisory";
+			const ledger = appendBashAttempt(
+				priorLedger
+					? { ...priorLedger, mode }
+					: createBashAttemptLedger({
+							sessionId: this.session.getSessionId?.() ?? "unknown",
+							commandFingerprint,
+							stateFingerprint,
+							mode,
+					}),
+				{
+					attemptId: randomUUID(),
+					startedAt: input.startedAt,
+					endedAt: new Date().toISOString(),
+					terminal,
+					failureFingerprint,
+					stdoutDigest: digestBashStream(normalizeResultOutput(input.result)),
+					stderrDigest: digestBashStream(""),
+					cwdIdentity: input.cwd,
+					changedInputReceipt: null,
+				},
+			);
+			store.upsert(ledger);
+
+			const notices: string[] = [];
+			if (prior.repeatedFailure && advisoryEnabled && prior.advisoryText) {
+				notices.push(prior.advisoryText);
+			}
+			if (prior.repeatedFailure && boundedInjectionEnabled && failureFingerprint) {
+				notices.push(
+					`[bash-attempt-ledger] bounded summary: prior identical failure; priorAttempts=${prior.priorAttempts}; failureFingerprint=${failureFingerprint.slice(0, 12)}…`,
+				);
+			}
+			return notices;
+		} catch {
+			// Ledger evidence is advisory only. Never prevent the command from
+			// completing when fingerprinting or storage is unavailable.
+			return [];
+		}
+	}
 
 	/**
 	 * Throw for outcomes that are *not* a completed command: user aborts and a
@@ -614,6 +708,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		timeoutSec: number | undefined,
 		options: {
 			requestedTimeoutSec?: number;
+			prefixNotices?: readonly string[];
 			notices?: readonly string[];
 			terminalId?: string;
 			wallTimeMs?: number;
@@ -622,7 +717,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const exitCode = result.exitCode;
 		const failedExit = exitCode !== undefined && exitCode !== 0;
 
-		const outputLines = [this.#formatResultOutput(result)];
+		const outputLines: string[] = [];
+		if (options.prefixNotices) {
+			for (const notice of options.prefixNotices) {
+				if (notice) outputLines.push(notice);
+			}
+		}
+		if (outputLines.length > 0) outputLines.push("");
+		outputLines.push(this.#formatResultOutput(result));
 		const notices: string[] = [];
 		if (options.wallTimeMs !== undefined) {
 			notices.push(formatWallTimeNotice(options.wallTimeMs));
@@ -1138,6 +1240,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			}
 
 			const bridgeWallTimeStart = performance.now();
+			const startedAt = new Date().toISOString();
 			const killGraceMs = 1000;
 			const outputSnapshotGraceMs = 2000;
 			// Cancellable timeout: a bare Bun.sleep(timeoutMs) would leave a live,
@@ -1352,11 +1455,19 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				};
 
 				const bridgeNotices: string[] = [];
+				const ledgerPrefixNotices = this.#recordBashAttempt({
+					command,
+					cwd: commandCwd,
+					env: bridgeEnv,
+					result: bridgeResult,
+					startedAt,
+				});
 				if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
 					requestedTimeoutSec,
+					prefixNotices: ledgerPrefixNotices,
 					notices: bridgeNotices,
 					terminalId: handle.terminalId,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
@@ -1389,6 +1500,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
 		}
 		const wallTimeStart = performance.now();
+		const startedAt = new Date().toISOString();
 		const result: BashResult | BashInteractiveResult = interactiveUi
 			? await runInteractiveBashPty(interactiveUi, {
 					// PTY bypasses executeBash, so feed it the direnv-transformed
@@ -1417,6 +1529,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
+		const ledgerPrefixNotices = this.#recordBashAttempt({
+			command,
+			cwd: commandCwd,
+			env: interactiveUi ? backendPreflight?.env ?? resolvedEnv : resolvedEnv,
+			result,
+			startedAt,
+		});
 		if (result.cancelled) {
 			// A cancelled result is either a timeout (the command's deadline fired)
 			// or a user/system abort. Timeouts are handled by #buildCompletedResult
@@ -1442,6 +1561,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		}
 		return this.#buildCompletedResult(result, timeoutSec, {
 			requestedTimeoutSec,
+			prefixNotices: ledgerPrefixNotices,
 			notices: pendingNotices,
 			wallTimeMs,
 		});

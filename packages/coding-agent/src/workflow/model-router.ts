@@ -1,3 +1,4 @@
+import { isMechanicalFlashEligible, type WorkflowMechanicalClassV1 } from "../latency/mechanical-class";
 import { WorkflowPolicyError } from "./errors";
 import type { FindingTracker } from "./finding-tracker";
 import { configuredIdentityForProfile } from "./model-profile-registry";
@@ -73,6 +74,14 @@ export interface RouteOptions {
 	findingTracker?: FindingTracker;
 	/** Prefer reasoning repair profile over mechanical. */
 	preferReasoningRepair?: boolean;
+	/** Caller/deferred evidence used only for repair mechanical Flash routing. */
+	mechanicalClass?: WorkflowMechanicalClassV1;
+	roleStaticSplitEnabled?: boolean;
+}
+
+function isFlashProfile(profile: ModelProfile): boolean {
+	const patterns = Array.isArray(profile.modelPattern) ? profile.modelPattern : [profile.modelPattern];
+	return profile.vendor === "deepseek" && patterns.some(pattern => pattern.toLowerCase().includes("flash"));
 }
 
 export class ModelRouter {
@@ -123,6 +132,14 @@ export class ModelRouter {
 			if (reasoning.length > 0) {
 				candidates = reasoning;
 			}
+		}
+
+		if (
+			role === "repair" &&
+			isMechanicalFlashEligible(options.mechanicalClass, options.roleStaticSplitEnabled === true)
+		) {
+			const flash = candidates.filter(isFlashProfile);
+			if (flash.length > 0) candidates = flash;
 		}
 
 		if (role === "repair" && !preferReasoning) {
@@ -234,7 +251,7 @@ export class ModelRouter {
 		const unavailable = new Set(options.unavailableProfileIds ?? []);
 		const excluded = new Set(options.excludedProfileIds ?? []);
 		const skipped: RoutingSkip[] = [];
-		const candidates: Array<{ profile: ModelProfile; modelFamily: string }> = [];
+		let candidates: Array<{ profile: ModelProfile; modelFamily: string }> = [];
 		const authorModelFamily =
 			options.avoidModelFamily ?? (role === "code_reviewer" ? options.implementerModelFamily : undefined);
 		for (const profileId of candidateProfileIds) {
@@ -281,6 +298,13 @@ export class ModelRouter {
 			}
 			candidates.push({ profile, modelFamily });
 		}
+		if (
+			role === "repair" &&
+			isMechanicalFlashEligible(options.mechanicalClass, options.roleStaticSplitEnabled === true)
+		) {
+			const flash = candidates.filter(candidate => isFlashProfile(candidate.profile));
+			if (flash.length > 0) candidates = flash;
+		}
 		const selected = candidates[0];
 		if (!selected) {
 			throw new WorkflowPolicyError(
@@ -305,6 +329,50 @@ export class ModelRouter {
 			snapshotFingerprint: options.snapshotFingerprint,
 			candidateProfileIds,
 			skipped,
+			modelFamily: selected.modelFamily,
+			identityProvenance: "configured",
+		};
+	}
+
+	/** Resolve an optional plan arbitrator without changing the plan-review route. */
+	resolvePlanArbitrator(options: {
+		avoidModelFamilies?: readonly string[];
+		unavailableProfileIds?: Iterable<string>;
+		allowDegradedFallback?: boolean;
+	} = {}): RoutingDecision {
+		const unavailable = new Set(options.unavailableProfileIds ?? []);
+		const avoided = new Set(options.avoidModelFamilies ?? []);
+		const candidates = this.list()
+			.filter(profile => {
+				const id = profile.id.toLowerCase();
+				const roles = profile.roles as readonly string[];
+				return roles.includes("plan_arbitrator") || id.includes("plan_arbitrator") || id.includes("arbitrator");
+			})
+			.filter(profile => !unavailable.has(profile.id))
+			.filter(profile => options.allowDegradedFallback === true || profile.vendor !== "anthropic")
+			.flatMap(profile => {
+				try {
+					const modelFamily = configuredIdentityForProfile(profile).modelFamily;
+					if (!modelFamily || avoided.has(modelFamily)) return [];
+					return [{ profile, modelFamily }];
+				} catch {
+					return [];
+				}
+			})
+			.sort((left, right) => (left.profile.vendor === "xai" ? -1 : right.profile.vendor === "xai" ? 1 : 0));
+		const selected = candidates[0];
+		if (!selected) {
+			throw new WorkflowPolicyError("plan_arbitrator_unavailable", {
+				avoidedModelFamilies: [...avoided],
+				allowDegradedFallback: options.allowDegradedFallback === true,
+			});
+		}
+		return {
+			profile: selected.profile,
+			profileId: selected.profile.id,
+			vendor: selected.profile.vendor,
+			reason: selected.profile.vendor === "xai" ? "plan_arbitrator:xai_lineage" : "plan_arbitrator:fallback",
+			degraded: selected.profile.vendor === "anthropic",
 			modelFamily: selected.modelFamily,
 			identityProvenance: "configured",
 		};

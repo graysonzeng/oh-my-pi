@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	buildContextLedger,
+	buildReadToolContextEntry,
 	type ContextArtifactAdapter,
 	type ContextEntry,
 	optimizeContextEntries,
@@ -33,6 +34,25 @@ function contextRef(uri: string, content: string): string {
 	return `[context ref: ${uri} sha256:${sha256Hex(content)}]`;
 }
 
+const readViewDefaults = {
+	canonicalSource: "/repo/src/file.ts",
+	normalizedSelector: "full",
+	branchOrWorktreeScope: "repo@main",
+	providerViewIdentity: "view:1",
+	contentOrRevisionIdentity: "rev:1",
+	outputMode: "raw" as const,
+};
+
+function readEntry(id: string, content: string, overrides: Partial<typeof readViewDefaults> = {}): ContextEntry {
+	const entry = buildReadToolContextEntry({
+		id,
+		content,
+		readViewKeyParts: { ...readViewDefaults, ...overrides },
+	});
+	if (!entry) throw new Error("read fixture must be successful");
+	return entry;
+}
+
 describe("ContextLedgerV1", () => {
 	it("deduplicates only byte-identical eligible entries and replaces old tool results with verified one-hop refs", async () => {
 		const result = await optimizeContextEntries(entries, artifactAdapter());
@@ -58,6 +78,64 @@ describe("ContextLedgerV1", () => {
 		});
 		expect(result.receipts.every(receipt => receipt.originalSha256.length === 64)).toBe(true);
 		expect(result.receipts.every(receipt => /^artifact:\/\/\d+$/.test(receipt.artifactRef))).toBe(true);
+	});
+
+	it("deduplicates successful read results only for the same eligible view and content hash", async () => {
+		const first = readEntry("read-1", "same read body");
+		const second = readEntry("read-2", "same read body");
+		const result = await optimizeContextEntries([first, second], artifactAdapter());
+
+		expect(result.entries[0]?.content).toBe("same read body");
+		expect(result.entries[1]?.content).toBe(contextRef("artifact://1", "same read body"));
+		expect(result.receipts[0]).toMatchObject({
+			entryId: "read-2",
+			retainedEntryId: "read-1",
+			transform: "dedupe_exact",
+		});
+	});
+
+	it("keeps full payloads when branch, selector, or provider view changes", async () => {
+		const result = await optimizeContextEntries(
+			[
+				readEntry("branch", "same read body", { branchOrWorktreeScope: "repo@feature" }),
+				readEntry("selector", "same read body", { normalizedSelector: "raw" }),
+				readEntry("provider", "same read body", { providerViewIdentity: "view:2" }),
+			],
+			artifactAdapter(),
+		);
+
+		expect(result.entries.map(entry => entry.content)).toEqual([
+			"same read body",
+			"same read body",
+			"same read body",
+		]);
+		expect(result.receipts).toEqual([]);
+	});
+
+	it("fails open for ineligible read identities or immutable hash mismatches", async () => {
+		const ineligible = [
+			readEntry("ineligible-1", "same read body", { branchOrWorktreeScope: "", providerViewIdentity: "" }),
+			readEntry("ineligible-2", "same read body", { branchOrWorktreeScope: "", providerViewIdentity: "" }),
+		];
+		const mismatched = readEntry("mismatch", "same read body");
+		mismatched.immutableSha256 = "0".repeat(64);
+		const result = await optimizeContextEntries([...ineligible, mismatched], artifactAdapter());
+
+		expect(result.entries.map(entry => entry.content)).toEqual([
+			"same read body",
+			"same read body",
+			"same read body",
+		]);
+		expect(result.receipts).toEqual([]);
+	});
+
+	it("fails open when a retained read artifact cannot be verified", async () => {
+		const first = readEntry("verify-1", "same read body");
+		const second = readEntry("verify-2", "same read body");
+		const result = await optimizeContextEntries([first, second], artifactAdapter({ verify: false }));
+
+		expect(result.entries.map(entry => entry.content)).toEqual(["same read body", "same read body"]);
+		expect(result.receipts).toEqual([]);
 	});
 
 	it("keeps inline originals when persistence or integrity verification fails", async () => {

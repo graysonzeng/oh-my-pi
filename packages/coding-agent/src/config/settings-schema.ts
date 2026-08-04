@@ -4526,6 +4526,97 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Latency optimization arms (design A §6.2) — all default-off, independently rollbackable.
+	// context_optimization reuses modelOptimization.enabled; remaining arms are explicit.
+	"latency.arms.readDedupe": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "files",
+			group: "Reading",
+			label: "Read Result Dedupe",
+			description:
+				"When enabled with model optimization, repeated same-view read results may be replaced with verified artifact refs in model-visible context. Fail-open on unknown identity. Default off.",
+		},
+	},
+	"latency.arms.contextBudgetTuning": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Context Budget Tuning",
+			description:
+				"Optional profile threshold tuning after ordinary context optimization is active. Default off; independent of the base optimization arm.",
+		},
+	},
+	"latency.arms.roleStaticSplit": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Mechanical Flash Route",
+			description:
+				"When enabled, caller-declared or previously-accepted mechanical workflow work may route to Flash via the frozen quality-route snapshot. Never downgrades plan reviewer. Default off.",
+		},
+	},
+	"latency.arms.bashAdvisory": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Bash",
+			label: "Bash Failure Advisory",
+			description:
+				"When enabled, repeated identical bash failures show a structured advisory from the single attempt ledger. Does not block execution. Default off.",
+		},
+	},
+	"latency.arms.bashBoundedInjection": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Bash",
+			label: "Bash Ledger Context Injection",
+			description:
+				"When enabled, inject a bounded bash attempt-ledger summary into model context on repeated failures. Shares the advisory ledger; does not auto-skip. Default off.",
+		},
+	},
+	"latency.arms.concurrencyDeclaration": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Concurrency Declaration",
+			description:
+				"When enabled, accept strict WorkflowConcurrencyDeclarationV1 for DAG/ownership validation. Default off.",
+		},
+	},
+	"latency.arms.concurrencyExecution": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Concurrency Declaration Execution",
+			description:
+				"When enabled, lower validated concurrency declarations onto existing task batch/parallel or workflow RuntimePort. Requires declaration arm. Default off.",
+		},
+	},
+	"latency.arms.evalGateMigration": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Eval Gate Native Migration",
+			description:
+				"When enabled and EvalGateParityReceiptV1 is proven, migrate eligible eval gates to native workflow/task owners with optional independent overlap. Default off.",
+		},
+	},
+
 	"title.refreshOnReplan": {
 		type: "boolean",
 		default: true,

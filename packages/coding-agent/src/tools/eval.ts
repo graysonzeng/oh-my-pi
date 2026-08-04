@@ -21,8 +21,10 @@ import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-me
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
+import { mayMigrateEvalGate, recordOrRequireEvalParity } from "../latency/eval-parity";
 
 export { EVAL_DEFAULT_PREVIEW_LINES, evalToolRenderer } from "./eval-render";
+export { mayMigrateEvalGate, recordOrRequireEvalParity };
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js" | "rb" | "jl";
@@ -404,6 +406,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
 		const session = this.session;
+		const evalGateArmEnabled = session.settings.get("latency.arms.evalGateMigration") === true;
+		const evalGateControl = recordOrRequireEvalParity(undefined, evalGateArmEnabled);
+		const evalGateNotice =
+			evalGateArmEnabled
+				? evalGateControl === "native-control"
+					? "[eval-gate] native migration target unavailable; bridge control retained"
+					: "[eval-gate] migration not proven; parity receipt unavailable; bridge control retained"
+				: undefined;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
 		const cellLanguage: EvalLanguage =
@@ -426,7 +436,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			},
 		];
 		const languages = uniqueEvalLanguages(cells);
-		const notice = detailsNotice(cells);
+		const notice = [detailsNotice(cells), evalGateNotice].filter(Boolean).join("\n") || undefined;
 		const sessionAbortController = new AbortController();
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;

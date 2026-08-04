@@ -1,0 +1,202 @@
+import { describe, expect, it } from "bun:test";
+import { Settings } from "../../src/config/settings";
+import { BashTool } from "../../src/tools/bash";
+import type { ToolSession } from "../../src/tools";
+import type { ClientBridge, ClientBridgeTerminalHandle } from "../../src/session/client-bridge";
+import {
+	appendBashAttempt,
+	buildBashCommandFingerprint,
+	buildBashFailureFingerprint,
+	buildBashStateFingerprint,
+	createBashAttemptLedger,
+	clearBashAttemptLedgerStore,
+	getBashAttemptLedgerStore,
+	lookupRepeatedBashFailure,
+} from "../../src/latency/bash-attempt-ledger";
+
+describe("BashAttemptLedgerV1 identity", () => {
+	it("keeps command identity conservative while normalizing whitespace", () => {
+		const normalized = buildBashCommandFingerprint({ command: "  printf   ok  ", cwd: "/repo" });
+		const equivalentWhitespace = buildBashCommandFingerprint({ command: "printf ok", cwd: "/repo" });
+		const differentQuote = buildBashCommandFingerprint({ command: 'printf "ok"', cwd: "/repo" });
+		const differentQuotedSpacing = buildBashCommandFingerprint({ command: 'printf "o k"', cwd: "/repo" });
+		const differentCwd = buildBashCommandFingerprint({ command: "printf ok", cwd: "/tmp" });
+
+		expect(normalized).toBe(equivalentWhitespace);
+		expect(normalized).not.toBe(differentQuote);
+		expect(normalized).not.toBe(differentQuotedSpacing);
+		expect(normalized).not.toBe(differentCwd);
+	});
+
+	it("uses cwd and sorted environment names without env values", () => {
+		const first = buildBashStateFingerprint({ cwd: "/repo", envNames: ["SECRET_TOKEN", "PATH"] });
+		const reordered = buildBashStateFingerprint({ cwd: "/repo", envNames: ["PATH", "SECRET_TOKEN"] });
+		const changedName = buildBashStateFingerprint({ cwd: "/repo", envNames: ["PATH", "OTHER_TOKEN"] });
+		const changedCwd = buildBashStateFingerprint({ cwd: "/tmp", envNames: ["PATH", "SECRET_TOKEN"] });
+
+		expect(first).toBe(reordered);
+		expect(first).not.toBe(changedName);
+		expect(first).not.toBe(changedCwd);
+	});
+});
+
+describe("BashAttemptLedgerV1 repetition", () => {
+	it("advises on a repeated failure but does not count cancellation", () => {
+		const commandFingerprint = buildBashCommandFingerprint({ command: "false", cwd: "/repo" });
+		const stateFingerprint = buildBashStateFingerprint({ cwd: "/repo", envNames: ["PATH"] });
+		const failureFingerprint = buildBashFailureFingerprint({
+			terminal: { kind: "exit", exitCode: 1 },
+			stderrExcerpt: "same failure",
+		});
+		expect(failureFingerprint).toHaveLength(64);
+
+		let ledger = createBashAttemptLedger({
+			sessionId: "session-1",
+			commandFingerprint,
+			stateFingerprint,
+			mode: "advisory",
+		});
+		ledger = appendBashAttempt(ledger, {
+			attemptId: "attempt-1",
+			startedAt: "2026-08-04T00:00:00Z",
+			endedAt: "2026-08-04T00:00:01Z",
+			terminal: { kind: "exit", exitCode: 1 },
+			failureFingerprint,
+			stdoutDigest: "stdout",
+			stderrDigest: "stderr",
+			cwdIdentity: "/repo",
+			changedInputReceipt: null,
+		});
+
+		const repeated = lookupRepeatedBashFailure([ledger], {
+			commandFingerprint,
+			stateFingerprint,
+			failureFingerprint,
+		});
+		expect(repeated.repeatedFailure).toBe(true);
+		expect(repeated.priorAttempts).toBe(1);
+		expect(repeated.advisoryText).toContain("execution not blocked");
+
+		const cancelledFailure = buildBashFailureFingerprint({
+			terminal: { kind: "cancelled" },
+			stderrExcerpt: "same failure",
+		});
+		expect(cancelledFailure).toBeNull();
+		const cancelledOnly = appendBashAttempt(
+			createBashAttemptLedger({
+				sessionId: "session-2",
+				commandFingerprint,
+				stateFingerprint,
+				mode: "advisory",
+			}),
+			{
+				attemptId: "attempt-cancelled",
+				startedAt: "2026-08-04T00:00:00Z",
+				endedAt: "2026-08-04T00:00:01Z",
+				terminal: { kind: "cancelled" },
+				failureFingerprint: null,
+				stdoutDigest: "stdout",
+				stderrDigest: "stderr",
+				cwdIdentity: "/repo",
+				changedInputReceipt: null,
+			},
+		);
+		const cancelledLookup = lookupRepeatedBashFailure([cancelledOnly], {
+			commandFingerprint,
+			stateFingerprint,
+			failureFingerprint,
+		});
+		expect(cancelledLookup.repeatedFailure).toBe(false);
+		expect(buildBashFailureFingerprint({ terminal: { kind: "exit", exitCode: 0 } })).toBeNull();
+	});
+});
+
+describe("BashAttemptLedgerStore session ownership", () => {
+	it("returns one store per session object", () => {
+		const session = {};
+		const sameSessionStore = getBashAttemptLedgerStore(session);
+		const sameSessionStoreAgain = getBashAttemptLedgerStore(session);
+		const otherSessionStore = getBashAttemptLedgerStore({});
+
+		expect(sameSessionStore).toBeDefined();
+		expect(sameSessionStoreAgain).toBe(sameSessionStore);
+		expect(otherSessionStore).not.toBe(sameSessionStore);
+	});
+
+	it("shares stores by session id and clears the id owner", () => {
+		const firstSession = { getSessionId: () => "bash-ledger-session-id" };
+		const secondSession = { getSessionId: () => "bash-ledger-session-id" };
+		const firstStore = getBashAttemptLedgerStore(firstSession);
+		expect(getBashAttemptLedgerStore(secondSession)).toBe(firstStore);
+
+		clearBashAttemptLedgerStore("bash-ledger-session-id");
+		expect(getBashAttemptLedgerStore(secondSession)).not.toBe(firstStore);
+	});
+});
+
+describe("BashTool ledger completion integration", () => {
+	it("prepends advisory and bounded summary without blocking rerun", async () => {
+		const settings = Settings.isolated({
+			"latency.arms.bashAdvisory": true,
+			"latency.arms.bashBoundedInjection": true,
+		});
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			settings,
+			skills: [],
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getSessionId: () => "bash-ledger-test",
+			getArtifactsDir: () => null,
+		} as unknown as ToolSession;
+		const tool = new BashTool(session);
+
+		const first = await tool.execute("first", { command: "printf ledger && exit 9", timeout: 30 });
+		const second = await tool.execute("second", { command: "printf ledger && exit 9", timeout: 30 });
+		const firstText = first.content.find(block => block.type === "text")?.text ?? "";
+		const secondText = second.content.find(block => block.type === "text")?.text ?? "";
+
+		expect(firstText).toContain("Command exited with code 9");
+		expect(secondText.startsWith("[bash-attempt-ledger] repeated identical failure")).toBe(true);
+		expect(secondText).toContain("bounded summary");
+		expect(secondText).toContain("Command exited with code 9");
+	});
+
+	it("records repeated failures from the ACP terminal path", async () => {
+		const settings = Settings.isolated({
+			"bash.direnv": "off",
+			"latency.arms.bashAdvisory": true,
+		});
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-ledger",
+			waitForExit: async () => ({ exitCode: 9, signal: null }),
+			currentOutput: async () => ({ output: "acp failure\n", truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+		const session = {
+			cwd: "/tmp",
+			hasUI: false,
+			settings,
+			skills: [],
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getSessionId: () => "bash-ledger-acp-test",
+			getArtifactsDir: () => null,
+			getClientBridge: () => bridge,
+		} as unknown as ToolSession;
+		const tool = new BashTool(session);
+
+		await tool.execute("acp-first", { command: "false" });
+		const repeated = await tool.execute("acp-second", { command: "false" });
+		const text = repeated.content.find(block => block.type === "text")?.text ?? "";
+
+		expect(text.startsWith("[bash-attempt-ledger] repeated identical failure")).toBe(true);
+		expect(text).toContain("Command exited with code 9");
+	});
+});

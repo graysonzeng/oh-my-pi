@@ -1,5 +1,6 @@
+import type { ReadViewKeyPartsV1, ReadViewKeyV1 } from "../latency/read-view-key";
+import { buildReadViewKeyV1 } from "../latency/read-view-key";
 import { sha256Hex } from "./optimization-receipt";
-
 export const CONTEXT_LEDGER_KIND = "context_ledger" as const;
 export const CONTEXT_LEDGER_VERSION = 1 as const;
 export const CONTEXT_ESTIMATE_VERSION = "estimate:utf8_bytes_div_4_v1" as const;
@@ -26,8 +27,10 @@ export interface ContextEntry {
 	content: string;
 	/** Existing one-hop session artifact for this typed entry, when available. */
 	artifactRef?: string;
-	/** Immutable SHA-256 of the bytes addressed by artifactRef. */
+	/** Immutable SHA-256 of entry content or bytes addressed by artifactRef. */
 	immutableSha256?: string;
+	/** Verified read-result view identity for prompt-level dedupe. */
+	readViewKey?: ReadViewKeyV1;
 	/** Handoff recovery refs carried by this typed entry. */
 	handoffRefs?: string[];
 	/** Old tool results may be replaced; the current result remains inline. */
@@ -42,6 +45,34 @@ export interface ContextArtifactRecord {
 export interface ContextArtifactAdapter {
 	persist(entry: ContextEntry, sha256: string): Promise<ContextArtifactRecord>;
 	verify(uri: string, sha256: string): Promise<boolean>;
+}
+
+export interface ReadToolContextEntryInput {
+	id: string;
+	content: string;
+	/** Read identity fields; the helper adds tool and renderer defaults. */
+	readViewKeyParts: Omit<ReadViewKeyPartsV1, "tool" | "rendererVersion"> & {
+		rendererVersion?: string;
+	};
+	bucket?: Exclude<ContextLedgerBucket, "output">;
+	artifactRef?: string;
+	replaceable?: boolean;
+	isError?: boolean;
+}
+
+/** Build a tool-result ledger entry only for a successful read result. */
+export function buildReadToolContextEntry(input: ReadToolContextEntryInput): ContextEntry | undefined {
+	if (input.isError === true) return undefined;
+	return {
+		id: input.id,
+		bucket: input.bucket ?? "tool_results",
+		kind: "tool_result",
+		content: input.content,
+		immutableSha256: sha256Hex(input.content),
+		readViewKey: buildReadViewKeyV1(input.readViewKeyParts),
+		...(input.artifactRef !== undefined ? { artifactRef: input.artifactRef } : {}),
+		...(input.replaceable !== undefined ? { replaceable: input.replaceable } : {}),
+	};
 }
 
 export type ContextOptimizationTransform = "dedupe_exact" | "artifact_ref";
@@ -155,17 +186,37 @@ interface RetainedContextEntry {
 	immutableSha256?: string;
 }
 
+function readViewDedupeKey(entry: ContextEntry, originalSha256: string): string | undefined {
+	if (entry.kind !== "tool_result" || !entry.immutableSha256 || entry.immutableSha256 !== originalSha256)
+		return undefined;
+	const view = entry.readViewKey;
+	if (!view?.eligible || view.schemaVersion !== 1 || !/^[0-9a-f]{64}$/.test(view.key)) return undefined;
+	try {
+		const rebuilt = buildReadViewKeyV1(view.parts);
+		if (!rebuilt.eligible || rebuilt.key !== view.key) return undefined;
+	} catch {
+		return undefined;
+	}
+	return `${view.key}:${originalSha256}`;
+}
+
 export async function optimizeContextEntries(
 	entries: readonly ContextEntry[],
 	artifact: ContextArtifactAdapter,
 ): Promise<OptimizedContextEntries> {
 	const firstByHash = new Map<string, RetainedContextEntry>();
+	const firstByReadView = new Map<string, RetainedContextEntry>();
 	const optimized: ContextEntry[] = [];
 	const receipts: ContextOptimizationReceiptV1[] = [];
 
 	for (const [position, entry] of entries.entries()) {
 		const originalSha256 = sha256Hex(entry.content);
-		const retained = DEDUPE_KINDS[entry.kind] ? firstByHash.get(originalSha256) : undefined;
+		const readKey = readViewDedupeKey(entry, originalSha256);
+		const retained = DEDUPE_KINDS[entry.kind]
+			? firstByHash.get(originalSha256)
+			: readKey
+				? firstByReadView.get(readKey)
+				: undefined;
 		const transform: ContextOptimizationTransform | null = retained
 			? "dedupe_exact"
 			: entry.kind === "tool_result" && entry.replaceable === true
@@ -174,27 +225,34 @@ export async function optimizeContextEntries(
 
 		if (!transform) {
 			optimized.push({ ...entry });
-			if (DEDUPE_KINDS[entry.kind] && !retained) {
-				firstByHash.set(originalSha256, {
-					id: entry.id,
-					artifactRef: entry.artifactRef,
-					immutableSha256: entry.immutableSha256,
-				});
-			}
+			const retainedEntry = {
+				id: entry.id,
+				artifactRef: entry.artifactRef,
+				immutableSha256: entry.immutableSha256,
+			};
+			if (DEDUPE_KINDS[entry.kind] && !retained) firstByHash.set(originalSha256, retainedEntry);
+			if (readKey && !retained) firstByReadView.set(readKey, retainedEntry);
 			continue;
 		}
 
 		let stored: ContextArtifactRecord | null = null;
-		if (
-			retained?.artifactRef &&
-			retained.immutableSha256 === originalSha256 &&
-			/^artifact:\/\/\d+$/.test(retained.artifactRef) &&
-			(await artifact.verify(retained.artifactRef, originalSha256))
-		) {
-			stored = { uri: retained.artifactRef, sha256: originalSha256 };
-		} else {
-			stored = await persistAndVerify(entry, originalSha256, artifact);
+		if (retained?.artifactRef && retained.immutableSha256 === originalSha256) {
+			let verified = false;
+			if (/^artifact:\/\/\d+$/.test(retained.artifactRef)) {
+				try {
+					verified = await artifact.verify(retained.artifactRef, originalSha256);
+				} catch {
+					verified = false;
+				}
+			}
+			if (verified) {
+				stored = { uri: retained.artifactRef, sha256: originalSha256 };
+			} else if (readKey) {
+				optimized.push({ ...entry });
+				continue;
+			}
 		}
+		if (!stored) stored = await persistAndVerify(entry, originalSha256, artifact);
 		if (!stored) {
 			optimized.push({ ...entry });
 			continue;
@@ -204,6 +262,13 @@ export async function optimizeContextEntries(
 		const originalBytes = Buffer.byteLength(entry.content, "utf8");
 		const visibleBytes = Buffer.byteLength(content, "utf8");
 		optimized.push({ ...entry, content, artifactRef: stored.uri, immutableSha256: stored.sha256 });
+		if (readKey) {
+			firstByReadView.set(readKey, {
+				id: entry.id,
+				artifactRef: stored.uri,
+				immutableSha256: stored.sha256,
+			});
+		}
 		receipts.push({
 			schemaVersion: 1,
 			kind: "context_optimization_receipt",

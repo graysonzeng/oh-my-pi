@@ -26,6 +26,14 @@ import {
 	WorkflowError,
 	WorkflowPolicyError,
 } from "./errors";
+import {
+	readyConcurrencyUnits,
+	resolveEffectiveConcurrency,
+	shouldAutoParallel,
+	validateConcurrencyDeclaration,
+} from "../latency/concurrency-declaration";
+import type { WorkflowConcurrencyDeclarationV1 } from "../latency/concurrency-declaration";
+import type { WorkflowMechanicalClassV1 } from "../latency/mechanical-class";
 import { FindingTracker } from "./finding-tracker";
 import { assertStrictRuntimeIdentity } from "./identity-receipt";
 import {
@@ -64,6 +72,7 @@ import { ImplementStage } from "./stages/implement";
 import { changedFilesFromPatch, ImplementationVerifyStage } from "./stages/implementation-verify";
 import { PlanStage } from "./stages/plan";
 import { PlanReviewStage } from "./stages/plan-review";
+import type { PlanReviewStageResult } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
 import type {
@@ -106,6 +115,7 @@ import {
 	buildWorkPackageExecutionPlan,
 	executeWorkPackagePlan,
 	renderWorkPackageAssignment,
+	workPackagesToConcurrencyDeclaration,
 	WorkPackageExecutionError,
 	withWorkPackageMerge,
 	withWorkPackageMergePrepared,
@@ -120,6 +130,63 @@ const MODEL_STAGE_ROLES: readonly Readonly<{ stage: WorkflowModelBackedStage; ro
 	{ stage: "code_review", role: "code_reviewer" },
 	{ stage: "repairing", role: "repair" },
 ];
+
+type PlanReviewerIdentity = Readonly<{
+	profileId: string;
+	provider: string;
+	model: string;
+	modelFamily: string | undefined;
+}>;
+
+
+function resolvePlanReviewerIdentity(
+	profile: ModelProfile,
+	result: PlanReviewStageResult,
+): PlanReviewerIdentity | null {
+	const attestedProvider = result.identityReceipt?.attested.provider ?? null;
+	const attestedModel = result.identityReceipt?.attested.model ?? null;
+	if (attestedProvider && attestedModel) {
+		return {
+			profileId: profile.id,
+			provider: attestedProvider,
+			model: attestedModel,
+			modelFamily: result.identityReceipt?.modelFamily ?? result.modelFamily ?? undefined,
+		};
+	}
+	const configuredProvider = result.identityReceipt?.configured.provider ?? null;
+	const configuredModel = result.identityReceipt?.configured.model ?? null;
+	if (configuredProvider && configuredModel) {
+		return {
+			profileId: profile.id,
+			provider: configuredProvider,
+			model: configuredModel,
+			modelFamily: result.identityReceipt?.modelFamily ?? result.modelFamily ?? undefined,
+		};
+	}
+	if (result.resolvedProvider && result.resolvedModel) {
+		return {
+			profileId: profile.id,
+			provider: result.resolvedProvider,
+			model: result.resolvedModel,
+			modelFamily: result.modelFamily ?? undefined,
+		};
+	}
+	try {
+		const configured = configuredIdentityForProfile(profile);
+		if (configured.provider && configured.model) {
+			return {
+				profileId: profile.id,
+				provider: configured.provider,
+				model: configured.model,
+				modelFamily: configured.modelFamily ?? result.modelFamily ?? undefined,
+			};
+		}
+	} catch {
+		// fail closed below
+	}
+	return null;
+}
+
 
 const IDENTITY_PROVENANCE: Record<ModelIdentityProvenance, true> = {
 	configured: true,
@@ -301,6 +368,7 @@ export class WorkflowEngine {
 	#implementerVendor: string | undefined;
 	#plannerModelFamily: string | undefined;
 	#implementerModelFamily: string | undefined;
+	#planReviewerIdentity: PlanReviewerIdentity | undefined;
 	#planCycles = 0;
 	#lastRouteProfileId: string | undefined;
 	#lastScopeMetrics: ScopeMetricsV1 | undefined;
@@ -1027,6 +1095,7 @@ export class WorkflowEngine {
 		const policy = this.#parsePolicy(state.policyJson);
 		const request = this.#parseRequest(state.requestJson);
 		const stage = state.status;
+		const roleStaticSplitEnabled = session.settings.get("latency.arms.roleStaticSplit") === true;
 
 		// Fail-closed resume: never silently re-run a write stage without detection.
 		// If an open in_progress attempt exists for this stage, mark it failed then start fresh.
@@ -1092,6 +1161,48 @@ export class WorkflowEngine {
 			case "plan_review": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
 				this.#budgetLedger.recordReviewerCycle();
+				const pinnedReviewer = this.#planReviewerIdentity?.profileId ?? (this.#planCycles > 0 ? this.#planReview?.modelProfileId : undefined);
+				const executeReview = async (profile: ModelProfile, assignment: string) =>
+					new PlanReviewStage(this.#adapter).execute({
+						workflowId,
+						attemptId,
+						profile,
+						assignment,
+						context: await this.#buildStageContext(
+							this.#contextBuilder.buildPlanReviewContext(this.#plan!, resolveArtifactInclusion(profile)),
+							profile,
+							session,
+							this.#plan?.affectedFiles.map(file => file.path),
+						),
+						session,
+						signal,
+					});
+				const reviewResult = pinnedReviewer
+					? await this.#withPinnedProfile("plan_reviewer", pinnedReviewer, async profile => {
+							const result = await executeReview(profile, "Re-review the revised plan for correctness and feasibility");
+							this.#assertPlanReviewerIdentity(profile, result);
+							return result;
+						}, "plan_reviewer:rereview")
+					: await this.#withProfileFallback(
+							"plan_reviewer",
+							{
+								excludedProfileIds: this.#plannerProfileId ? [this.#plannerProfileId] : [],
+								avoidVendor: this.#plannerVendor,
+								avoidModelFamily: this.#plannerModelFamily,
+							},
+							async profile => {
+								const result = await executeReview(profile, "Review the plan for correctness and feasibility");
+								const pinned = resolvePlanReviewerIdentity(profile, result);
+								if (!pinned) {
+									throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", {
+										profileId: profile.id,
+										reason: "missing_identity_receipt",
+									});
+								}
+								this.#planReviewerIdentity = pinned;
+								return result;
+							},
+						);
 				const {
 					artifact: review,
 					usage,
@@ -1104,29 +1215,7 @@ export class WorkflowEngine {
 					identityReceipt,
 					modelFamily,
 					resolvedToolPolicyId,
-				} = await this.#withProfileFallback(
-					"plan_reviewer",
-					{
-						excludedProfileIds: this.#plannerProfileId ? [this.#plannerProfileId] : [],
-						avoidVendor: this.#plannerVendor,
-						avoidModelFamily: this.#plannerModelFamily,
-					},
-					async profile =>
-						new PlanReviewStage(this.#adapter).execute({
-							workflowId,
-							attemptId,
-							profile,
-							assignment: "Review the plan for correctness and feasibility",
-							context: await this.#buildStageContext(
-								this.#contextBuilder.buildPlanReviewContext(this.#plan!, resolveArtifactInclusion(profile)),
-								profile,
-								session,
-								this.#plan?.affectedFiles.map(f => f.path),
-							),
-							session,
-							signal,
-						}),
-				);
+				} = reviewResult;
 				this.#planReview = review;
 				this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
@@ -1145,16 +1234,59 @@ export class WorkflowEngine {
 				if (review.decision === "changes_requested") {
 					this.#planCycles += 1;
 					if (this.#planCycles >= this.#config.maxPlanCycles) {
-						await this.#store.completeAttemptAndTransition({
+						const arbitration = await this.#runPlanArbitration(workflowId, attemptId, session, signal, policy);
+						if (!arbitration) {
+							await this.#store.completeAttemptAndTransition({
+								workflowId,
+								attemptId,
+								attemptStatus: "failed",
+								fromStatus: fresh.status,
+								toStatus: "blocked",
+								reason: "arbitration_required",
+								expectedVersion: fresh.version,
+								budget: this.#ledgerBudgetSnapshot(),
+							});
+							return;
+						}
+						this.#planReview = arbitration.artifact;
+						this.#planReviewArtifactRef = await this.#persistArtifact(
 							workflowId,
 							attemptId,
-							attemptStatus: "failed",
-							fromStatus: fresh.status,
-							toStatus: "blocked",
-							reason: "max_plan_cycles_exceeded",
-							expectedVersion: fresh.version,
-							budget: this.#ledgerBudgetSnapshot(),
+							"review",
+							arbitration.artifact,
+						);
+						await this.#recordUsageAndProfile(workflowId, attemptId, arbitration.usage, {
+							promptAssemblyReceipt: arbitration.promptAssemblyReceipt,
+							contextLedger: arbitration.contextLedger,
+							optimizationReceipts: arbitration.optimizationReceipts,
+							resolvedProvider: arbitration.resolvedProvider,
+							resolvedModel: arbitration.resolvedModel,
+							toolCalls: arbitration.toolCalls,
+							identityReceipt: arbitration.identityReceipt,
+							modelFamily: arbitration.modelFamily,
+							resolvedToolPolicyId: arbitration.resolvedToolPolicyId,
 						});
+						if (arbitration.artifact.decision !== "approved") {
+							await this.#store.completeAttemptAndTransition({
+								workflowId,
+								attemptId,
+								attemptStatus: "failed",
+								fromStatus: fresh.status,
+								toStatus: "blocked",
+								reason: "arbitration_blocked",
+								expectedVersion: fresh.version,
+								budget: this.#ledgerBudgetSnapshot(),
+							});
+							return;
+						}
+						await this.#completeTo(
+							workflowId,
+							attemptId,
+							fresh.status,
+							"implementing",
+							"plan_review:arbitration_approved",
+							fresh.version,
+						);
 						return;
 					}
 				}
@@ -1185,7 +1317,14 @@ export class WorkflowEngine {
 						}),
 					[this.#planArtifactRef, this.#planReviewArtifactRef],
 				);
-				const execution = await this.#executeImplementation(workflowId, attemptId, session, plannerHandoff, signal);
+				const execution = await this.#executeImplementation(
+					workflowId,
+					attemptId,
+					session,
+					plannerHandoff,
+					signal,
+					policy,
+				);
 				let impl = execution.artifact;
 				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, impl);
 				if (!execution.usageRecorded) {
@@ -1461,6 +1600,11 @@ export class WorkflowEngine {
 						finding: primary,
 						findingTracker: this.#findingTracker,
 						preferReasoningRepair: primary ? this.#findingTracker.needsReasoningRepair(primary) : false,
+						mechanicalClass:
+							policy.mechanicalClass && typeof policy.mechanicalClass === "object"
+								? (policy.mechanicalClass as WorkflowMechanicalClassV1)
+								: undefined,
+						roleStaticSplitEnabled,
 					},
 					async profile =>
 						new RepairStage(this.#adapter).execute({
@@ -1607,6 +1751,7 @@ export class WorkflowEngine {
 		session: ToolSession,
 		plannerHandoff: StageHandoffV1 | undefined,
 		signal?: AbortSignal,
+		policy: Record<string, unknown> = {},
 	): Promise<{
 		artifact: ImplementationArtifactV1;
 		usageRecorded: boolean;
@@ -1620,10 +1765,73 @@ export class WorkflowEngine {
 		) {
 			return this.#recoverAppliedWorkPackageImplementation(workflowId, attemptId, session.cwd, "implementing");
 		}
-		const configuredConcurrency = session.settings?.get?.("task.maxConcurrency" as never);
-		const maxConcurrency = typeof configuredConcurrency === "number" ? configuredConcurrency : 0;
+		const settingsGet = session.settings?.get?.bind(session.settings);
+		const configuredConcurrency = settingsGet?.("task.maxConcurrency" as "task.maxConcurrency");
+		const taskMaxConcurrency = typeof configuredConcurrency === "number" ? configuredConcurrency : 0;
+		const declarationArmEnabled = settingsGet?.("latency.arms.concurrencyDeclaration" as "latency.arms.concurrencyDeclaration") === true;
+		const executionArmEnabled = settingsGet?.("latency.arms.concurrencyExecution" as "latency.arms.concurrencyExecution") === true;
+		let concurrencyDeclaration: WorkflowConcurrencyDeclarationV1 | undefined;
+		if (declarationArmEnabled) {
+			const rawDeclaration = policy.concurrencyDeclaration;
+			if (rawDeclaration !== undefined) {
+				if (!rawDeclaration || typeof rawDeclaration !== "object" || Array.isArray(rawDeclaration)) {
+					throw new WorkflowPolicyError("concurrency_declaration_invalid", { reason: "expected object" });
+				}
+				const candidate = rawDeclaration as WorkflowConcurrencyDeclarationV1;
+				const validation = validateConcurrencyDeclaration(candidate, {
+					knownFieldsOnly: true,
+					raw: rawDeclaration as Record<string, unknown>,
+				});
+				if (!validation.ok) {
+					throw new WorkflowPolicyError("concurrency_declaration_invalid", { errors: validation.errors });
+				}
+				concurrencyDeclaration = candidate;
+			} else if (this.#plan?.workPackages) {
+				const generated = workPackagesToConcurrencyDeclaration(this.#plan.workPackages, {
+					declarationId: `${workflowId}:work-packages`,
+					ownerId: workflowId,
+					maxConcurrency: 0,
+				});
+				if (generated) {
+					const validation = validateConcurrencyDeclaration(generated, { knownFieldsOnly: true });
+					if (!validation.ok) {
+						throw new WorkflowPolicyError("concurrency_declaration_invalid", { errors: validation.errors });
+					}
+					concurrencyDeclaration = generated;
+				}
+			}
+		}
+		const maxConcurrency =
+			concurrencyDeclaration && executionArmEnabled
+				? resolveEffectiveConcurrency({
+						declarationMax: concurrencyDeclaration.maxConcurrency,
+						sessionMax: taskMaxConcurrency,
+					})
+				: taskMaxConcurrency;
 		const mergeCapturedChanges = this.#adapter.mergeCapturedChanges;
-		const packagePlan = buildWorkPackageExecutionPlan(this.#plan?.workPackages, maxConcurrency);
+		let packageInput = this.#plan?.workPackages;
+		if (concurrencyDeclaration && executionArmEnabled) {
+			const initialStates = concurrencyDeclaration.units.map(unit => ({
+				id: unit.id,
+				status: "declared" as const,
+				attemptCount: 0,
+			}));
+			const ready = readyConcurrencyUnits(concurrencyDeclaration, initialStates);
+			// Full-unit readiness/isolation contract must pass before write-only work-package lowering.
+			if (!shouldAutoParallel(ready)) {
+				packageInput = undefined;
+			} else {
+				packageInput = concurrencyDeclaration.units
+					.filter(unit => unit.mode === "write")
+					.map(unit => ({
+						id: unit.id,
+						assignment: unit.assignment,
+						paths: [...unit.paths],
+						dependsOn: [...unit.dependsOn],
+					}));
+			}
+		}
+		const packagePlan = buildWorkPackageExecutionPlan(packageInput, maxConcurrency);
 		if (!mergeCapturedChanges || !packagePlan) {
 			const result = await this.#withProfileFallback("implementer", {}, async profile => {
 				this.#implementerVendor = profile.vendor;
@@ -2380,6 +2588,107 @@ export class WorkflowEngine {
 		this.#configuredRouter.register(fallback);
 	}
 
+	async #withPinnedProfile<T>(
+		role: WorkflowRole,
+		profileId: string,
+		run: (profile: ModelProfile, route: RoutingDecision) => Promise<T>,
+		reason: string,
+	): Promise<T> {
+		if (this.#preflightUnavailableReasons[profileId]) {
+			throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", {
+				profileId,
+				reason: this.#preflightUnavailableReasons[profileId],
+			});
+		}
+		const profile = this.#router.list().find(candidate => candidate.id === profileId && candidate.roles.includes(role));
+		if (!profile) {
+			throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", { profileId, role });
+		}
+		const route: RoutingDecision = {
+			profile,
+			profileId,
+			vendor: profile.vendor,
+			reason,
+			degraded: false,
+			qualityTier: this.#qualityRouteSnapshot?.qualityTier,
+			snapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint,
+			candidateProfileIds: [profileId],
+			modelFamily: this.#planReviewerIdentity?.modelFamily,
+			identityProvenance: "configured",
+		};
+		this.#audit(route);
+		return run(profile, route);
+	}
+
+	#assertPlanReviewerIdentity(profile: ModelProfile, result: PlanReviewStageResult): void {
+		const expected = this.#planReviewerIdentity;
+		if (!expected) {
+			throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", {
+				profileId: profile.id,
+				reason: "missing_pinned_identity",
+			});
+		}
+		const actual = resolvePlanReviewerIdentity(profile, result);
+		if (!actual) {
+			throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", {
+				profileId: profile.id,
+				reason: "missing_identity_receipt",
+			});
+		}
+		if (
+			expected.profileId !== actual.profileId ||
+			expected.provider !== actual.provider ||
+			expected.model !== actual.model ||
+			(expected.modelFamily && actual.modelFamily && expected.modelFamily !== actual.modelFamily)
+		) {
+			throw new WorkflowPolicyError("plan_reviewer_identity_mismatch", {
+				expected,
+				actual,
+			});
+		}
+	}
+
+	async #runPlanArbitration(
+		workflowId: string,
+		attemptId: string,
+		session: ToolSession,
+		signal: AbortSignal | undefined,
+		policy: Record<string, unknown>,
+	): Promise<PlanReviewStageResult | null> {
+		let route: RoutingDecision;
+		try {
+			route = this.#router.resolvePlanArbitrator({
+				avoidModelFamilies: [this.#plannerModelFamily, this.#planReviewerIdentity?.modelFamily].filter(
+					(family): family is string => Boolean(family),
+				),
+				unavailableProfileIds: Object.keys(this.#preflightUnavailableReasons),
+				allowDegradedFallback: policy.planArbitratorAllowDegradedFallback === true,
+			});
+		} catch (error) {
+			if (error instanceof WorkflowPolicyError) return null;
+			throw error;
+		}
+		this.#audit(route);
+		const context = `${this.#contextBuilder.buildPlanReviewContext(
+			this.#plan!,
+			resolveArtifactInclusion(route.profile),
+		)}\n\nLatest review to arbitrate:\n${JSON.stringify(this.#planReview)}`;
+		return new PlanReviewStage(this.#adapter).execute({
+			workflowId,
+			attemptId,
+			profile: route.profile,
+			assignment: "Arbitrate the bounded plan-review disagreement",
+			context: await this.#buildStageContext(
+				context,
+				route.profile,
+				session,
+				this.#plan?.affectedFiles.map(file => file.path),
+			),
+			session,
+			signal,
+		});
+	}
+
 	/**
 	 * Resolve profile, run, and on retryable provider failure mark the profile unavailable
 	 * and retry once via ModelRouter fallback / alternate candidates.
@@ -2783,6 +3092,23 @@ export class WorkflowEngine {
 					if (review.subject === "plan") {
 						this.#planReview = review;
 						this.#planReviewArtifactRef = ref;
+						if (!this.#planReviewerIdentity && review.modelProfileId && review.provider && review.model) {
+							const profile = this.#router.list().find(candidate => candidate.id === review.modelProfileId);
+							let modelFamily: string | undefined;
+							if (profile) {
+								try {
+									modelFamily = configuredIdentityForProfile(profile).modelFamily ?? undefined;
+								} catch {
+									modelFamily = undefined;
+								}
+							}
+							this.#planReviewerIdentity = {
+								profileId: review.modelProfileId,
+								provider: review.provider,
+								model: review.model,
+								modelFamily,
+							};
+						}
 					} else {
 						this.#codeReview = review;
 						this.#codeReviewArtifactRef = ref;

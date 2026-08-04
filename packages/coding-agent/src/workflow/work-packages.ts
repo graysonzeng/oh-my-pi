@@ -1,7 +1,14 @@
 import * as path from "node:path";
 import workPackageAssignmentTemplate from "../prompts/workflow/work-package-assignment.hbs.md" with { type: "text" };
+import {
+	buildConcurrencyDeclaration,
+	shouldAutoParallel,
+	type ConcurrencyUnitV1,
+	type WorkflowConcurrencyDeclarationV1,
+} from "../latency/concurrency-declaration";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "../task/parallel";
 import { parsePatchTouchedFiles } from "../utils/git";
+import { sha256Hex } from "./optimization-receipt";
 import { renderContextTemplate } from "./context-builder";
 import { WorkflowCancelledError, WorkflowError, WorkflowPolicyError } from "./errors";
 import type { ImplementStageResult } from "./stages/implement";
@@ -73,7 +80,8 @@ export class WorkPackageExecutionError extends WorkflowError {
 /**
  * Build deterministic dependency waves only when parallel execution is provably useful and safe.
  * Invalid ids/dependencies/paths, path ownership overlap, or an effectively serial limit return null
- * so the caller can preserve the existing whole-plan implementation path.
+ * so the caller can preserve the existing whole-plan implementation path. The final wave guard
+ * mirrors `shouldAutoParallel`: at least two independent ready units are required.
  */
 export function buildWorkPackageExecutionPlan(
 	input: readonly WorkPackageV1[] | undefined,
@@ -121,13 +129,70 @@ export function buildWorkPackageExecutionPlan(
 		waves.push(ready);
 		for (const workPackage of ready) completed.add(workPackage.id);
 	}
-	if (!waves.some(wave => wave.length > 1)) return null;
+	const parallelWave = waves.some(wave =>
+		shouldAutoParallel(
+			wave.map(
+				workPackage =>
+					({
+						id: workPackage.id,
+						assignment: workPackage.assignment,
+						paths: workPackage.paths,
+						dependsOn: workPackage.dependsOn,
+						mode: "write",
+						required: true,
+						idempotencyKey: `work-package:${workPackage.id}`,
+					} satisfies ConcurrencyUnitV1),
+			),
+		),
+	);
+	if (!parallelWave) return null;
 	return {
 		packages,
 		waves,
 		mergeOrder: waves.flatMap(wave => wave.map(workPackage => workPackage.id)),
 		maxConcurrency: normalizedMax,
 	};
+}
+
+export interface WorkPackageConcurrencyDeclarationOptions {
+	declarationId?: string;
+	ownerId?: string;
+	scopeArtifactRef?: string;
+	scopeArtifactSha256?: string;
+	maxConcurrency?: number;
+}
+
+/** Convert plan work packages into the strict declaration contract when its arm is enabled. */
+export function workPackagesToConcurrencyDeclaration(
+	input: readonly WorkPackageV1[] | undefined,
+	options: WorkPackageConcurrencyDeclarationOptions = {},
+): WorkflowConcurrencyDeclarationV1 | null {
+	if (!input || input.length === 0) return null;
+	const packages = input.map(workPackage => ({
+		id: workPackage.id.trim(),
+		assignment: workPackage.assignment.trim(),
+		paths: workPackage.paths.map(value => value.trim()),
+		dependsOn: workPackage.dependsOn.map(value => value.trim()),
+	}));
+	const scopePayload = JSON.stringify(packages);
+	return buildConcurrencyDeclaration({
+		declarationId: options.declarationId ?? "plan-work-packages",
+		ownerKind: "workflow",
+		ownerId: options.ownerId ?? "workflow",
+		scopeArtifactRef: options.scopeArtifactRef ?? "plan://work-packages",
+		scopeArtifactSha256: options.scopeArtifactSha256 ?? sha256Hex(scopePayload),
+		revision: 0,
+		maxConcurrency: options.maxConcurrency ?? 0,
+		completionPolicy: { kind: "all_required", minSuccesses: null },
+		failurePolicy: "fail_closed",
+		cancelPolicy: "cascade_dependents",
+		units: packages.map(workPackage => ({
+			...workPackage,
+			mode: "write" as const,
+			required: true,
+			idempotencyKey: `work-package:${workPackage.id}`,
+		})),
+	});
 }
 
 export function renderWorkPackageAssignment(workPackage: WorkPackageV1): string {

@@ -142,6 +142,13 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
+import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
+import {
+	emptyLatencyArms,
+	freezeLatencyArmSnapshot,
+	type LatencyArmSnapshotV1,
+} from "../latency/arms";
+import { normalizeReadSelector } from "../latency/read-view-key";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import {
@@ -218,7 +225,9 @@ import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
+import { buildReadToolContextEntry } from "../workflow/context-ledger";
 import {
+	sha256Hex,
 	TOOL_OPTIMIZATION_RECEIPT_KIND,
 	type ToolOptimizationReceiptV1,
 	type ToolOutputArtifactAdapter,
@@ -560,6 +569,8 @@ export class AgentSession {
 	#resolveInlineToolDescriptors: ((modelId: string | undefined) => boolean) | undefined;
 	#activeModelOptimization: ResolvedModelOptimization = {};
 	#modelOptimizationDirty = true;
+	#readDedupeArtifacts = new Map<string, { artifactRef: string; immutableSha256: string }>();
+	#latencyArmSnapshot: LatencyArmSnapshotV1 | undefined;
 
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
@@ -1373,7 +1384,10 @@ export class AgentSession {
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
-			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
+			rebaseAfterCompaction: () => {
+				this.#readDedupeArtifacts.clear();
+				this.#stats.rebaseAfterCompaction();
+			},
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
@@ -1894,6 +1908,9 @@ export class AgentSession {
 	#subscriberEmitGate: Promise<void> = Promise.resolve();
 
 	async #emitSessionEvent(event: AgentSessionEvent): Promise<void> {
+		if (event.type === "auto_compaction_end") {
+			this.#readDedupeArtifacts.clear();
+		}
 		if (event.type === "message_update") {
 			this.#emit(event);
 			void this.#queueExtensionEvent(event);
@@ -3044,8 +3061,19 @@ export class AgentSession {
 
 	async #optimizeOrdinaryToolResult(ctx: AfterToolCallContext): Promise<AfterToolCallResult | undefined> {
 		if (ctx.isError) return undefined;
+		const latencyArms = this.#ensureLatencyArmSnapshot();
+		const modelOptimizationActive =
+			latencyArms.arms.context_optimization && this.#activeModelOptimization.profile !== undefined;
+		const readDedupeEnabled =
+			modelOptimizationActive && latencyArms.arms.read_dedupe && ctx.toolCall.name === "read";
 		const toolStrategy = this.#activeModelOptimization.profile?.toolStrategy as SessionToolStrategy | undefined;
-		if (!toolStrategy?.outputTruncation?.enabled && !toolStrategy?.resultSummarization?.enabled) return undefined;
+		if (
+			!readDedupeEnabled &&
+			!toolStrategy?.outputTruncation?.enabled &&
+			!toolStrategy?.resultSummarization?.enabled
+		) {
+			return undefined;
+		}
 		const originalContent = ctx.result.content;
 		if (!Array.isArray(originalContent) || originalContent.length === 0) return undefined;
 		const textParts: string[] = [];
@@ -3075,7 +3103,16 @@ export class AgentSession {
 			});
 			return undefined;
 		}
-		if (detailed.text === originalText) return undefined;
+		let visibleText = detailed.text;
+		if (readDedupeEnabled) {
+			visibleText = await this.#dedupeOrdinaryReadResult(
+				ctx,
+				originalText,
+				visibleText,
+				detailed.receipt?.recoveryUri,
+			);
+		}
+		if (visibleText === originalText && !detailed.receipt) return undefined;
 		if (detailed.receipt) {
 			try {
 				this.sessionManager.appendCustomEntry(TOOL_OPTIMIZATION_RECEIPT_KIND, {
@@ -3090,7 +3127,124 @@ export class AgentSession {
 				return undefined;
 			}
 		}
-		return { content: [{ type: "text", text: detailed.text }, ...nonText] };
+		return { content: [{ type: "text", text: visibleText }, ...nonText] };
+	}
+
+	async #verifyReadArtifact(artifactRef: string, sha256: string): Promise<boolean> {
+		try {
+			const match = /^artifact:\/\/(\d+)$/.exec(artifactRef);
+			if (!match) return false;
+			const artifactPath = await this.sessionManager.getArtifactPath(match[1]);
+			if (!artifactPath) return false;
+			return sha256Hex(await Bun.file(artifactPath).text()) === sha256;
+		} catch {
+			return false;
+		}
+	}
+
+	async #dedupeOrdinaryReadResult(
+		ctx: AfterToolCallContext,
+		originalText: string,
+		visibleText: string,
+		recoveryUri?: string,
+	): Promise<string> {
+		try {
+			const args = isRecord(ctx.args) ? ctx.args : {};
+			const details = isRecord(ctx.result.details) ? ctx.result.details : {};
+			const meta = isRecord(details.meta) ? details.meta : {};
+			const source = isRecord(meta.source) ? meta.source : {};
+			const rawPath = typeof args.path === "string" ? args.path.trim() : "";
+			const canonicalSource =
+				"canonicalSource" in details
+					? typeof details.canonicalSource === "string"
+						? details.canonicalSource
+						: ""
+					: typeof details.resolvedPath === "string"
+						? details.resolvedPath
+						: typeof details.finalUrl === "string"
+							? details.finalUrl
+							: typeof details.url === "string"
+								? details.url
+								: typeof source.value === "string"
+									? source.value
+									: rawPath;
+			const contentSha256 = sha256Hex(originalText);
+			const providerViewIdentity =
+				"providerViewIdentity" in details
+					? typeof details.providerViewIdentity === "string"
+						? details.providerViewIdentity
+						: ""
+					: `content:${contentSha256}`;
+			const contentOrRevisionIdentity =
+				"contentOrRevisionIdentity" in details
+					? typeof details.contentOrRevisionIdentity === "string"
+						? details.contentOrRevisionIdentity
+						: ""
+					: `content:${contentSha256}`;
+			const branchOrWorktreeScope =
+				"branchOrWorktreeScope" in details
+					? typeof details.branchOrWorktreeScope === "string"
+						? details.branchOrWorktreeScope
+						: ""
+					: `${this.sessionManager.getSessionFile() ?? this.sessionId}|${this.sessionManager.getCwd()}`;
+			const outputMode =
+				"outputMode" in details
+					? details.outputMode === "raw" ||
+						details.outputMode === "converted" ||
+						details.outputMode === "decoded" ||
+						details.outputMode === "summary"
+						? details.outputMode
+						: "unknown"
+					: details.contentType === "text/markdown"
+						? "converted"
+						: "raw";
+			const readEntry = buildReadToolContextEntry({
+				id: ctx.toolCall.id,
+				content: originalText,
+				readViewKeyParts: {
+					canonicalSource,
+					normalizedSelector: normalizeReadSelector({
+						raw: args.raw === true,
+						offset: typeof args.offset === "number" ? args.offset : undefined,
+						limit: typeof args.limit === "number" ? args.limit : undefined,
+						selector: typeof args.selector === "string" ? args.selector : rawPath,
+						query: typeof args.query === "string" ? args.query : undefined,
+					}),
+					branchOrWorktreeScope,
+					providerViewIdentity,
+					contentOrRevisionIdentity,
+					outputMode,
+				},
+			});
+			const readViewKey = readEntry?.readViewKey;
+			const immutableSha256 = readEntry?.immutableSha256;
+			if (!readEntry || !readViewKey?.eligible || !immutableSha256) return visibleText;
+
+			const retained = this.#readDedupeArtifacts.get(readViewKey.key);
+			if (retained) {
+				if (
+					retained.immutableSha256 === immutableSha256 &&
+					(await this.#verifyReadArtifact(retained.artifactRef, immutableSha256))
+				) {
+					return `[context ref: ${retained.artifactRef} sha256:${immutableSha256}]`;
+				}
+				this.#readDedupeArtifacts.delete(readViewKey.key);
+				return visibleText;
+			}
+
+			let artifactRef = recoveryUri;
+			if (!artifactRef || !(await this.#verifyReadArtifact(artifactRef, immutableSha256))) {
+				const savedId = await this.sessionManager.saveArtifact(originalText, "read");
+				if (typeof savedId !== "string" || savedId.length === 0) return visibleText;
+				artifactRef = savedId.startsWith("artifact://") ? savedId : `artifact://${savedId}`;
+			}
+			if (!(await this.#verifyReadArtifact(artifactRef, immutableSha256))) return visibleText;
+			this.#readDedupeArtifacts.set(readViewKey.key, { artifactRef, immutableSha256 });
+			return visibleText;
+		} catch (error) {
+			logger.debug("Ordinary read dedupe failed open", { error: String(error) });
+			return visibleText;
+		}
 	}
 	/**
 	 * Emits the extension `tool_call` event for a loop-dispatched call at
@@ -4505,6 +4659,22 @@ export class AgentSession {
 		this.agent.clearDeferredToolDirectives();
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
+		this.#readDedupeArtifacts.clear();
+		this.#clearLatencyArmSnapshot();
+		clearBashAttemptLedgerStore(this.sessionManager.getSessionId());
+	}
+
+	#ensureLatencyArmSnapshot(): LatencyArmSnapshotV1 {
+		if (this.#latencyArmSnapshot) return this.#latencyArmSnapshot;
+		const arms = emptyLatencyArms();
+		arms.context_optimization = this.settings.get("modelOptimization.enabled");
+		arms.read_dedupe = this.settings.get("latency.arms.readDedupe");
+		this.#latencyArmSnapshot = freezeLatencyArmSnapshot({ arms });
+		return this.#latencyArmSnapshot;
+	}
+
+	#clearLatencyArmSnapshot(): void {
+		this.#latencyArmSnapshot = undefined;
 	}
 
 	/**
@@ -6618,6 +6788,7 @@ export class AgentSession {
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
+		this.#readDedupeArtifacts.clear();
 	}
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */
 	#isPlanDecisionTool(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
@@ -6699,6 +6870,7 @@ export class AgentSession {
 		this.agent.setModel(model);
 		// All model-change paths go through here; reconcile before next dispatch.
 		this.#modelOptimizationDirty = true;
+		this.#readDedupeArtifacts.clear();
 
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);
