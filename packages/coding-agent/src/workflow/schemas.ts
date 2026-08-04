@@ -52,6 +52,15 @@ const WorkPackageSchema = z
 	})
 	.strict();
 
+const AuthorResponseSchema = z
+	.object({
+		findingId: z.string().min(1),
+		disposition: z.enum(["accepted", "rejected", "clarified"]),
+		explanation: z.string().min(1),
+		evidenceRefs: z.array(z.string()),
+	})
+	.strict();
+
 export const PlanArtifactSchema = ArtifactHeaderSchema.extend({
 	kind: z.literal("plan"),
 	summary: z.string().min(1),
@@ -80,6 +89,8 @@ export const PlanArtifactSchema = ArtifactHeaderSchema.extend({
 	verificationCommands: z.array(z.string()),
 	risks: z.array(z.string()),
 	rollback: z.array(z.string()),
+	/** Replan-only planner dispositions for prior plan-review findings. */
+	authorResponses: z.array(AuthorResponseSchema).optional(),
 }).strict();
 
 export const ReviewFindingSchema = z
@@ -158,16 +169,67 @@ const PlanReviewFindingV2Schema = ReviewFindingSchema.extend({
 	requirementId: z.string().min(1).nullable(),
 	sourceRefs: z.array(z.string().min(1)),
 	missingAuthority: z.string().min(1).nullable(),
-}).strict();
+})
+	.strict()
+	.superRefine((finding, ctx) => {
+		// Design §4/§5: basis-specific evidence. Unsupported findings must not parse as valid V2.
+		switch (finding.basis) {
+			case "spec_requirement":
+			case "user_requirement": {
+				if (finding.requirementId == null || finding.requirementId.trim().length === 0) {
+					ctx.addIssue({
+						code: "custom",
+						message: `${finding.basis} findings require a non-empty requirementId`,
+						path: ["requirementId"],
+					});
+				}
+				if (finding.sourceRefs.length === 0) {
+					ctx.addIssue({
+						code: "custom",
+						message: `${finding.basis} findings require non-empty sourceRefs`,
+						path: ["sourceRefs"],
+					});
+				}
+				if (finding.missingAuthority != null) {
+					ctx.addIssue({
+						code: "custom",
+						message: `${finding.basis} findings cannot set missingAuthority`,
+						path: ["missingAuthority"],
+					});
+				}
+				break;
+			}
+			case "repo_evidence":
+			case "safety_invariant": {
+				if (finding.sourceRefs.length === 0) {
+					ctx.addIssue({
+						code: "custom",
+						message: `${finding.basis} findings require non-empty sourceRefs`,
+						path: ["sourceRefs"],
+					});
+				}
+				if (finding.missingAuthority != null) {
+					ctx.addIssue({
+						code: "custom",
+						message: `${finding.basis} findings cannot set missingAuthority`,
+						path: ["missingAuthority"],
+					});
+				}
+				break;
+			}
+			case "missing_authority": {
+				if (finding.missingAuthority == null || finding.missingAuthority.trim().length === 0) {
+					ctx.addIssue({
+						code: "custom",
+						message: "missing_authority findings require a concrete missingAuthority description",
+						path: ["missingAuthority"],
+					});
+				}
+				break;
+			}
+		}
+	});
 
-const AuthorResponseSchema = z
-	.object({
-		findingId: z.string().min(1),
-		disposition: z.enum(["accepted", "rejected", "clarified"]),
-		explanation: z.string().min(1),
-		evidenceRefs: z.array(z.string()),
-	})
-	.strict();
 
 export const PlanReviewArtifactV2Schema = ArtifactHeaderV2Schema.extend({
 	kind: z.literal("review"),

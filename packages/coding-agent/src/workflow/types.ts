@@ -125,6 +125,11 @@ export interface PlanArtifactV1 extends ArtifactHeader {
 	verificationCommands: string[];
 	risks: string[];
 	rollback: string[];
+	/**
+	 * Replan-only: planner disposition for each prior plan-review finding.
+	 * Required by the engine when replan follows open P0/P1 findings; omitted on first plan.
+	 */
+	authorResponses?: AuthorResponseV1[];
 }
 
 export interface ReviewFindingV1 {
@@ -178,6 +183,28 @@ export interface RequirementCoverageV1 {
 	status: "satisfied" | "violated" | "not_applicable" | "missing_authority";
 	evidenceRefs: string[];
 	rationale: string;
+}
+
+export interface RequirementsSnapshotRequirementV1 {
+	requirementId: string;
+	source: "spec_requirement" | "user_requirement";
+	mandatory: boolean;
+	text: string;
+}
+
+export interface RequirementsSnapshotV1 {
+	schemaVersion: 1;
+	kind: "requirements_snapshot";
+	workflowId: string;
+	createdAt: string;
+	/** Frozen request text used to extract requirements. */
+	source: {
+		request: string;
+		constraints: string | null;
+	};
+	requirements: RequirementsSnapshotRequirementV1[];
+	/** sha256 of the canonical fingerprint payload (excludes createdAt). */
+	sha256: string;
 }
 
 export interface PlanReviewFindingV2 extends ReviewFindingV1 {

@@ -43,7 +43,20 @@ import {
 } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
 import { sha256Hex } from "./optimization-receipt";
+import {
+	AUTHOR_RESPONSES_KIND,
+	buildAuthorResponsesArtifact,
+	hasMaxCyclesAuthorReject,
+	isAuthorResponsesArtifact,
+	validateAuthorResponses,
+} from "./author-responses";
 import { derivePlanReviewTrigger } from "./plan-review-trigger";
+import {
+	buildRequirementsSnapshot,
+	isRequirementsSnapshot,
+	REQUIREMENTS_SNAPSHOT_KIND,
+	validateApprovedMandatoryCoverage,
+} from "./requirements-snapshot";
 import {
 	compileQualityRouteSnapshot,
 	qualityRouteProfileIds,
@@ -78,6 +91,7 @@ import { PlanReviewStage } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
 import type {
+	AuthorResponseV1,
 	Artifact,
 	CapturedChangesMergeResult,
 	ImplementationArtifactV1,
@@ -87,6 +101,7 @@ import type {
 	PlanReviewArtifact,
 	PlanReviewControlStateV1,
 	PlanReviewTriggerReasonV1,
+	RequirementsSnapshotV1,
 	QualityRouteSnapshotV1,
 	ReviewArtifactV1,
 	ReviewFindingV1,
@@ -376,6 +391,11 @@ export class WorkflowEngine {
 	#implementerModelFamily: string | undefined;
 	#planReviewerIdentity: PlanReviewerIdentity | undefined;
 	#planReviewControl: PlanReviewControlStateV1 | undefined;
+	#requirementsSnapshot: RequirementsSnapshotV1 | undefined;
+	#requirementsSnapshotRef: StageHandoffArtifactRef | undefined;
+	#authorResponses: AuthorResponseV1[] | undefined;
+	#authorResponsesPriorFindings: Array<Pick<ReviewFindingV1, "id" | "priority">> | undefined;
+	#authorResponsesArtifactRef: StageHandoffArtifactRef | undefined;
 	#planCycles = 0;
 	#lastRouteProfileId: string | undefined;
 	#lastScopeMetrics: ScopeMetricsV1 | undefined;
@@ -774,6 +794,9 @@ export class WorkflowEngine {
 			this.#planReviewLegacy = false;
 			this.#planReviewControl = undefined;
 			this.#planArtifactSha256 = undefined;
+			this.#authorResponses = undefined;
+			this.#authorResponsesPriorFindings = undefined;
+			this.#authorResponsesArtifactRef = undefined;
 			this.#implementation = undefined;
 			this.#verification = undefined;
 			this.#finalVerification = undefined;
@@ -1124,6 +1147,8 @@ export class WorkflowEngine {
 
 		switch (stage) {
 			case "planning": {
+				await this.#ensureRequirementsSnapshot(workflowId, attemptId, request);
+
 				const {
 					artifact: plan,
 					usage,
@@ -1162,6 +1187,38 @@ export class WorkflowEngine {
 				this.#plan = plan;
 				this.#planArtifactRef = await this.#persistArtifact(workflowId, attemptId, "plan", plan);
 				const wasReplan = this.#planReviewControl?.substate === "awaiting_replan";
+				if (wasReplan && this.#planReview) {
+					const validation = validateAuthorResponses(plan.authorResponses, this.#planReview.findings);
+					if (!validation.ok) {
+						throw new WorkflowPolicyError(validation.reason ?? "author_responses_invalid", {
+							workflowId,
+							attemptId,
+							priorReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
+						});
+					}
+					this.#authorResponses = validation.responses;
+					this.#authorResponsesPriorFindings = this.#planReview.findings.map(finding => ({
+						id: finding.id,
+						priority: finding.priority,
+					}));
+					const authorResponsesArtifact = buildAuthorResponsesArtifact({
+						workflowId,
+						attemptId,
+						priorReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
+						priorFindings: this.#planReview.findings,
+						responses: validation.responses,
+					});
+					this.#authorResponsesArtifactRef = await this.#persistArtifact(
+						workflowId,
+						attemptId,
+						AUTHOR_RESPONSES_KIND,
+						authorResponsesArtifact,
+					);
+				} else if (!wasReplan) {
+					this.#authorResponses = undefined;
+					this.#authorResponsesPriorFindings = undefined;
+					this.#authorResponsesArtifactRef = undefined;
+				}
 				this.#planReviewControl = {
 					schemaVersion: 1,
 					kind: "plan_review_control_state",
@@ -1172,7 +1229,7 @@ export class WorkflowEngine {
 					arbitrationTrigger: null,
 					latestPlanArtifactRef: this.#planArtifactRef.artifactId,
 					latestReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
-					authorResponsesArtifactRef: this.#planReviewControl?.authorResponsesArtifactRef ?? null,
+					authorResponsesArtifactRef: this.#authorResponsesArtifactRef?.artifactId ?? null,
 					routeSelectionReceiptRef: this.#planReviewControl?.routeSelectionReceiptRef ?? null,
 					humanRequestReason: null,
 					updatedAt: new Date().toISOString(),
@@ -1195,6 +1252,8 @@ export class WorkflowEngine {
 			}
 			case "plan_review": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
+				await this.#ensureRequirementsSnapshot(workflowId, attemptId, request);
+
 				if (!this.#planReviewControl) {
 					const rejectionCount = this.#planCycles;
 					this.#planReviewControl = {
@@ -1271,7 +1330,7 @@ export class WorkflowEngine {
 				}
 				this.#budgetLedger.recordReviewerCycle();
 				const reviewKind = control.reviewRound === 2 ? "rereview" : "initial";
-				const requirementsSnapshot = this.#planRequirementsSnapshot();
+				const requirementsSnapshot = await this.#requireRequirementsSnapshot(workflowId, attemptId, request);
 				const pinnedReviewer =
 					this.#planReviewerIdentity?.profileId ??
 					(reviewKind === "rereview" ? (this.#planReview?.modelProfileId ?? undefined) : undefined);
@@ -1282,18 +1341,24 @@ export class WorkflowEngine {
 						profile,
 						assignment,
 						context: await this.#buildStageContext(
-							this.#contextBuilder.buildPlanReviewContext(this.#plan!, resolveArtifactInclusion(profile)),
+							this.#contextBuilder.buildPlanReviewContext(
+								this.#plan!,
+								resolveArtifactInclusion(profile),
+								this.#requirementsSnapshot,
+							),
 							profile,
 							session,
 							this.#plan?.affectedFiles.map(file => file.path),
 						),
 						session,
 						signal,
-						requirementsSnapshotRef: requirementsSnapshot.ref,
+						requirementsSnapshotRef:
+							this.#requirementsSnapshotRef?.recoveryUri ??
+							`artifact://${workflowId}/requirements-snapshot`,
 						requirementsSnapshotSha256: requirementsSnapshot.sha256,
 						reviewKind,
 						reviewRound: control.reviewRound,
-						authorResponses: this.#planReview?.schemaVersion === 2 ? [...this.#planReview.authorResponses] : [],
+						authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
 						routeSelectionReceiptRef: control.routeSelectionReceiptRef,
 						legacyV1: this.#planReviewLegacy,
 					});
@@ -1347,10 +1412,11 @@ export class WorkflowEngine {
 					resolvedToolPolicyId,
 				} = reviewResult;
 				const isV2Review = rawReview.schemaVersion === 2;
-				// C1: stamp engine-owned fields before persist; never trust model triggerReason.
+				// C1: stamp engine-owned fields before persist; never trust model triggerReason/authorResponses.
 				const review = isV2Review
 					? {
 							...rawReview,
+							authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
 							triggerReason: derivePlanReviewTrigger(rawReview),
 							routeSelectionReceiptRef: control.routeSelectionReceiptRef,
 							cleanContextReceiptRef: null,
@@ -1371,9 +1437,7 @@ export class WorkflowEngine {
 					latestPlanArtifactRef: this.#planArtifactRef?.artifactId ?? control.latestPlanArtifactRef,
 					latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
 					authorResponsesArtifactRef:
-						isV2Review && review.schemaVersion === 2 && review.authorResponses.length > 0
-							? this.#planReviewArtifactRef.artifactId
-							: control.authorResponsesArtifactRef,
+						this.#authorResponsesArtifactRef?.artifactId ?? control.authorResponsesArtifactRef,
 					routeSelectionReceiptRef: control.routeSelectionReceiptRef,
 					planRejectionCount: nextRejectionCount,
 					updatedAt: new Date().toISOString(),
@@ -1389,6 +1453,7 @@ export class WorkflowEngine {
 					modelFamily,
 					resolvedToolPolicyId,
 				});
+
 				if (isV2Review && (review.decision === "blocked" || hasMissingAuthority)) {
 					await this.#setPlanReviewAwaitingHuman(
 						workflowId,
@@ -1398,12 +1463,25 @@ export class WorkflowEngine {
 					return;
 				}
 
+				const maxCyclesHit =
+					review.decision === "changes_requested" && nextRejectionCount >= this.#config.maxPlanCycles;
+				const authorRejectEvidence =
+					maxCyclesHit &&
+					hasMaxCyclesAuthorReject(this.#authorResponses ?? [], this.#authorResponsesPriorFindings ?? []);
 				const triggerArbitration =
 					triggerReason === "contradiction" ||
 					triggerReason === "suspicious_pass" ||
-					(review.decision === "changes_requested" && nextRejectionCount >= this.#config.maxPlanCycles);
+					authorRejectEvidence;
+				if (maxCyclesHit && !triggerArbitration) {
+					this.#planCycles = nextRejectionCount;
+					await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "max_plan_cycles_exceeded");
+					return;
+				}
 				if (triggerArbitration) {
-					const arbitrationTrigger = triggerReason ?? ("max_cycles_author_reject" as const);
+					const arbitrationTrigger: Exclude<PlanReviewTriggerReasonV1, null> =
+						triggerReason === "contradiction" || triggerReason === "suspicious_pass"
+							? triggerReason
+							: "max_cycles_author_reject";
 					if (this.#planReviewControl.arbitrationCycles >= 1) {
 						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "maximum arbitration cycles reached");
 						return;
@@ -1433,6 +1511,18 @@ export class WorkflowEngine {
 					}
 					await this.#finishSuccessfulArbitration(workflowId, attemptId, fresh.status, fresh.version, arbitration);
 					return;
+				}
+
+				if (isV2Review && review.schemaVersion === 2 && review.decision === "approved") {
+					const coverageGate = validateApprovedMandatoryCoverage(review, requirementsSnapshot);
+					if (!coverageGate.ok) {
+						await this.#setPlanReviewAwaitingHuman(
+							workflowId,
+							attemptId,
+							coverageGate.reason ?? "incomplete_mandatory_coverage",
+						);
+						return;
+					}
 				}
 
 				const next = getNextStage("plan_review", review.decision);
@@ -2838,29 +2928,34 @@ export class WorkflowEngine {
 			throw error;
 		}
 		this.#audit(route);
-		const context = `${this.#contextBuilder.buildPlanReviewContext(
-			this.#plan!,
-			resolveArtifactInclusion(route.profile),
-		)}\n\nLatest review to arbitrate:\n${JSON.stringify(this.#planReview)}\n\nArbitration trigger: ${triggerReason}`;
-		const requirementsSnapshot = this.#planRequirementsSnapshot();
+		const requirementsSnapshot = await this.#requireRequirementsSnapshot(
+			workflowId,
+			attemptId,
+			this.#parseRequest((await this.#requireState(workflowId)).requestJson),
+		);
 		return new PlanReviewStage(this.#adapter).execute({
 			workflowId,
 			attemptId,
 			profile: route.profile,
 			assignment: "Arbitrate the bounded plan-review disagreement",
 			context: await this.#buildStageContext(
-				context,
+				`${this.#contextBuilder.buildPlanReviewContext(
+					this.#plan!,
+					resolveArtifactInclusion(route.profile),
+					this.#requirementsSnapshot,
+				)}\n\nLatest review to arbitrate:\n${JSON.stringify(this.#planReview)}\n\nAuthor responses:\n${JSON.stringify(this.#authorResponses ?? [])}\n\nArbitration trigger: ${triggerReason}`,
 				route.profile,
 				session,
 				this.#plan?.affectedFiles.map(file => file.path),
 			),
 			session,
 			signal,
-			requirementsSnapshotRef: requirementsSnapshot.ref,
+			requirementsSnapshotRef:
+				this.#requirementsSnapshotRef?.recoveryUri ?? `artifact://${workflowId}/requirements-snapshot`,
 			requirementsSnapshotSha256: requirementsSnapshot.sha256,
 			reviewKind: "arbitration",
 			reviewRound: 2,
-			authorResponses: this.#planReview?.schemaVersion === 2 ? [...this.#planReview.authorResponses] : [],
+			authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
 			triggerReason,
 			routeSelectionReceiptRef: this.#planReviewControl?.routeSelectionReceiptRef ?? null,
 		});
@@ -3036,11 +3131,49 @@ export class WorkflowEngine {
 		return this.#budgetLedger.snapshot() as unknown as Record<string, unknown>;
 	}
 
-	#planRequirementsSnapshot(): { ref: string; sha256: string } {
-		return {
-			ref: this.#planArtifactRef?.recoveryUri ?? `artifact://${this.#plan?.workflowId ?? "workflow"}/plan`,
-			sha256: this.#planArtifactSha256 ?? sha256Hex(JSON.stringify(this.#plan ?? {})),
-		};
+	/**
+	 * Build once from the frozen WorkflowRequest and persist. Resume reuses the
+	 * hydrated artifact; replan never regenerates a different snapshot.
+	 */
+	async #ensureRequirementsSnapshot(
+		workflowId: string,
+		attemptId: string,
+		request: WorkflowRequest,
+	): Promise<RequirementsSnapshotV1> {
+		if (this.#requirementsSnapshot) return this.#requirementsSnapshot;
+		const snapshot = buildRequirementsSnapshot({ workflowId, request });
+		if (snapshot.requirements.length === 0) {
+			throw new WorkflowPolicyError("requirements_snapshot_empty", {
+				workflowId,
+				hint: "WorkflowRequest must include a non-empty request or constraints",
+			});
+		}
+		this.#requirementsSnapshot = snapshot;
+		this.#requirementsSnapshotRef = await this.#persistArtifact(
+			workflowId,
+			attemptId,
+			REQUIREMENTS_SNAPSHOT_KIND,
+			snapshot,
+		);
+		return snapshot;
+	}
+
+	async #requireRequirementsSnapshot(
+		workflowId: string,
+		attemptId: string,
+		request: WorkflowRequest,
+	): Promise<RequirementsSnapshotV1> {
+		const snapshot = await this.#ensureRequirementsSnapshot(workflowId, attemptId, request);
+		if (!this.#requirementsSnapshotRef) {
+			// Hydrated body without a durable ref: re-persist under the current attempt.
+			this.#requirementsSnapshotRef = await this.#persistArtifact(
+				workflowId,
+				attemptId,
+				REQUIREMENTS_SNAPSHOT_KIND,
+				snapshot,
+			);
+		}
+		return snapshot;
 	}
 
 	async #persistPlanReviewControl(workflowId: string, attemptId: string): Promise<void> {
@@ -3056,9 +3189,10 @@ export class WorkflowEngine {
 		_expectedVersion: number,
 		arbitration: PlanReviewStageResult,
 	): Promise<void> {
-		this.#planReview = arbitration.artifact;
+		const artifact = arbitration.artifact;
+		this.#planReview = artifact;
 		this.#planReviewLegacy = false;
-		this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", arbitration.artifact);
+		this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", artifact);
 		if (this.#planReviewControl) {
 			this.#planReviewControl = {
 				...this.#planReviewControl,
@@ -3079,13 +3213,29 @@ export class WorkflowEngine {
 			resolvedToolPolicyId: arbitration.resolvedToolPolicyId,
 		});
 		await this.#persistPlanReviewControl(workflowId, attemptId);
+		if (artifact.schemaVersion === 2 && artifact.decision === "approved") {
+			const snapshot = this.#requirementsSnapshot;
+			if (!snapshot) {
+				await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "requirements_snapshot_missing");
+				return;
+			}
+			const coverageGate = validateApprovedMandatoryCoverage(artifact, snapshot);
+			if (!coverageGate.ok) {
+				await this.#setPlanReviewAwaitingHuman(
+					workflowId,
+					attemptId,
+					coverageGate.reason ?? "incomplete_mandatory_coverage",
+				);
+				return;
+			}
+		}
 		const state = await this.#requireState(workflowId);
 		await this.#completeTo(
 			workflowId,
 			attemptId,
 			fromStatus,
-			arbitration.artifact.decision === "approved" ? "implementing" : "blocked",
-			`plan_review:arbitration_${arbitration.artifact.decision}`,
+			artifact.decision === "approved" ? "implementing" : "blocked",
+			`plan_review:arbitration_${artifact.decision}`,
 			state.version,
 		);
 	}
@@ -3344,6 +3494,34 @@ export class WorkflowEngine {
 					if (!this.#planReviewControl || control.updatedAt >= this.#planReviewControl.updatedAt) {
 						this.#planReviewControl = control;
 					}
+					continue;
+				}
+				if (meta.kind === REQUIREMENTS_SNAPSHOT_KIND || parsed.kind === REQUIREMENTS_SNAPSHOT_KIND) {
+					if (!isRequirementsSnapshot(parsed)) {
+						throw new WorkflowPolicyError("requirements_snapshot_invalid", {
+							relativePath: meta.relativePath,
+						});
+					}
+					// First/oldest snapshot wins — never replace a frozen authority with a later rewrite.
+					if (!this.#requirementsSnapshot) {
+						this.#requirementsSnapshot = parsed;
+						this.#requirementsSnapshotRef = ref;
+					}
+					continue;
+				}
+				if (meta.kind === AUTHOR_RESPONSES_KIND || parsed.kind === AUTHOR_RESPONSES_KIND) {
+					if (!isAuthorResponsesArtifact(parsed)) {
+						throw new WorkflowPolicyError("author_responses_invalid", {
+							relativePath: meta.relativePath,
+						});
+					}
+					// Latest author-responses artifact wins (replan may rewrite dispositions).
+					this.#authorResponses = parsed.responses;
+					this.#authorResponsesPriorFindings = parsed.priorFindings.map(finding => ({
+						id: finding.id,
+						priority: finding.priority,
+					}));
+					this.#authorResponsesArtifactRef = ref;
 					continue;
 				}
 				if (parsed.kind === "plan") {

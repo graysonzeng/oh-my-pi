@@ -29,11 +29,26 @@ describe("plan review identity pin + arbitration", () => {
 
 	it("returns to planning on first changes_requested and keeps single-reviewer shape", async () => {
 		let planReviews = 0;
+		let planCount = 0;
 		const engine = new WorkflowEngine({
 			store,
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
-					plan: () => planArtifact({ summary: `plan-${planReviews}` }),
+					plan: () => {
+						planCount += 1;
+						if (planCount === 1) return planArtifact({ summary: "plan-initial" });
+						return planArtifact({
+							summary: "plan-replan",
+							authorResponses: [
+								{
+									findingId: "f-default",
+									disposition: "accepted",
+									explanation: "will fix default finding",
+									evidenceRefs: ["plan:step-1"],
+								},
+							],
+						});
+					},
 					planReview: () => {
 						planReviews += 1;
 						if (planReviews === 1) return planReviewArtifactV2("changes_requested");
@@ -69,7 +84,18 @@ describe("plan review identity pin + arbitration", () => {
 			store,
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
-					plan: () => planArtifact({ summary: `plan-${planReviews}` }),
+					plan: () =>
+						planArtifact({
+							summary: "plan-replan",
+							authorResponses: [
+								{
+									findingId: "f-default",
+									disposition: "accepted",
+									explanation: "will fix default finding",
+									evidenceRefs: ["plan:step-1"],
+								},
+							],
+						}),
 					planReview: () => {
 						planReviews += 1;
 						return planReviewArtifactV2("approved");
@@ -86,20 +112,32 @@ describe("plan review identity pin + arbitration", () => {
 		expect(planReviews).toBe(2);
 	});
 
-	it("arbitrates after the second rejection without a third replan", async () => {
+	it("blocks second rejection without author reject evidence", async () => {
 		let planReviews = 0;
+		let planCount = 0;
 		const engine = new WorkflowEngine({
 			store,
 			config: { maxPlanCycles: 2 },
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
-					plan: () => planArtifact({ summary: `plan-${planReviews}` }),
+					plan: () => {
+						planCount += 1;
+						if (planCount === 1) return planArtifact({ summary: "plan-initial" });
+						return planArtifact({
+							summary: "plan-replan-accept",
+							authorResponses: [
+								{
+									findingId: "f-default",
+									disposition: "accepted",
+									explanation: "accepted finding; no disagreement",
+									evidenceRefs: [],
+								},
+							],
+						});
+					},
 					planReview: () => {
 						planReviews += 1;
-						if (planReviews <= 2) return planReviewArtifactV2("changes_requested");
-						return planReviewArtifactV2("blocked", [], {
-							explanation: "arbitration requires human authority",
-						});
+						return planReviewArtifactV2("changes_requested");
 					},
 				}),
 			),
@@ -107,22 +145,33 @@ describe("plan review identity pin + arbitration", () => {
 			session: fakeSession(),
 		});
 
-		const workflowId = await engine.startWorkflow({ request: "need arbitration" });
+		const workflowId = await engine.startWorkflow({ request: "no author reject" });
 		const result = await engine.run(workflowId);
 		expect(result.state.status).toBe("blocked");
-		// Default profiles lack an exact-identity arbitrator → short-circuit to blocked
-		// without a third paid review call (see F6 for the successful arbitration path).
 		expect(planReviews).toBe(2);
 		const transitions = await store.listTransitions(workflowId);
+		expect(transitions.some(transition => transition.reason === "max_plan_cycles_exceeded")).toBe(true);
 		expect(
 			transitions.filter(
 				transition => transition.fromStatus === "plan_review" && transition.toStatus === "planning",
 			),
 		).toHaveLength(1);
+		const controlMeta = (await store.listArtifacts(workflowId))
+			.filter(artifact => artifact.kind === "plan-review-control-state")
+			.at(-1);
+		const controlBody = controlMeta
+			? await new ArtifactStore(artifactDir).load(controlMeta.relativePath, controlMeta.sha256)
+			: null;
+		expect(controlBody ? JSON.parse(controlBody.content ?? "{}") : null).toMatchObject({
+			substate: "awaiting_human",
+			humanRequestReason: "max_plan_cycles_exceeded",
+			arbitrationTrigger: null,
+		});
 	});
 
-	it("F6: eligible arbitrator runs a third reviewKind=arbitration lineage", async () => {
+	it("F6: eligible arbitrator runs only when author rejects P0/P1 with evidence", async () => {
 		let planReviews = 0;
+		let planCount = 0;
 		const seenAssignments: string[] = [];
 		const exactArbitrator = normalizeModelProfile({
 			...DEFAULT_MODEL_PROFILES.grok_plan_arbitrator,
@@ -135,7 +184,21 @@ describe("plan review identity pin + arbitration", () => {
 			exactArbitrator,
 		]);
 		const baseRunner = scriptedRunner({
-			plan: () => planArtifact({ summary: `plan-${planReviews}` }),
+			plan: () => {
+				planCount += 1;
+				if (planCount === 1) return planArtifact({ summary: "plan-initial" });
+				return planArtifact({
+					summary: "plan-replan-reject",
+					authorResponses: [
+						{
+							findingId: "f-default",
+							disposition: "rejected",
+							explanation: "prior finding is wrong; auth is covered by step-1",
+							evidenceRefs: ["plan:step-1", "src/auth.ts:1"],
+						},
+					],
+				});
+			},
 			planReview: () => {
 				planReviews += 1;
 				if (planReviews <= 2) return planReviewArtifactV2("changes_requested");
@@ -178,10 +241,25 @@ describe("plan review identity pin + arbitration", () => {
 			reviewMetas.map(async meta => {
 				const loaded = await new ArtifactStore(artifactDir).load(meta.relativePath, meta.sha256);
 				expect(loaded).not.toBeNull();
-				return JSON.parse(loaded!.content ?? "{}") as { reviewKind?: string };
+				return JSON.parse(loaded!.content ?? "{}") as {
+					reviewKind?: string;
+					authorResponses?: Array<{ disposition?: string }>;
+					triggerReason?: string | null;
+				};
 			}),
 		);
 		expect(bodies.some(body => body.reviewKind === "arbitration")).toBe(true);
+		expect(
+			bodies.some(
+				body =>
+					body.reviewKind === "rereview" &&
+					body.authorResponses?.some(response => response.disposition === "rejected"),
+			),
+		).toBe(true);
+		const authorResponseMetas = (await store.listArtifacts(workflowId)).filter(
+			artifact => artifact.kind === "author_responses",
+		);
+		expect(authorResponseMetas.length).toBeGreaterThan(0);
 		const transitions = await store.listTransitions(workflowId);
 		expect(
 			transitions.filter(
@@ -251,7 +329,6 @@ describe("plan review identity pin + arbitration", () => {
 						planReviews += 1;
 						return planReviewArtifactV2("approved", [], {
 							triggerReason: "contradiction",
-							coverage: [],
 							findings: [],
 						});
 					},
@@ -335,12 +412,27 @@ describe("plan review identity pin + arbitration", () => {
 
 	it("C2: maxPlanCycles>2 stops after uncapped rejections", async () => {
 		let planReviews = 0;
+		let planCount = 0;
 		const engine = new WorkflowEngine({
 			store,
 			config: { maxPlanCycles: 3 },
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
-					plan: () => planArtifact({ summary: `plan-${planReviews}` }),
+					plan: () => {
+						planCount += 1;
+						if (planCount === 1) return planArtifact({ summary: "plan-initial" });
+						return planArtifact({
+							summary: `plan-replan-${planCount}`,
+							authorResponses: [
+								{
+									findingId: "f-default",
+									disposition: "accepted",
+									explanation: "accepted for replan",
+									evidenceRefs: [],
+								},
+							],
+						});
+					},
 					planReview: () => {
 						planReviews += 1;
 						return planReviewArtifactV2("changes_requested");

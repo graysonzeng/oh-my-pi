@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	ImplementationArtifactSchema,
 	PlanArtifactSchema,
+	PlanReviewArtifactV2Schema,
 	ReviewArtifactSchema,
 	ReviewFindingSchema,
 	VerificationArtifactSchema,
@@ -199,5 +200,187 @@ describe("Workflow schemas", () => {
 				policyJson: "{}",
 			}).status,
 		).toBe("created");
+	});
+});
+
+describe("PlanReviewArtifactV2 basis-specific evidence", () => {
+	const v2Header = {
+		schemaVersion: 2 as const,
+		workflowId: "wf_1",
+		attemptId: "att_1",
+		stage: "plan_review" as const,
+		createdAt: "2026-07-23T00:00:00.000Z",
+		modelProfileId: "test-profile",
+		provider: "test",
+		model: "test/model",
+		promptVersion: "test-v2",
+	};
+
+	const baseFinding = {
+		id: "f1",
+		priority: "P1" as const,
+		category: "correctness" as const,
+		status: "open" as const,
+		confidence: 0.9,
+		summary: "finding",
+		explanation: "detail",
+		suggestedOwner: "implementer" as const,
+	};
+
+	function review(overrides: {
+		decision?: "approved" | "changes_requested" | "blocked";
+		findings?: Array<Record<string, unknown>>;
+	}) {
+		return {
+			...v2Header,
+			kind: "review" as const,
+			subject: "plan" as const,
+			reviewKind: "initial" as const,
+			decision: overrides.decision ?? "changes_requested",
+			findings: overrides.findings ?? [],
+			explanation: "review explanation",
+			confidence: 0.9,
+			requirementsSnapshotRef: "artifact://requirements",
+			requirementsSnapshotSha256: "a".repeat(64),
+			coverage: [],
+			uncoveredDimensions: [],
+			antiAnchoringRationale: "checked dimensions",
+			reviewRound: 1 as const,
+			authorResponses: [],
+			triggerReason: null,
+			routeSelectionReceiptRef: null,
+			cleanContextReceiptRef: null,
+			specEvidenceReceiptRef: null,
+			authorityReceiptRef: null,
+		};
+	}
+
+	it("rejects repo_evidence findings without sourceRefs", () => {
+		const result = PlanReviewArtifactV2Schema.safeParse(
+			review({
+				findings: [
+					{
+						...baseFinding,
+						basis: "repo_evidence",
+						requirementId: null,
+						sourceRefs: [],
+						missingAuthority: null,
+					},
+				],
+			}),
+		);
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			expect(result.error.issues.some(issue => issue.path.join(".").includes("sourceRefs"))).toBe(true);
+		}
+	});
+
+	it("rejects requirement-basis findings without requirementId", () => {
+		const result = PlanReviewArtifactV2Schema.safeParse(
+			review({
+				findings: [
+					{
+						...baseFinding,
+						basis: "spec_requirement",
+						requirementId: null,
+						sourceRefs: ["spec.md:1"],
+						missingAuthority: null,
+					},
+				],
+			}),
+		);
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			expect(result.error.issues.some(issue => issue.path.join(".").includes("requirementId"))).toBe(true);
+		}
+	});
+
+	it("rejects missing_authority findings without missingAuthority description", () => {
+		const result = PlanReviewArtifactV2Schema.safeParse(
+			review({
+				decision: "blocked",
+				findings: [
+					{
+						...baseFinding,
+						suggestedOwner: "human",
+						basis: "missing_authority",
+						requirementId: null,
+						sourceRefs: [],
+						missingAuthority: null,
+					},
+				],
+			}),
+		);
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			expect(result.error.issues.some(issue => issue.path.join(".").includes("missingAuthority"))).toBe(true);
+		}
+	});
+
+	it("rejects missing_authority findings when decision is not blocked", () => {
+		const result = PlanReviewArtifactV2Schema.safeParse(
+			review({
+				decision: "changes_requested",
+				findings: [
+					{
+						...baseFinding,
+						suggestedOwner: "human",
+						basis: "missing_authority",
+						requirementId: null,
+						sourceRefs: [],
+						missingAuthority: "product_owner sign-off",
+					},
+				],
+			}),
+		);
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			expect(result.error.issues.some(issue => issue.message.includes("blocked"))).toBe(true);
+		}
+	});
+
+	it("accepts well-formed basis-specific findings", () => {
+		expect(
+			PlanReviewArtifactV2Schema.safeParse(
+				review({
+					findings: [
+						{
+							...baseFinding,
+							id: "req",
+							basis: "user_requirement",
+							requirementId: "user:req-001",
+							sourceRefs: ["request:line-1"],
+							missingAuthority: null,
+						},
+						{
+							...baseFinding,
+							id: "repo",
+							basis: "repo_evidence",
+							requirementId: null,
+							sourceRefs: ["src/foo.ts:12"],
+							missingAuthority: null,
+						},
+					],
+				}),
+			).success,
+		).toBe(true);
+
+		expect(
+			PlanReviewArtifactV2Schema.safeParse(
+				review({
+					decision: "blocked",
+					findings: [
+						{
+							...baseFinding,
+							suggestedOwner: "human",
+							basis: "missing_authority",
+							requirementId: null,
+							sourceRefs: [],
+							missingAuthority: "security owner must approve exception",
+						},
+					],
+				}),
+			).success,
+		).toBe(true);
 	});
 });

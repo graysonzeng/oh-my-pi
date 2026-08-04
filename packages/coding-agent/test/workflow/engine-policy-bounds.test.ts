@@ -335,12 +335,27 @@ describe("WorkflowEngine policy bounds regressions", () => {
 
 	it("maxPlanCycles hard-stops after bounded plan rejections", async () => {
 		let planReviews = 0;
+		let planCount = 0;
 		const engine = new WorkflowEngine({
 			store,
 			config: { maxPlanCycles: 2 },
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
-					plan: planArtifact({ summary: "v" }),
+					plan: () => {
+						planCount += 1;
+						if (planCount === 1) return planArtifact({ summary: "v" });
+						return planArtifact({
+							summary: "v-replan",
+							authorResponses: [
+								{
+									findingId: "f-default",
+									disposition: "accepted",
+									explanation: "accepted finding",
+									evidenceRefs: [],
+								},
+							],
+						});
+					},
 					planReview: () => {
 						planReviews += 1;
 						return reviewArtifact("changes_requested", "plan");
@@ -362,13 +377,28 @@ describe("WorkflowEngine policy bounds regressions", () => {
 
 	it("maxPlanCycles survives new Engine instances across single-step resumes", async () => {
 		let planReviews = 0;
+		let planCount = 0;
 		const mk = () =>
 			new WorkflowEngine({
 				store,
 				config: { maxPlanCycles: 2 },
 				adapter: new RuntimeAdapter(
 					scriptedRunner({
-						plan: planArtifact({ summary: "v" }),
+						plan: () => {
+							planCount += 1;
+							if (planCount === 1) return planArtifact({ summary: "v" });
+							return planArtifact({
+								summary: "v-replan",
+								authorResponses: [
+									{
+										findingId: "f-default",
+										disposition: "accepted",
+										explanation: "accepted finding",
+										evidenceRefs: [],
+									},
+								],
+							});
+						},
 						planReview: () => {
 							planReviews += 1;
 							return reviewArtifact("changes_requested", "plan");

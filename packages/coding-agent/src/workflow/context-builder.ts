@@ -11,6 +11,7 @@ import type {
 	ImplementationArtifactV1,
 	PlanArtifactV1,
 	PlanReviewArtifact,
+	RequirementsSnapshotV1,
 	ReviewFindingV1,
 	StageHandoffV1,
 	VerificationArtifactV1,
@@ -54,10 +55,27 @@ export class ContextBuilder {
 		});
 	}
 
-	buildPlanReviewContext(plan: PlanArtifactV1, inclusion?: ResolvedArtifactInclusion): string {
+	buildPlanReviewContext(
+		plan: PlanArtifactV1,
+		inclusion?: ResolvedArtifactInclusion,
+		requirementsSnapshot?: RequirementsSnapshotV1 | null,
+	): string {
 		const includePlan = inclusion?.includePlan !== false;
+		const requirementsJson =
+			requirementsSnapshot != null
+				? JSON.stringify(
+						{
+							sha256: requirementsSnapshot.sha256,
+							requirements: requirementsSnapshot.requirements,
+							source: requirementsSnapshot.source,
+						},
+						null,
+						2,
+					)
+				: "";
 		return renderContextTemplate(planReviewContextTemplate, {
 			planJson: includePlan ? JSON.stringify(this.#truncatePlan(plan), null, 2) : OMITTED,
+			requirementsJson,
 		});
 	}
 

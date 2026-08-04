@@ -27,6 +27,7 @@ export * from "./runtime-default";
 export * from "./runtime-invocation";
 export * from "./schema-enhancer";
 export * from "./schemas";
+export * from "./requirements-snapshot";
 export * from "./scope-metrics";
 export * from "./session-config";
 export * from "./sqlite-store";

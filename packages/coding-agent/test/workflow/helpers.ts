@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../../src/tools";
+import { buildRequirementsSnapshot, satisfyMandatoryCoverage } from "../../src/workflow/requirements-snapshot";
 import type { StructuredRunner } from "../../src/workflow/runtime-adapter";
 import type {
 	ImplementationArtifactV1,
@@ -84,6 +85,7 @@ export function planReviewArtifactV2(
 	decision: PlanReviewArtifactV2["decision"],
 	findings: Array<PlanReviewFindingV2 | ReviewArtifactV1["findings"][number]> = [],
 	overrides: Partial<PlanReviewArtifactV2> = {},
+	options: { request?: string; constraints?: string } = {},
 ): PlanReviewArtifactV2 {
 	const resolvedFindings = findings.map(finding => ("basis" in finding ? finding : toPlanReviewFinding(finding)));
 	const candidateFindings = overrides.findings ?? resolvedFindings;
@@ -106,6 +108,19 @@ export function planReviewArtifactV2(
 					},
 				]
 			: candidateFindings;
+	// Default approved fixtures satisfy the engine-owned request snapshot so happy-path
+	// tests are not blocked by the mandatory coverage gate. Explicit coverage overrides win.
+	const defaultSnapshot = buildRequirementsSnapshot({
+		workflowId: overrides.workflowId ?? "wf",
+		request: {
+			request: options.request ?? "default test request",
+			constraints: options.constraints,
+		},
+	});
+	const defaultCoverage =
+		decision === "approved" && overrides.coverage === undefined
+			? satisfyMandatoryCoverage(defaultSnapshot)
+			: [];
 	return {
 		schemaVersion: 2,
 		workflowId: "wf",
@@ -123,8 +138,8 @@ export function planReviewArtifactV2(
 		explanation: `decision=${decision}`,
 		confidence: 0.9,
 		requirementsSnapshotRef: "artifact://requirements",
-		requirementsSnapshotSha256: "0".repeat(64),
-		coverage: [],
+		requirementsSnapshotSha256: defaultSnapshot.sha256,
+		coverage: defaultCoverage,
 		uncoveredDimensions: [],
 		antiAnchoringRationale: "checked mandatory requirements and open dimensions",
 		reviewRound: 1,

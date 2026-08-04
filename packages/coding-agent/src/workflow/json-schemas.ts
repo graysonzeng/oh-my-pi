@@ -70,6 +70,18 @@ const workPackageItem = {
 	},
 } as const;
 
+const authorResponseItem = {
+	type: "object",
+	additionalProperties: false,
+	required: ["findingId", "disposition", "explanation", "evidenceRefs"],
+	properties: {
+		findingId: { type: "string", minLength: 1 },
+		disposition: { enum: ["accepted", "rejected", "clarified"] },
+		explanation: { type: "string", minLength: 1 },
+		evidenceRefs: { type: "array", items: { type: "string" } },
+	},
+} as const;
+
 export const PlanArtifactJsonSchema = {
 	type: "object",
 	additionalProperties: false,
@@ -127,6 +139,8 @@ export const PlanArtifactJsonSchema = {
 		verificationCommands: { type: "array", items: { type: "string" } },
 		risks: { type: "array", items: { type: "string" } },
 		rollback: { type: "array", items: { type: "string" } },
+		// Replan-only: required by engine when prior open P0/P1 findings exist.
+		authorResponses: { type: "array", items: authorResponseItem },
 	},
 } as const;
 
@@ -194,6 +208,45 @@ const planReviewFindingV2Item = {
 		sourceRefs: { type: "array", items: { type: "string", minLength: 1 } },
 		missingAuthority: { anyOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
 	},
+	// Keep in lockstep with PlanReviewFindingV2Schema basis superRefine (Zod remains fail-closed).
+	allOf: [
+		{
+			if: {
+				properties: { basis: { enum: ["spec_requirement", "user_requirement"] } },
+				required: ["basis"],
+			},
+			then: {
+				properties: {
+					requirementId: { type: "string", minLength: 1 },
+					sourceRefs: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
+					missingAuthority: { type: "null" },
+				},
+			},
+		},
+		{
+			if: {
+				properties: { basis: { enum: ["repo_evidence", "safety_invariant"] } },
+				required: ["basis"],
+			},
+			then: {
+				properties: {
+					sourceRefs: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
+					missingAuthority: { type: "null" },
+				},
+			},
+		},
+		{
+			if: {
+				properties: { basis: { const: "missing_authority" } },
+				required: ["basis"],
+			},
+			then: {
+				properties: {
+					missingAuthority: { type: "string", minLength: 1 },
+				},
+			},
+		},
+	],
 } as const;
 
 const requirementCoverageItem = {
@@ -210,17 +263,6 @@ const requirementCoverageItem = {
 	},
 } as const;
 
-const authorResponseItem = {
-	type: "object",
-	additionalProperties: false,
-	required: ["findingId", "disposition", "explanation", "evidenceRefs"],
-	properties: {
-		findingId: { type: "string", minLength: 1 },
-		disposition: { enum: ["accepted", "rejected", "clarified"] },
-		explanation: { type: "string", minLength: 1 },
-		evidenceRefs: { type: "array", items: { type: "string" } },
-	},
-} as const;
 
 /** Strict model-facing V2 plan-review output; engine-owned metadata is merged before Zod parsing. */
 export const PlanReviewArtifactV2JsonSchema = {
