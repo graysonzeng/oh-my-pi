@@ -732,3 +732,82 @@ bun test test/latency \
 若继续修复：使用 $fix-implement（或 /fix-implement），
 优先 MEDIUM：concurrency DAG scaffolding honesty / timeout lifecycle / bash accounting。
 ```
+
+### Round 7 — MEDIUM batch close: concurrency honesty, timeout lifecycle, bash accounting, mechanical parse (2026-08-05)
+
+**Status**: All §3 MEDIUM findings closed or honesty-relabeled. Remaining items are explicit deferrals (A/B pilots, full DAG lifecycle, smoke receipts, QualityRouteSnapshotV2, human UI, SQLite control-state).
+
+#### What changed
+
+1. **MEDIUM concurrency DAG scaffolding honesty**
+   - `buildWorkPackageExecutionPlan` docs + comment: non-empty `dependsOn` intentionally returns null (whole-plan fallback).
+   - Acceptance + CHANGELOG relabeled: **flat independent-wave scaffolding**, not durable DAG 4.a/4.b.
+   - Status label: `unit-verified scaffolding; Phase 1 smoke acceptance pending`.
+
+2. **MEDIUM timeout lifecycle**
+   - `failQueuedTimeout` now `await reportProgress(buildDetails())` before throwing so the original async task block receives a terminal failed snapshot.
+   - `requestAbort` sets `runtimeLimitExceeded` / `budgetLimitExceeded` only when that cause wins the first abort transition (cancel-first preserved).
+   - `runtime_timeout_triggered` recorded in shared `#buildResultPayload` for both async and sync fanout paths (once per spawn id).
+
+3. **MEDIUM bash accounting / state / session lifetime**
+   - Managed async/auto-background: exactly-one terminal ledger record via `outcomeRecorded`; notices prepended; catch synthesizes only when no terminal result existed.
+   - ACP create/abort/timeout/poll/success + unexpected throw paths use once-helper + catch finalizer.
+   - Foreground PTY/`executeBash` rejection recorded before rethrow.
+   - State fingerprint uses verified `git.head.resolveSync` commit when available; incomplete state fails open (record attempt, no repeated-failure advice).
+   - Session transitions (`newSession` / `switchSession` / `branch` / `branchFromBtw`) capture departed session id **before** SessionManager mutates and clear that ledger.
+   - Managed jobs bind launch-time session id for late completions.
+
+4. **MEDIUM mechanical class strict parser**
+   - New `parseWorkflowMechanicalClass`: schemaVersion/enums + required refs for deterministic_rule/accepted_finding.
+   - Engine uses parser instead of unsafe cast; `isMechanicalFlashEligible` re-parses fail-closed.
+
+5. **MEDIUM acceptance smoke honesty**
+   - Acceptance verification labeled unit scaffolding; design §§6.3–6.4 smoke receipts explicitly not claimed.
+   - Deferred list adds durable DAG + owner-path smoke items.
+
+#### Verification
+
+```text
+cd packages/coding-agent
+bun run check:types
+→ clean
+
+bun test test/latency test/task/task-spawn.test.ts \
+  test/workflow/work-packages.test.ts \
+  test/workflow/stages/plan-review.test.ts \
+  test/workflow/engine-work-packages.test.ts \
+  test/workflow/model-router.test.ts \
+  test/workflow/engine-happy-path.test.ts \
+  test/workflow/engine-resume.test.ts \
+  test/latency/model-router-mechanical.test.ts
+→ 115 pass / 0 fail (combined focused runs)
+```
+
+#### Remaining risk / next review scope
+
+- **Still deferred (not §3 MEDIUM)**: pilot A/B receipts; full concurrency DAG lifecycle (join/quorum/resume/cancel/idempotency/required-read RuntimePort); design §§6.3–6.4 owner-path smoke receipts; QualityRouteSnapshotV2; human authority UI; full SQLite control-state migration; configurable multi-cycle arbitration beyond sole reserved cycle.
+- **Residual for bash state identity**: only HEAD commit is authoritative today (no dirty-tree/config/dependency receipts); advice still fail-open when HEAD unavailable — intentional conservative behavior until richer receipts exist.
+- **Residual for timeout metrics**: sync/async share once-key metric path; dedicated wall-clock runtime-timeout metric integration fixture still thin (queued-timeout covered; runtime path relies on abortReason text match).
+
+#### Code status
+
+**Needs re-review for Round 7 MEDIUM close**, then merge-ready for the review scope if re-review finds no regressions. All §3 HIGH (Rounds 1–6) and MEDIUM (Round 7) findings are addressed; remaining open items are explicit deferrals already listed in acceptance.
+
+#### Handoff
+
+**Same session**:
+
+```
+直接执行 $code-review 或 /code-review
+重点复审 Round 7：timeout terminal/first-cause/sync metrics、bash exactly-once/state fail-open/session clear、mechanical strict parse、concurrency honesty relabel。
+```
+
+**New-session recovery prompt**:
+
+```
+请阅读实现文档 docs/superpowers/plans/2026-08-04-latency-implementation-acceptance.md、
+审查文档 docs/superpowers/plans/2026-08-04-latency-plan-review-implementation-code-review.md 的修复记录，
+对本轮修复结果补做下一轮检查；重点关注文档中记录的剩余风险与复审范围。
+
+重点复审 Round 7 MEDIUM 关闭项：queued timeout terminal progress、cancel-first runtime timeout、sync runtime metrics、bash exactly-once + ACP/foreground throw recording + state fail-open + departed-session ledger clear、mechanical strict parser、concurrency flat-wave honesty。
+```

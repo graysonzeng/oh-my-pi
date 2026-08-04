@@ -78,16 +78,19 @@ export class WorkPackageExecutionError extends WorkflowError {
 }
 
 /**
- * Build deterministic dependency waves only when parallel execution is provably useful and safe.
- * Invalid ids/dependencies/paths, path ownership overlap, or an effectively serial limit return null
- * so the caller can preserve the existing whole-plan implementation path. The final wave guard
- * mirrors `shouldAutoParallel`: at least two independent ready units are required.
+ * Build flat independent-wave scaffolding for work packages with empty dependsOn.
+ * Any non-empty dependsOn returns null so callers keep the whole-plan path: full
+ * durable DAG ready-waves / join / quorum / resume / cancel lifecycle is deferred.
+ * Invalid ids/dependencies/paths, path ownership overlap, or an effectively serial
+ * limit also return null. The final wave guard mirrors `shouldAutoParallel`: at
+ * least two independent ready units are required.
  */
 export function buildWorkPackageExecutionPlan(
 	input: readonly WorkPackageV1[] | undefined,
 	maxConcurrency: number,
 ): WorkPackageExecutionPlan | null {
 	if (!input || input.length < 2) return null;
+	// Phase-1 honesty: only flat independent packages. Dependent DAGs fall back.
 	if (input.some(candidate => candidate.dependsOn.length > 0)) return null;
 	const normalizedMax = Number.isFinite(maxConcurrency) ? Math.trunc(maxConcurrency) : 0;
 	if (normalizedMax === 1) return null;

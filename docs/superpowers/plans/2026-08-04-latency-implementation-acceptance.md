@@ -26,8 +26,7 @@ Current config SHA-256: `996a4953b3e7c60bbb2855056030244f57d4632b48fe1a194ed391c
 
 ### Residual pool (treatment still OFF / missing before this change)
 
-Historical active 306.6h = gen 174.3 + TTFT 92.0 + tools 40.3 (not residual savings).  
-Residual arms implemented this round (all default-off): context optimization activation path, read dedupe, bash ledger, concurrency declaration/execution, mechanical Flash route, eval parity gate.
+Residual arms implemented this round (all default-off): context optimization activation path, read dedupe, bash ledger, concurrency flat independent-wave scaffolding, mechanical Flash route, eval parity gate.
 
 ## 2. Arms, switches, rollback
 
@@ -55,27 +54,29 @@ Quality stop (any arm): completion/verifier/review −>2pp, rework/dup-read +>10
 - 1.c ReadViewKeyV1 + tool_result eligible dedupe in `workflow/context-ledger.ts`; ordinary session map in `agent-session.ts`; fail-open on incomplete identity / hash / artifact verify. No `fresh` param.
 
 ### Direction 3 — Bash ledger
-- Single `BashAttemptLedgerV1` + session WeakMap store.
-- Wired in `tools/bash.ts` for advisory / bounded injection; cancel not failure; env **names** only in state fingerprint.
+- Single `BashAttemptLedgerV1` + session WeakMap/id store.
+- Wired in `tools/bash.ts` for advisory / bounded injection; cancel not failure; env **names** only; verified HEAD code revision when available, otherwise fail-open (record without repeated-failure advice).
 
 ### Direction 5 — Eval migration gate
 - `EvalGateParityReceiptV1` + `recordOrRequireEvalParity` / `mayMigrateEvalGate`.
 - Migration stays bridge-control unless arm on **and** parity=`proven`. Re-exported from `tools/eval.ts`.
 
 ### Direction 4 — Concurrency + plan review
-- `WorkflowConcurrencyDeclarationV1` validation (cycle, path overlap, unknown fields).
-- `buildConcurrencyExecutionPlan` lowers ready wave via `mapWithConcurrencyLimitAllSettled` + `Semaphore`; auto-parallel only when `shouldAutoParallel` (≥2 independent ready, no write/isolation conflict).
-- Engine arm-gated declaration validation + work-package conversion.
+- `WorkflowConcurrencyDeclarationV1` validation (cycle, path overlap, isolationScope, fingerprint recompute, unknown fields).
+- `buildConcurrencyExecutionPlan` lowers a **single ready wave** via `mapWithConcurrencyLimitAllSettled` + `Semaphore`; auto-parallel only when `shouldAutoParallel` (≥2 independent ready, no write/isolation conflict).
+- Engine arm-gated declaration validation + write-only work-package conversion; **non-empty `dependsOn` falls back to whole-plan implementation** (flat independent-wave scaffolding only; no durable DAG join/quorum/resume/cancel lifecycle). Required non-write units fail closed.
 - Plan review: pin initial reviewer profile/identity for rereview; max cycles → `#runPlanArbitration` (prefer non-author/non-reviewer lineage) or `blocked:arbitration_required`. No N-reviewer voting. Prompts unchanged: `plan-reviewer.md` / `agents/reviewer.md`.
 
 ### Direction 2 — Mechanical Flash
-- `WorkflowMechanicalClassV1` + `roleStaticSplitEnabled` only influence **repair** Flash preference in `model-router.ts`.
-- Never applied to `plan_reviewer`.
+- `WorkflowMechanicalClassV1` + strict `parseWorkflowMechanicalClass` + `roleStaticSplitEnabled` only influence **repair** Flash preference in `model-router.ts`.
+- Never applied to `plan_reviewer`. Incomplete/missing refs fail closed to the strong route.
 
 ### Forbidden names
 No `task-batch.ts`, `tool-output-processor.ts`, `performance.contextVolume.truncation.*`, or `fresh` parameter.
 
 ## 4. Verification evidence
+
+**Status label**: `unit-verified scaffolding; Phase 1 smoke acceptance pending`.
 
 Commands (packages/coding-agent):
 
@@ -98,11 +99,13 @@ bun test test/latency test/workflow/context-ledger.test.ts \
 Contract coverage includes:
 - all arms default-off + freeze snapshot / combinedArmId rules
 - ReadViewKey eligibility + branch/selector/provider invalidation
-- bash repeated failure advisory; cancel ignored
-- concurrency cycle/path/unknown-field reject; auto-parallel ≥2 only; effective concurrency min
-- mechanical Flash on repair only; plan_reviewer unchanged
+- bash repeated failure advisory; cancel ignored; state-identity fail-open without verified HEAD
+- concurrency cycle/path/isolation/fingerprint reject; auto-parallel ≥2 only; effective concurrency min; dependsOn → whole-plan fallback
+- mechanical Flash on repair only with strict parse; plan_reviewer unchanged
 - eval parity gate blocks until proven
 - plan_review single-reviewer replan + arbitration_required block path
+
+Design §§6.3–6.4 real-path smoke receipts (read/change/view, Bash fail→change→success, dependent concurrency cancel/resume, eval parity with frozen arm snapshot + artifact hashes) are **not** claimed here.
 
 ## 5. Open / follow-ups (not blocking this implementation gate)
 
@@ -122,7 +125,9 @@ Contract coverage includes:
 5. **Session-frozen arm snapshot** helper exists; optional persistence into session custom entries / workflow artifacts can be wired at session start without changing defaults.
 6. Host `modelRoles.default` drift (grok vs historical flash) is outside arm treatment; freeze actual model identity in A/B lineage.
 7. **Explicit deferred epics** (do not claim closed): QualityRouteSnapshotV2 full, standalone `plan-arbitration.ts`, human receipt UI, five plan-review A/B arms rollout, D §10 full SQLite control-state migration.
-8. **Post-acquire timeout interleaving** beyond current first-cause tests remains partial (MEDIUM-3 residual); sync fanout has no `queuedStartupTimeoutMs` (documented non-goal).
+8. **Concurrency 4.a/4.b durable DAG** (topological multi-wave ready, join/quorum, declaration-state resume/cancel/idempotency, required-read RuntimePort execution) remains deferred; current path is flat independent-wave scaffolding only.
+9. **Owner-path smoke receipts** for design §§6.3–6.4 remain pending (unit contracts only).
+10. **Post-acquire timeout interleaving** beyond current first-cause tests remains partial residual; sync fanout has no `queuedStartupTimeoutMs` (documented non-goal).
 
 ## 6. Rollback checklist (operator)
 

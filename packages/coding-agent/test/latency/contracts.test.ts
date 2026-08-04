@@ -23,6 +23,7 @@ import {
 import {
 	buildMechanicalClass,
 	isMechanicalFlashEligible,
+	parseWorkflowMechanicalClass,
 } from "../../src/latency/mechanical-class";
 import {
 	buildReadViewKeyV1,
@@ -327,6 +328,35 @@ describe("WorkflowMechanicalClassV1 + eval parity", () => {
 				true,
 			),
 		).toBe(false);
+	});
+
+	it("rejects incomplete mechanical evidence before Flash routing", () => {
+		const missingRef = {
+			schemaVersion: 1,
+			class: "mechanical_repair",
+			evidence: { source: "accepted_finding" },
+			targetRole: "repair",
+			requestedModelClass: "flash",
+		};
+		expect(parseWorkflowMechanicalClass(missingRef)).toBeNull();
+		expect(isMechanicalFlashEligible(missingRef as never, true)).toBe(false);
+
+		const badSchema = {
+			schemaVersion: 2,
+			class: "mechanical_repair",
+			evidence: { source: "caller_declaration" },
+			targetRole: "repair",
+			requestedModelClass: "flash",
+		};
+		expect(parseWorkflowMechanicalClass(badSchema)).toBeNull();
+		expect(isMechanicalFlashEligible(badSchema as never, true)).toBe(false);
+
+		const validCaller = buildMechanicalClass({
+			class: "mechanical_repair",
+			source: "caller_declaration",
+			targetRole: "repair",
+		});
+		expect(parseWorkflowMechanicalClass(validCaller)).toEqual(validCaller);
 	});
 
 	it("blocks eval migration until parity is proven", () => {

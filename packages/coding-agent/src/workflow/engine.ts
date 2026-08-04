@@ -8,7 +8,7 @@ import {
 	shouldAutoParallel,
 	validateConcurrencyDeclaration,
 } from "../latency/concurrency-declaration";
-import type { WorkflowMechanicalClassV1 } from "../latency/mechanical-class";
+import { parseWorkflowMechanicalClass, type WorkflowMechanicalClassV1 } from "../latency/mechanical-class";
 import type { ToolSession } from "../tools";
 import * as git from "../utils/git";
 import {
@@ -1881,10 +1881,7 @@ export class WorkflowEngine {
 						finding: primary,
 						findingTracker: this.#findingTracker,
 						preferReasoningRepair: primary ? this.#findingTracker.needsReasoningRepair(primary) : false,
-						mechanicalClass:
-							policy.mechanicalClass && typeof policy.mechanicalClass === "object"
-								? (policy.mechanicalClass as WorkflowMechanicalClassV1)
-								: undefined,
+						mechanicalClass: parseWorkflowMechanicalClass(policy.mechanicalClass) ?? undefined,
 						roleStaticSplitEnabled,
 					},
 					async profile =>

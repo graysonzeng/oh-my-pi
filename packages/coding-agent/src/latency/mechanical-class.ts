@@ -36,6 +36,22 @@ export interface WorkflowMechanicalClassV1 {
 export const ROLE_STATIC_SPLIT_ARM = "role_static_split" as const;
 export const MECHANICAL_TARGET_MODEL_HINT = "flash" as const;
 
+const MECHANICAL_CLASS_KINDS: Record<MechanicalClassKind, true> = {
+	deterministic_evidence: true,
+	mechanical_repair: true,
+	format_check: true,
+	none: true,
+};
+const MECHANICAL_EVIDENCE_SOURCES: Record<MechanicalEvidenceSource, true> = {
+	caller_declaration: true,
+	deterministic_rule: true,
+	accepted_finding: true,
+};
+const MECHANICAL_TARGET_ROLES: Record<MechanicalTargetRole, true> = {
+	evidence: true,
+	repair: true,
+	code_review_experiment: true,
+};
 export function buildMechanicalClass(input: {
 	class: MechanicalClassKind;
 	source: MechanicalEvidenceSource;
@@ -52,18 +68,63 @@ export function buildMechanicalClass(input: {
 	};
 }
 
+/**
+ * Strict runtime parse for policy/object evidence. Malformed or incomplete
+ * mechanical classes fail closed to the strong route (return null).
+ */
+export function parseWorkflowMechanicalClass(value: unknown): WorkflowMechanicalClassV1 | null {
+	if (!value || typeof value !== "object") return null;
+	const raw = value as Record<string, unknown>;
+	if (raw.schemaVersion !== WORKFLOW_MECHANICAL_CLASS_VERSION) return null;
+	if (typeof raw.class !== "string" || !(raw.class in MECHANICAL_CLASS_KINDS)) {
+		return null;
+	}
+	if (typeof raw.targetRole !== "string" || !(raw.targetRole in MECHANICAL_TARGET_ROLES)) {
+		return null;
+	}
+	if (raw.requestedModelClass !== "flash" && raw.requestedModelClass !== "existing") return null;
+	if (!raw.evidence || typeof raw.evidence !== "object") return null;
+	const evidence = raw.evidence as Record<string, unknown>;
+	if (typeof evidence.source !== "string" || !(evidence.source in MECHANICAL_EVIDENCE_SOURCES)) {
+		return null;
+	}
+	const ref = evidence.ref;
+	if (ref !== undefined && (typeof ref !== "string" || ref.trim().length === 0)) return null;
+	// Deterministic/accepted-finding evidence requires a concrete ref; caller
+	// declaration may omit one when the declaration itself is the proof.
+	if (
+		(evidence.source === "deterministic_rule" || evidence.source === "accepted_finding") &&
+		(typeof ref !== "string" || ref.trim().length === 0)
+	) {
+		return null;
+	}
+	return {
+		schemaVersion: WORKFLOW_MECHANICAL_CLASS_VERSION,
+		class: raw.class as MechanicalClassKind,
+		evidence: {
+			source: evidence.source as MechanicalEvidenceSource,
+			...(typeof ref === "string" ? { ref: ref.trim() } : {}),
+		},
+		targetRole: raw.targetRole as MechanicalTargetRole,
+		requestedModelClass: raw.requestedModelClass,
+	};
+}
+
 /** Ineligible / unknown → strong model conservative path. */
 export function isMechanicalFlashEligible(
 	cls: WorkflowMechanicalClassV1 | null | undefined,
 	armEnabled: boolean,
 ): boolean {
 	if (!armEnabled || !cls) return false;
-	if (cls.class === "none") return false;
-	if (cls.requestedModelClass !== "flash") return false;
+	// Re-validate even for typed callers so malformed casts cannot route Flash.
+	const parsed = parseWorkflowMechanicalClass(cls);
+	if (!parsed) return false;
+	if (parsed.class === "none") return false;
+	if (parsed.requestedModelClass !== "flash") return false;
 	// Plan review / arbitration / architecture never eligible.
-	if (cls.targetRole === "code_review_experiment") {
+	if (parsed.targetRole === "code_review_experiment") {
 		// only when explicitly declared experiment
-		return cls.evidence.source === "caller_declaration";
+		return parsed.evidence.source === "caller_declaration";
 	}
 	return true;
 }

@@ -4649,13 +4649,15 @@ export class AgentSession {
 	}
 
 	/** Drop mutable tool decisions and directives owned by the previous logical session. */
-	#clearSessionScopedToolState(): void {
+	#clearSessionScopedToolState(departedSessionId?: string): void {
 		this.agent.clearDeferredToolDirectives();
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#readDedupeArtifacts.clear();
 		this.#clearLatencyArmSnapshot();
-		clearBashAttemptLedgerStore(this.sessionManager.getSessionId());
+		// Prefer the departed session id captured before newSession/switch mutates
+		// SessionManager; clearing only the current id would leave the old ledger.
+		clearBashAttemptLedgerStore(departedSessionId ?? this.sessionManager.getSessionId());
 	}
 
 	#ensureLatencyArmSnapshot(): LatencyArmSnapshotV1 {
@@ -6342,6 +6344,8 @@ export class AgentSession {
 		this.#closeAllProviderSessions("new session");
 		await this.#bash.flushPending();
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
+		// Capture before SessionManager mutates the active session id.
+		const departedSessionId = this.sessionManager.getSessionId();
 		let sessionTransitioned = false;
 		try {
 			this.agent.reset();
@@ -6374,8 +6378,7 @@ export class AgentSession {
 			this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 		}
 
-		this.#clearSessionScopedToolState();
-		this.#clearCheckpointRuntimeState();
+		this.#clearSessionScopedToolState(departedSessionId);
 		this.setTodoPhases([]);
 		this.#freshProviderSessionId = undefined;
 		this.#clearInheritedProviderPromptCacheKey();
@@ -7329,6 +7332,7 @@ export class AgentSession {
 	 */
 	async switchSession(sessionPath: string): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
+		const departedSessionId = this.sessionManager.getSessionId();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
@@ -7510,7 +7514,7 @@ export class AgentSession {
 				await this.#memory.resetContextForNewTranscript();
 			}
 			if (switchingToDifferentSession) {
-				this.#clearSessionScopedToolState();
+				this.#clearSessionScopedToolState(departedSessionId);
 			}
 			this.#reconnectToAgent();
 			try {
@@ -7624,6 +7628,7 @@ export class AgentSession {
 		// Flush pending writes before branching
 		await this.sessionManager.flush();
 		const bashTransition = this.#bash.beginSessionTransition();
+		const departedSessionId = this.sessionManager.getSessionId();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
 		await this.#drainAutolearnCapture();
@@ -7641,7 +7646,7 @@ export class AgentSession {
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 		}
-		this.#clearSessionScopedToolState();
+		this.#clearSessionScopedToolState(departedSessionId);
 		this.#rehydrateCheckpointRewindState();
 		this.#todo.syncFromBranch();
 		this.#freshProviderSessionId = undefined;
@@ -7726,6 +7731,7 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		await this.sessionManager.flush();
 		const bashTransition = this.#bash.beginSessionTransition();
+		const departedSessionId = this.sessionManager.getSessionId();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
 		await this.#drainAutolearnCapture();
@@ -7740,7 +7746,7 @@ export class AgentSession {
 			this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 		}
 
-		this.#clearSessionScopedToolState();
+		this.#clearSessionScopedToolState(departedSessionId);
 
 		this.#rehydrateCheckpointRewindState();
 		this.sessionManager.appendMessage({

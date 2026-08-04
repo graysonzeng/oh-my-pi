@@ -13,6 +13,7 @@ import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import * as git from "../utils/git";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import {
@@ -591,6 +592,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		env?: Record<string, string>;
 		result: BashResult | BashInteractiveResult;
 		startedAt: string;
+		/** Launch-time session id for late background completions after session switch. */
+		sessionId?: string;
 	}): string[] {
 		let advisoryEnabled = false;
 		let boundedInjectionEnabled = false;
@@ -610,9 +613,15 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		try {
 			const commandFingerprint = buildBashCommandFingerprint({ command: input.command, cwd: input.cwd });
+			// Prefer a verified working-tree revision when available. Incomplete
+			// authoritative state identity fails open: record the attempt, but never
+			// emit repeated-failure advice based on placeholder "unknown" state.
+			const codeRevision = git.head.resolveSync(input.cwd)?.commit ?? undefined;
+			const stateAuthoritative = Boolean(codeRevision);
 			const stateFingerprint = buildBashStateFingerprint({
 				cwd: input.cwd,
 				envNames: Object.keys(input.env ?? {}),
+				codeRevision,
 			});
 			const terminal: BashAttemptTerminal = input.result.timedOut
 				? { kind: "timeout" }
@@ -625,7 +634,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				terminal,
 				stdoutExcerpt: normalizeResultOutput(input.result),
 			});
-			const store = getBashAttemptLedgerStore(this.session);
+			const store = getBashAttemptLedgerStore(
+				input.sessionId
+					? { getSessionId: () => input.sessionId as string }
+					: this.session,
+			);
 			if (!store) return [];
 			const priorLedger = store.get(commandFingerprint, stateFingerprint);
 			const prior = lookupRepeatedBashFailure(priorLedger ? [priorLedger] : [], {
@@ -638,7 +651,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				priorLedger
 					? { ...priorLedger, mode }
 					: createBashAttemptLedger({
-							sessionId: this.session.getSessionId?.() ?? "unknown",
+							sessionId:
+								input.sessionId ??
+								this.session.getSessionId?.() ??
+								"unknown",
 							commandFingerprint,
 							stateFingerprint,
 							mode,
@@ -656,6 +672,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				},
 			);
 			store.upsert(ledger);
+
+			// Fail open when state identity is not authoritative: still keep the
+			// attempt for observability, but do not claim a repeated identical retry.
+			if (!stateAuthoritative) return [];
 
 			const notices: string[] = [];
 			if (prior.repeatedFailure && advisoryEnabled && prior.advisoryText) {
@@ -887,10 +907,29 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 				const wallTimeStart = performance.now();
+				// Bind ledger ownership to the session that launched this job so a
+				// mid-flight session switch cannot re-attribute late completions.
+				const launchSessionId = this.session.getSessionId?.() ?? "unknown";
+				let outcomeRecorded = false;
+				const recordTerminalOnce = (
+					result: BashResult | BashInteractiveResult,
+					startedAt: string,
+				): string[] => {
+					if (outcomeRecorded) return [];
+					outcomeRecorded = true;
+					return this.#recordBashAttempt({
+						command: options.command,
+						cwd: options.commandCwd,
+						env: options.resolvedEnv,
+						result,
+						startedAt,
+						sessionId: launchSessionId,
+					});
+				};
 				try {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
-						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+						sessionKey: `${launchSessionId}:async:${jobId}`,
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						env: options.resolvedEnv,
@@ -904,18 +943,15 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					});
 					const wallTimeMs = performance.now() - wallTimeStart;
+					const startedAt = new Date(Date.now() - wallTimeMs).toISOString();
+					// Exactly one terminal ledger row for the executor outcome; notices
+					// must reach the final text even when isError re-throws below.
+					const ledgerPrefixNotices = recordTerminalOnce(result, startedAt);
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						requestedTimeoutSec: options.requestedTimeoutSec,
+						prefixNotices: ledgerPrefixNotices,
 						notices: options.notices ?? [],
 						wallTimeMs,
-					});
-					// Canonical attempt ledger covers managed async/auto-background jobs too.
-					this.#recordBashAttempt({
-						command: options.command,
-						cwd: options.commandCwd,
-						env: options.resolvedEnv,
-						result,
-						startedAt: new Date(Date.now() - wallTimeMs).toISOString(),
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -927,6 +963,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						// A non-zero exit is a completed command that failed. Re-enter
 						// the failure path so the job manager records it as failed and
 						// delivers the error text, matching prior throw-based behavior.
+						// Do NOT re-record ledger here — terminal outcome already landed.
 						throw new ToolError(finalText);
 					}
 					await reportProgress(finalText, { async: { state: "completed", jobId, type: "bash" } });
@@ -935,25 +972,26 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;
 					const wallTimeMs = performance.now() - wallTimeStart;
-					this.#recordBashAttempt({
-						command: options.command,
-						cwd: options.commandCwd,
-						env: options.resolvedEnv,
-						result: {
-							exitCode: undefined,
-							timedOut: false,
-							cancelled: runSignal.aborted,
-							stdout: message,
-							stderr: "",
-							output: message,
-							truncated: false,
-							totalLines: 1,
-							totalBytes: Buffer.byteLength(message, "utf8"),
-							noOutput: message.length === 0,
-							durationMs: wallTimeMs,
-						} as unknown as BashResult,
-						startedAt: new Date(Date.now() - wallTimeMs).toISOString(),
-					});
+					// Only synthesize an error/cancel record when no terminal result
+					// was recorded (executor throw before a settled BashResult).
+					if (!outcomeRecorded) {
+						recordTerminalOnce(
+							{
+								exitCode: undefined,
+								timedOut: false,
+								cancelled: runSignal.aborted,
+								stdout: message,
+								stderr: "",
+								output: message,
+								truncated: false,
+								totalLines: 1,
+								totalBytes: Buffer.byteLength(message, "utf8"),
+								noOutput: message.length === 0,
+								durationMs: wallTimeMs,
+							} as unknown as BashResult,
+							new Date(Date.now() - wallTimeMs).toISOString(),
+						);
+					}
 					completion.resolve({ kind: "failed", error });
 					await reportProgress(message, { async: { state: "failed", jobId, type: "bash" } });
 					throw error;
@@ -1289,6 +1327,21 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			const { promise: abortedP, resolve: resolveAborted } = Promise.withResolvers<void>();
 			let handle: ClientBridgeTerminalHandle | undefined;
 			let killStarted = false;
+			let bridgeOutcomeRecorded = false;
+			const recordBridgeTerminal = (
+				result: BashResult | BashInteractiveResult,
+				bridgeEnv?: Record<string, string>,
+			): string[] => {
+				if (bridgeOutcomeRecorded) return [];
+				bridgeOutcomeRecorded = true;
+				return this.#recordBashAttempt({
+					command,
+					cwd: commandCwd,
+					env: bridgeEnv,
+					result,
+					startedAt,
+				});
+			};
 			const fireKill = (): Promise<void> => {
 				if (killStarted) return Promise.resolve();
 				const currentHandle = handle;
@@ -1344,6 +1397,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				]);
 				if (createRaced.kind === "aborted" || signal?.aborted) {
 					cleanupLateCreate(createP);
+					recordBridgeTerminal({
+						output: "",
+						exitCode: undefined,
+						cancelled: true,
+						timedOut: false,
+						truncated: false,
+						totalLines: 0,
+						totalBytes: 0,
+						outputLines: 0,
+						outputBytes: 0,
+					}, bridgeEnv);
 					throw new ToolAbortError("Command aborted");
 				}
 				if (createRaced.kind === "timeout") {
@@ -1359,13 +1423,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						outputLines: 0,
 						outputBytes: 0,
 					};
-					this.#recordBashAttempt({
-						command,
-						cwd: commandCwd,
-						env: bridgeEnv,
-						result: timedOutResult,
-						startedAt,
-					});
+					recordBridgeTerminal(timedOutResult, bridgeEnv);
 					this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
 					throw new ToolError("Command timed out");
 				}
@@ -1404,6 +1462,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 					if (raced.kind === "aborted" || signal?.aborted) {
 						await Promise.race([fireKill(), Bun.sleep(killGraceMs)]);
+						recordBridgeTerminal({
+							output: lastPolledOutput.output,
+							exitCode: undefined,
+							cancelled: true,
+							timedOut: false,
+							truncated: lastPolledOutput.truncated,
+							totalLines: lastPolledOutput.output.length > 0 ? lastPolledOutput.output.split("\n").length : 0,
+							totalBytes: lastPolledOutput.output.length,
+							outputLines: lastPolledOutput.output.length > 0 ? lastPolledOutput.output.split("\n").length : 0,
+							outputBytes: lastPolledOutput.output.length,
+						}, bridgeEnv);
 						throw new ToolAbortError("Command aborted");
 					}
 
@@ -1436,13 +1505,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
 							outputBytes: current.output.length,
 						};
-						this.#recordBashAttempt({
-							command,
-							cwd: commandCwd,
-							env: bridgeEnv,
-							result: timedOutResult,
-							startedAt,
-						});
+						recordBridgeTerminal(timedOutResult, bridgeEnv);
 						this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
 						throw new ToolError("Command timed out");
 					}
@@ -1503,13 +1566,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				};
 
 				const bridgeNotices: string[] = [];
-				const ledgerPrefixNotices = this.#recordBashAttempt({
-					command,
-					cwd: commandCwd,
-					env: bridgeEnv,
-					result: bridgeResult,
-					startedAt,
-				});
+				const ledgerPrefixNotices = recordBridgeTerminal(bridgeResult, bridgeEnv);
 				if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
@@ -1520,6 +1577,28 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					terminalId: handle.terminalId,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 				});
+			} catch (error) {
+				// createTerminal / waitForExit rejections and other unexpected bridge
+				// failures must still land exactly one terminal ledger row.
+				if (!bridgeOutcomeRecorded) {
+					const message = error instanceof Error ? error.message : String(error);
+					const cancelled = signal?.aborted === true || error instanceof ToolAbortError;
+					recordBridgeTerminal(
+						{
+							output: message,
+							exitCode: undefined,
+							cancelled,
+							timedOut: false,
+							truncated: false,
+							totalLines: message.length > 0 ? message.split("\n").length : 0,
+							totalBytes: Buffer.byteLength(message, "utf8"),
+							outputLines: message.length > 0 ? message.split("\n").length : 0,
+							outputBytes: Buffer.byteLength(message, "utf8"),
+						},
+						backendPreflight?.env ?? resolvedEnv,
+					);
+				}
+				throw error;
 			} finally {
 				clearTimeout(timeoutTimer);
 				signal?.removeEventListener("abort", onAbortSignal);
@@ -1549,33 +1628,58 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		}
 		const wallTimeStart = performance.now();
 		const startedAt = new Date().toISOString();
-		const result: BashResult | BashInteractiveResult = interactiveUi
-			? await runInteractiveBashPty(interactiveUi, {
-					// PTY bypasses executeBash, so feed it the direnv-transformed
-					// command + merged env (backendPreflight is defined whenever this
-					// branch runs, since both gate on canUseInteractiveBashPty).
-					command: backendPreflight?.command ?? command,
-					cwd: commandCwd,
-					timeoutMs,
-					signal,
-					env: backendPreflight?.env ?? resolvedEnv,
-					artifactPath,
-					artifactId,
-				})
-			: // executeBash runs its OWN direnv preflight internally — pass the RAW
-				// command + resolvedEnv here so the unset prefix / env merge is not
-				// applied twice.
-				await executeBash(command, {
-					cwd: commandCwd,
-					sessionKey: this.session.getSessionId?.() ?? undefined,
-					timeout: timeoutMs ?? 0,
-					signal,
-					env: resolvedEnv,
-					artifactPath,
-					artifactId,
-					onChunk: streamTailUpdates(tailBuffer, onUpdate),
-					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-				});
+		let result: BashResult | BashInteractiveResult;
+		try {
+			result = interactiveUi
+				? await runInteractiveBashPty(interactiveUi, {
+						// PTY bypasses executeBash, so feed it the direnv-transformed
+						// command + merged env (backendPreflight is defined whenever this
+						// branch runs, since both gate on canUseInteractiveBashPty).
+						command: backendPreflight?.command ?? command,
+						cwd: commandCwd,
+						timeoutMs,
+						signal,
+						env: backendPreflight?.env ?? resolvedEnv,
+						artifactPath,
+						artifactId,
+					})
+				: // executeBash runs its OWN direnv preflight internally — pass the RAW
+					// command + resolvedEnv here so the unset prefix / env merge is not
+					// applied twice.
+					await executeBash(command, {
+						cwd: commandCwd,
+						sessionKey: this.session.getSessionId?.() ?? undefined,
+						timeout: timeoutMs ?? 0,
+						signal,
+						env: resolvedEnv,
+						artifactPath,
+						artifactId,
+						onChunk: streamTailUpdates(tailBuffer, onUpdate),
+						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+					});
+		} catch (error) {
+			// Executor/PTY rejections leave before the normal post-await ledger write.
+			const message = error instanceof Error ? error.message : String(error);
+			const cancelled = signal?.aborted === true || error instanceof ToolAbortError;
+			this.#recordBashAttempt({
+				command,
+				cwd: commandCwd,
+				env: interactiveUi ? backendPreflight?.env ?? resolvedEnv : resolvedEnv,
+				result: {
+					output: message,
+					exitCode: undefined,
+					cancelled,
+					timedOut: false,
+					truncated: false,
+					totalLines: message.length > 0 ? message.split("\n").length : 0,
+					totalBytes: Buffer.byteLength(message, "utf8"),
+					outputLines: message.length > 0 ? message.split("\n").length : 0,
+					outputBytes: Buffer.byteLength(message, "utf8"),
+				},
+				startedAt,
+			});
+			throw error;
+		}
 		const wallTimeMs = performance.now() - wallTimeStart;
 		const ledgerPrefixNotices = this.#recordBashAttempt({
 			command,

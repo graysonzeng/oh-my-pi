@@ -1203,12 +1203,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					semaphoreHeld = false;
 					this.#releaseSpawnSemaphore();
 				};
-				const failQueuedTimeout = (timeoutMs: number): never => {
+				const failQueuedTimeout = async (timeoutMs: number): Promise<never> => {
 					releasePermit();
 					progress.status = "failed";
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
 					recordJobTimeout("queued_timeout_triggered");
 					settleOnce(true);
+					// Publish a terminal tool snapshot before throwing so the original
+					// async task block can finalize/untrack instead of freezing on pending.
+					try {
+						await reportProgress(
+							queuedTimeoutErrorText(timeoutMs),
+							buildDetails() as unknown as Record<string, unknown>,
+						);
+					} catch {
+						// Progress delivery is best-effort; settlement already completed.
+					}
 					throw new TaskJobError(queuedTimeoutErrorText(timeoutMs));
 				};
 				const failAbortedBeforeExecution = (): never => {
@@ -1241,7 +1251,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// (timer may still fire after cancel won the race).
 					const reason = combinedSignal.reason;
 					if (isQueuedTimeoutReason(reason)) {
-						failQueuedTimeout(reason.timeoutMs);
+						await failQueuedTimeout(reason.timeoutMs);
 					}
 					failAbortedBeforeExecution();
 				} finally {
@@ -1253,7 +1263,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				if (combinedSignal.aborted) {
 					const reason = combinedSignal.reason;
 					if (isQueuedTimeoutReason(reason)) {
-						failQueuedTimeout(reason.timeoutMs);
+						await failQueuedTimeout(reason.timeoutMs);
 					}
 					failAbortedBeforeExecution();
 				}
@@ -1306,13 +1316,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// A missing result means the sync path failed at the tool level
 					// (results: []) — treat it as a failure, not success.
 					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;
-					if (
-						singleResult?.aborted &&
-						typeof singleResult.abortReason === "string" &&
-						singleResult.abortReason.includes("runtime limit exceeded")
-					) {
-						recordJobTimeout("runtime_timeout_triggered");
-					}
+
 					// F8: runtime timeout keeps AgentProgress.status="aborted"; AsyncJob becomes failed via TaskJobError.
 					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
@@ -1610,6 +1614,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 	}
 
+	/** Record runtime-timeout metrics once per spawn id for both async and sync paths. */
+	#recordRuntimeTimeoutMetric(jobKey: string, result: SingleResult | undefined): void {
+		if (
+			result?.aborted &&
+			typeof result.abortReason === "string" &&
+			result.abortReason.includes("runtime limit exceeded")
+		) {
+			recordTimeoutMetric("runtime_timeout_triggered", jobKey);
+		}
+	}
+
 	/** Build the tool result (summary text + details) for a settled run. */
 	#buildResultPayload(
 		result: SingleResult,
@@ -1617,6 +1632,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		totalDurationMs: number,
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
+		this.#recordRuntimeTimeoutMetric(result.id, result);
 		const status = result.aborted
 			? "cancelled"
 			: result.exitCode === 0 && result.error

@@ -29,14 +29,24 @@ describe("BashAttemptLedgerV1 identity", () => {
 	});
 
 	it("uses cwd and sorted environment names without env values", () => {
-		const first = buildBashStateFingerprint({ cwd: "/repo", envNames: ["SECRET_TOKEN", "PATH"] });
-		const reordered = buildBashStateFingerprint({ cwd: "/repo", envNames: ["PATH", "SECRET_TOKEN"] });
-		const changedName = buildBashStateFingerprint({ cwd: "/repo", envNames: ["PATH", "OTHER_TOKEN"] });
-		const changedCwd = buildBashStateFingerprint({ cwd: "/tmp", envNames: ["PATH", "SECRET_TOKEN"] });
+		const first = buildBashStateFingerprint({ cwd: "/repo", envNames: ["SECRET_TOKEN", "PATH"], codeRevision: "abc" });
+		const reordered = buildBashStateFingerprint({
+			cwd: "/repo",
+			envNames: ["PATH", "SECRET_TOKEN"],
+			codeRevision: "abc",
+		});
+		const changedName = buildBashStateFingerprint({ cwd: "/repo", envNames: ["PATH", "OTHER_TOKEN"], codeRevision: "abc" });
+		const changedCwd = buildBashStateFingerprint({ cwd: "/tmp", envNames: ["PATH", "SECRET_TOKEN"], codeRevision: "abc" });
+		const changedRevision = buildBashStateFingerprint({
+			cwd: "/repo",
+			envNames: ["PATH", "SECRET_TOKEN"],
+			codeRevision: "def",
+		});
 
 		expect(first).toBe(reordered);
 		expect(first).not.toBe(changedName);
 		expect(first).not.toBe(changedCwd);
+		expect(first).not.toBe(changedRevision);
 	});
 });
 
@@ -223,7 +233,7 @@ describe("BashTool ledger completion integration", () => {
 			createTerminal: async () => handle,
 		};
 		const session = {
-			cwd: "/tmp",
+			cwd: process.cwd(),
 			hasUI: false,
 			settings,
 			skills: [],
@@ -246,7 +256,7 @@ describe("BashTool ledger completion integration", () => {
 	it("records timeout terminals from ACP create and poll paths", async () => {
 		const makeSession = (sessionId: string, bridge: ClientBridge): ToolSession =>
 			({
-				cwd: "/tmp",
+				cwd: process.cwd(),
 				hasUI: false,
 				settings: Settings.isolated({
 					"bash.direnv": "off",
@@ -260,11 +270,12 @@ describe("BashTool ledger completion integration", () => {
 				getClientBridge: () => bridge,
 			}) as unknown as ToolSession;
 		const expectTimeoutAttempt = (session: ToolSession, command: string): void => {
-			const ledger = getBashAttemptLedgerStore(session)?.get(
-				buildBashCommandFingerprint({ command, cwd: "/tmp" }),
-				buildBashStateFingerprint({ cwd: "/tmp", envNames: [] }),
-			);
-			expect(ledger?.attempts.at(-1)?.terminal).toEqual({ kind: "timeout" });
+			const cwd = process.cwd();
+			const commandFingerprint = buildBashCommandFingerprint({ command, cwd });
+			const authoritative = getBashAttemptLedgerStore(session)
+				?.list()
+				.find(entry => entry.commandFingerprint === commandFingerprint);
+			expect(authoritative?.attempts.at(-1)?.terminal).toEqual({ kind: "timeout" });
 		};
 
 		const createCommand = "printf create-timeout";
