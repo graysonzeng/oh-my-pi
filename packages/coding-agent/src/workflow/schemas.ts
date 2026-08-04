@@ -357,6 +357,11 @@ export const PlanReviewControlStateSchema = z
 		planRejectionCount: z.number().int().min(0),
 		arbitrationCycles: z.union([z.literal(0), z.literal(1)]),
 		arbitrationTrigger: z.enum(["contradiction", "suspicious_pass", "max_cycles_author_reject"]).nullable(),
+		// Defaults keep legacy control artifacts (pre-HIGH-5/HIGH-10) parseable.
+		arbitrationAttemptId: z.string().min(1).nullable().default(null),
+		arbitrationAttemptPhase: z.enum(["reserved", "completed", "failed_closed"]).nullable().default(null),
+		// Missing cohort on old artifacts is filled at hydrate time (legacy → v1).
+		reviewSchemaCohort: z.enum(["v1", "v2"]).default("v1"),
 		latestPlanArtifactRef: z.string().nullable(),
 		latestReviewArtifactRef: z.string().nullable(),
 		authorResponsesArtifactRef: z.string().nullable(),

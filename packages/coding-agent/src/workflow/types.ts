@@ -256,14 +256,28 @@ export type PlanReviewArtifact = ReviewArtifactV1 | PlanReviewArtifactV2;
 
 export type PlanReviewSubstateV1 = "initial_review" | "awaiting_replan" | "rereview" | "arbitration" | "awaiting_human";
 
+export type PlanReviewSchemaCohortV1 = "v1" | "v2";
+
+export type PlanReviewArbitrationAttemptPhaseV1 = "reserved" | "completed" | "failed_closed";
+
 export interface PlanReviewControlStateV1 {
 	schemaVersion: 1;
 	kind: "plan_review_control_state";
 	substate: PlanReviewSubstateV1;
 	reviewRound: 1 | 2;
 	planRejectionCount: number;
+	/** 0 = never reserved; 1 = sole cycle reserved or completed (maxArbitrationCycles default 1). */
 	arbitrationCycles: 0 | 1;
 	arbitrationTrigger: Exclude<PlanReviewTriggerReasonV1, null> | null;
+	/** Stable id for the sole reserved arbitration attempt; null until reserved. */
+	arbitrationAttemptId: string | null;
+	/** Pre-call reservation / completion phase for non-replayable resume. */
+	arbitrationAttemptPhase: PlanReviewArbitrationAttemptPhaseV1 | null;
+	/**
+	 * Immutable plan-review schema cohort for this workflow.
+	 * Persisted before the first review call so resume cannot flip V1↔V2 mid-flight.
+	 */
+	reviewSchemaCohort: PlanReviewSchemaCohortV1;
 	latestPlanArtifactRef: string | null;
 	latestReviewArtifactRef: string | null;
 	authorResponsesArtifactRef: string | null;

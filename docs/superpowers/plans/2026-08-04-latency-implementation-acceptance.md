@@ -46,7 +46,7 @@ Residual arms implemented this round (all default-off): context optimization act
 Session-frozen snapshot helper: `freezeLatencyArmSnapshot` / `resolveLatencyArmsFromSettings` in `packages/coding-agent/src/latency/arms.ts`.  
 Combined experiments require explicit `combinedArmId` + ≥2 `childArms`.
 
-Quality stop (any arm): completion/verifier/review −>2pp, rework/dup-read +>10%, P0/P1 +>10% → rollback that arm only.
+Quality stop (any arm): completion/verifier/review −>2pp, rework/dup-read +>10%, any treatment-attributed P0/P1 escape (zero tolerance) → rollback that arm only.
 
 ## 3. What landed (canonical owners only)
 

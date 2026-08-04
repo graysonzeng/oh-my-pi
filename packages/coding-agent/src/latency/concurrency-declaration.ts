@@ -97,7 +97,8 @@ export type ConcurrencyValidationErrorCode =
 	| "invalid_rendezvous"
 	| "invalid_quorum"
 	| "invalid_max_concurrency"
-	| "scope_hash_required";
+	| "scope_hash_required"
+	| "fingerprint_mismatch";
 
 export interface ConcurrencyValidationResult {
 	ok: boolean;
@@ -208,6 +209,29 @@ export function validateConcurrencyDeclaration(
 	if (!decl.scopeArtifactSha256?.trim()) {
 		errors.push({ code: "scope_hash_required", message: "scopeArtifactSha256 required" });
 	}
+	// Fail closed on stale/tampered fingerprints: recompute the canonical digest.
+	if (decl.schemaVersion === WORKFLOW_CONCURRENCY_DECLARATION_VERSION && Array.isArray(decl.units)) {
+		const expectedFingerprint = fingerprintConcurrencyDeclaration({
+			schemaVersion: decl.schemaVersion,
+			declarationId: decl.declarationId,
+			ownerKind: decl.ownerKind,
+			ownerId: decl.ownerId,
+			scopeArtifactRef: decl.scopeArtifactRef,
+			scopeArtifactSha256: decl.scopeArtifactSha256,
+			revision: decl.revision,
+			maxConcurrency: decl.maxConcurrency,
+			completionPolicy: decl.completionPolicy,
+			failurePolicy: decl.failurePolicy,
+			cancelPolicy: decl.cancelPolicy,
+			units: decl.units,
+		});
+		if (decl.fingerprint !== expectedFingerprint) {
+			errors.push({
+				code: "fingerprint_mismatch",
+				message: "declaration fingerprint does not match canonical content",
+			});
+		}
+	}
 	if (!Number.isFinite(decl.revision) || decl.revision < 0) {
 		errors.push({ code: "missing_required", message: "revision must be >= 0" });
 	}
@@ -297,7 +321,7 @@ export function validateConcurrencyDeclaration(
 	}
 	if (ids.size > 0 && seen !== ids.size) errors.push({ code: "cycle", message: "dependency graph has a cycle" });
 
-	// Independent write ownership and same-isolation overlap are unsafe.
+	// Independent write ownership and same-isolation conflicts are unsafe even with disjoint paths.
 	for (let left = 0; left < (decl.units ?? []).length; left++) {
 		for (let right = left + 1; right < (decl.units ?? []).length; right++) {
 			const a = decl.units[left]!;
@@ -305,15 +329,18 @@ export function validateConcurrencyDeclaration(
 			if (!a || !b || typeof a !== "object" || typeof b !== "object") continue;
 			const ordered = a.dependsOn.includes(b.id) || b.dependsOn.includes(a.id);
 			const overlap = pathSetsOverlap(a.paths ?? [], b.paths ?? []);
-			if (!overlap) continue;
-			if (!ordered && (a.mode === "write" || b.mode === "write")) {
+			const sameIsolation = Boolean(
+				a.isolationScope && a.isolationScope.trim() && a.isolationScope === b.isolationScope,
+			);
+			if (!ordered && overlap && (a.mode === "write" || b.mode === "write")) {
 				errors.push({
 					code: "path_overlap",
 					message: `write path overlap between ${a.id} and ${b.id}`,
 					unitId: a.id,
 				});
 			}
-			if (a.isolationScope && a.isolationScope === b.isolationScope) {
+			// Isolation scope conflicts are independent of path overlap.
+			if (sameIsolation) {
 				errors.push({
 					code: "isolation_overlap",
 					message: `isolationScope overlap between ${a.id} and ${b.id}`,
@@ -411,8 +438,10 @@ export function resolveEffectiveConcurrency(limits: {
 
 function unitsConflict(a: ConcurrencyUnitV1, b: ConcurrencyUnitV1): boolean {
 	if (a.dependsOn.includes(b.id) || b.dependsOn.includes(a.id)) return true;
+	const sameIsolation = Boolean(a.isolationScope && a.isolationScope.trim() && a.isolationScope === b.isolationScope);
+	if (sameIsolation) return true;
 	if (!pathSetsOverlap(a.paths, b.paths)) return false;
-	return a.mode === "write" || b.mode === "write" || Boolean(a.isolationScope && a.isolationScope === b.isolationScope);
+	return a.mode === "write" || b.mode === "write";
 }
 
 /** Whether auto-parallel should fire: at least two independent ready units with no ownership conflict. */

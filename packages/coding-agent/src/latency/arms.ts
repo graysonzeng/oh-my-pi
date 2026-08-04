@@ -123,9 +123,42 @@ export function isLatencyArmId(value: string): value is LatencyArmId {
 export const LATENCY_QUALITY_STOP = {
 	completionDropPp: 2,
 	reworkRisePct: 10,
-	p0p1RisePct: 10,
+	/** Any treatment-attributed P0/P1 escape stops rollout immediately (zero tolerance). */
+	p0p1ZeroTolerance: true as const,
 	costP50MaxMultiple: 1.5,
 	costP95MaxMultiple: 2,
 	minLatencyImprovePct: 10,
 	spawnedAgentsP95MaxMultiple: 2,
 } as const;
+
+export type LatencyQualityStopDecision =
+	| { stop: false; reason: null }
+	| { stop: true; reason: "p0p1_escape" | "completion_drop" | "rework_rise" | "missing_attribution" };
+
+/**
+ * Evaluate treatment-attributed quality stops before promotion/rollout.
+ * P0/P1 is zero-tolerance: one attributed escape stops the causal arm immediately.
+ */
+export function evaluateLatencyQualityStop(input: {
+	treatmentAttributedP0P1Escapes: number;
+	attributionKnown: boolean;
+	completionDropPp?: number;
+	reworkRisePct?: number;
+}): LatencyQualityStopDecision {
+	if (!input.attributionKnown) {
+		return { stop: true, reason: "missing_attribution" };
+	}
+	if (LATENCY_QUALITY_STOP.p0p1ZeroTolerance && input.treatmentAttributedP0P1Escapes > 0) {
+		return { stop: true, reason: "p0p1_escape" };
+	}
+	if (
+		typeof input.completionDropPp === "number" &&
+		input.completionDropPp > LATENCY_QUALITY_STOP.completionDropPp
+	) {
+		return { stop: true, reason: "completion_drop" };
+	}
+	if (typeof input.reworkRisePct === "number" && input.reworkRisePct > LATENCY_QUALITY_STOP.reworkRisePct) {
+		return { stop: true, reason: "rework_rise" };
+	}
+	return { stop: false, reason: null };
+}

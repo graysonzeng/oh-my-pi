@@ -108,7 +108,7 @@ tools subclasses (non-additive with top-level): hub 21.3h, bash 6.2h, eval 3.7h,
 | `concurrency_execution` | current task/workflow path | declaration-backed lowering | unit intervals/artifacts | disable execution lowering |
 | `eval_gate_migration` | bridge path | parity-proven native + independent overlap | EvalGateParityReceiptV1 | restore bridge |
 
-Combined experiments require a separate `combinedArmId` listing child arms. Quality stop (any arm): completion/verifier/review −>2pp, rework/dup-read +>10%, P0/P1 +>10% → rollback that arm only.
+Combined experiments require a separate `combinedArmId` listing child arms. Quality stop (any arm): completion/verifier/review −>2pp, rework/dup-read +>10%, any treatment-attributed P0/P1 escape (zero tolerance) → rollback that arm only.
 
 ## 5. Phase 0 exit checklist
 

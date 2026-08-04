@@ -347,14 +347,17 @@ function scriptedRunner(script: RunnerScript): StructuredRunner {
 		} else {
 			throw new Error(`unexpected scripted agent ${agent}`);
 		}
-		const identityMode = script.identityMode?.(request, packageIdFromAssignment(request.assignment));
-		if (identityMode) emitRuntimeIdentity(request, identityMode);
+		// Always emit provider-echo attestation so plan_reviewer pin (HIGH-4) and
+		// implementer identity receipts succeed under strict routes.
+		const identityMode: IdentityMode =
+			script.identityMode?.(request, packageIdFromAssignment(request.assignment)) ?? "valid";
+		emitRuntimeIdentity(request, identityMode);
 		const result: StructuredRunnerResult["result"] = {
 			id: `scripted-${label}`,
 			structuredOutput: { status: "valid", data },
 			patchPath,
 			branchName,
-			resolvedModel: identityMode ? requestModel(request) : "test/model",
+			resolvedModel: identityMode === "unknown" ? "test/model" : requestModel(request),
 		};
 		return { result };
 	};

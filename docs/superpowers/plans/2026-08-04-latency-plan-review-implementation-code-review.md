@@ -613,3 +613,122 @@ bun run check:types
 若继续修复：使用 $fix-implement（或 /fix-implement），
 优先 HIGH-5：Do not replay an uncertain or already-persisted arbitration。
 ```
+
+### Round 5 — HIGH-5 non-replayable arbitration (2026-08-05)
+
+**Status**: HIGH-5 closed. Remaining HIGH/MEDIUM from §3 not all closed in this round (see Round 6).
+
+#### What changed
+
+1. **Pre-call reservation of the sole arbitration cycle**
+   - On trigger, control is written as `substate=arbitration`, `arbitrationCycles=1`, `arbitrationAttemptPhase=reserved`, plus stable `arbitrationAttemptId` **before** the external arbitrator call.
+   - New control fields: `arbitrationAttemptId`, `arbitrationAttemptPhase` (`reserved|completed|failed_closed`).
+
+2. **Resume never re-pays**
+   - Trusted arbitration review already present → mark phase `completed` if needed and idempotently finish transition (no model call).
+   - Reserved/uncertain launch without trusted artifact → `awaiting_human` / `arbitration attempt has no trusted artifact` (no second paid call).
+
+3. **Tests**
+   - F5: reserved + no artifact → blocked, `arbitrationCalls=0`
+   - F5b: trusted artifact present → implementing without re-call
+
+#### Verification
+
+```text
+cd packages/coding-agent
+bun test test/latency/plan-review-identity.test.ts \
+  test/workflow/stages/plan-review.test.ts \
+  test/workflow/engine-happy-path.test.ts \
+  test/workflow/engine-plan-rejection.test.ts \
+  test/workflow/engine-resume.test.ts \
+  test/workflow/author-responses.test.ts \
+  test/workflow/requirements-snapshot.test.ts \
+  test/workflow/schemas.test.ts
+→ 56 pass / 0 fail
+```
+
+### Round 6 — HIGH-6..11 batch close (2026-08-05)
+
+**Status**: All §3 HIGH findings closed. MEDIUM items remain open.
+
+#### What changed
+
+1. **HIGH-6 arbitration budget recheck**
+   - `#runPlanArbitration` re-runs global `checkPreStage` and selected-profile `checkProfileBudget` immediately after route resolve and **before** `PlanReviewStage.execute`.
+   - Cycle reservation remains the HIGH-5 pre-call write (`arbitrationCycles=1`).
+
+2. **HIGH-7 concurrency fingerprint + scope bind**
+   - `validateConcurrencyDeclaration` recomputes canonical fingerprint and rejects `fingerprint_mismatch`.
+   - Engine binds raw policy declaration `scopeArtifactSha256` / `scopeArtifactRef` to the approved plan artifact when available.
+
+3. **HIGH-8 isolation scope independent of paths**
+   - Validator emits `isolation_overlap` for identical non-empty `isolationScope` even when paths are disjoint.
+   - `unitsConflict` / `shouldAutoParallel` treat same isolation as conflict before path-overlap early return.
+
+4. **HIGH-9 required non-write units**
+   - Work-package lowering still write-only; required `mode!=="write"` units now throw `required_non_write_units_unsupported` instead of silent drop.
+
+5. **HIGH-10 V1/V2 cohort marker**
+   - `PlanReviewControlStateV1.reviewSchemaCohort` (`v1|v2`) persisted before the first external review call.
+   - Resume hydrates cohort from control; `legacyV1` is driven by durable cohort, not latest review artifact alone.
+   - Schema default for missing cohort on old artifacts: `v1` (legacy-safe).
+
+6. **HIGH-11 P0/P1 zero tolerance**
+   - Replaced inert `p0p1RisePct: 10` with `p0p1ZeroTolerance: true` + `evaluateLatencyQualityStop()`.
+   - Any treatment-attributed P0/P1 escape or missing attribution → stop.
+   - Acceptance + Phase 0 baseline wording corrected.
+
+7. **Fixture residual (HIGH-4 related)**
+   - `engine-work-packages` local scripted runner now always emits provider-echo attestation so plan_reviewer pin succeeds under strict routes.
+
+#### Verification
+
+```text
+cd packages/coding-agent
+bun run check:types
+→ clean
+
+bun test test/latency \
+  test/workflow/stages/plan-review.test.ts \
+  test/workflow/engine-happy-path.test.ts \
+  test/workflow/engine-plan-rejection.test.ts \
+  test/workflow/engine-resume.test.ts \
+  test/workflow/engine-policy-bounds.test.ts \
+  test/workflow/author-responses.test.ts \
+  test/workflow/requirements-snapshot.test.ts \
+  test/workflow/schemas.test.ts \
+  test/workflow/identity-receipt.test.ts \
+  test/workflow/engine-work-packages.test.ts
+→ 132 pass / 0 fail
+```
+
+#### Remaining risk / next review scope
+
+- **Still open (MEDIUM)**: concurrency DAG scaffolding honesty (flat-wave only; dependsOn falls back); smoke receipts for real owner paths; timeout terminal/first-cause/sync metrics; mechanical class strict parser; bash state identity/accounting/session lifetime.
+- **Not claimed closed**: pilot A/B receipts; QualityRouteSnapshotV2; human authority UI; full SQLite control-state migration; configurable `maxArbitrationCycles` beyond sole reserved cycle; required-read unit execution via RuntimePort (currently fail-closed reject).
+- **Residual for HIGH-5/6**: budget gate throws `BudgetExhaustedError` (stage loop transitions to blocked); no dedicated F6 budget-exhaustion integration fixture yet (unit path covered via ledger APIs + pre-call reservation).
+- **Residual for HIGH-10**: pre-upgrade workflows with no control artifact and no review still initialize as V2 on first modern engine entry after upgrade; only control-missing + pre-existing V1 review artifacts remain V1 via hydrate/default. Intentional for new cohorts; migrate-with-V1-marker still recommended for long-lived paused workflows if product requires strict freeze-at-start.
+
+#### Code status
+
+**Not merge-ready for the full review scope** until MEDIUM trust/ops items are closed or explicitly deferred with acceptance relabel. All §3 HIGH findings are fixed and regression-covered.
+
+#### Handoff
+
+**Same session**:
+
+```
+直接执行 $code-review 或 /code-review
+重点复审 Round 5–6：非重放仲裁、预算门、并发指纹/隔离/required units、cohort marker、P0/P1 zero-tolerance。
+```
+
+**New-session recovery prompt**:
+
+```
+请阅读实现文档 docs/superpowers/plans/2026-08-04-latency-implementation-acceptance.md、
+审查文档 docs/superpowers/plans/2026-08-04-latency-plan-review-implementation-code-review.md 的修复记录，
+对本轮修复结果补做下一轮检查；重点关注文档中记录的剩余风险与复审范围。
+
+若继续修复：使用 $fix-implement（或 /fix-implement），
+优先 MEDIUM：concurrency DAG scaffolding honesty / timeout lifecycle / bash accounting。
+```

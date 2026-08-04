@@ -1213,6 +1213,9 @@ export class WorkflowEngine {
 					planRejectionCount: this.#planReviewControl?.planRejectionCount ?? 0,
 					arbitrationCycles: this.#planReviewControl?.arbitrationCycles ?? 0,
 					arbitrationTrigger: null,
+					arbitrationAttemptId: this.#planReviewControl?.arbitrationAttemptId ?? null,
+					arbitrationAttemptPhase: this.#planReviewControl?.arbitrationAttemptPhase ?? null,
+					reviewSchemaCohort: this.#planReviewControl?.reviewSchemaCohort ?? "v2",
 					latestPlanArtifactRef: this.#planArtifactRef.artifactId,
 					latestReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
 					authorResponsesArtifactRef: this.#authorResponsesArtifactRef?.artifactId ?? null,
@@ -1250,6 +1253,10 @@ export class WorkflowEngine {
 						planRejectionCount: rejectionCount,
 						arbitrationCycles: 0,
 						arbitrationTrigger: null,
+						arbitrationAttemptId: null,
+						arbitrationAttemptPhase: null,
+						// New workflows start on V2; legacy resumes hydrate cohort before this path.
+						reviewSchemaCohort: "v2",
 						latestPlanArtifactRef: this.#planArtifactRef?.artifactId ?? null,
 						latestReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
 						authorResponsesArtifactRef: null,
@@ -1257,6 +1264,8 @@ export class WorkflowEngine {
 						humanRequestReason: null,
 						updatedAt: new Date().toISOString(),
 					};
+					// Persist cohort before the first external review call (HIGH-10).
+					await this.#persistPlanReviewControl(workflowId, attemptId);
 				}
 				const control = this.#planReviewControl;
 				if (control.substate === "awaiting_human") {
@@ -1267,53 +1276,45 @@ export class WorkflowEngine {
 					);
 					return;
 				}
-				if (
-					control.substate === "arbitration" &&
-					control.arbitrationCycles === 1 &&
-					this.#planReview?.schemaVersion === 2 &&
-					this.#planReview.reviewKind === "arbitration"
-				) {
-					const arbitrationDecision = this.#planReview.decision;
-					await this.#completeTo(
-						workflowId,
-						attemptId,
-						fresh.status,
-						arbitrationDecision === "approved" ? "implementing" : "blocked",
-						`plan_review:arbitration_${arbitrationDecision}`,
-						fresh.version,
-					);
-					return;
-				}
-				if (control.substate === "arbitration" && control.arbitrationCycles === 1) {
+				if (control.substate === "arbitration") {
+					const trustedArbitration = this.#trustedArbitrationReview(control);
+					if (trustedArbitration) {
+						// Artifact already persisted; finish the transition without another model call.
+						this.#planReview = trustedArbitration;
+						this.#planReviewLegacy = false;
+						if (control.arbitrationAttemptPhase !== "completed" || control.arbitrationCycles !== 1) {
+							this.#planReviewControl = {
+								...control,
+								arbitrationCycles: 1,
+								arbitrationAttemptPhase: "completed",
+								latestReviewArtifactRef:
+									this.#planReviewArtifactRef?.artifactId ?? control.latestReviewArtifactRef,
+								updatedAt: new Date().toISOString(),
+							};
+							await this.#persistPlanReviewControl(workflowId, attemptId);
+						}
+						await this.#completeTo(
+							workflowId,
+							attemptId,
+							fresh.status,
+							trustedArbitration.decision === "approved" ? "implementing" : "blocked",
+							`plan_review:arbitration_${trustedArbitration.decision}`,
+							fresh.version,
+						);
+						return;
+					}
+					// Reserved/uncertain launch without a trusted arbitration artifact: never re-pay.
 					await this.#setPlanReviewAwaitingHuman(
 						workflowId,
 						attemptId,
-						"arbitration attempt has no trusted artifact",
+						control.arbitrationCycles >= 1 || control.arbitrationAttemptPhase === "reserved"
+							? "arbitration attempt has no trusted artifact"
+							: "arbitration resume missing reservation",
 					);
 					return;
 				}
-				// F5 resume: crashed after single-write arbitration entry (cycles still 0).
-				if (control.substate === "arbitration" && control.arbitrationCycles < 1) {
-					const resumeTrigger = control.arbitrationTrigger;
-					if (!resumeTrigger) {
-						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "arbitration resume missing trigger");
-						return;
-					}
-					const arbitration = await this.#runPlanArbitration(
-						workflowId,
-						attemptId,
-						session,
-						signal,
-						policy,
-						resumeTrigger,
-					);
-					if (!arbitration) {
-						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "no eligible plan arbitrator route");
-						return;
-					}
-					await this.#finishSuccessfulArbitration(workflowId, attemptId, fresh.status, fresh.version, arbitration);
-					return;
-				}
+				// Cohort is durable on control; never re-infer mid-flight from the latest artifact alone.
+				this.#planReviewLegacy = control.reviewSchemaCohort === "v1";
 				this.#budgetLedger.recordReviewerCycle();
 				const reviewKind = control.reviewRound === 2 ? "rereview" : "initial";
 				const requirementsSnapshot = await this.#requireRequirementsSnapshot(workflowId, attemptId, request);
@@ -1354,7 +1355,7 @@ export class WorkflowEngine {
 						authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
 						routeSelectionReceiptRef:
 							this.#planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
-						legacyV1: this.#planReviewLegacy,
+						legacyV1: control.reviewSchemaCohort === "v1",
 					});
 				const reviewResult = pinnedReviewer
 					? await this.#withPinnedProfile(
@@ -1502,13 +1503,17 @@ export class WorkflowEngine {
 						return;
 					}
 					this.#planCycles = nextRejectionCount;
-					// F5: single write before arbitration call; cycles stay 0 until success.
+					// HIGH-5: reserve the sole arbitration cycle before the external call.
+					// Resume with reserved+no trusted artifact fails closed (no re-pay).
+					const arbitrationAttemptId = `arb_${randomUUID()}`;
 					this.#planReviewControl = {
 						...this.#planReviewControl,
 						substate: "arbitration",
-						arbitrationCycles: 0,
+						arbitrationCycles: 1,
 						planRejectionCount: nextRejectionCount,
 						arbitrationTrigger: arbitrationTrigger,
+						arbitrationAttemptId,
+						arbitrationAttemptPhase: "reserved",
 						updatedAt: new Date().toISOString(),
 					};
 					await this.#persistPlanReviewControl(workflowId, attemptId);
@@ -1521,6 +1526,13 @@ export class WorkflowEngine {
 						arbitrationTrigger,
 					);
 					if (!arbitration) {
+						if (this.#planReviewControl) {
+							this.#planReviewControl = {
+								...this.#planReviewControl,
+								arbitrationAttemptPhase: "failed_closed",
+								updatedAt: new Date().toISOString(),
+							};
+						}
 						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "no eligible plan arbitrator route");
 						return;
 					}
@@ -2056,12 +2068,34 @@ export class WorkflowEngine {
 				if (!validation.ok) {
 					throw new WorkflowPolicyError("concurrency_declaration_invalid", { errors: validation.errors });
 				}
+				// Bind declaration scope to the approved plan artifact when available.
+				if (this.#planArtifactSha256 && candidate.scopeArtifactSha256 !== this.#planArtifactSha256) {
+					throw new WorkflowPolicyError("concurrency_declaration_invalid", {
+						reason: "scope_artifact_sha256_mismatch",
+						expected: this.#planArtifactSha256,
+						actual: candidate.scopeArtifactSha256,
+					});
+				}
+				if (
+					this.#planArtifactRef?.artifactId &&
+					candidate.scopeArtifactRef &&
+					candidate.scopeArtifactRef !== this.#planArtifactRef.artifactId &&
+					candidate.scopeArtifactRef !== this.#planArtifactRef.recoveryUri
+				) {
+					throw new WorkflowPolicyError("concurrency_declaration_invalid", {
+						reason: "scope_artifact_ref_mismatch",
+						expected: this.#planArtifactRef.artifactId,
+						actual: candidate.scopeArtifactRef,
+					});
+				}
 				concurrencyDeclaration = candidate;
 			} else if (this.#plan?.workPackages) {
 				const generated = workPackagesToConcurrencyDeclaration(this.#plan.workPackages, {
 					declarationId: `${workflowId}:work-packages`,
 					ownerId: workflowId,
 					maxConcurrency: 0,
+					scopeArtifactRef: this.#planArtifactRef?.artifactId ?? `${workflowId}:plan`,
+					scopeArtifactSha256: this.#planArtifactSha256 ?? "0".repeat(64),
 				});
 				if (generated) {
 					const validation = validateConcurrencyDeclaration(generated, { knownFieldsOnly: true });
@@ -2088,7 +2122,17 @@ export class WorkflowEngine {
 				attemptCount: 0,
 			}));
 			const ready = readyConcurrencyUnits(concurrencyDeclaration, initialStates);
-			// Full-unit readiness/isolation contract must pass before write-only work-package lowering.
+			// Work-package lowering only represents write units today. Required read/evidence
+			// units must not be silently dropped — reject mixed/unsupported declarations.
+			const unsupportedRequired = concurrencyDeclaration.units.filter(
+				unit => unit.required && unit.mode !== "write",
+			);
+			if (unsupportedRequired.length > 0) {
+				throw new WorkflowPolicyError("concurrency_declaration_invalid", {
+					reason: "required_non_write_units_unsupported",
+					unitIds: unsupportedRequired.map(unit => unit.id),
+				});
+			}
 			if (!shouldAutoParallel(ready)) {
 				packageInput = undefined;
 			} else {
@@ -2943,6 +2987,25 @@ export class WorkflowEngine {
 			if (error instanceof WorkflowPolicyError) return null;
 			throw error;
 		}
+		// HIGH-6: recheck global + selected-profile budgets immediately before the external call.
+		// The stage-entry precheck can be exhausted by the preceding review in the same stage.
+		if (!(await this.#budgetLedger.checkPreStage())) {
+			const snap = this.#budgetLedger.snapshot();
+			throw new BudgetExhaustedError(snap.requests, snap.costUsd ?? "unknown", snap.limitUsd);
+		}
+		if (
+			!this.#budgetLedger.checkProfileBudget(route.profileId, {
+				maxRequests: route.profile.maxRequests,
+				maxCostUsd: route.profile.maxCostUsd,
+			})
+		) {
+			const profileSnap = this.#budgetLedger.profileSnapshot(route.profileId);
+			throw new BudgetExhaustedError(
+				profileSnap.profileRequests,
+				profileSnap.profileCostUsd ?? "unknown",
+				route.profile.maxCostUsd ?? route.profile.maxRequests ?? 0,
+			);
+		}
 		this.#audit(route);
 		const requirementsSnapshot = await this.#requireRequirementsSnapshot(
 			workflowId,
@@ -3197,7 +3260,28 @@ export class WorkflowEngine {
 		await this.#persistArtifact(workflowId, attemptId, "plan-review-control-state", this.#planReviewControl);
 	}
 
-	/** Persist successful arbitration: stamp cycles=1 only after a non-null result. */
+	/** True when the hydrated plan review is a trusted arbitration decision for this control. */
+	#trustedArbitrationReview(
+		control: PlanReviewControlStateV1,
+	): Extract<PlanReviewArtifact, { schemaVersion: 2 }> | null {
+		const review = this.#planReview;
+		if (!review || review.schemaVersion !== 2 || review.reviewKind !== "arbitration") return null;
+		if (review.decision !== "approved" && review.decision !== "blocked") return null;
+		// Prefer explicit control pointer when present; otherwise accept the hydrated arbitration review.
+		if (
+			control.latestReviewArtifactRef &&
+			this.#planReviewArtifactRef?.artifactId &&
+			control.latestReviewArtifactRef !== this.#planReviewArtifactRef.artifactId
+		) {
+			return null;
+		}
+		if (control.arbitrationTrigger && review.triggerReason && review.triggerReason !== control.arbitrationTrigger) {
+			return null;
+		}
+		return review;
+	}
+
+	/** Persist successful arbitration: mark the reserved attempt completed (cycle already reserved). */
 	async #finishSuccessfulArbitration(
 		workflowId: string,
 		attemptId: string,
@@ -3213,6 +3297,8 @@ export class WorkflowEngine {
 			this.#planReviewControl = {
 				...this.#planReviewControl,
 				arbitrationCycles: 1,
+				arbitrationAttemptPhase: "completed",
+				arbitrationAttemptId: this.#planReviewControl.arbitrationAttemptId ?? `arb_${randomUUID()}`,
 				latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
 				updatedAt: new Date().toISOString(),
 			};
@@ -3509,6 +3595,8 @@ export class WorkflowEngine {
 					const control = PlanReviewControlStateSchema.parse(parsed) as PlanReviewControlStateV1;
 					if (!this.#planReviewControl || control.updatedAt >= this.#planReviewControl.updatedAt) {
 						this.#planReviewControl = control;
+						// Durable cohort is authoritative; do not re-infer from later review artifacts alone.
+						this.#planReviewLegacy = control.reviewSchemaCohort === "v1";
 					}
 					continue;
 				}

@@ -2,9 +2,11 @@ import { describe, expect, it } from "bun:test";
 import { Settings } from "../../src/config/settings";
 import {
 	emptyLatencyArms,
+	evaluateLatencyQualityStop,
 	freezeLatencyArmSnapshot,
 	LATENCY_ARM_IDS,
 	LATENCY_ARM_SETTINGS,
+	LATENCY_QUALITY_STOP,
 } from "../../src/latency/arms";
 import {
 	buildConcurrencyDeclaration,
@@ -86,6 +88,44 @@ describe("latency arm snapshots", () => {
 				childArms: ["context_optimization"],
 			}),
 		).toThrow(/childArms/);
+	});
+});
+
+describe("latency quality stop", () => {
+	it("treats attributed P0/P1 escapes as zero-tolerance stop", () => {
+		expect(LATENCY_QUALITY_STOP.p0p1ZeroTolerance).toBe(true);
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+			}),
+		).toEqual({ stop: false, reason: null });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 1,
+				attributionKnown: true,
+			}),
+		).toEqual({ stop: true, reason: "p0p1_escape" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: false,
+			}),
+		).toEqual({ stop: true, reason: "missing_attribution" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				completionDropPp: 3,
+			}),
+		).toEqual({ stop: true, reason: "completion_drop" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				reworkRisePct: 11,
+			}),
+		).toEqual({ stop: true, reason: "rework_rise" });
 	});
 });
 
@@ -209,6 +249,61 @@ describe("WorkflowConcurrencyDeclarationV1", () => {
 		expect(readyConcurrencyUnits(valid, states)).toHaveLength(2);
 		expect(resolveEffectiveConcurrency({ declarationMax: 8, sessionMax: 2, providerMax: 4 })).toBe(2);
 		expect(resolveEffectiveConcurrency({ declarationMax: 0, sessionMax: 0 })).toBe(0);
+	});
+
+	it("rejects tampered fingerprints and same isolationScope with disjoint paths", () => {
+		const valid = buildConcurrencyDeclaration({
+			declarationId: "d-iso",
+			ownerKind: "workflow",
+			ownerId: "wf-1",
+			scopeArtifactRef: "artifact://plan",
+			scopeArtifactSha256: "b".repeat(64),
+			revision: 0,
+			maxConcurrency: 2,
+			completionPolicy: { kind: "all_required", minSuccesses: null },
+			failurePolicy: "fail_closed",
+			cancelPolicy: "cascade_dependents",
+			units: [
+				{
+					id: "w1",
+					assignment: "write a",
+					paths: ["src/a.ts"],
+					dependsOn: [],
+					mode: "write",
+					required: true,
+					idempotencyKey: "w1",
+					isolationScope: "workspace",
+				},
+				{
+					id: "w2",
+					assignment: "write b",
+					paths: ["src/b.ts"],
+					dependsOn: [],
+					mode: "write",
+					required: true,
+					idempotencyKey: "w2",
+					isolationScope: "workspace",
+				},
+			],
+		});
+		const isolation = validateConcurrencyDeclaration(valid);
+		expect(isolation.ok).toBe(false);
+		expect(isolation.errors.some(e => e.code === "isolation_overlap")).toBe(true);
+		expect(shouldAutoParallel(valid.units)).toBe(false);
+
+		const clean = buildConcurrencyDeclaration({
+			...valid,
+			declarationId: "d-fp",
+			units: [
+				{ ...valid.units[0]!, isolationScope: undefined },
+				{ ...valid.units[1]!, isolationScope: undefined },
+			],
+		});
+		expect(validateConcurrencyDeclaration(clean).ok).toBe(true);
+		const tampered = { ...clean, fingerprint: "0".repeat(64) };
+		const fp = validateConcurrencyDeclaration(tampered);
+		expect(fp.ok).toBe(false);
+		expect(fp.errors.some(e => e.code === "fingerprint_mismatch")).toBe(true);
 	});
 });
 
