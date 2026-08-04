@@ -82,21 +82,23 @@ created by the current build; never delete pre-existing user files.
 
 ## Latest verified baseline
 
-Last updated: 2026-07-31 (Asia/Shanghai).
+Last updated: 2026-08-03 (Asia/Shanghai).
 
 | Item | Verified value |
 |---|---|
-| Source commit | `d86d1834952f642291bb496469bd78cf8a509c6a` / `d86d18349` plus the current uncommitted proxy-discovery reference fix; preserved `.gitignore` changes |
+| Source commit | `c588443b43a76f28b17ad66a93cb8fa25d252a53` / `c588443b4` plus the current uncommitted Biome safe fixes required by the package check and this baseline update |
 | Package version | `omp/17.1.8` |
 | Artifact | `packages/coding-agent/dist/omp` |
 | Installed path | `/Users/sheng/.local/bin/omp` |
-| SHA-256 | `8b612cc2e2a5e2580be19f52dd56c6c3fa6019fe6e4945d76c3277571836d0c9` |
+| SHA-256 | `c996794e7919008d2752260f55198375a0bb2195bbbcb24fbe73f0defb7ddc05` |
 | Native SHA-256 | `6c79bfbd95a3626a038c5f21b4d00636a23e32c8480f2b3ff114821e16474c27` (source and installed cache match; sentinel `__piNativesV17_1_8`) |
 | Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build` |
 | Artifact type | signed arm64 Mach-O executable |
-| Gates | proxy-discovery regression + full model-discovery/model-registry/gateway-reference tests; `bun --cwd=packages/coding-agent run check`; production binary build; artifact type/signature/checksum; artifact and installed `--smoke-test`; installed `gateway/gpt-5.6-sol` metadata; installed path/version/checksum |
+| Gates | Biome safe fixes for the pre-existing check failures; `bun --cwd=packages/coding-agent run check`; production binary build; artifact version/help/stats/type/signature/checksum and `--smoke-test`; installed path/type/signature/version/checksum and `--smoke-test`; native source/cache checksum |
 
-The installed checksum matched the build artifact, `omp --smoke-test` returned
-`smoke-test: ok`, and `gateway/gpt-5.6-sol` resolved to a 372,000-token context window. Existing worktree changes were
-preserved, no commit or official upgrade command was run, and the previous
-installed command remains available at the rollback path above.
+The installed checksum matched the build artifact, both artifact and installed
+`--smoke-test` returned `smoke-test: ok`, and the installed command resolved to
+`/Users/sheng/.local/bin/omp`. The worktree started clean; the formatter fixes
+and this baseline update remain uncommitted. No commit or official upgrade
+command was run, and the previous installed command remains available at the
+rollback path above.

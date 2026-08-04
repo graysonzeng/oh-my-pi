@@ -1,207 +1,391 @@
-# 普通会话默认主动委派：自动并行感知 + 阶段链式推进 + 默认模型路由
+# 普通会话默认主动委派：自动并行感知 + 轻量阶段推进 + 既有模型路由
 
 - 日期：2026-08-04
-- 状态：设计待评审
+- 状态：最终评审修复完成（round 2 reviewer）
+- revision_round: 2
+- reviewer_input_sha256: `bf0dfc7ad334e4bc8653c27a059b4f12e0ba18186a9dec6c7778fa5e95ec009f`
+- reviewed_at: 2026-08-04
+- effective_config_sha256: `1eb09e44cb35d1a2ad0dda2162c0e711d044e039e9e4c18fba9b070c756bd5f1`
 - 范围：`packages/coding-agent/`
-- 关联：`magic-keywords`（workflowz）、`task.eager`、agent frontmatter、`task.agentModelOverrides`、bundled agent 注册（`task/agents.ts`）
+- 关联：`magic-keywords`（workflowz）、`task.eager`、`task.batch`、agent frontmatter、`task.agentModelOverrides`、bundled agent 注册（`task/agents.ts`）、`prompts/tools/workflow.md` canonical owner、`docs/superpowers/specs/2026-08-04-plan-review-pipeline-design.md`
 
 ## 1. 背景与需求
 
-当前普通会话（默认配置）的委派姿态是「能力常在、默认不主动」：`task` 工具每个会话都可用，但系统提示只在 `task.eager !== "default"` 时才渲染正面委派指引，而该设置默认是 `"default"`。`workflowz` 关键词提供了确定性的多 subagent 编排，但需要用户显式输入关键词、走 eval 路径，且是固定 recipe。
+普通主会话在 `task` 工具可用时已经具备委派能力，但仓库 schema 的 `task.eager` 默认仍为 `"default"`，不会渲染正面主动委派指引；本机 effective config 已显式设为 `"preferred"`。`task` 并非“每个会话常驻”：subagent 可受工具 allowlist 与递归深度限制，plan mode subagent 还会被强制收窄为只读工具。`workflowz` 则需要用户显式输入关键词，注入 eval 编排 notice，属于另一条确定性 recipe。
 
 需求：
 
-1. **自动感知及触发 parallel/parallelize**：用户说 `parallel`/`parallelize` 时强制 fan out（已存在）；工作天然分解为独立切片时，普通会话默认自动 fan out，不等用户发话。
-2. **合适场景主动调用 subagent 完成 review/implement/design 任务**：如「要求设计方案」→ 主动调 `planner`（方案设计 agent，新增）产出方案 → 主动调 `reviewer` 评审 → 实现（worker）→ 代码审查，如此类推，近似 workflowz 的流程但非确定性。
-3. **不要 workflowz 的确定性**：姿态性（SHOULD）、模型自组织、每步判断，不注入 workflow notice、不强制 eval 编排。
-4. **默认模型路由**：主动委派时各阶段使用指定默认模型（见 §5）。
+1. **自动感知 parallel/parallelize**：用户明确说 `parallel`/`parallelize` 时继续强制 fan out（现有行为）；未明说时，只有在 scope 后存在至少 2 个独立、可立即运行的切片，才默认 batch fan out。
+2. **主动委派轻量工作**：task 只承接已 scope 的独立切片；只读探索走 scout；具体 patch 的 critique 可走 reviewer。禁止“spawn 一个写任务然后主 agent 空等”；单 subagent 默认仅允许只读 scout 这一现有例外，reviewer 必须与 parent verification 或另一独立切片并行。
+3. **复用 canonical workflow owner**：完整 design→plan-review→implement→verify→code-review→repair 门禁一律走既有 `workflow`；task 自组织轻链不复制 WorkflowArtifact、持久状态、deterministic verifier、repair、receipt、resume 或仲裁。
+4. **保持姿态性而非 workflowz 确定性**：主动委派是 SHOULD，模型先 scope 再自组织，不注入 workflow notice，不强制 eval recipe。
+5. **保留既有模型路由**：通用 worker 保持 `@task`；不新增 planner bundled agent；reviewer 仓库定义保持 Sol→Opus→`@task` 候选链。阶段路由实验只选择既有 agent，不重写其 frontmatter 或 fallback owner。
 
 ## 2. 现状与约束（证据）
 
+**配置基线**（`reviewed_at=2026-08-04`；本机 `/Users/sheng/.omp/agent/config.yml:609-650`；完整文件 hash 见页首）：
+
+| 配置键 | 当前 effective 值 | 来源 | schema/default 区分 |
+|---|---|---|---|
+| `task.eager` | `"preferred"` | [当前本机 effective] 显式键 | [当前 schema 默认] `"default"`（`settings-schema.ts:4645-4648`） |
+| `task.batch` | `true` | [当前本机 effective] 显式键 | [当前 schema 默认] `true`（`:4662-4665`），不是 false |
+| `async.enabled` | `true` | [当前本机 effective] 显式键 | [当前 schema 默认] `true`（`:4134-4136`） |
+| `compaction.thresholdPercent` | `70` | [当前本机 effective] 显式键 | [当前 schema 默认] `-1`（`:2154-2156`），不是 70 |
+| `compaction.idleEnabled` | `true` | [当前本机 effective] 显式键 | [当前 schema 默认] `false`（`:2248-2256`），不是 true |
+| `compaction.idleThresholdTokens` | `200000` | [当前 schema 默认] default-derived；本机未显式覆盖 | schema 默认见 `:2259-2262` |
+| `task.agentModelOverrides` | `{scout: Flash:max, designer: Sol:high, task: Luna:max, reviewer: Sol:xhigh}` | [当前本机 effective] 四个显式键 | [当前 schema 默认] `{}`（`:4817-4820`） |
+| `modelRoles.plan` | `gateway/gpt-5.6-luna:max` | [当前本机 effective] 显式键 | schema record 无此默认项 |
+| `modelRoles.default` | `gateway/deepseek-v4-flash:max` | [当前本机 effective] 显式键 | schema record 无此默认项 |
+| `defaultThinkingLevel` | `"high"` | [当前 schema 默认]；本机未显式覆盖 | classifier 仅 thinking=`auto` 时激活（`settings-defs.ts:126-129`） |
+| `modelOptimization.enabled` | `false` | [当前 schema 默认]；本机未显式覆盖 | ordinary-session truncation seam 已存在，只是默认关闭 |
+
+**能力与约束**：
+
 | 事实 | 证据 |
 |---|---|
-| `task` 工具每个 (sub)agent 会话常驻 | `task/index.ts:462-464`（`TaskTool.create` 每会话运行） |
-| 委派姿态由 `task.eager` 驱动，默认 `"default"` | `sdk.ts:2774-2775`（`eagerTasks = task.eager !== "default"`）；`settings-schema.ts:4645-4648`（默认 `"default"`） |
-| 系统提示 Delegation 段条件渲染 | `prompts/system/system-prompt.md:155-190`：非 codex 分支 `eagerTasks=false` 时仅 3 条被动规则 + gates，无 "Delegation is preferred"；codex 分支（仅 GPT-5.6，`task/prompt-policy.ts:4`）`eagerTasks=false` 时明确 "Do not spawn sub-agents unless…" |
-| `parallel` MUST 规则只在用户说出关键词时触发 | `system-prompt.md:112` |
-| gates 已有「不可串行化并行切片」但无「无需用户发话」授权 | `system-prompt.md:184`（Width = real independence. NEVER serialize…） |
-| `always` 首条 prelude 仅 `task.eager==="always"` 且主会话、非 plan-mode 触发 | `session/todo-tracker.ts:159-173` |
-| agent 定义支持 `model` + `thinking-level` frontmatter | `prompts/agents/frontmatter.md:6-7`；现状：scout/librarian=`@smol`，reviewer=`@slow`，designer=`@designer`，task worker=`@task` |
-| bundled agents 构建时嵌入，`task/agents.ts` 的 `EMBEDDED_AGENT_DEFS` 是**唯一注册点**（非目录扫描） | `task/agents.ts:8-15,31-75`（逐个 `import … with { type: "text" }` + 数组项；新增 agent 必须同步接线，否则 `task` 工具描述与 `discoverAgents` 中不存在） |
-| 按 agent 的模型覆盖设置存在 | `task.agentModelOverrides`（`settings-schema.ts:4817-4820`，record，默认 `{}`），`/agents` 面板可编辑（`modes/components/agent-dashboard.ts:436,583`） |
-| 模型解析优先级：调用方 override > agent frontmatter > 继承会话模型 | `task/structured-subagent.ts:297-304` + `config/model-resolver.ts:1104+`（`resolveAgentModelPatterns`） |
-| 模型角色别名 `@smol`/`@slow`/`@default` 由 `modelRoles` 设置解析 | `settings-schema.ts:564`；`model-resolver.ts:1074-1077`（`expandRoleAlias`） |
-| effort 后缀语法 `provider/model:level`（`:max` 为真实 thinking level，有 literal-id 保护） | `advisor/config.ts:11-12`；`model-resolver.ts:96-101,190-198`（`MAX_THINKING_SUFFIX_OPTIONS`） |
-| `task.maxEffort` 限制 per-spawn effort 上限，默认 `"max"` | `settings-schema.ts:4798-4810` |
-| 现有 gates 反对「第一步外包顶层方案」 | `system-prompt.md:182`（"NEVER outsource the top-level plan… the canonical dumb spawn"）——与需求 2 存在张力，见 D5 |
-| 测试面无委派措辞/默认值断言；相关测试全部传显式值 | 搜 `Delegation is preferred`/`task.eager` 于 `test/`：仅 `agent-session-eager-task.test.ts`、`agent-session-eager-compaction.test.ts`、`settings-manager.test.ts`、`acp-lazy-startup.test.ts`（均显式传值） |
+| `task` 非每会话常驻；subagent 可有受限工具集，递归深度达到上限后不再暴露 `task` | `tools/index.ts:481-487,639-640`；`task.maxRecursionDepth` schema 默认 2（`settings-schema.ts:4719-4722`） |
+| plan mode 的 task child 被强制替换为只读工具集、移除 `spawns`/prewalk；isolation/apply/merge 控制被拒绝 | `task/structured-subagent.ts:194-220,256-279`；`test/task/structured-subagent.test.ts:151-165` |
+| 委派姿态由 `task.eager` 驱动 | `sdk.ts:2774-2775`：`eagerTasks = task.eager !== "default"`；`eagerTasksAlways = task.eager === "always"` |
+| 系统提示 Delegation 段按 `eagerTasks` 条件渲染 | `prompts/system/system-prompt.md:155-190`；GPT-5.6 分支判定在 `task/prompt-policy.ts:7` |
+| 当前 prompt 的 codex-default 禁止 spawn 与无条件 “Default to parallel” 直接冲突 | `system-prompt.md:162` vs `:175-177`；这是必须永久修正的 correctness bug，不作为可回滚实验 arm |
+| 用户明确说 `parallel`/`parallelize` 的 MUST 规则已存在 | `system-prompt.md:112` |
+| Delegation gates 已规定 scope-first、禁止 spawn-one-then-wait、width=真实独立性 | `system-prompt.md:181-190` |
+| `always` 的首轮 eager task prelude 仅主会话且非 plan mode 渲染 | `session/todo-tracker.ts:159-173` |
+| bundled agent frontmatter 当前为 scout/librarian=`@smol`、designer=`@designer`、task=`@task`；reviewer 为 Sol→Opus→`@task` | `prompts/agents/{scout,librarian,designer,reviewer}.md`；`task/agents.ts:31-75` |
+| 本机 reviewer override 为单一 `gateway/gpt-5.6-sol:xhigh`，会先于 reviewer frontmatter 候选链生效 | config receipt；`task/structured-subagent.ts:297-304` |
+| bundled agents 由 `task/agents.ts` 的 `EMBEDDED_AGENT_DEFS` 显式嵌入，不做目录扫描 | `task/agents.ts:8-15,31-75` |
+| project/user agent 优先于 bundled agent，同名覆盖 | `task/discovery.ts:63-67,121-137` |
+| 模型解析优先级为 per-call `request.model` > `task.agentModelOverrides[agent]` > agent frontmatter > active/session fallback | `task/structured-subagent.ts:297-304`；`config/model-resolver.ts:1104-1150` |
+| `@task` 是模型角色/会话继承标记；通用 worker 保持它才能尊重用户 role 与 active-session fallback | `config/model-roles.ts:22-65`；`model-resolver.ts:960-972,1104-1150` |
+| task-agent 候选 fallback 由 `model-resolver.ts` + `task/executor.ts` 的 retry fallback chain 处理；workflow 的 family-aware `model-router.ts` 不拥有普通 task 路由 | `task/executor.ts:150-225,2625-2688` |
+| `task.maxEffort` 默认 `"max"`，仅调用方显式传 `effort` 时 clamp；frontmatter 的显式 xhigh 不受该 ceiling 降低 | `settings-schema.ts:4798-4810`；`task/executor.ts:2696-2718` |
+| 完整 gated pipeline 的 canonical owner 已存在 | `prompts/tools/workflow.md:1-9`：“plan → plan review → implement (isolated) → verify → code review → repair → final verify” |
+| 当前 workflow plan reviewer 是只读 `ReviewArtifactV1` 三态评审；D 文档拟议在同一 owner 上增加反锚定字段、同评审复审与仲裁，不是当前已实现事实 | `prompts/workflow/plan-reviewer.md:1-24`；D 文档 §§3-5 |
+| task 的 generic reviewer 是 patch-only code reviewer，输出 `overall_correctness: correct|incorrect` | `prompts/agents/reviewer.md:1-76` |
+| 现有 `task.eager` 显式值回归覆盖恰有六个文件 | `test/agent-session-eager-task.test.ts`、`agent-session-eager-compaction.test.ts`、`agent-session-plan-reference-compaction.test.ts`、`agent-session-plan-reference-setup-bail.test.ts`、`settings-manager.test.ts`、`acp-lazy-startup.test.ts` |
+| ordinary-session tool output optimization 已复用共享 seam，当前缺口只是 `modelOptimization.enabled=false` | `session/agent-session.ts:3046-3085`；`workflow/tool-output-manager.ts:364-401` |
 
 ## 3. 设计目标
 
-- 普通会话（默认配置）系统提示获得「prefer 主动」的正面委派指引。
-- 自动并行：独立切片 → 默认 fan out。
-- 阶段链：design → review → implement → code review，由模型按判断推进，每步并行 fan out 可继续。
-- 阶段默认模型按 §5 路由，用户可覆盖。
-- 显式 opt-out（`task.eager: default`）与 codex-default（GPT-5.6 非 eager）行为不变。
+- 仓库默认最终获得“prefer 主动”的正面委派姿态，但必须先通过 §8 的独立 A/B arms。
+- 自动并行只在 scope 后存在 **≥2 个独立可运行切片**时默认 fan out；不为了并行制造切片。
+- task 轻量委派只覆盖已 scope 切片与只读 exploration/critique；完整门禁交给 workflow。
+- 单写任务不得 spawn-one-then-wait；单只读 scout 可用于隔离大体量探索上下文。
+- plan mode 只允许只读 child；共享 eager 文案不得给出正向 working-tree/implementation 指令。
+- 阶段选择复用既有 task/scout/reviewer agent；保持 `@task`、reviewer 候选链与用户 override/fallback。
+- `task.eager: default` 始终是绝对 opt-out；GPT-5.6 codex-default 不收到互相矛盾的指令。
 
 ## 4. 设计决策
 
-**D1 — 全局默认翻转：`task.eager` 默认 `"default"` → `"preferred"`**
-- 一个值翻转同时覆盖非 codex 分支（渲染 "Delegation is preferred"）与 codex 分支（渲染 "Proactive multi-agent delegation is active"），零代码路径改动。
-- 翻转后 `"default"` 成为**显式 opt-out**（值名保留：既有迁移逻辑 `settings.ts:1420-1424` 把 boolean `false` 归一为 `"default"`；已显式保存 `"default"` 的用户不受影响）。
-- 同步更新 settings UI 文案（options 描述），避免「Default」标签误导。
+### D1 — 默认翻转采用“先开关、后推广”
 
-**D2 — 新增共享 eager 块（自动并行感知 + 阶段链推进），而非改 parallel 规则**
-- 新块位置：Delegation 段内、codex/非 codex split 的 `{{/if}}` 之后、`## Delegation gates:` 之前，以 `{{#if eagerTasks}}` 包裹。
-- 收益：preferred / always / codex-eager 三态统一获得；显式 opt-out（`default`）与 codex-default 不渲染，**避免与 "Do not spawn sub-agents" 矛盾**。
-- 不把自动感知行放进 TOOL POLICY（对所有会话可见）——会与 codex-default 的禁止条款冲突。
+目标状态仍是 `task.eager` schema 默认从 `"default"` 改为 `"preferred"`。为避免先全局翻转再补实验：
 
-**D3 — 阶段专精提法：角色名 + 指向 task 工具动态 agent 列表**
-- 方案设计 → 新增 **`planner`** agent（方案/架构设计，借鉴 `prompts/workflow/planner.md` 的只读规划角色改编为普通 task 工具 agent）；UI/UX 设计仍走既有 `designer`；review → `reviewer`；探路 → `scout`；实现 → 通用 worker（`task`）。
-- `task.md` 工具描述已动态枚举可用 agents 且要求 "Pick the most specific agent"。措辞提角色名同时指向 "Available Agents list"，避免 spawn policy（`allowedAgentsText`/`spawningDisabled`）裁剪时失配。
+1. 先实现 §4 D2 的三个独立 guidance 开关，默认 false；
+2. 用显式 `task.eager: preferred` 做 pilot；
+3. arm 1 通过停止条件后，才把 schema 默认改为 `"preferred"`；
+4. 三个 guidance arm 分别通过后才逐项推广默认，不捆绑上线。
 
-**D4 — 默认模型路由落点：bundled agent frontmatter（显式 model pattern），不触碰全局角色别名**
-- 机制已具备：`structured-subagent.ts:297-304` 解析优先级 = 调用方 override（`task.agentModelOverrides[agentName]`）> agent frontmatter `model` > 继承会话模型。
-- **不**改 `@smol`/`@slow` 全局别名默认：`@smol` 被 cleanse / commit agent / prewalk / `@slow` 被多处复用，改默认会波及无关调用方。
-- 落点：给阶段 agent（planner / reviewer / 通用 task worker）frontmatter 直接写 `model: "gateway/<model>:<effort>"`；`designer`/`scout`/`librarian` 保持现状。用户级覆盖走既有 `task.agentModelOverrides`（`/agents` 面板已支持）。
-- `:max` 后缀：`deepseek-v4-flash:max` 依赖 max-aware split（`model-resolver.ts:196-198`）；若 gateway 侧存在字面 `:max` 结尾 id，按既有 literal-id 保护机制处理（实现阶段验证）。
+已显式保存 `"default"` 的用户不受 schema 默认翻转影响；boolean `false` 迁移仍归一为 `"default"`（`config/settings.ts:1421-1424`）。
 
-**D5 — 调和「主动调 planner」与现有 gates「NEVER outsource the top-level plan」**
-- 边界：**scoping 与顶层分解永远由主模型内联完成**（现状 gates 不变）；明确、独立的**方案/设计产出**（用户要求设计方案、或设计是任务的可委派切片）→ 委派 `planner`。
-- 措辞上在共享 eager 块明示：「scope and settle the shape inline before each fan-out, and keep the top-level plan with yourself」。
-- 效果：`gates` 反对的是「第一步把整个任务的规划外包给通用 plan agent」；需求 2 是「方案产出委派 + 主动推进下一阶段」，两者不冲突。
-- workflowz 的 `planner.md`（`prompts/workflow/`）是其确定性流程的专用 prompt，保持不动；新增的是普通 task 工具可 spawn 的 bundled `planner` agent。
+### D2 — 三个 prompt/route 开关复用 settings canonical owner
 
-**D6 — 不动的东西**
-- `workflowz`（`modes/workflow.ts` + notice）：不动。
-- `eager-task.md` prelude（`always` 专属）：不动；preferred 不注入 reminder，符合「prefer 而非强制」。
-- `task.md` 工具描述、`sdk.ts`、`system-prompt.ts` 代码：不动（默认翻转自动生效）。
+新增三个布尔设置，均嵌套在 `eagerTasks` 总 gate 下：
 
-## 5. 默认模型路由表
+- `task.proactive.autoParallel`：控制 ≥2 独立切片的默认 batch 文案。
+- `task.proactive.pipelineGuidance`：控制轻量 task 边界与升级 workflow 文案。
+- `task.proactive.stageRouting`：控制 task/scout/reviewer 的阶段选择文案；不修改 agent frontmatter。
 
-| 阶段 | 委派 agent | 默认模型（model pattern + effort） | 说明 |
-|---|---|---|---|
-| 方案设计（design） | `planner`（**新增**） | `gateway/claude-opus-5:xhigh` | 新 bundled agent（§6.3），借鉴 workflowz planner 的只读规划角色 |
-| 方案评审（review） | `reviewer` | `gateway/gpt-5.6-sol:xhigh` | frontmatter 从 `@slow` 改为显式 pattern |
-| 实现（implement） | 通用 worker（`task`） | `gateway/deepseek-v4-flash:max`（备选 `gateway/grok-4.5:high`） | worker frontmatter 从 `@task` 改为显式 pattern（方案 A）；grok 通过 `task.agentModelOverrides` 切换 |
-| 代码审查（code review） | `reviewer` | `gateway/gpt-5.6-sol:xhigh` | 与方案评审同 agent 同模型 |
-| UI/UX 设计（如遇） | `designer` | 保持 `@designer` | 不在本链内，现状不动 |
-| 只读探索（scout） | `scout` | 保持 `@smol`（不触碰全局别名） | 低成本探路，维持现状 |
+`task.eager: default` 时三者即使为 true 也不得渲染。实验阶段三者默认 false；推广时逐项翻转，确保 arm、snapshot 与 rollback 独立。所有开关继续由现有 `config/settings-schema.ts`、`sdk.ts`、`system-prompt.ts` 与 `system-prompt.md` 承载，不新增第二个委派引擎。
 
-覆盖链（自上而下）：`task.agentModelOverrides[agentName]`（用户，`/agents` 面板）> agent frontmatter `model`（本方案默认）> 继承会话模型（fallback）。`task.maxEffort` 默认 `"max"`，不限制 `xhigh`。
+### D3 — 永久修复 system prompt 矛盾
+
+- 把 `system-prompt.md:175-177` 的无条件 “Default to parallel for complex changes” 删除并并入 `task.proactive.autoParallel` 文案；该文案同时受 `eagerTasks` gate 约束。
+- codex-default（`eagerTasks=false`）只保留 “Do not spawn…” 与通用 gates，不再出现默认 parallel。
+- 新文案明确：**scope 后至少 2 个独立可运行切片才默认 batch**。单 planner、单 worker、串行 reviewer 链均不满足。
+- 这是 correctness 修复；不得将恢复无条件冲突文案定义为 rollback arm。
+
+### D4 — task 与 workflow canonical owner 的唯一边界
+
+**task 主动委派可做**：
+- 已 scope、可独立运行的轻量切片；写切片只有在同批 ≥2 个独立切片，或 parent 同时继续另一独立切片时才委派。
+- 单个只读 scout，用于把大体量探索隔离出 parent context。
+- patch critique reviewer，但 reviewer 运行时 parent 必须继续 verification 或另一独立切片；否则 inline review，或进入 workflow 完整 gate。
+
+**必须升级 workflow**：
+- 方案/架构设计需要 plan review；
+- 跨模块 contract/schema 变更；
+- 需要持久 artifact、deterministic verifier、repair、rollback/resume；
+- 需要完整 design→plan-review→implement→code-review 门禁。
+
+轻量 task 链不得宣称执行 D 的 plan-review 管线，也不得建立平行 PlanArtifact/ReviewArtifact/仲裁状态机。
+
+### D5 — plan reviewer 与 code reviewer 分离
+
+- **Plan review**：唯一落点为 workflow 的 `prompts/workflow/plan-reviewer.md`。当前输入 PlanArtifact、输出 `ReviewArtifactV1`（`approved|changes_requested|blocked`）；D 文档拟议的目标合同为“单强评审 + 同评审复审 + 分歧仲裁”，并在同一 prompt/schema/stage owner 上增加 anti-anchoring、finding basis 与 coverage。E 不复制实现。
+- **Task patch critique/code review**：落点为 `prompts/agents/reviewer.md`，遵守 patch-only `overall_correctness: correct|incorrect` 契约。
+- generic reviewer 不承担 plan review；workflow plan reviewer 不改成 N-reviewer/any-block 投票。
+
+### D6 — 保留 `@task`、reviewer 候选链与 fallback owner
+
+- 通用 task worker frontmatter 继续为 `model: "@task"`；不改为 literal Flash。
+- 不改全局 `modelRoles.task`；用户仍可通过 per-call model、`task.agentModelOverrides.task`、`modelRoles.task` 或 active session model 控制。
+- reviewer 仓库定义继续为 `gateway/gpt-5.6-sol:xhigh` → `gateway/claude-opus-5:max` → `@task`。本机单值 reviewer override 是 [当前本机 effective]，不是仓库默认候选链。
+- 普通 task fallback 由 `resolveAgentModelPatterns`、auth fallback 与 executor retry chain 处理。`resolvedModel`/`resolvedModelIsFallback` 可作为 A/B receipt；不虚构普通 task 已有 workflow-style degraded/family receipt。
+- D 的 family-aware plan-review route 属 WorkflowEngine；E 的 stage-routing arm只选择既有 agent，不新增 planner、不绕过 workflow route。
+
+### D7 — 不新增 planner bundled agent
+
+workflow 已有确定性 planner；designer 是 UI/UX agent；generic task 足以承担已 scope 切片内部的局部规划。方案/架构规划走 workflow，轻量委派不注册 `planner.md`、不改 `EMBEDDED_AGENT_DEFS`、不留下 thinking-level 占位符。
+
+### D8 — plan mode 不渲染正向 implementation guidance
+
+- 共享 eager 文案不列“single-module implementation/local refactor”等正向 write 示例，只说 active mode 允许的 scoped slice。
+- plan mode 的 task preflight 已在 `structured-subagent.ts` 把 child 强制为只读工具、移除 spawns，并拒绝 isolation/apply/merge；设计复用该 owner。
+- plan mode 遇到实现诉求时只走既有 plan proposal handoff；不得启动 write-capable workflow/task path。
+- 新测试同时核对 prompt 文案与 `resolveEffectiveSubagentPolicy(planMode=true)` 的只读工具集合。
+
+### D9 — 不动的能力
+
+- `workflowz` 检测、eval notice 与 recipe 不动。
+- `eager-task.md` 的 `always` prelude 不动。
+- bundled task/scout/reviewer/designer frontmatter 不动；不新增 planner。
+- `prompts/workflow/plan-reviewer.md` 与 `prompts/agents/reviewer.md` 在 E 中不改；D 单独拥有 plan-review 目标合同。
+
+## 5. 阶段模型路由表（保持既有 owner）
+
+| 场景 | agent/owner | 仓库 selector | 本机 effective | fallback/说明 |
+|---|---|---|---|---|
+| 已 scope 一般切片 | `task` | `@task` | `task.agentModelOverrides.task=Luna:max` | 保持 `@task`；per-call/user override 优先 |
+| 只读探索 | `scout` | `@smol` | `task.agentModelOverrides.scout=Flash:max` | 单 scout 是允许的只读例外 |
+| 具体 patch critique | `reviewer` | Sol:xhigh→Opus:max→`@task` | 单值 override Sol:xhigh | 只在与 parent verification/另一切片并行时用于轻量链 |
+| UI/UX | `designer` | `@designer` | Sol:high | 不属于通用方案 planner |
+| 方案/架构设计 | workflow planner | workflow quality route | 由 quality-tier snapshot 解析 | 不新增 bundled planner |
+| 方案评审 | workflow plan reviewer | D：单强评审+同评审复审+仲裁 | 由 workflow route 解析 | 唯一 prompt 为 `prompts/workflow/plan-reviewer.md` |
+
+覆盖顺序：per-call `request.model` > `task.agentModelOverrides[agentName]` > agent frontmatter > active/session fallback。`task.maxEffort` 只 clamp 显式 `effort`；不把 frontmatter xhigh 当成受该 ceiling 自动降低。
 
 ## 6. 具体改动
 
-### 6.1 `config/settings-schema.ts` — `task.eager` 块（4645-4661 行）
+### 6.1 `config/settings-schema.ts`
 
-- `default: "default"` → `default: "preferred"`。
-- UI description：说明默认 Preferred = 主动感知并行 + 委派 review/design/implement 阶段。
-- options：`"default"` 描述改为「Opt out — model decides; no proactive subagent guidance」；`"preferred"` 标注为默认。
+1. 新增 `task.proactive.autoParallel`、`task.proactive.pipelineGuidance`、`task.proactive.stageRouting` 三个独立 boolean；实验初始默认 false。
+2. 保持 `task.eager` schema 默认 `"default"` 直至 arm 1 通过；推广时单独改为 `"preferred"`。
+3. UI 明示 `"default"` 是 opt-out；Preferred 只渲染已通过并启用的 proactive guidance。
+4. 不改 `task.batch` 默认（当前已是 true），不新增 agent/model 配置键。
 
-### 6.2 `prompts/system/system-prompt.md` — 共享 eager 块
+### 6.2 `sdk.ts` + `system-prompt.ts` + `prompts/system/system-prompt.md`
 
-位置：`{{/if}}`（useCodexTaskPrompt split 关闭）之后、`## Delegation gates:` 之前：
+`buildSystemPrompt` 增加三项布尔模板输入，并由现有 settings 读取；共享块位于 codex/非 codex split 之后、Delegation gates 之前：
 
 ```handlebars
 {{#if eagerTasks}}
-- **Auto-parallelize.** When the work decomposes into independent slices, treat that as an implicit `parallel`/`parallelize`: fan out via `{{toolRefs.task}}` subagents by default — don't serialize work that can run concurrently, and don't wait for the user to say the word.
-- **Drive the pipeline proactively.** Prefer the stage-matched specialist from the `{{toolRefs.task}}` tool's Available Agents list — solution design → the planner, UI design → the designer, review → the review specialist, read-only exploration → scout, implementation → general workers. When a stage returns, decide and run the natural next stage (e.g. plan → review the plan → implement → review the implementation) instead of stopping after one result. Each transition is a judgment call, not a fixed recipe; scope and settle the shape inline before each fan-out, and keep the top-level plan with yourself.
+{{#if taskProactiveAutoParallel}}
+- **Auto-parallelize only real width.** After you scope the request and identify at least 2 independent runnable slices, treat that as an implicit `parallel`/`parallelize`: fan them out together via `{{toolRefs.task}}`. Do not serialize them, invent padding, or spawn one worker and wait.
+{{/if}}
+{{#if taskProactivePipelineGuidance}}
+- **Delegate only scoped slices.** Keep the top-level plan and cross-slice contracts yourself. A lone write-capable spawn that you wait behind remains prohibited; a single proactive spawn is reserved for a read-only scout that keeps bulk exploration out of parent context.
+- **Escalate complete gated delivery to workflow.** If the work needs solution/architecture design with plan review, cross-module contracts, or persistent verify/repair/rollback/resume, use `{{toolRefs.workflow}}`. In plan mode remain read-only and use the plan proposal handoff; never start a write-capable delivery path.
+{{/if}}
+{{#if taskProactiveStageRouting}}
+- **Route through existing agents.** General scoped slice → `task`; read-only exploration → scout; concrete patch critique → reviewer only while you continue verification or another independent slice. Preserve each agent's configured selectors and fallbacks; never add a generic planner agent.
+{{/if}}
 {{/if}}
 ```
 
-渲染矩阵：
+删除旧的无条件 “Default to parallel…” 行，避免重复与 codex-default 冲突。
 
-| 会话 | 新增块 | 其余委派指引 |
-|---|---|---|
-| 默认新会话（非 5.6） | 渲染 | "Delegation is preferred here…" |
-| `task.eager: always` | 渲染 | MUST 段 + prelude（现状） |
-| `task.eager: default`（opt-out） | 不渲染 | 仅 3 条被动规则 + gates（现状） |
-| GPT-5.6 默认 | 渲染（eager 由翻转默认生效） | "Proactive multi-agent delegation is active" |
-| plan mode | 渲染（基础 prompt 同路径） | 需确认与 plan-mode notice 无冲突（风险 R4） |
+**渲染矩阵**：
 
-### 6.3 Agent — 新增 planner + 默认模型路由
+| 会话 | eager 总 gate | 三个独立 flag | 结果 |
+|---|---:|---:|---|
+| Pilot control | preferred | 对应 arm=false | 只缺该 arm 文案，其余配置冻结 |
+| Pilot treatment | preferred | 对应 arm=true | 只增加该 arm 文案 |
+| `task.eager: default` | false | 任意 | proactive 三段均不渲染；codex-default 无矛盾 |
+| `task.eager: always` | true | 按 flag | 现有 MUST/prelude 保留；新增文案仍受独立 flag 控制 |
+| plan mode | 可为 true | 按 flag | 文案无正向 implementation 示例；child policy 强制只读 |
 
-**新增 `prompts/agents/planner.md`**（方案/架构设计 agent）：
-- frontmatter：`name: planner`、`description: Solution/architecture design specialist…`、`model: "gateway/claude-opus-5:xhigh"`、`thinking-level: <xhigh 对应级别>`、工具集以只读为主（read/grep/glob/lsp + 可选 write 输出方案文档）、`output` schema 可选（structured plan）。
-- 正文改编自 `prompts/workflow/planner.md` 的规划角色（只读规划、不 claim 实现完成、产出含 affected files / 步骤 / 验收标准 / 风险），去掉 PlanArtifact 严格 schema 依赖（普通 task 工具不强制），保留「untrusted input 注入边界」与「不做实现」约束。
+### 6.3 测试
 
-**接线 `task/agents.ts`**（唯一注册点）：
-- `import plannerMd from "../prompts/agents/planner.md" with { type: "text" };`
-- `EMBEDDED_AGENT_DEFS` 新增 `{ fileName: "planner.md", template: plannerMd }`（frontmatter 直接在 md 内，参考 designer 条目写法）。
-- 漏接线的后果：`task` 工具描述与 `discoverAgents` 中不存在 planner，共享块指向失配——必须同步。
-
-**默认模型路由 frontmatter 调整**：
-- `prompts/agents/reviewer.md`：`model: "@slow"` → `model: "gateway/gpt-5.6-sol:xhigh"`。
-- `prompts/agents/reviewer.md` prompt 正文新增反锚定清单段（§10.2）——评审不得只对照草案找错，须列草案未覆盖维度并以规格锚定 FAIL。
-- `task/agents.ts` 中 task worker 条目的 `model: "@task"` → `model: "gateway/deepseek-v4-flash:max"`（方案 A：仅影响默认 worker spawn；方案 B 改 `@task` 角色别名默认，波及面大，不推荐）。
-- `scout.md` / `librarian.md` / `designer.md`：不动。
-- 用户覆盖一律走既有 `task.agentModelOverrides`（`/agents` 面板）。
-
-### 6.4 测试
-
-| 文件 | 内容 |
+| 文件 | 合同 |
 |---|---|
-| 新建 `test/system-prompt-delegation.test.ts` | `buildSystemPrompt`（签名 `system-prompt.ts:558`，GPU probe 测试有可复用 buildOptions 骨架）断言：`eagerTasks=true` 渲染含 "Auto-parallelize" 与 "Drive the pipeline proactively"；`eagerTasks=false` 不含；GPT-5.6 模型 + eager 时同样含 |
-| `test/settings-manager.test.ts` 或 schema 测试 | 断言 `task.eager` schema 默认 `"preferred"` |
-| agent 接线/路由测试 | `loadBundledAgents()` 含 `planner`；planner/reviewer/worker 解析出的默认模型 pattern 断言（`gateway/claude-opus-5:xhigh` / `gateway/gpt-5.6-sol:xhigh` / `gateway/deepseek-v4-flash:max`） |
-| 现有测试 | 预期零改动（全部显式传值）；跑 `agent-session-eager-task.test.ts`、`agent-session-eager-compaction.test.ts`、`settings-manager.test.ts` 回归 |
+| 新建 `test/system-prompt-delegation.test.ts` | 三 flag 可独立开关；`eagerTasks=false` 全部不渲染；auto-parallel 文案含“至少 2 个独立 runnable slices”；旧无条件 “Default to parallel” 不再存在；GPT-5.6 codex-default 无冲突 |
+| `test/task/structured-subagent.test.ts` | plan mode child 仅 `read/grep/glob/web_search/ast_grep`，无 spawns；隔离/apply/merge 被拒绝 |
+| `test/settings-manager.test.ts` 或 schema 测试 | 三 flag 初始默认 false；推广变更单独测试；`task.eager: default` 为绝对 opt-out |
+| 现有六文件回归 | `agent-session-eager-task`、`eager-compaction`、`plan-reference-compaction`、`plan-reference-setup-bail`、`settings-manager`、`acp-lazy-startup` |
 
-### 6.5 `packages/coding-agent/CHANGELOG.md`
+### 6.4 Release note（功能通过 smoke/A/B 后）
 
-Release note：默认委派姿态改为 prefer 主动（自动并行感知 + 阶段链推进 + 阶段默认模型路由），可用 `task.eager: default` 退回。
+说明默认委派姿态、≥2 独立切片门槛、workflow canonical owner、plan-mode 只读边界与 `task.eager: default` opt-out。未通过 §8 前不宣称全局默认已推广。
 
 ## 7. 验证步骤
 
-1. `bun test test/system-prompt-delegation.test.ts test/agent-session-eager-task.test.ts test/agent-session-eager-compaction.test.ts test/settings-manager.test.ts`。
-2. repo 标准 typecheck + 相关模块 lint。
-3. 手动渲染一次默认系统提示，确认三段措辞落位、模板语法无残留。
-4. （实现阶段）验证 `deepseek-v4-flash:max` / `claude-opus-5:xhigh` / `gpt-5.6-sol:xhigh` 在 `resolveAgentModelPatterns` 下解析正确、无 literal-id 冲突。
+1. `bun test test/system-prompt-delegation.test.ts test/task/structured-subagent.test.ts test/agent-session-eager-task.test.ts test/agent-session-eager-compaction.test.ts test/agent-session-plan-reference-compaction.test.ts test/agent-session-plan-reference-setup-bail.test.ts test/settings-manager.test.ts test/acp-lazy-startup.test.ts`。
+2. repo 标准 typecheck 与相关 lint。
+3. 手动渲染四组：GPT-5.6/non-GPT × eager true/false；确认 codex-default 没有任何默认 spawn/parallel 指令。
+4. 手动进入 plan mode，调用 task preflight；确认 child 工具只读、无 spawns，且共享 prompt 不出现正向 implementation 示例。
+5. 用一个“3 个互不相交模块”的 fixture 验证 treatment 一次 batch ≥2；用一个单文件 bug fixture 验证不 spawn-one-then-wait。
+6. 用 reviewer 路由 fixture 验证结果记录 `resolvedModel` 与 `resolvedModelIsFallback`；本机 override 与仓库 frontmatter 必须分别记录。
 
-## 8. 风险与边界
+## 8. A/B 测试与护栏（Blocking 5）
 
-- **R1 全局行为翻转**：影响所有新会话，有意为之；changelog + settings UI 显式化，保留 `default` 退回路径。
-- **R2 模型自觉性**：preferred 是 SHOULD，不保证每次触发——正是「非确定性」诉求，接受。
-- **R3 codex-default 一致性**：共享块 gate 在 `eagerTasks`，codex-default 无矛盾指令。
-- **R4 plan mode 张力**：plan mode 下基础 prompt 仍渲染「drive the pipeline」；若 plan-mode notice 语义冲突，需在 plan-mode notice 声明「plan mode 期间不做实现委派」（实现阶段核实 `plan-mode-active.md`）。
-- **R5 子会话**：subagent 系统提示同样渲染 eager 块（`eagerTasks` 无 sub 门控），子 agent 可再委派（`maxRecursionDepth` 约束）——语义自洽，不做额外 gate。
-- **R6 模型路由硬编码**：frontmatter 写死 gateway 模型，用户换模型走 `task.agentModelOverrides`（既有机制）；bundled agent 共享时（如 reviewer 同时服务 review/code review）单一模型满足需求。task worker 默认模型改为显式 pattern 后，所有未指定 model 的默认 worker spawn 都走 deepseek-v4-flash:max（含 vibe/plan-mode subagent 等）——实现阶段审计消费方，必要时以 `@task` 别名 + `task.agentModelOverrides` 精细化。
-- **R8 planner 接线遗漏**：bundled agent 非目录扫描，`task/agents.ts` 的 `EMBEDDED_AGENT_DEFS` 漏接线 = agent 不存在。实施时与 `system-prompt.md` 措辞同 PR 落地，测试断言 `loadBundledAgents()` 含 planner。
-- **R9 planner 与既有 workflowz `planner.md` 命名**：`prompts/workflow/planner.md` 是 workflowz 专用 prompt（不经 agents 注册），新增 `prompts/agents/planner.md` 与之同名不同目录，互不冲突；agent 名 `planner` 不与现有 bundled agents 重名（接线测试覆盖）。
-- **R7 既有显式配置**：已存 `"default"` 配置与 boolean→enum 迁移不受默认翻转影响。
-- **R10 评审偏置（PASS ≠ 质量）**：implement 默认 flash 草稿 PASS 早于 opus 草稿是已知偏置（§10.1.4），不得把「PASS 早」作为质量或性能验收证据；PASS 判定必须规格锚定（§10.2.3），reviewer prompt 的 §10.2 清单是质量底线。
+### 8.1 四个独立 feature arms
 
-## 9. 实施顺序
+| Arm | Control | Treatment | 独立开关/owner | Snapshot | 独立 rollback |
+|---|---|---|---|---|---|
+| `eager_default` | schema 默认 `default` | schema 默认 `preferred` | `task.eager` | settings revision + effective config hash | 恢复 schema 默认 `default`；不动其余 arms |
+| `auto_parallel_copy` | `task.proactive.autoParallel=false` | `true` | system prompt setting | prompt hash + rendered text hash | 关闭该 flag |
+| `pipeline_guidance` | `task.proactive.pipelineGuidance=false` | `true` | system prompt setting | prompt hash + workflow prompt hash | 关闭该 flag |
+| `stage_model_routing` | 轻量委派统一走 generic `task` | 按 task/scout/reviewer 阶段选择 | `task.proactive.stageRouting` | agent source/hash + requested selectors + effective override + resolved model/fallback | 关闭该 flag；不改 frontmatter/`@task` |
 
-1. settings 默认翻转 + UI 文案（6.1）→ 2. 共享 eager 块（6.2）→ 3. 新增 `planner.md` + `task/agents.ts` 接线 + 模型路由 frontmatter（6.3）→ 4. 测试（6.4）→ 5. changelog（6.5）→ 6. 验证（§7）。
+无条件 “Default to parallel” 的 gate 修正是 correctness baseline，不是第五 arm，也不得回滚到冲突状态。
 
-改动面：3 个源文件（settings-schema / system-prompt.md / task-agents.ts）+ 2 个 agent md（新增 planner、改 reviewer）+ 1~2 个测试文件 + changelog，无架构变动、无 workflowz/eval 路径改动。
+### 8.2 配对、随机化与双账本
 
-## 10. 评审质量背景与反锚定清单需求（2026-08-04 用户补充）
+- **单-arm 隔离**：测 `eager_default` 时三 guidance flags 均 false；测 arms 2-4 时 control/treatment 均固定 `task.eager=preferred`，只翻一个 flag。
+- **同任务配对**：同一 user-request/fixture hash、同 parent model、同 agent discovery source/hash、同模型可用性、同 `task.batch`/`async` snapshot，各跑 control 与 treatment。
+- **随机化**：每对随机或交叉平衡先后顺序；同一 host 上 control/treatment interval 不重叠，避免 provider/CPU contention 污染。
+- **样本量**：pilot ≥30 对；正式 ≥100 对，或预注册 CI 固定集与判定区间。
+- **Canonical interval-union ledger**：记录 parent 与全部 descendants 的 `[startedAt, endedAt)`；对区间做 union，重叠并行时间只计一次。
+- **Legacy sum ledger**：把 parent/child 各 interval 直接相加，仅用于历史复算；不得与 union ledger混成“节省”。
+- **成本总量**：每 task 把 parent+完整子树的 requests、tokens、USD、spawned-agent count 全部相加；成本是 additive，不做 interval union。
+- **路由 receipt**：使用现有 `AgentProgress`/`SingleResult` 的 requests、tokens、usage、durationMs、`resolvedModel`、`resolvedModelIsFallback`；若开始/结束时间未持久化，只扩展现有 task lifecycle/result，不新建 scheduler。
 
-### 10.1 背景思路：评审质量的调研结论
+### 8.3 质量与成本停止条件
 
-调研与用户反馈的一致结论：**「多个便宜模型评审 > 单一昂贵模型」与「弱草稿+强评审 > 强直接生成」都不是普遍成立的**（[文献] 外部研究；[本仓库观测] 本仓库事实；[推导] 推断）：
+以下均为 [拟议验收目标]。单-arm 实验触发时只关闭该 arm；组合实验触发时先 fail closed 关闭组合，随后只能逐 arm 重新启用定位，不把组合效应冒充单 arm 边际贡献。
 
-1. **多模型投票不是普遍成立的**。[文献] MoA（arXiv 2406.04692，纯开源模型分层集成 AlpacaEval 2.0 65.1% > GPT-4o 57.5%）与 Self-Consistency（Wang et al. 2022，GSM8K +17.9%）的增益集中在可验证答案类任务，依赖模型不同源、有聚合层；普林斯顿 Self-MoA（arXiv 2502.00674）显示混合弱模型反而拉低均值——质量 > 多样性。
-2. **弱草稿+强评审受草案覆盖度封顶**。[文献] 评审锚定在草案框架内：草案未覆盖的维度评审无从挑错；Huang et al.（ICLR 2024）显示无外部反馈的纯内部评审在推理任务上会降质——方案评审正属此风险区。
-3. **强草稿+强评审是开放质量类任务中上限最高的配置**。[文献] Self-Refine（NeurIPS 2023）+20% absolute over 一步生成；CriticGPT（OpenAI 2024）证明强评审对强输出有真实增量。收益递减，评审-refine 1-2 轮封顶。
-4. **[本仓库观测] deepseek-v4-flash 出稿 + gpt-5.6-sol 评审的 PASS 早于 claude-opus-5 出稿 + gpt-5.6-sol 评审**。[推导] 这是评审偏置而非草稿质量差异：①**攻击面偏置**——评审输出量随草稿内容丰富度膨胀，平庸草稿找不到足够的错；②**遵从度不对称**——弱模型对 FAIL 顺从、收敛快，强模型抵抗、收敛慢；③**家族偏置**——gpt-5.6-sol 对 claude 系（竞争家族）更挑剔（[文献] Yang et al. 2026 量化 judge 自偏好）。
+1. **完成率/人工通过率下降 >2pp**：关闭致因 arm。
+2. **返工率上升 >10%**：以 revision/repair cycles 对比 control，关闭致因 arm。
+3. **P0/P1 escape**：treatment 任一归因于该委派变更的 P0/P1 逃逸即停止；不以“control 也出现”为豁免。
+4. **无效阻断或错误 reviewer 结论上升 >2pp**：关闭 `stage_model_routing` 或相关 guidance arm。
+5. **成本 P50/P95**：每 task 总 requests/tokens/USD 的 P50 >1.5× control 或 P95 >2× control，且中位 interval-union latency 改善 <10%，停止对应 arm。
+6. **agent 数膨胀**：spawned-agent count P95 >2× control 或超过配置并发上限导致排队，停止 `auto_parallel_copy`。
+7. **合同违规**：出现 scope 前 spawn、单写 agent 等待、plan mode write-capable child、task 轻链伪装 plan review，立即停止相关 arm，不等统计显著性。
 
-**结论：[推导] 评审 PASS 是「内部一致性」信号，不是「最优性」信号；PASS 早 ≠ 方案质量高。**
+### 8.4 行为场景
 
-### 10.2 反锚定清单需求（reviewer agent prompt 必做项）
+| 场景 | 预期行为 | 证据 |
+|---|---|---|
+| “重构 3 个互不相交模块” | treatment scope 后一次 batch ≥2 | task batch size + non-overlap path receipt |
+| 单文件 bug fix | inline 完成，不 spawn 单 worker 后等待 | child count=0 |
+| 大范围只读探索 | 可单独 spawn scout | agent=`scout`、只读工具 |
+| patch critique | reviewer 与 parent verification/另一切片并行；否则 inline/workflow | parent/child interval overlap |
+| 需 plan review/跨模块 contract | 使用 workflow，不用 task 自组织完整链 | workflow artifact/receipt 存在；无 task plan-review artifact |
+| plan mode | child 只读、无 spawns/apply/merge | structured-subagent policy + prompt snapshot |
+| stage route | task/scout/reviewer 分别解析既有 selector；无 planner | agent source/hash + `resolvedModel` |
+| fallback | 记录 `resolvedModelIsFallback`；不声称普通 task 有 workflow degraded receipt | task result fields |
+| 停止条件 | 只回滚致因 arm；组合先全部关闭再逐 arm 重启 | settings snapshot + rollback receipt |
 
-适用对象：本设计阶段链中的 review 阶段（planner → reviewer → implement → reviewer 的 reviewer 均指 `prompts/agents/reviewer.md`）。评审 prompt 必须满足：
+## 9. 风险与边界
 
-1. **反锚定清单**：显式列出「草案**未覆盖**的约束、风险、备选方向」，而不是只对照草案找错。
-2. **规格锚定 FAIL**：每个 FAIL 意见必须引用被违反的具体规格/需求条目；禁止无依据的泛泛意见。
-3. **PASS 判定标准**：PASS 基于逐条核对规格清单，而非「没找到足够的错」；评审结论附证据密度。
-4. **收敛控制**：评审-refine 1-2 轮封顶；分歧/高风险样本升级强模型重写。
-5. **可验证维度走客观检查**：测试/lint/规格 check 是客观锚点，LLM 评审只负责开放维度。
+- **R1 全局默认翻转**：影响所有未显式配置的新会话；通过 arm 1 后才推广，保留 `task.eager: default`。
+- **R2 模型自觉性**：Preferred 是 SHOULD，触发率不确定；用行为 ledger 测量，不把 prompt 存在当行为已发生。
+- **R3 codex-default 一致性**：auto-parallel 永远在 eager gate 内；无条件冲突行永久删除。
+- **R4 plan mode**：prompt 不给正向 implementation 指令，task preflight 强制只读；任一 write-capable child 是合同违规。
+- **R5 子会话递归**：subagent 只能在 `task.maxRecursionDepth` 内继续 spawn；达到默认深度 2 时 task 工具消失。
+- **R6 workflow 边界误判**：通过明确触发条件与 workflow artifact receipt 检测；task 轻链不得补造状态机。
+- **R7 本机配置已是 preferred**：arm 1 必须用未配置环境或显式 control，不能把本机现状当 schema 默认。
+- **R8 agent 覆盖**：project/user 同名 agent 优先；A/B 必须冻结 agent source/hash，不能只记 agent 名。
+- **R9 评审偏置**：generic reviewer 仅做 patch critique；plan review 始终走 D 的单强评审+同评审复审+仲裁，不以“PASS 早”决定模型路由。
 
-### 10.3 对本设计的影响
+## 10. 评审质量背景（引用 D；E 不重复实现）
 
-- §5 路由表 implement=`deepseek-v4-flash:max` + review=`gpt-5.6-sol:xhigh` 的配对下，flash 草稿 PASS 早于 opus 草稿是已知偏置（§10.1.4）——**不得把「PASS 早」当作实现模型合格的证据**；PASS 判定必须规格锚定（§10.2.3）。
-- §6.3 reviewer.md 变更除 frontmatter 模型外，prompt 正文须新增 §10.2 反锚定清单段。
-- 用户若经 `task.agentModelOverrides` 把 review 换成更弱模型，§10.2 清单是质量底线，不可省略（R10）。
-- **已定方案（2026-08-04）**：方案评审管线落地形态见 `docs/superpowers/specs/2026-08-04-plan-review-pipeline-design.md`——生成 `claude-opus-5:xhigh` / 评审 `gpt-5.6-sol:xhigh`（异家族）/ 仲裁 opus-5；本设计的 review 阶段（planner→reviewer→implement→reviewer 链）按该管线执行，§10.2 清单为 reviewer prompt 必含项。
+### 10.1 文献与推断边界
+
+1. **聚合收益不是通用 reviewer 结论**。[文献] MoA（arXiv:2406.04692）报告纯开源 layered ensemble 在 AlpacaEval 2.0 为 65.1%，GPT-4 Omni 为 57.5%；Self-Consistency（arXiv:2203.11171）报告 GSM8K +17.9%。[推导] 前者是有聚合层的开放生成，后者是可验证推理采样；两者都不能直接证明“多个便宜 plan reviewers 优于一个强 reviewer”。
+2. **质量不等于模型数量**。[文献] Self-MoA（arXiv:2502.00674）报告单一顶级模型的 Self-MoA 在多种场景优于混合 MoA，并指出混入较弱模型会降低平均质量。[推导] E/D 因此不采用 N-reviewer any-block 投票。
+3. **草案覆盖限制**。[文献] Huang et al.（ICLR 2024）报告无外部反馈的自我纠错在推理任务上可能降质。[推导] 对开放方案评审，弱草稿漏掉的维度不能假定 reviewer 一定补全，故 D 要求 anti-anchoring 与 finding basis。
+4. **迭代改进数字**。[文献] Self-Refine（arXiv:2303.17651；NeurIPS 2023）报告跨七项任务平均约 +20% absolute；CriticGPT（OpenAI 2024）表明 critique assistance 可帮助发现模型输出问题。[推导] 这些结果支持“强草稿+强评审”作为质量优先候选，但不是仓库当前能力事实。[未验证假设] 收益递减；[拟议验收目标] review-refine 最多 1-2 轮。
+5. **PASS 早**。[未验证假设] Flash draft + Sol review 比 Opus draft + Sol review 更早 PASS；本仓库可见 artifacts 不足以证明该比较。[推导] 攻击面/遵从度可能造成偏置。[未验证假设] family bias 可能存在，但缺少可复现的 Yang et al. 2026 标识，因此不作为实现前提或 `[文献]` 事实。
+
+**结论：[推导] PASS 是内部一致性信号，不是最优性信号；E 的 stage-routing arm 必须用 §8 的质量指标，而不是 PASS 速度选路。**
+
+### 10.2 Plan review 专属目标合同
+
+适用对象仅为 workflow `prompts/workflow/plan-reviewer.md` 与 D 的 WorkflowEngine 方案；generic `prompts/agents/reviewer.md` 不承载：
+
+1. anti-anchoring：列出草案未覆盖的约束、风险、备选方向；
+2. finding basis：`spec_requirement | user_requirement | repo_evidence | safety_invariant | missing_authority`；`missing_authority` 转 blocked/human；
+3. PASS coverage：逐项核对规格/需求并附证据密度；
+4. [未验证假设] 收益递减；[拟议验收目标] 同 reviewer refine/review 最多 1-2 轮，分歧转仲裁；
+5. 可验证维度由测试/lint/spec check 提供客观锚点。
+
+当前 `plan-reviewer.md` v1 尚未包含全部 V2 字段；这是 D 的拟议实现，不得在 E 中写成已实现能力。
+
+### 10.3 对 E 的影响
+
+- task patch critique 使用 `prompts/agents/reviewer.md`，不输出 plan-review anti-anchoring schema。
+- 完整 plan review 走 workflow + D；E 不实现 task adapter、N-reviewer 或第二评审引擎。
+- stage-model-routing arm只验证既有 agent 选择与 route receipt；不以 §10.1.5 的 PASS 早假设为依据。
+
+## 11. 实施与推广顺序
+
+1. 永久修复无条件 “Default to parallel” 冲突。
+2. 添加三个独立 settings/prompt flags，默认 false；补 prompt 与 plan-mode policy 测试。
+3. 接入现有 task lifecycle 的 A/B interval/cost/route receipt；不新增 scheduler。
+4. 逐 arm 做 pilot ≥30 对；通过后做 ≥100 对或预注册 CI。
+5. 分别推广通过的 guidance flags；arm 1 通过后才翻 `task.eager` schema 默认。
+6. smoke、A/B 与质量停止条件均通过后再写 release note。
+
+改动 owner：`config/settings-schema.ts`、`sdk.ts`、`system-prompt.ts`、`prompts/system/system-prompt.md`、相关 tests；若 interval 起止尚未持久化，仅扩展 `task/executor.ts`/`task/types.ts` 现有 lifecycle/result。无 bundled agent 接线、无新 planner、无 workflow prompt/code 改动、无第二编排引擎。
+
+## 12. Round 1 Blocking/Major 闭合核验
+
+### Blocking 1-5
+
+1. **canonical workflow owner** — **闭合**：§4 D4 限定 task 只做 scoped slices/read-only；完整门禁走 workflow；禁止 task plan-review adapter/第二状态机。
+2. **plan/code reviewer 分离** — **闭合**：§4 D5；plan→`prompts/workflow/plan-reviewer.md`，task patch critique/code→`prompts/agents/reviewer.md`；当前 V1 与 D 拟议 V2 已区分。
+3. **system-prompt 冲突与并行门槛** — **闭合**：§4 D3/§6.2；无条件行永久移入 eager+autoParallel gate；只有 ≥2 独立 runnable slices 才默认 batch；单 planner/worker/reviewer 等待被禁止。
+4. **模型路由** — **闭合**：§4 D6/§5；保留 `@task` 与 task fallback owner；不新增 planner；reviewer 仓库定义保持 Sol→Opus→`@task`，并明确本机 override 的优先级。
+5. **A/B、双账本与停止条件** — **闭合**：§8 四 arm 正确为 eager flip/auto-parallel copy/pipeline guidance/stage model routing；配对随机化、non-overlap、interval union+legacy sum、成本总量、独立 rollback、>2pp/>10%/P0-P1 stop 均已定义。
+
+### Major
+
+1. **§2 baseline 标签与事实** — **闭合**：explicit/default-derived 分离；纠正 `task.batch`、threshold、idle 默认；task 非每会话常驻，递归限制与 plan-mode read-only owner 均有源码证据。
+2. **planner 必要性/占位符** — **闭合**：明确不新增 planner，无 thinking-level 或 manifest 占位符。
+3. **agent 覆盖与 spawn policy** — **闭合**：project/user 优先、reviewer spawn 限制与 spawn-one gate均保留；stage arm冻结 agent source/hash。
+4. **plan mode** — **闭合**：共享 prompt 不渲染正向 implementation 示例；structured-subagent 强制只读，测试合同已列。
+5. **fallback/family 规则** — **闭合**：普通 task resolver/executor 与 workflow model-router 分开；不虚构 degraded receipt；D family-aware 规则只属 plan review。
+6. **评审 output schema** — **闭合**：E 的 code reviewer 保持 patch schema；D 的 anti-anchoring/V2 是 workflow 专属拟议合同。
+7. **`task.maxEffort`** — **闭合**：明确只 clamp 显式 `effort`，frontmatter xhigh 不受影响。
+8. **测试枚举** — **闭合**：六个现有 eager 文件完整列出，另加 plan-mode policy test。
+9. **文献标签** — **闭合**：MoA 65.1/57.5、GSM8K +17.9、Self-Refine约 +20% 均标 `[文献]`；1-2 轮分别标 `[未验证假设]`/`[拟议验收目标]`；不可复现 Yang 引用已降级。
+10. **风险编号** — **闭合**：R1-R9 顺序连续；`task/agents.ts` 与 `task/prompt-policy.ts:7` 路径正确。
+
+## 13. 跨文档契约一致性
+
+1. plan_review 一律采用 D 的“单强评审 + 同评审复审 + 分歧仲裁”；E 不提出 N-reviewer/any-block。
+2. E 的 reviewer 落点分离：plan→`prompts/workflow/plan-reviewer.md`；task patch/code critique→`prompts/agents/reviewer.md`。
+3. 配置 receipt 固定 `reviewed_at=2026-08-04` 与 config sha256，逐项区分 [当前本机 effective]/[当前 schema 默认]。
+4. E 不涉及 TTFT 19.87h、eval 23.04s、Flash 4s 等 A/B 文档算术，不重复或改写这些数值。
+5. 并发 owner 只使用现有 task lifecycle/batch；不虚构 `task-batch.ts`、`session/tool-output-processor.ts`、`fresh` 或 `performance.contextVolume.truncation.*`。
+6. 设计推断使用 `[推导]`、`[未验证假设]`、`[拟议验收目标]`；`[文献]` 与 `[当前…]` 是来源限定，不把推断伪装成历史/current capability。
+7. A/B 每 arm 独立 switch/snapshot/rollback；control/treatment 不重叠，interval union 不双算，成本按完整子树总量相加。
+8. scope 维持 design-only；本文只修设计文档，未改代码、配置或其他文档。
+
+## Reviewed Inputs manifest（sha256）
+
+以下均为 reviewer 实际读取的完整文件；无 selector 占位符：
+
+```text
+docs/superpowers/plans/2026-08-04-latency-delegation-docs-collective-subagent-review.md	d07eeeba8319d5094c0b3b75f1a35ecf9e0f27665450f2e382daf1efa0a4bea9
+docs/superpowers/specs/2026-08-04-plan-review-pipeline-design.md	91504fac740d8b1b37df43333fbb64f0733bb128652555f3df98323909fd900e
+packages/coding-agent/src/prompts/system/system-prompt.md	cf2e0c89b79f28468774fadff9eea7564b38e499215a10e9ea911670f7efac76
+packages/coding-agent/src/prompts/system/plan-mode-active.md	364b1401dfa02d33c9a733238b6315252025696210e12ac3b8f317028295c92e
+packages/coding-agent/src/prompts/agents/reviewer.md	ba152ff2ae1325b768fb9ed45d03e85542b7f66d40acca81b102c15f64a6f79b
+packages/coding-agent/src/prompts/workflow/plan-reviewer.md	69e46b1fdedeb1a681205f943c861500b84c855b05097cfbfa41794d8914b4e5
+packages/coding-agent/src/prompts/tools/workflow.md	2064652381b53ddbd47c358ecc8a0d61acfbc44e983828c1d18f97c8f35da2bd
+packages/coding-agent/src/task/agents.ts	1b7e925e19b34fbe779e2222d9536de609cfb4afeabbbf60dd425a3ff3a9fcb8
+packages/coding-agent/src/task/discovery.ts	4dab64e5c2b1f5756de584de5f12499189e03929baa485134fb43540994facf3
+packages/coding-agent/src/task/structured-subagent.ts	41a1c7cf26501dfa4c90567bbddf9f42126ad87d051a4ed06bc921dfaaf2cdbf
+packages/coding-agent/src/task/executor.ts	3ff079a59d6f502597c13728b0b076acf7cc33240de7937416ce6b0cd1df7961
+packages/coding-agent/src/task/types.ts	828f330c9fe7508c490daf4c31cb52a49c9c87ff87218b2f77641198314d3af0
+packages/coding-agent/src/tools/index.ts	cc25d2ac316bb27eb7ba9062e4d17991a64650b080b5451ea47b3a1a7dccfe44
+packages/coding-agent/src/config/settings-schema.ts	eece9ec0fce4d4509a54b822e00ea2d4cdada7b50822f2b1eca45873cd35c382
+packages/coding-agent/src/config/model-resolver.ts	4a0a88e284256b3b7329ebc4d2ecefbbaba4945a05fdcd4ebc1baa3385f64f07
+packages/coding-agent/src/system-prompt.ts	2f52cabad6b5b36286fff0841e96acbb72643715bb07f1575b4a6d46d5b24e85
+packages/coding-agent/src/sdk.ts	8165d78ef189e855ec099ddab7880bf2a6728e7a865b78abd4119c69fd335bef
+packages/coding-agent/test/task/structured-subagent.test.ts	c488a99ffeeaf5eed4cfb1a6aa802b76ef354f8e5908a69f18541982eb04fa08
+/Users/sheng/.omp/agent/config.yml	1eb09e44cb35d1a2ad0dda2162c0e711d044e039e9e4c18fba9b070c756bd5f1
+```
