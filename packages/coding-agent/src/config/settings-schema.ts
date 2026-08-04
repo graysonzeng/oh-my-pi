@@ -4750,6 +4750,39 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.proactive.autoParallel": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Proactive Auto-Parallel",
+			description: "Recommend batching at least 2 independent runnable slices when proactive delegation is enabled",
+		},
+	},
+
+	"task.proactive.pipelineGuidance": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Proactive Pipeline Guidance",
+			description: "Recommend escalating gated delivery to workflow when proactive delegation is enabled",
+		},
+	},
+
+	"task.proactive.stageRouting": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Proactive Stage Routing",
+			description: "Recommend routing scoped slices through existing task, scout, and reviewer agents",
+		},
+	},
+
 	"task.batch": {
 		type: "boolean",
 		default: true,

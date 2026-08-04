@@ -8,6 +8,7 @@ import { sha256Hex } from "./optimization-receipt";
 import type {
 	ImplementationArtifactV1,
 	PlanArtifactV1,
+	PlanReviewArtifact,
 	ReviewArtifactV1,
 	ReviewFindingV1,
 	StageHandoffArtifactRef,
@@ -149,7 +150,7 @@ function defaultRef(
  */
 export function buildPlannerToImplementerHandoff(input: {
 	plan: PlanArtifactV1;
-	planReview?: ReviewArtifactV1 | null;
+	planReview?: PlanReviewArtifact | null;
 	planRef?: StageHandoffArtifactRef;
 	planReviewRef?: StageHandoffArtifactRef;
 	/** Exploratory / process artifacts to record as omitted (not inlined). */

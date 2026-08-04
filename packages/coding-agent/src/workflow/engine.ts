@@ -50,6 +50,7 @@ import {
 	verifyQualityRouteSnapshot,
 } from "./quality-route-snapshot";
 import { RuntimeAdapter } from "./runtime-adapter";
+import { PlanReviewControlStateSchema } from "./schemas";
 import {
 	buildScopeMetrics,
 	collectScopeMetricsFromGit,
@@ -73,6 +74,7 @@ import { changedFilesFromPatch, ImplementationVerifyStage } from "./stages/imple
 import { PlanStage } from "./stages/plan";
 import { PlanReviewStage } from "./stages/plan-review";
 import type { PlanReviewStageResult } from "./stages/plan-review";
+import { derivePlanReviewTrigger } from "./plan-review-trigger";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
 import type {
@@ -82,6 +84,9 @@ import type {
 	ModelIdentityProvenance,
 	ModelProfile,
 	PlanArtifactV1,
+	PlanReviewArtifact,
+	PlanReviewControlStateV1,
+	PlanReviewTriggerReasonV1,
 	QualityRouteSnapshotV1,
 	ReviewArtifactV1,
 	ReviewFindingV1,
@@ -138,7 +143,6 @@ type PlanReviewerIdentity = Readonly<{
 	modelFamily: string | undefined;
 }>;
 
-
 function resolvePlanReviewerIdentity(
 	profile: ModelProfile,
 	result: PlanReviewStageResult,
@@ -186,7 +190,6 @@ function resolvePlanReviewerIdentity(
 	}
 	return null;
 }
-
 
 const IDENTITY_PROVENANCE: Record<ModelIdentityProvenance, true> = {
 	configured: true,
@@ -306,7 +309,7 @@ export interface WorkflowStartResult {
 export interface WorkflowRunResult {
 	state: WorkflowState;
 	plan?: PlanArtifactV1;
-	planReview?: ReviewArtifactV1;
+	planReview?: PlanReviewArtifact;
 	implementation?: ImplementationArtifactV1;
 	verification?: VerificationArtifactV1;
 	codeReview?: ReviewArtifactV1;
@@ -349,7 +352,9 @@ export class WorkflowEngine {
 
 	// In-memory artifact cache for the current process (also persisted to store)
 	#plan: PlanArtifactV1 | undefined;
-	#planReview: ReviewArtifactV1 | undefined;
+	#planReview: PlanReviewArtifact | undefined;
+	/** True only when the latest persisted plan review is legacy V1. */
+	#planReviewLegacy = false;
 	#implementation: ImplementationArtifactV1 | undefined;
 	#verification: VerificationArtifactV1 | undefined;
 	#codeReview: ReviewArtifactV1 | undefined;
@@ -357,6 +362,7 @@ export class WorkflowEngine {
 	#workPackageState: WorkPackageStateArtifactV1 | undefined;
 	/** Durable refs for stage-handoff sizing / recovery (source artifacts never deleted). */
 	#planArtifactRef: StageHandoffArtifactRef | undefined;
+	#planArtifactSha256: string | undefined;
 	#planReviewArtifactRef: StageHandoffArtifactRef | undefined;
 	#implementationArtifactRef: StageHandoffArtifactRef | undefined;
 	#verificationArtifactRef: StageHandoffArtifactRef | undefined;
@@ -369,6 +375,7 @@ export class WorkflowEngine {
 	#plannerModelFamily: string | undefined;
 	#implementerModelFamily: string | undefined;
 	#planReviewerIdentity: PlanReviewerIdentity | undefined;
+	#planReviewControl: PlanReviewControlStateV1 | undefined;
 	#planCycles = 0;
 	#lastRouteProfileId: string | undefined;
 	#lastScopeMetrics: ScopeMetricsV1 | undefined;
@@ -764,12 +771,17 @@ export class WorkflowEngine {
 			// Reset mutable stage caches then hydrate from the post-claim snapshot.
 			this.#plan = undefined;
 			this.#planReview = undefined;
+			this.#planReviewLegacy = false;
+			this.#planReviewControl = undefined;
+			this.#planArtifactSha256 = undefined;
 			this.#implementation = undefined;
 			this.#verification = undefined;
 			this.#finalVerification = undefined;
 			this.#codeReview = undefined;
 			this.#findingTracker = new FindingTracker();
 			await this.#hydrateArtifacts(fresh);
+			const hydratedPlanReviewControl = this.#planReviewControl as PlanReviewControlStateV1 | undefined;
+			if (hydratedPlanReviewControl) this.#planCycles = hydratedPlanReviewControl.planRejectionCount;
 			if (options.signal) {
 				this.#signal = options.signal;
 			}
@@ -965,6 +977,12 @@ export class WorkflowEngine {
 						);
 					}
 
+					if (
+						(await this.#requireState(workflowId)).status === "plan_review" &&
+						this.#planReviewControl?.substate === "awaiting_human"
+					) {
+						break;
+					}
 					if (singleStep) break;
 				} finally {
 					if (claimed) {
@@ -1143,6 +1161,23 @@ export class WorkflowEngine {
 				this.#plannerModelFamily = modelFamily;
 				this.#plan = plan;
 				this.#planArtifactRef = await this.#persistArtifact(workflowId, attemptId, "plan", plan);
+				const wasReplan = this.#planReviewControl?.substate === "awaiting_replan";
+				this.#planReviewControl = {
+					schemaVersion: 1,
+					kind: "plan_review_control_state",
+					substate: wasReplan ? "rereview" : "initial_review",
+					reviewRound: wasReplan ? 2 : (this.#planReviewControl?.reviewRound ?? 1),
+					planRejectionCount: this.#planReviewControl?.planRejectionCount ?? 0,
+					arbitrationCycles: this.#planReviewControl?.arbitrationCycles ?? 0,
+					arbitrationTrigger: null,
+					latestPlanArtifactRef: this.#planArtifactRef.artifactId,
+					latestReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
+					authorResponsesArtifactRef: this.#planReviewControl?.authorResponsesArtifactRef ?? null,
+					routeSelectionReceiptRef: this.#planReviewControl?.routeSelectionReceiptRef ?? null,
+					humanRequestReason: null,
+					updatedAt: new Date().toISOString(),
+				};
+				await this.#persistPlanReviewControl(workflowId, attemptId);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
 					contextLedger,
@@ -1160,8 +1195,100 @@ export class WorkflowEngine {
 			}
 			case "plan_review": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
+				if (!this.#planReviewControl) {
+					const rejectionCount = this.#planCycles;
+					this.#planReviewControl = {
+						schemaVersion: 1,
+						kind: "plan_review_control_state",
+						substate: rejectionCount > 0 ? "rereview" : "initial_review",
+						reviewRound: rejectionCount > 0 ? 2 : 1,
+						planRejectionCount: rejectionCount,
+						arbitrationCycles: 0,
+						arbitrationTrigger: null,
+						latestPlanArtifactRef: this.#planArtifactRef?.artifactId ?? null,
+						latestReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
+						authorResponsesArtifactRef: null,
+						routeSelectionReceiptRef: null,
+						humanRequestReason: null,
+						updatedAt: new Date().toISOString(),
+					};
+				}
+				const control = this.#planReviewControl;
+				if (control.substate === "awaiting_human") {
+					await this.#setPlanReviewAwaitingHuman(
+						workflowId,
+						attemptId,
+						control.humanRequestReason ?? "plan review is awaiting human authority",
+					);
+					return;
+				}
+				if (
+					control.substate === "arbitration" &&
+					control.arbitrationCycles === 1 &&
+					this.#planReview?.schemaVersion === 2 &&
+					this.#planReview.reviewKind === "arbitration"
+				) {
+					const arbitrationDecision = this.#planReview.decision;
+					await this.#completeTo(
+						workflowId,
+						attemptId,
+						fresh.status,
+						arbitrationDecision === "approved" ? "implementing" : "blocked",
+						`plan_review:arbitration_${arbitrationDecision}`,
+						fresh.version,
+					);
+					return;
+				}
+				if (control.substate === "arbitration" && control.arbitrationCycles === 1) {
+					await this.#setPlanReviewAwaitingHuman(
+						workflowId,
+						attemptId,
+						"arbitration attempt has no trusted artifact",
+					);
+					return;
+				}
+				// F5 resume: crashed after single-write arbitration entry (cycles still 0).
+				if (control.substate === "arbitration" && control.arbitrationCycles < 1) {
+					const resumeTrigger = control.arbitrationTrigger;
+					if (!resumeTrigger) {
+						await this.#setPlanReviewAwaitingHuman(
+							workflowId,
+							attemptId,
+							"arbitration resume missing trigger",
+						);
+						return;
+					}
+					const arbitration = await this.#runPlanArbitration(
+						workflowId,
+						attemptId,
+						session,
+						signal,
+						policy,
+						resumeTrigger,
+					);
+					if (!arbitration) {
+						await this.#setPlanReviewAwaitingHuman(
+							workflowId,
+							attemptId,
+							"no eligible plan arbitrator route",
+						);
+						return;
+					}
+					await this.#finishSuccessfulArbitration(
+						workflowId,
+						attemptId,
+						fresh.status,
+						fresh.version,
+						arbitration,
+					);
+					return;
+				}
 				this.#budgetLedger.recordReviewerCycle();
-				const pinnedReviewer = this.#planReviewerIdentity?.profileId ?? (this.#planCycles > 0 ? this.#planReview?.modelProfileId : undefined);
+				const reviewKind = control.reviewRound === 2 ? "rereview" : "initial";
+				const requirementsSnapshot = this.#planRequirementsSnapshot();
+				const pinnedReviewer =
+					this.#planReviewerIdentity?.profileId ??
+					(reviewKind === "rereview" ? (this.#planReview?.modelProfileId ?? undefined) : undefined);
 				const executeReview = async (profile: ModelProfile, assignment: string) =>
 					new PlanReviewStage(this.#adapter).execute({
 						workflowId,
@@ -1176,13 +1303,30 @@ export class WorkflowEngine {
 						),
 						session,
 						signal,
+						requirementsSnapshotRef: requirementsSnapshot.ref,
+						requirementsSnapshotSha256: requirementsSnapshot.sha256,
+						reviewKind,
+						reviewRound: control.reviewRound,
+						authorResponses: this.#planReview?.schemaVersion === 2 ? [...this.#planReview.authorResponses] : [],
+						routeSelectionReceiptRef: control.routeSelectionReceiptRef,
+						legacyV1: this.#planReviewLegacy,
 					});
 				const reviewResult = pinnedReviewer
-					? await this.#withPinnedProfile("plan_reviewer", pinnedReviewer, async profile => {
-							const result = await executeReview(profile, "Re-review the revised plan for correctness and feasibility");
-							this.#assertPlanReviewerIdentity(profile, result);
-							return result;
-						}, "plan_reviewer:rereview")
+					? await this.#withPinnedProfile(
+							"plan_reviewer",
+							pinnedReviewer,
+							async profile => {
+								const result = await executeReview(
+									profile,
+									reviewKind === "rereview"
+										? "Re-review the revised plan for correctness and feasibility"
+										: "Review the plan for correctness and feasibility",
+								);
+								this.#assertPlanReviewerIdentity(profile, result);
+								return result;
+							},
+							"plan_reviewer:rereview",
+						)
 					: await this.#withProfileFallback(
 							"plan_reviewer",
 							{
@@ -1204,7 +1348,7 @@ export class WorkflowEngine {
 							},
 						);
 				const {
-					artifact: review,
+					artifact: rawReview,
 					usage,
 					promptAssemblyReceipt,
 					contextLedger,
@@ -1216,8 +1360,40 @@ export class WorkflowEngine {
 					modelFamily,
 					resolvedToolPolicyId,
 				} = reviewResult;
+				const isV2Review = rawReview.schemaVersion === 2;
+				// C1: stamp engine-owned fields before persist; never trust model triggerReason.
+				const review = isV2Review
+					? {
+							...rawReview,
+							triggerReason: derivePlanReviewTrigger(rawReview),
+							routeSelectionReceiptRef: control.routeSelectionReceiptRef,
+							cleanContextReceiptRef: null,
+							specEvidenceReceiptRef: null,
+						}
+					: rawReview;
 				this.#planReview = review;
+				this.#planReviewLegacy = !isV2Review;
 				this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
+				const nextRejectionCount =
+					review.decision === "changes_requested"
+						? control.planRejectionCount + 1
+						: control.planRejectionCount;
+				const hasMissingAuthority =
+					isV2Review && review.schemaVersion === 2 && review.findings.some(f => f.basis === "missing_authority");
+				const triggerReason: PlanReviewTriggerReasonV1 | null =
+					isV2Review && review.schemaVersion === 2 ? review.triggerReason : null;
+				this.#planReviewControl = {
+					...control,
+					latestPlanArtifactRef: this.#planArtifactRef?.artifactId ?? control.latestPlanArtifactRef,
+					latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
+					authorResponsesArtifactRef:
+						isV2Review && review.schemaVersion === 2 && review.authorResponses.length > 0
+							? this.#planReviewArtifactRef.artifactId
+							: control.authorResponsesArtifactRef,
+					routeSelectionReceiptRef: control.routeSelectionReceiptRef,
+					planRejectionCount: nextRejectionCount,
+					updatedAt: new Date().toISOString(),
+				};
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
 					contextLedger,
@@ -1229,66 +1405,80 @@ export class WorkflowEngine {
 					modelFamily,
 					resolvedToolPolicyId,
 				});
-				const next = getNextStage("plan_review", review.decision);
-				if (!next) throw new WorkflowPolicyError("invalid_review_decision", { decision: review.decision });
-				if (review.decision === "changes_requested") {
-					this.#planCycles += 1;
-					if (this.#planCycles >= this.#config.maxPlanCycles) {
-						const arbitration = await this.#runPlanArbitration(workflowId, attemptId, session, signal, policy);
-						if (!arbitration) {
-							await this.#store.completeAttemptAndTransition({
-								workflowId,
-								attemptId,
-								attemptStatus: "failed",
-								fromStatus: fresh.status,
-								toStatus: "blocked",
-								reason: "arbitration_required",
-								expectedVersion: fresh.version,
-								budget: this.#ledgerBudgetSnapshot(),
-							});
-							return;
-						}
-						this.#planReview = arbitration.artifact;
-						this.#planReviewArtifactRef = await this.#persistArtifact(
+				if (isV2Review && (review.decision === "blocked" || hasMissingAuthority)) {
+					await this.#setPlanReviewAwaitingHuman(
+						workflowId,
+						attemptId,
+						hasMissingAuthority ? "missing_authority" : "plan_review_blocked",
+					);
+					return;
+				}
+
+				const triggerArbitration =
+					triggerReason === "contradiction" ||
+					triggerReason === "suspicious_pass" ||
+					(review.decision === "changes_requested" && nextRejectionCount >= this.#config.maxPlanCycles);
+				if (triggerArbitration) {
+					const arbitrationTrigger = triggerReason ?? ("max_cycles_author_reject" as const);
+					if (this.#planReviewControl.arbitrationCycles >= 1) {
+						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "maximum arbitration cycles reached");
+						return;
+					}
+					this.#planCycles = nextRejectionCount;
+					// F5: single write before arbitration call; cycles stay 0 until success.
+					this.#planReviewControl = {
+						...this.#planReviewControl,
+						substate: "arbitration",
+						arbitrationCycles: 0,
+						planRejectionCount: nextRejectionCount,
+						arbitrationTrigger: arbitrationTrigger,
+						updatedAt: new Date().toISOString(),
+					};
+					await this.#persistPlanReviewControl(workflowId, attemptId);
+					const arbitration = await this.#runPlanArbitration(
+						workflowId,
+						attemptId,
+						session,
+						signal,
+						policy,
+						arbitrationTrigger,
+					);
+					if (!arbitration) {
+						await this.#setPlanReviewAwaitingHuman(
 							workflowId,
 							attemptId,
-							"review",
-							arbitration.artifact,
-						);
-						await this.#recordUsageAndProfile(workflowId, attemptId, arbitration.usage, {
-							promptAssemblyReceipt: arbitration.promptAssemblyReceipt,
-							contextLedger: arbitration.contextLedger,
-							optimizationReceipts: arbitration.optimizationReceipts,
-							resolvedProvider: arbitration.resolvedProvider,
-							resolvedModel: arbitration.resolvedModel,
-							toolCalls: arbitration.toolCalls,
-							identityReceipt: arbitration.identityReceipt,
-							modelFamily: arbitration.modelFamily,
-							resolvedToolPolicyId: arbitration.resolvedToolPolicyId,
-						});
-						if (arbitration.artifact.decision !== "approved") {
-							await this.#store.completeAttemptAndTransition({
-								workflowId,
-								attemptId,
-								attemptStatus: "failed",
-								fromStatus: fresh.status,
-								toStatus: "blocked",
-								reason: "arbitration_blocked",
-								expectedVersion: fresh.version,
-								budget: this.#ledgerBudgetSnapshot(),
-							});
-							return;
-						}
-						await this.#completeTo(
-							workflowId,
-							attemptId,
-							fresh.status,
-							"implementing",
-							"plan_review:arbitration_approved",
-							fresh.version,
+							"no eligible plan arbitrator route",
 						);
 						return;
 					}
+					await this.#finishSuccessfulArbitration(
+						workflowId,
+						attemptId,
+						fresh.status,
+						fresh.version,
+						arbitration,
+					);
+					return;
+				}
+
+				const next = getNextStage("plan_review", review.decision);
+				if (!next) throw new WorkflowPolicyError("invalid_review_decision", { decision: review.decision });
+				if (review.decision === "changes_requested") {
+					this.#planCycles = nextRejectionCount;
+					this.#planReviewControl = {
+						...this.#planReviewControl,
+						substate: "awaiting_replan",
+						updatedAt: new Date().toISOString(),
+					};
+					await this.#persistPlanReviewControl(workflowId, attemptId);
+				} else {
+					this.#planReviewControl = {
+						...this.#planReviewControl,
+						substate: reviewKind === "rereview" ? "rereview" : "initial_review",
+						arbitrationTrigger: null,
+						updatedAt: new Date().toISOString(),
+					};
+					await this.#persistPlanReviewControl(workflowId, attemptId);
 				}
 				await this.#completeTo(
 					workflowId,
@@ -1768,8 +1958,10 @@ export class WorkflowEngine {
 		const settingsGet = session.settings?.get?.bind(session.settings);
 		const configuredConcurrency = settingsGet?.("task.maxConcurrency" as "task.maxConcurrency");
 		const taskMaxConcurrency = typeof configuredConcurrency === "number" ? configuredConcurrency : 0;
-		const declarationArmEnabled = settingsGet?.("latency.arms.concurrencyDeclaration" as "latency.arms.concurrencyDeclaration") === true;
-		const executionArmEnabled = settingsGet?.("latency.arms.concurrencyExecution" as "latency.arms.concurrencyExecution") === true;
+		const declarationArmEnabled =
+			settingsGet?.("latency.arms.concurrencyDeclaration" as "latency.arms.concurrencyDeclaration") === true;
+		const executionArmEnabled =
+			settingsGet?.("latency.arms.concurrencyExecution" as "latency.arms.concurrencyExecution") === true;
 		let concurrencyDeclaration: WorkflowConcurrencyDeclarationV1 | undefined;
 		if (declarationArmEnabled) {
 			const rawDeclaration = policy.concurrencyDeclaration;
@@ -2600,7 +2792,9 @@ export class WorkflowEngine {
 				reason: this.#preflightUnavailableReasons[profileId],
 			});
 		}
-		const profile = this.#router.list().find(candidate => candidate.id === profileId && candidate.roles.includes(role));
+		const profile = this.#router
+			.list()
+			.find(candidate => candidate.id === profileId && candidate.roles.includes(role));
 		if (!profile) {
 			throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", { profileId, role });
 		}
@@ -2654,6 +2848,7 @@ export class WorkflowEngine {
 		session: ToolSession,
 		signal: AbortSignal | undefined,
 		policy: Record<string, unknown>,
+		triggerReason: Exclude<PlanReviewTriggerReasonV1, null>,
 	): Promise<PlanReviewStageResult | null> {
 		let route: RoutingDecision;
 		try {
@@ -2672,7 +2867,8 @@ export class WorkflowEngine {
 		const context = `${this.#contextBuilder.buildPlanReviewContext(
 			this.#plan!,
 			resolveArtifactInclusion(route.profile),
-		)}\n\nLatest review to arbitrate:\n${JSON.stringify(this.#planReview)}`;
+		)}\n\nLatest review to arbitrate:\n${JSON.stringify(this.#planReview)}\n\nArbitration trigger: ${triggerReason}`;
+		const requirementsSnapshot = this.#planRequirementsSnapshot();
 		return new PlanReviewStage(this.#adapter).execute({
 			workflowId,
 			attemptId,
@@ -2686,6 +2882,13 @@ export class WorkflowEngine {
 			),
 			session,
 			signal,
+			requirementsSnapshotRef: requirementsSnapshot.ref,
+			requirementsSnapshotSha256: requirementsSnapshot.sha256,
+			reviewKind: "arbitration",
+			reviewRound: 2,
+			authorResponses: this.#planReview?.schemaVersion === 2 ? [...this.#planReview.authorResponses] : [],
+			triggerReason,
+			routeSelectionReceiptRef: this.#planReviewControl?.routeSelectionReceiptRef ?? null,
 		});
 	}
 
@@ -2859,6 +3062,89 @@ export class WorkflowEngine {
 		return this.#budgetLedger.snapshot() as unknown as Record<string, unknown>;
 	}
 
+	#planRequirementsSnapshot(): { ref: string; sha256: string } {
+		return {
+			ref: this.#planArtifactRef?.recoveryUri ?? `artifact://${this.#plan?.workflowId ?? "workflow"}/plan`,
+			sha256: this.#planArtifactSha256 ?? sha256Hex(JSON.stringify(this.#plan ?? {})),
+		};
+	}
+
+	async #persistPlanReviewControl(workflowId: string, attemptId: string): Promise<void> {
+		if (!this.#planReviewControl) return;
+		await this.#persistArtifact(workflowId, attemptId, "plan-review-control-state", this.#planReviewControl);
+	}
+
+	/** Persist successful arbitration: stamp cycles=1 only after a non-null result. */
+	async #finishSuccessfulArbitration(
+		workflowId: string,
+		attemptId: string,
+		fromStatus: WorkflowStatus,
+		_expectedVersion: number,
+		arbitration: PlanReviewStageResult,
+	): Promise<void> {
+		this.#planReview = arbitration.artifact;
+		this.#planReviewLegacy = false;
+		this.#planReviewArtifactRef = await this.#persistArtifact(
+			workflowId,
+			attemptId,
+			"review",
+			arbitration.artifact,
+		);
+		if (this.#planReviewControl) {
+			this.#planReviewControl = {
+				...this.#planReviewControl,
+				arbitrationCycles: 1,
+				latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
+				updatedAt: new Date().toISOString(),
+			};
+		}
+		await this.#recordUsageAndProfile(workflowId, attemptId, arbitration.usage, {
+			promptAssemblyReceipt: arbitration.promptAssemblyReceipt,
+			contextLedger: arbitration.contextLedger,
+			optimizationReceipts: arbitration.optimizationReceipts,
+			resolvedProvider: arbitration.resolvedProvider,
+			resolvedModel: arbitration.resolvedModel,
+			toolCalls: arbitration.toolCalls,
+			identityReceipt: arbitration.identityReceipt,
+			modelFamily: arbitration.modelFamily,
+			resolvedToolPolicyId: arbitration.resolvedToolPolicyId,
+		});
+		await this.#persistPlanReviewControl(workflowId, attemptId);
+		const state = await this.#requireState(workflowId);
+		await this.#completeTo(
+			workflowId,
+			attemptId,
+			fromStatus,
+			arbitration.artifact.decision === "approved" ? "implementing" : "blocked",
+			`plan_review:arbitration_${arbitration.artifact.decision}`,
+			state.version,
+		);
+	}
+
+	/**
+	 * Mark plan review as awaiting human authority and transition top-level to terminal blocked,
+	 * while preserving control state (substate awaiting_human + humanRequestReason).
+	 */
+	async #setPlanReviewAwaitingHuman(workflowId: string, attemptId: string, reason: string): Promise<void> {
+		if (!this.#planReviewControl) return;
+		this.#planReviewControl = {
+			...this.#planReviewControl,
+			substate: "awaiting_human",
+			humanRequestReason: reason,
+			updatedAt: new Date().toISOString(),
+		};
+		await this.#persistPlanReviewControl(workflowId, attemptId);
+		const state = await this.#requireState(workflowId);
+		if (!TERMINAL.has(state.status) && isValidTransition(state.status, "blocked")) {
+			await this.#completeTo(workflowId, attemptId, state.status, "blocked", reason, state.version);
+			return;
+		}
+		await this.#finishOpenAttempt(workflowId, attemptId, "failed", {
+			kind: "plan_review_awaiting_human",
+			summary: reason,
+		});
+	}
+
 	async #completeTo(
 		workflowId: string,
 		attemptId: string,
@@ -2908,11 +3194,15 @@ export class WorkflowEngine {
 	): Promise<StageHandoffArtifactRef> {
 		// Secret-safe: never persist raw secret-like values in durable artifacts.
 		const content = redactSecretsInText(JSON.stringify(artifact));
+		const schemaVersion =
+			typeof (artifact as { schemaVersion?: unknown }).schemaVersion === "number"
+				? (artifact as { schemaVersion: number }).schemaVersion
+				: 1;
 		const stored = await this.#artifactStore.store({
 			workflowId,
 			attemptId,
 			kind,
-			schemaVersion: 1,
+			schemaVersion,
 			relativePath: "",
 			content,
 		});
@@ -2920,11 +3210,12 @@ export class WorkflowEngine {
 			workflowId,
 			attemptId,
 			kind,
-			schemaVersion: 1,
+			schemaVersion,
 			relativePath: stored.relativePath,
 			sha256: stored.sha256,
 			content,
 		});
+		if (kind === "plan") this.#planArtifactSha256 = stored.sha256;
 		return this.#toHandoffRef(stored);
 	}
 
@@ -3079,18 +3370,27 @@ export class WorkflowEngine {
 					this.#qualityRouteArtifactPersisted = true;
 					continue;
 				}
+				if (meta.kind === "plan-review-control-state" || parsed.kind === "plan_review_control_state") {
+					const control = PlanReviewControlStateSchema.parse(parsed) as PlanReviewControlStateV1;
+					if (!this.#planReviewControl || control.updatedAt >= this.#planReviewControl.updatedAt) {
+						this.#planReviewControl = control;
+					}
+					continue;
+				}
 				if (parsed.kind === "plan") {
 					this.#plan = parsed as PlanArtifactV1;
 					this.#planArtifactRef = ref;
+					this.#planArtifactSha256 = meta.sha256;
 					// Restore planner route context for plan_review diversity across Engine resume.
 					if (this.#plan.modelProfileId) this.#plannerProfileId = this.#plan.modelProfileId;
 					if (this.#plan.modelProfileId) {
 						this.#plannerVendor = this.#router.list().find(p => p.id === this.#plan?.modelProfileId)?.vendor;
 					}
 				} else if (parsed.kind === "review") {
-					const review = parsed as ReviewArtifactV1;
+					const review = parsed as PlanReviewArtifact;
 					if (review.subject === "plan") {
 						this.#planReview = review;
+						this.#planReviewLegacy = review.schemaVersion === 1;
 						this.#planReviewArtifactRef = ref;
 						if (!this.#planReviewerIdentity && review.modelProfileId && review.provider && review.model) {
 							const profile = this.#router.list().find(candidate => candidate.id === review.modelProfileId);

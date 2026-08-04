@@ -477,6 +477,11 @@ function recordTimeoutMetric(name: TimeoutMetricName, jobKey: string): void {
 	logger.warn(`task timeout metric: ${name}`, { jobKey, total: timeoutMetricTotals[name] });
 }
 
+function clearTimeoutMetricsForJob(jobKey: string): void {
+	timeoutMetricOnce.delete(`queued_timeout_triggered:${jobKey}`);
+	timeoutMetricOnce.delete(`runtime_timeout_triggered:${jobKey}`);
+}
+
 /** Test-only: reset per-job timeout metric de-duplication. */
 export function __resetTaskTimeoutMetricsForTests(): void {
 	timeoutMetricOnce.clear();
@@ -487,6 +492,26 @@ export function __resetTaskTimeoutMetricsForTests(): void {
 /** Test-only: read timeout metric totals. */
 export function __getTaskTimeoutMetricsForTests(): Readonly<Record<TimeoutMetricName, number>> {
 	return { ...timeoutMetricTotals };
+}
+
+/** Test-only: count retained once-keys (F8 leak detector). */
+export function __getTaskTimeoutOnceKeyCountForTests(): number {
+	return timeoutMetricOnce.size;
+}
+
+/**
+ * Test-only: reproduce settle-then-late-record once-key race (F8).
+ * Fixed settleOnce always clears on re-entry, so keysAfterReentryClear must be 0.
+ */
+export function __exerciseTimeoutMetricSettleRaceForTests(jobKey: string): {
+	keysAfterLateRecord: number;
+	keysAfterReentryClear: number;
+} {
+	clearTimeoutMetricsForJob(jobKey);
+	recordTimeoutMetric("queued_timeout_triggered", jobKey);
+	const keysAfterLateRecord = timeoutMetricOnce.size;
+	clearTimeoutMetricsForJob(jobKey);
+	return { keysAfterLateRecord, keysAfterReentryClear: timeoutMetricOnce.size };
 }
 
 /** Test-only: build the abort reason payload used by queued-startup timeout. */
@@ -1150,9 +1175,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				let semaphoreHeld = false;
 				let settled = false;
 				const settleOnce = (failed: boolean) => {
+					// F8: always clear once-keys, even on re-entry after a late recordTimeoutMetric.
+					clearTimeoutMetricsForJob(agentId);
 					if (settled) return;
 					settled = true;
 					onSettled?.(failed);
+				};
+				const recordJobTimeout = (name: TimeoutMetricName) => {
+					// Do not leave orphan once-keys after the job has already settled.
+					if (settled) return;
+					recordTimeoutMetric(name, agentId);
 				};
 				// Freeze at job start so mid-run settings edits cannot change this job's policy.
 				const queuedTimeoutMsRaw = this.session.settings.get("task.queuedStartupTimeoutMs");
@@ -1175,8 +1207,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					releasePermit();
 					progress.status = "failed";
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
+					recordJobTimeout("queued_timeout_triggered");
 					settleOnce(true);
-					recordTimeoutMetric("queued_timeout_triggered", agentId);
 					throw new TaskJobError(queuedTimeoutErrorText(timeoutMs));
 				};
 				const failAbortedBeforeExecution = (): never => {
@@ -1279,7 +1311,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						typeof singleResult.abortReason === "string" &&
 						singleResult.abortReason.includes("runtime limit exceeded")
 					) {
-						recordTimeoutMetric("runtime_timeout_triggered", agentId);
+						recordJobTimeout("runtime_timeout_triggered");
 					}
 					// F8: runtime timeout keeps AgentProgress.status="aborted"; AsyncJob becomes failed via TaskJobError.
 					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";

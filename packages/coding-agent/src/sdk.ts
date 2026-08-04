@@ -2773,6 +2773,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			shouldInlineToolDescriptors(inlineToolDescriptorsMode, modelId);
 		const eagerTasks = settings.get("task.eager") !== "default";
 		const eagerTasksAlways = settings.get("task.eager") === "always";
+		const taskProactiveAutoParallel = settings.get("task.proactive.autoParallel");
+		const taskProactivePipelineGuidance = settings.get("task.proactive.pipelineGuidance");
+		const taskProactiveStageRouting = settings.get("task.proactive.stageRouting");
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
 		// Mutable holder updated by reconcileModelOptimization / session apply.
@@ -2876,6 +2879,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				eagerTasks,
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
+				taskProactiveAutoParallel,
+				taskProactivePipelineGuidance,
+				taskProactiveStageRouting,
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),

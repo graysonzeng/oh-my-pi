@@ -10,7 +10,7 @@ import type {
 	ContextStrategy,
 	ImplementationArtifactV1,
 	PlanArtifactV1,
-	ReviewArtifactV1,
+	PlanReviewArtifact,
 	ReviewFindingV1,
 	StageHandoffV1,
 	VerificationArtifactV1,
@@ -43,7 +43,7 @@ export function renderContextTemplate(template: string, vars: Record<string, str
 export class ContextBuilder {
 	buildPlanContext(input: {
 		request: WorkflowRequest | { request: string; constraints?: string };
-		priorReview?: ReviewArtifactV1 | null;
+		priorReview?: PlanReviewArtifact | null;
 		constraints?: string;
 	}): string {
 		return renderContextTemplate(planContextTemplate, {
@@ -63,7 +63,7 @@ export class ContextBuilder {
 
 	buildImplementContext(
 		plan: PlanArtifactV1,
-		review?: ReviewArtifactV1 | null,
+		review?: PlanReviewArtifact | null,
 		inclusion?: ResolvedArtifactInclusion,
 	): string {
 		const includePlan = inclusion?.includePlan !== false;

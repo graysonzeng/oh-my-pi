@@ -243,7 +243,7 @@ export interface PlanReviewControlStateV1 {
 	kind: "plan_review_control_state";
 	substate: PlanReviewSubstateV1;
 	reviewRound: 1 | 2;
-	planRejectionCount: 0 | 1 | 2;
+	planRejectionCount: number;
 	arbitrationCycles: 0 | 1;
 	arbitrationTrigger: Exclude<PlanReviewTriggerReasonV1, null> | null;
 	latestPlanArtifactRef: string | null;

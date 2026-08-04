@@ -17,14 +17,17 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
-	TaskTool,
 	__classifyAcquireAbortReasonForTests,
+	__exerciseTimeoutMetricSettleRaceForTests,
 	__getTaskTimeoutMetricsForTests,
+	__getTaskTimeoutOnceKeyCountForTests,
 	__makeQueuedTimeoutReasonForTests,
 	__resetTaskTimeoutMetricsForTests,
+	TaskTool,
 } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -324,17 +327,16 @@ describe("task spawn routing", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(
-			createSession({
-				manager,
-				settings: {
-					"task.maxConcurrency": 1,
-					"task.queuedStartupTimeoutMs": 40,
-					// Keep runtime unlimited so only the queue guard can fire.
-					"task.maxRuntimeMs": 0,
-				},
-			}),
-		);
+		const session = createSession({
+			manager,
+			settings: {
+				"task.maxConcurrency": 1,
+				"task.queuedStartupTimeoutMs": 40,
+				// Keep runtime unlimited so only the queue guard can fire.
+				"task.maxRuntimeMs": 0,
+			},
+		});
+		const tool = await TaskTool.create(session);
 
 		const first = await tool.execute("tc-hold", {
 			agent: "task",
@@ -360,6 +362,18 @@ describe("task spawn routing", () => {
 		expect(started).toEqual(["Holder"]);
 		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(1);
 
+		// A later job with the same agent name must get a fresh per-job metric key.
+		session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
+		const repeated = await tool.execute("tc-queued-repeat", {
+			agent: "task",
+			name: "Queued",
+			task: "Wait behind holder again.",
+		} as TaskParams);
+		const repeatedJob = manager.getJob(repeated.details!.async!.jobId)!;
+		await repeatedJob.promise;
+		expect(repeatedJob.status).toBe("failed");
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(2);
+
 		// Permit must not leak: after holder finishes, a third spawn can acquire.
 		const third = await tool.execute("tc-after", {
 			agent: "task",
@@ -379,8 +393,7 @@ describe("task spawn routing", () => {
 		gates.get("After")!.resolve();
 		await thirdJob.promise;
 		expect(thirdJob.status).toBe("completed");
-		// Metric stays once-per-job even if inspected again.
-		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(1);
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(2);
 	});
 
 	it("keeps cancel as first cause when timeout timer fires after cancel (same-tick race)", async () => {
@@ -439,9 +452,19 @@ describe("task spawn routing", () => {
 		expect(secondJob.errorText ?? "").not.toContain("queued startup timeout");
 		expect(started).toEqual(["Holder"]);
 		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(0);
+		// F8: cancel-then-late-timer must not leave orphan once-keys.
+		expect(__getTaskTimeoutOnceKeyCountForTests()).toBe(0);
 
 		gates.get("Holder")!.resolve();
 		await firstJob.promise;
+	});
+
+	it("F8: settleOnce always clears once-keys even after a late record", () => {
+		__resetTaskTimeoutMetricsForTests();
+		const result = __exerciseTimeoutMetricSettleRaceForTests("race-job");
+		expect(result.keysAfterLateRecord).toBe(1);
+		expect(result.keysAfterReentryClear).toBe(0);
+		expect(__getTaskTimeoutOnceKeyCountForTests()).toBe(0);
 	});
 
 	it("classifies cancel-then-timeout by combinedSignal.reason only (no secondary OR)", () => {

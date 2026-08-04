@@ -167,6 +167,7 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 									status: "valid",
 									data: reviewArtifact("approved", "plan"),
 								},
+								resolvedModel: model ? `openai/${model}` : undefined,
 							},
 						};
 					}

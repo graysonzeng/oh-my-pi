@@ -5,6 +5,9 @@ import type { StructuredRunner } from "../../src/workflow/runtime-adapter";
 import type {
 	ImplementationArtifactV1,
 	PlanArtifactV1,
+	PlanReviewArtifact,
+	PlanReviewArtifactV2,
+	PlanReviewFindingV2,
 	ReviewArtifactV1,
 	VerificationArtifactV1,
 	VerifierPort,
@@ -67,11 +70,96 @@ export function planArtifact(overrides: Partial<PlanArtifactV1> = {}): PlanArtif
 	};
 }
 
+function toPlanReviewFinding(finding: ReviewArtifactV1["findings"][number]): PlanReviewFindingV2 {
+	return {
+		...finding,
+		basis: "repo_evidence",
+		requirementId: null,
+		sourceRefs: [finding.file ? `${finding.file}:${finding.line ?? 1}` : "test:fixture"],
+		missingAuthority: null,
+	};
+}
+
+export function planReviewArtifactV2(
+	decision: PlanReviewArtifactV2["decision"],
+	findings: Array<PlanReviewFindingV2 | ReviewArtifactV1["findings"][number]> = [],
+	overrides: Partial<PlanReviewArtifactV2> = {},
+): PlanReviewArtifactV2 {
+	const resolvedFindings = findings.map(finding => ("basis" in finding ? finding : toPlanReviewFinding(finding)));
+	const candidateFindings = overrides.findings ?? resolvedFindings;
+	const finalFindings =
+		decision === "changes_requested" && candidateFindings.length === 0
+			? [
+					{
+						id: "f-default",
+						priority: "P1" as const,
+						category: "correctness" as const,
+						status: "open" as const,
+						confidence: 0.9,
+						summary: "default finding for changes_requested",
+						explanation: "tests must provide actionable findings",
+						suggestedOwner: "implementer" as const,
+						basis: "repo_evidence" as const,
+						requirementId: null,
+						sourceRefs: ["test:fixture"],
+						missingAuthority: null,
+					},
+				]
+			: candidateFindings;
+	return {
+		schemaVersion: 2,
+		workflowId: "wf",
+		attemptId: "att",
+		stage: "plan_review",
+		createdAt: new Date().toISOString(),
+		modelProfileId: "test-profile",
+		provider: "test",
+		model: "test/model",
+		promptVersion: "test-v2",
+		kind: "review",
+		subject: "plan",
+		reviewKind: "initial",
+		decision,
+		explanation: `decision=${decision}`,
+		confidence: 0.9,
+		requirementsSnapshotRef: "artifact://requirements",
+		requirementsSnapshotSha256: "0".repeat(64),
+		coverage: [],
+		uncoveredDimensions: [],
+		antiAnchoringRationale: "checked mandatory requirements and open dimensions",
+		reviewRound: 1,
+		authorResponses: [],
+		triggerReason: null,
+		routeSelectionReceiptRef: null,
+		cleanContextReceiptRef: null,
+		specEvidenceReceiptRef: null,
+		authorityReceiptRef: null,
+		...overrides,
+		findings: finalFindings,
+	};
+}
+
+export function reviewArtifact(
+	decision: ReviewArtifactV1["decision"],
+	subject: "plan",
+	findings?: ReviewArtifactV1["findings"],
+): PlanReviewArtifactV2;
+export function reviewArtifact(
+	decision: ReviewArtifactV1["decision"],
+	subject: "implementation",
+	findings?: ReviewArtifactV1["findings"],
+): ReviewArtifactV1;
+export function reviewArtifact(
+	decision: ReviewArtifactV1["decision"],
+	subject?: ReviewArtifactV1["subject"],
+	findings?: ReviewArtifactV1["findings"],
+): PlanReviewArtifact | ReviewArtifactV1;
 export function reviewArtifact(
 	decision: ReviewArtifactV1["decision"],
 	subject: ReviewArtifactV1["subject"] = "plan",
 	findings: ReviewArtifactV1["findings"] = [],
-): ReviewArtifactV1 {
+): PlanReviewArtifact | ReviewArtifactV1 {
+	if (subject === "plan") return planReviewArtifactV2(decision, findings);
 	// changes_requested must include ≥1 finding (schema contract).
 	const resolvedFindings =
 		decision === "changes_requested" && findings.length === 0
@@ -92,7 +180,7 @@ export function reviewArtifact(
 		schemaVersion: 1,
 		workflowId: "wf",
 		attemptId: "att",
-		stage: subject === "plan" ? "plan_review" : "code_review",
+		stage: "code_review",
 		createdAt: new Date().toISOString(),
 		kind: "review",
 		subject,
@@ -128,7 +216,7 @@ export function implArtifact(overrides: Partial<ImplementationArtifactV1> = {}):
  */
 export function scriptedRunner(script: {
 	plan?: PlanArtifactV1 | (() => PlanArtifactV1);
-	planReview?: ReviewArtifactV1 | (() => ReviewArtifactV1);
+	planReview?: PlanReviewArtifact | (() => PlanReviewArtifact);
 	implement?: ImplementationArtifactV1 | (() => ImplementationArtifactV1);
 	codeReview?: ReviewArtifactV1 | (() => ReviewArtifactV1);
 	repair?: ImplementationArtifactV1 | (() => ImplementationArtifactV1);

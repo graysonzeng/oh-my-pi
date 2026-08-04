@@ -59,6 +59,7 @@ import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block
 import { buildLineEntriesWithBlockContext, type LineEntry, lineEntriesToPlainText } from "../utils/block-context";
 import { isCpuProfilePath, renderCpuProfile } from "../utils/cpuprofile";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
+import * as git from "../utils/git";
 import {
 	ImageInputTooLargeError,
 	loadImageInput,
@@ -730,6 +731,11 @@ export interface ReadToolDetails {
 	truncation?: TruncationResult;
 	isDirectory?: boolean;
 	resolvedPath?: string;
+	branchOrWorktreeScope?: string;
+	providerViewIdentity?: string;
+	contentOrRevisionIdentity?: string;
+	canonicalSource?: string;
+	outputMode?: "raw" | "converted" | "decoded" | "summary" | "unknown";
 	suffixResolution?: { from: string; to: string };
 	url?: string;
 	finalUrl?: string;
@@ -751,6 +757,59 @@ export interface ReadToolDetails {
 	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
 	displayReadTargets?: string[];
 }
+
+type ReadIdentityOutputMode = NonNullable<ReadToolDetails["outputMode"]>;
+
+function readBranchOrWorktreeScope(cwd?: string): string {
+	const normalizedCwd = cwd?.trim();
+	if (!normalizedCwd) return "";
+	try {
+		const head = git.head.resolveSync(normalizedCwd);
+		if (head?.commit) return `git:${head.commit}`;
+		if (head?.kind === "ref" && head.branchName) return `git:${head.branchName}`;
+	} catch {
+		// Fall back to the absolute worktree when git metadata is unavailable.
+	}
+	return `worktree:${path.resolve(normalizedCwd)}`;
+}
+
+async function attachReadIdentity(
+	result: AgentToolResult<ReadToolDetails>,
+	options: {
+		absolutePath: string;
+		cwd?: string;
+		outputMode: ReadIdentityOutputMode;
+		canonicalSource?: string;
+		providerViewIdentity?: string;
+	},
+): Promise<AgentToolResult<ReadToolDetails>> {
+	const textBlocks = result.content.filter((content): content is TextContent => content.type === "text");
+	if (textBlocks.length === 0) return result;
+
+	let providerViewIdentity = options.providerViewIdentity ?? result.details?.providerViewIdentity ?? "";
+	if (!providerViewIdentity) {
+		try {
+			const stat = await fs.stat(options.absolutePath);
+			providerViewIdentity = `fs:${stat.mtimeMs}:${stat.size}`;
+		} catch {
+			// Identity production is fail-open when the source disappears after reading.
+		}
+	}
+
+	const returnedText = textBlocks.map(content => content.text).join("\n");
+	const contentOrRevisionIdentity = new Bun.CryptoHasher("sha256").update(returnedText).digest("hex");
+	const details: ReadToolDetails = {
+		...(result.details ?? {}),
+		resolvedPath: options.absolutePath,
+		canonicalSource: options.canonicalSource ?? result.details?.canonicalSource ?? options.absolutePath,
+		branchOrWorktreeScope: readBranchOrWorktreeScope(options.cwd),
+		providerViewIdentity,
+		contentOrRevisionIdentity,
+		outputMode: options.outputMode,
+	};
+	return { ...result, details };
+}
+
 type ReadParams = ReadToolInput;
 
 /** Parsed representation of a path-embedded selector. */
@@ -1986,7 +2045,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (firstText) {
 			firstText.text = prependSuffixResolutionNotice(firstText.text, resolvedArchivePath.suffixResolution);
 		}
-		return result;
+		return attachReadIdentity(result, {
+			absolutePath: resolvedArchivePath.absolutePath,
+			cwd: this.session.cwd,
+			canonicalSource: `${resolvedArchivePath.absolutePath}#${entry.path}`,
+			outputMode: details.contentType === "text/markdown" ? "converted" : "raw",
+		});
 	}
 
 	async #readSqlite(
@@ -2305,16 +2369,26 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			const urlRaw = parsedUrlTarget.raw;
 			const urlRanges = parsedUrlTarget.ranges;
+			const urlOutputMode = (details: { contentType?: string }, raw?: boolean): ReadIdentityOutputMode =>
+				raw === true ? "raw" : details.contentType === "text/markdown" ? "converted" : "raw";
 			if (urlRanges !== undefined && urlRanges.length > 1) {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				return this.#buildInMemoryMultiRangeResult(entry.output, urlRanges, {
+				const built = this.#buildInMemoryMultiRangeResult(entry.output, urlRanges, {
 					details: { ...entry.details },
 					sourceUrl: entry.details.finalUrl,
 					entityLabel: "URL output",
 					raw: urlRaw,
 					immutable: true,
+				});
+				// F4: URL multi-range path must stamp read identity for dedupe eligibility.
+				return attachReadIdentity(built, {
+					absolutePath: entry.details.finalUrl,
+					cwd: this.session.cwd,
+					canonicalSource: entry.details.finalUrl,
+					providerViewIdentity: `url-content:${new Bun.CryptoHasher("sha256").update(entry.output).digest("hex")}`,
+					outputMode: urlOutputMode(entry.details, urlRaw),
 				});
 			}
 			const urlOffset = parsedUrlTarget.offset;
@@ -2323,15 +2397,36 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				return this.#buildInMemoryTextResult(entry.output, urlOffset, urlLimit, {
+				const built = this.#buildInMemoryTextResult(entry.output, urlOffset, urlLimit, {
 					details: { ...entry.details },
 					sourceUrl: entry.details.finalUrl,
 					entityLabel: "URL output",
 					raw: urlRaw,
 					immutable: true,
 				});
+				// F4: URL offset/limit path must stamp read identity for dedupe eligibility.
+				return attachReadIdentity(built, {
+					absolutePath: entry.details.finalUrl,
+					cwd: this.session.cwd,
+					canonicalSource: entry.details.finalUrl,
+					providerViewIdentity: `url-content:${new Bun.CryptoHasher("sha256").update(entry.output).digest("hex")}`,
+					outputMode: urlOutputMode(entry.details, urlRaw),
+				});
 			}
-			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
+			const urlResult = await executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
+			const finalUrl = urlResult.details?.finalUrl ?? parsedUrlTarget.path;
+			const urlText = urlResult.content
+				.filter((content): content is TextContent => content.type === "text")
+				.map(content => content.text)
+				.join("\n");
+			// F4: plain URL path must stamp read identity (was completely missing).
+			return attachReadIdentity(urlResult, {
+				absolutePath: finalUrl,
+				cwd: this.session.cwd,
+				canonicalSource: finalUrl,
+				providerViewIdentity: `url-content:${new Bun.CryptoHasher("sha256").update(urlText).digest("hex")}`,
+				outputMode: urlOutputMode(urlResult.details ?? {}, urlRaw),
+			});
 		}
 
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
@@ -2527,18 +2622,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			else if (isCpuProfilePath(absolutePath)) rendered = renderCpuProfile(await Bun.file(absolutePath).text());
 			if (rendered) {
 				if (isMultiRange(parsed) && parsed.kind === "lines") {
-					return this.#buildInMemoryMultiRangeResult(rendered, parsed.ranges, {
+					return attachReadIdentity(
+						this.#buildInMemoryMultiRangeResult(rendered, parsed.ranges, {
+							details: { resolvedPath: absolutePath },
+							sourcePath: absolutePath,
+							entityLabel: "profile summary",
+						}),
+						{ absolutePath, cwd: this.session.cwd, outputMode: "summary" },
+					);
+				}
+				const { offset, limit } = selToOffsetLimit(parsed);
+				return attachReadIdentity(
+					this.#buildInMemoryTextResult(rendered, offset, limit, {
 						details: { resolvedPath: absolutePath },
 						sourcePath: absolutePath,
 						entityLabel: "profile summary",
-					});
-				}
-				const { offset, limit } = selToOffsetLimit(parsed);
-				return this.#buildInMemoryTextResult(rendered, offset, limit, {
-					details: { resolvedPath: absolutePath },
-					sourcePath: absolutePath,
-					entityLabel: "profile summary",
-				});
+					}),
+					{ absolutePath, cwd: this.session.cwd, outputMode: "summary" },
+				);
 			}
 		}
 		// Read the file based on type
@@ -2561,18 +2662,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		} else if (isNotebookPath(absolutePath) && !isRawSelector(parsed)) {
 			const notebookText = await readEditableNotebookText(absolutePath, localReadPath);
 			if (isMultiRange(parsed) && parsed.kind === "lines") {
-				return this.#buildInMemoryMultiRangeResult(notebookText, parsed.ranges, {
+				return attachReadIdentity(
+					this.#buildInMemoryMultiRangeResult(notebookText, parsed.ranges, {
+						details: { resolvedPath: absolutePath },
+						sourcePath: absolutePath,
+						entityLabel: "notebook",
+					}),
+					{ absolutePath, cwd: this.session.cwd, outputMode: "converted" },
+				);
+			}
+			const { offset, limit } = selToOffsetLimit(parsed);
+			return attachReadIdentity(
+				this.#buildInMemoryTextResult(notebookText, offset, limit, {
 					details: { resolvedPath: absolutePath },
 					sourcePath: absolutePath,
 					entityLabel: "notebook",
-				});
-			}
-			const { offset, limit } = selToOffsetLimit(parsed);
-			return this.#buildInMemoryTextResult(notebookText, offset, limit, {
-				details: { resolvedPath: absolutePath },
-				sourcePath: absolutePath,
-				entityLabel: "notebook",
-			});
+				}),
+				{ absolutePath, cwd: this.session.cwd, outputMode: "converted" },
+			);
 		} else if (shouldConvertWithMarkit) {
 			// Convert document via markit.
 			const result = await convertFileWithMarkit(absolutePath, signal);
@@ -2585,25 +2692,31 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// `file.pdf:50-100` silently returned the head of the document
 				// because only `truncateHead` was being applied.
 				if (isMultiRange(parsed) && parsed.kind === "lines") {
-					return this.#buildInMemoryMultiRangeResult(renderedContent, parsed.ranges, {
+					return attachReadIdentity(
+						this.#buildInMemoryMultiRangeResult(renderedContent, parsed.ranges, {
+							details: {
+								resolvedPath: absolutePath,
+								contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
+							},
+							sourcePath: absolutePath,
+							entityLabel: "document",
+						}),
+						{ absolutePath, cwd: this.session.cwd, outputMode: "converted" },
+					);
+				}
+				const { offset, limit } = selToOffsetLimit(parsed);
+				return attachReadIdentity(
+					this.#buildInMemoryTextResult(renderedContent, offset, limit, {
 						details: {
 							resolvedPath: absolutePath,
 							contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
 						},
 						sourcePath: absolutePath,
 						entityLabel: "document",
-					});
-				}
-				const { offset, limit } = selToOffsetLimit(parsed);
-				return this.#buildInMemoryTextResult(renderedContent, offset, limit, {
-					details: {
-						resolvedPath: absolutePath,
-						contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
-					},
-					sourcePath: absolutePath,
-					entityLabel: "document",
-					raw: isRawSelector(parsed),
-				});
+						raw: isRawSelector(parsed),
+					}),
+					{ absolutePath, cwd: this.session.cwd, outputMode: "converted" },
+				);
 			} else if (result.error) {
 				content = [{ type: "text", text: `[Cannot read ${ext} file: ${result.error || "conversion failed"}]` }];
 			} else {
@@ -2675,7 +2788,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 					);
-					if (multiResult.bridgeResult) return multiResult.bridgeResult;
+					if (multiResult.bridgeResult) {
+						return attachReadIdentity(multiResult.bridgeResult, {
+							absolutePath,
+							cwd: this.session.cwd,
+							outputMode: "raw",
+						});
+					}
 					content = [{ type: "text", text: multiResult.outputText }];
 					sourcePath = absolutePath;
 					details = multiResult.displayContent ? { displayContent: multiResult.displayContent } : {};
@@ -2705,7 +2824,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
 								if (firstText) firstText.text = `${notice}\n${firstText.text}`;
 							}
-							return bridgeResult;
+							return attachReadIdentity(bridgeResult, {
+								absolutePath,
+								cwd: this.session.cwd,
+								outputMode: "raw",
+							});
 						} catch (error) {
 							logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
 						}
@@ -3016,7 +3139,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (columnTruncated > 0) {
 			resultBuilder.limits({ columnMax: columnTruncated });
 		}
-		return resultBuilder.done();
+		const result = resultBuilder.done();
+		if (sourcePath && !mimeType) {
+			return attachReadIdentity(result, {
+				absolutePath,
+				cwd: this.session.cwd,
+				outputMode: details.summary ? "summary" : details.contentType === "text/markdown" ? "converted" : "raw",
+			});
+		}
+		return result;
 	}
 
 	/**
@@ -3153,7 +3284,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				.sourcePath(artifact.path)
 				.sourceInternal(url.href);
 			if (read.columnTruncated > 0) resultBuilder.limits({ columnMax: read.columnTruncated });
-			return resultBuilder.done();
+			return attachReadIdentity(resultBuilder.done(), {
+				absolutePath: artifact.path,
+				cwd: this.session.cwd,
+				canonicalSource: artifactUrl,
+				providerViewIdentity: `artifact:${artifact.id}`,
+				outputMode: "raw",
+			});
 		}
 
 		const { offset, limit } = selToOffsetLimit(parsedSel);
@@ -3278,7 +3415,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			.sourcePath(artifact.path)
 			.sourceInternal(url.href);
 		if (truncationInfo) resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
-		return resultBuilder.done();
+		return attachReadIdentity(resultBuilder.done(), {
+			absolutePath: artifact.path,
+			cwd: this.session.cwd,
+			canonicalSource: artifactUrl,
+			providerViewIdentity: `artifact:${artifact.id}`,
+			outputMode: "raw",
+		});
 	}
 
 	/**

@@ -7,7 +7,7 @@ import { BudgetLedger } from "../../src/workflow/budget-ledger";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
-import { fakeSession, planArtifact, scriptedRunner } from "./helpers";
+import { fakeSession, planArtifact, planReviewArtifactV2, scriptedRunner } from "./helpers";
 
 describe("WorkflowEngine budget stop", () => {
 	let store: WorkflowStore;
@@ -56,19 +56,7 @@ describe("WorkflowEngine budget stop", () => {
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
 					plan: planArtifact(),
-					planReview: {
-						schemaVersion: 1,
-						workflowId: "wf",
-						attemptId: "att",
-						stage: "plan_review",
-						createdAt: new Date().toISOString(),
-						kind: "review",
-						subject: "plan",
-						decision: "approved",
-						findings: [],
-						explanation: "ok",
-						confidence: 0.9,
-					},
+					planReview: planReviewArtifactV2("approved", [], { explanation: "ok" }),
 				}),
 			),
 			artifactStore: new ArtifactStore(artifactDir),

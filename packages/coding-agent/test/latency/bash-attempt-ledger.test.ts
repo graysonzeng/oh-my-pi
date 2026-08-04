@@ -199,4 +199,59 @@ describe("BashTool ledger completion integration", () => {
 		expect(text.startsWith("[bash-attempt-ledger] repeated identical failure")).toBe(true);
 		expect(text).toContain("Command exited with code 9");
 	});
+
+	it("records timeout terminals from ACP create and poll paths", async () => {
+		const makeSession = (sessionId: string, bridge: ClientBridge): ToolSession =>
+			({
+				cwd: "/tmp",
+				hasUI: false,
+				settings: Settings.isolated({
+					"bash.direnv": "off",
+					"latency.arms.bashAdvisory": true,
+				}),
+				skills: [],
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				getSessionId: () => sessionId,
+				getArtifactsDir: () => null,
+				getClientBridge: () => bridge,
+			}) as unknown as ToolSession;
+		const expectTimeoutAttempt = (session: ToolSession, command: string): void => {
+			const ledger = getBashAttemptLedgerStore(session)?.get(
+				buildBashCommandFingerprint({ command, cwd: "/tmp" }),
+				buildBashStateFingerprint({ cwd: "/tmp", envNames: [] }),
+			);
+			expect(ledger?.attempts.at(-1)?.terminal).toEqual({ kind: "timeout" });
+		};
+
+		const createCommand = "printf create-timeout";
+		const createBridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: () => new Promise<ClientBridgeTerminalHandle>(() => {}),
+		};
+		const createSession = makeSession("bash-ledger-acp-create-timeout-test", createBridge);
+		await expect(
+			new BashTool(createSession).execute("acp-create-timeout", { command: createCommand, timeout: 1 }),
+		).rejects.toThrow(/Command timed out after 1 seconds/);
+		expectTimeoutAttempt(createSession, createCommand);
+
+		const pollCommand = "printf poll-timeout";
+		const pendingExit = Promise.withResolvers<{ exitCode: number | null; signal: string | null }>();
+		const pollHandle: ClientBridgeTerminalHandle = {
+			terminalId: "term-ledger-poll-timeout",
+			waitForExit: async () => pendingExit.promise,
+			currentOutput: async () => ({ output: "poll timeout output\n", truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const pollBridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => pollHandle,
+		};
+		const pollSession = makeSession("bash-ledger-acp-poll-timeout-test", pollBridge);
+		await expect(
+			new BashTool(pollSession).execute("acp-poll-timeout", { command: pollCommand, timeout: 1 }),
+		).rejects.toThrow(/Command timed out after 1 seconds/);
+		expectTimeoutAttempt(pollSession, pollCommand);
+	});
 });

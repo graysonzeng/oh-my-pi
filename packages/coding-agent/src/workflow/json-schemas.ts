@@ -157,6 +157,113 @@ export const ReviewArtifactJsonSchema = {
 	},
 } as const;
 
+const artifactHeaderV2Properties = {
+	schemaVersion: { const: 2 },
+	workflowId: { type: "string", minLength: 1 },
+	attemptId: { type: "string", minLength: 1 },
+	stage: { const: "plan_review" },
+	createdAt: { type: "string" },
+	modelProfileId: { type: ["string", "null"] },
+	provider: { type: ["string", "null"] },
+	model: { type: ["string", "null"] },
+	promptVersion: { type: "string", minLength: 1 },
+} as const;
+
+const planReviewFindingV2Item = {
+	type: "object",
+	additionalProperties: false,
+	required: [
+		"id",
+		"priority",
+		"category",
+		"confidence",
+		"summary",
+		"explanation",
+		"suggestedOwner",
+		"basis",
+		"requirementId",
+		"sourceRefs",
+		"missingAuthority",
+	],
+	properties: {
+		...reviewFindingItem.properties,
+		basis: {
+			enum: ["spec_requirement", "user_requirement", "repo_evidence", "safety_invariant", "missing_authority"],
+		},
+		requirementId: { anyOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
+		sourceRefs: { type: "array", items: { type: "string", minLength: 1 } },
+		missingAuthority: { anyOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
+	},
+} as const;
+
+const requirementCoverageItem = {
+	type: "object",
+	additionalProperties: false,
+	required: ["requirementId", "source", "mandatory", "status", "evidenceRefs", "rationale"],
+	properties: {
+		requirementId: { type: "string", minLength: 1 },
+		source: { enum: ["spec_requirement", "user_requirement"] },
+		mandatory: { type: "boolean" },
+		status: { enum: ["satisfied", "violated", "not_applicable", "missing_authority"] },
+		evidenceRefs: { type: "array", items: { type: "string", minLength: 1 } },
+		rationale: { type: "string", minLength: 1 },
+	},
+} as const;
+
+const authorResponseItem = {
+	type: "object",
+	additionalProperties: false,
+	required: ["findingId", "disposition", "explanation", "evidenceRefs"],
+	properties: {
+		findingId: { type: "string", minLength: 1 },
+		disposition: { enum: ["accepted", "rejected", "clarified"] },
+		explanation: { type: "string", minLength: 1 },
+		evidenceRefs: { type: "array", items: { type: "string" } },
+	},
+} as const;
+
+/** Strict model-facing V2 plan-review output; engine-owned metadata is merged before Zod parsing. */
+export const PlanReviewArtifactV2JsonSchema = {
+	type: "object",
+	additionalProperties: false,
+	required: [
+		"schemaVersion",
+		"workflowId",
+		"attemptId",
+		"stage",
+		"createdAt",
+		"kind",
+		"subject",
+		"decision",
+		"findings",
+		"explanation",
+		"confidence",
+		"coverage",
+		"uncoveredDimensions",
+		"antiAnchoringRationale",
+	],
+	properties: {
+		...artifactHeaderV2Properties,
+		kind: { const: "review" },
+		subject: { const: "plan" },
+		reviewKind: { enum: ["initial", "rereview", "arbitration", "human"] },
+		decision: { enum: ["approved", "changes_requested", "blocked"] },
+		findings: { type: "array", items: planReviewFindingV2Item },
+		explanation: { type: "string", minLength: 1 },
+		confidence: { type: "number", minimum: 0, maximum: 1 },
+		requirementsSnapshotRef: { type: "string", minLength: 1 },
+		requirementsSnapshotSha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+		coverage: { type: "array", items: requirementCoverageItem },
+		uncoveredDimensions: { type: "array", items: { type: "string" } },
+		antiAnchoringRationale: { type: "string", minLength: 1 },
+		reviewRound: { enum: [1, 2] },
+		authorResponses: { type: "array", items: authorResponseItem },
+		// Engine-owned fields (triggerReason, routeSelectionReceiptRef, cleanContextReceiptRef,
+		// specEvidenceReceiptRef) are intentionally omitted so models are not invited to emit them.
+		authorityReceiptRef: { anyOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
+	},
+} as const;
+
 export const ImplementationArtifactJsonSchema = {
 	type: "object",
 	additionalProperties: false,

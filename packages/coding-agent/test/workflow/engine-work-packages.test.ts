@@ -23,6 +23,7 @@ import type {
 	ImplementationArtifactV1,
 	ModelProfile,
 	PlanArtifactV1,
+	PlanReviewArtifactV2,
 	ReviewArtifactV1,
 	ReviewFindingV1,
 	VerifierPort,
@@ -34,7 +35,7 @@ import type {
 	WorkPackageV1,
 } from "../../src/workflow/types";
 import { executeWorkPackagePlan, type WorkPackageExecutionPlan } from "../../src/workflow/work-packages";
-import { reviewArtifact } from "./helpers";
+import { planReviewArtifactV2, reviewArtifact } from "./helpers";
 
 type ScriptValue<T> = T | (() => T);
 type ImplementScript = (
@@ -44,7 +45,7 @@ type ImplementScript = (
 
 interface RunnerScript {
 	plan: ScriptValue<PlanArtifactV1>;
-	planReview: ScriptValue<ReviewArtifactV1>;
+	planReview: ScriptValue<PlanReviewArtifactV2>;
 	implement: ImplementScript;
 	codeReview: ScriptValue<ReviewArtifactV1>;
 	identityMode?: (request: StructuredRunnerRequest, packageId: string | undefined) => IdentityMode;
@@ -233,12 +234,15 @@ function makePlan(workPackages?: WorkPackageV1[]): PlanArtifactV1 {
 	return plan;
 }
 
-function makeReview(subject: ReviewArtifactV1["subject"]): ReviewArtifactV1 {
+function makeReview(subject: "plan"): PlanReviewArtifactV2;
+function makeReview(subject: "implementation"): ReviewArtifactV1;
+function makeReview(subject: ReviewArtifactV1["subject"]): PlanReviewArtifactV2 | ReviewArtifactV1 {
+	if (subject === "plan") return planReviewArtifactV2("approved");
 	return {
 		schemaVersion: 1,
 		workflowId: "wf",
 		attemptId: "att",
-		stage: subject === "plan" ? "plan_review" : "code_review",
+		stage: "code_review",
 		createdAt: new Date().toISOString(),
 		kind: "review",
 		subject,

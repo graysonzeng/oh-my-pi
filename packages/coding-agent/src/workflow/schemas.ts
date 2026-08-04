@@ -250,6 +250,30 @@ export const PlanReviewArtifactV2Schema = ArtifactHeaderV2Schema.extend({
 				path: ["authorityReceiptRef"],
 			});
 		}
+		// Engine-owned trigger/context fields: models may only carry them on arbitration/human.
+		if (data.reviewKind !== "arbitration" && data.reviewKind !== "human") {
+			if (data.triggerReason != null) {
+				ctx.addIssue({
+					code: "custom",
+					message: "initial/rereview cannot set triggerReason",
+					path: ["triggerReason"],
+				});
+			}
+			if (data.cleanContextReceiptRef != null) {
+				ctx.addIssue({
+					code: "custom",
+					message: "initial/rereview cannot set cleanContextReceiptRef",
+					path: ["cleanContextReceiptRef"],
+				});
+			}
+			if (data.specEvidenceReceiptRef != null) {
+				ctx.addIssue({
+					code: "custom",
+					message: "initial/rereview cannot set specEvidenceReceiptRef",
+					path: ["specEvidenceReceiptRef"],
+				});
+			}
+		}
 	});
 
 export const PlanReviewArtifactSchema = z.union([ReviewArtifactSchema, PlanReviewArtifactV2Schema]);
@@ -266,7 +290,7 @@ export const PlanReviewControlStateSchema = z
 			"awaiting_human",
 		]),
 		reviewRound: z.union([z.literal(1), z.literal(2)]),
-		planRejectionCount: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+		planRejectionCount: z.number().int().min(0),
 		arbitrationCycles: z.union([z.literal(0), z.literal(1)]),
 		arbitrationTrigger: z
 			.enum(["contradiction", "suspicious_pass", "max_cycles_author_reject"])

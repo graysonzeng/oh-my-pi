@@ -1359,6 +1359,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						outputLines: 0,
 						outputBytes: 0,
 					};
+					this.#recordBashAttempt({
+						command,
+						cwd: commandCwd,
+						env: bridgeEnv,
+						result: timedOutResult,
+						startedAt,
+					});
 					this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
 					throw new ToolError("Command timed out");
 				}
@@ -1429,6 +1436,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
 							outputBytes: current.output.length,
 						};
+						this.#recordBashAttempt({
+							command,
+							cwd: commandCwd,
+							env: bridgeEnv,
+							result: timedOutResult,
+							startedAt,
+						});
 						this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
 						throw new ToolError("Command timed out");
 					}

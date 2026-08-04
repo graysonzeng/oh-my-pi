@@ -516,6 +516,12 @@ export interface BuildSystemPromptOptions {
 	eagerTasksAlways?: boolean;
 	/** Whether `task.batch` is enabled; selects the centralized delegation guidance's call shape. */
 	taskBatch?: boolean;
+	/** Whether to render proactive guidance for batching independent runnable slices. */
+	taskProactiveAutoParallel?: boolean;
+	/** Whether to render proactive guidance for escalating gated delivery to workflow. */
+	taskProactivePipelineGuidance?: boolean;
+	/** Whether to render proactive guidance for routing slices through existing agents. */
+	taskProactiveStageRouting?: boolean;
 	/** Effective task concurrency limit displayed in centralized delegation guidance. Zero means unlimited. */
 	taskMaxConcurrency?: number;
 	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
@@ -580,6 +586,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks = false,
 		eagerTasksAlways = false,
 		taskBatch = true,
+		taskProactiveAutoParallel = false,
+		taskProactivePipelineGuidance = false,
+		taskProactiveStageRouting = false,
 		taskMaxConcurrency = 0,
 		taskIrcEnabled = false,
 		secretsEnabled = false,
@@ -862,6 +871,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks,
 		eagerTasksAlways,
 		taskBatch,
+		taskProactiveAutoParallel,
+		taskProactivePipelineGuidance,
+		taskProactiveStageRouting,
 		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		taskIrcEnabled,
 		secretsEnabled,
