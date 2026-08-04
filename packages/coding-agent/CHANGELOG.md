@@ -14,6 +14,8 @@
 - Added subagent queue/runtime timeout defaults: `task.maxRuntimeMs` defaults to 1h and `task.queuedStartupTimeoutMs` defaults to 2m (both independently disable with `0`), with AbortSignal.any first-cause attribution for queued-startup failures.
 - Added PlanReview V2 control path: single strong reviewer identity pin, engine-owned trigger/receipt fields, rejection counts aligned with `maxPlanCycles`, bounded arbitration resume, and terminal `blocked` when human authority is required while preserving `awaiting_human` control state.
 - Added opt-in proactive task-delegation prompt flags (`task.proactive.*`, default false) gated behind existing eager-task settings so parallel/delegation guidance is experimental rather than unconditional.
+- Added built-in ordinary-session modelOptimization profiles for production gateway models `luna` / `terra` / `sol` (priority 10, deterministic tool truncation only, LLM summarizer off) and expanded `grok` patterns for gateway-prefixed ids so `modelOptimization.enabled=true` resolves without a hand-written overlay.
+
 
 ### Added
 - Added custom-model validation for `compat.codexResponsesEndpoint`, enabling standard `/responses` WebSocket-to-SSE fallback on compatible gateways.
@@ -43,6 +45,8 @@
 ### Fixed
 - Fixed plan-review stage parsing so model-forged engine-owned V2 fields (`triggerReason` / receipt refs) are rejected at the stage boundary while the engine may stamp them after a successful parse; implementer session-fallback fixtures now supply `resolvedModel` so plan-review identity pin works end-to-end.
 - Fixed read-tool URL/local identity production so ReadViewKey eligibility can succeed for local paths, git scopes, and URL content; bash create/poll timeouts now record into the single BashAttemptLedger.
+- Fixed bash failure fingerprint noise: wall-time footers are stripped so two identical failed commands (e.g. `false`) share one fingerprint and can fire `bashAdvisory`.
+- Fixed ordinary-session read dedupe artifact verification for no-session/in-memory stores via `SessionManager.getArtifactContent`, so a second full read under opt+profile+`readDedupe` can rewrite to `[context ref: artifact://… sha256:…]` instead of fail-opening on missing disk path.
 - Fixed queued-timeout metric once-keys to clear on settle (including cancel-then-late-timer races) and to attribute cancel vs queued timeout by AbortSignal.any first-cause only.
 - Fixed resolved tool-policy id being dropped from stage evidence: `PlanStage`, `PlanReviewStage`, `CodeReviewStage`, `ImplementStage`, and `RepairStage` now forward `resolvedToolPolicyId` from the prepared invocation into their results, so usage/evidence records for planning/plan-review/code-review/implementing/repairing carry the actually-applied policy id instead of null.
 - Fixed provider-level `referenceProvider` being ignored by proxy discovery, which replaced configured upstream metadata with generic fallback limits.

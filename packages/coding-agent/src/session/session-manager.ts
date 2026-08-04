@@ -334,6 +334,7 @@ export type ReadonlySessionManager = Pick<
 	| "allocateArtifactPath"
 	| "saveArtifact"
 	| "getArtifactPath"
+	| "getArtifactContent"
 	| "getLeafId"
 	| "getLeafEntry"
 	| "getEntry"
@@ -1774,6 +1775,23 @@ export class SessionManager {
 
 	async getArtifactPath(id: string): Promise<string | null> {
 		return (await this.#artifactManagerForSession()?.getPath(id)) ?? null;
+	}
+
+	/**
+	 * Resolve artifact body for path-backed or in-memory (no-session) stores.
+	 * Read dedupe / recovery must verify immutable SHA against this content.
+	 */
+	async getArtifactContent(id: string): Promise<string | null> {
+		const normalized = id.startsWith("artifact://") ? id.slice("artifact://".length) : id;
+		const onDisk = await this.getArtifactPath(normalized);
+		if (onDisk) {
+			try {
+				return await Bun.file(onDisk).text();
+			} catch {
+				return null;
+			}
+		}
+		return this.#inMemoryArtifacts?.get(normalized) ?? null;
 	}
 
 	async saveDraft(text: string): Promise<void> {

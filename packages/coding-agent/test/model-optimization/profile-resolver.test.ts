@@ -113,4 +113,62 @@ describe("ordinary-session model optimization resolver", () => {
 		expect(glm.promptBlock).toBeUndefined();
 		expect(deepseek.promptBlock).toBeUndefined();
 	});
+
+	it("resolves gateway production models without user overlay", () => {
+		const cases: Array<{ id: string; provider: string; expected: string }> = [
+			{ id: "gpt-5.6-luna", provider: "gateway", expected: "luna" },
+			{ id: "gateway/gpt-5.6-luna", provider: "gateway", expected: "luna" },
+			{ id: "gpt-5.6-terra", provider: "gateway", expected: "terra" },
+			{ id: "gpt-5.6-sol", provider: "gateway", expected: "sol" },
+			{ id: "gpt-5.6-sol-pro", provider: "gateway", expected: "sol" },
+			{ id: "grok-4.5", provider: "gateway", expected: "grok" },
+			{ id: "gateway/grok-4.5", provider: "custom", expected: "grok" },
+		];
+
+		for (const { id, provider, expected } of cases) {
+			const model = {
+				id,
+				provider,
+				name: id,
+				api: "openai-completions" as const,
+				baseUrl: "http://example.invalid",
+				reasoning: false,
+				input: ["text"] as const,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+			};
+			const result = resolveModelOptimizationProfile({
+				model: model as never,
+				profiles: Object.values(DEFAULT_MODEL_OPTIMIZATION_PROFILES),
+				availableModels: [model as never],
+			});
+			expect(result.profile?.id).toBe(expected);
+			expect(result.ambiguous).toBeFalsy();
+			expect(result.profile?.toolStrategy?.resultSummarization?.enabled).toBe(false);
+			expect(result.profile?.toolStrategy?.outputTruncation?.enabled).toBe(true);
+		}
+	});
+
+	it("does not match unrelated ids containing sol as a substring", () => {
+		const model = {
+			id: "console",
+			provider: "gateway",
+			name: "console",
+			api: "openai-completions" as const,
+			baseUrl: "http://example.invalid",
+			reasoning: false,
+			input: ["text"] as const,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+		};
+		const result = resolveModelOptimizationProfile({
+			model: model as never,
+			profiles: Object.values(DEFAULT_MODEL_OPTIMIZATION_PROFILES),
+			availableModels: [model as never],
+		});
+		expect(result.profile).toBeUndefined();
+		expect(result.ambiguous).toBeFalsy();
+	});
 });

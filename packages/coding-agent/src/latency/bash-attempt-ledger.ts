@@ -133,6 +133,10 @@ export function buildBashStateFingerprint(input: {
 /** Strip timestamps / ephemeral ids before digesting failure excerpts. */
 export function normalizeBashFailureExcerpt(text: string): string {
 	return text
+		// Bash tool footers embed variable wall-clock text; strip so identical
+		// failures (e.g. two `false` runs) share one failure fingerprint.
+		.replace(/^\s*Wall time:\s*\d+(?:\.\d+)?\s*(?:seconds?|ms|milliseconds?)\s*$/gim, "")
+		.replace(/\bWall time:\s*\d+(?:\.\d+)?\s*(?:seconds?|ms|milliseconds?)\b/gi, "")
 		.replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/g, "<ts>")
 		.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "<uuid>")
 		.replace(/\b\d{10,}\b/g, "<num>")

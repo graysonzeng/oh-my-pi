@@ -3133,9 +3133,9 @@ export class AgentSession {
 		try {
 			const match = /^artifact:\/\/(\d+)$/.exec(artifactRef);
 			if (!match) return false;
-			const artifactPath = await this.sessionManager.getArtifactPath(match[1]);
-			if (!artifactPath) return false;
-			return sha256Hex(await Bun.file(artifactPath).text()) === sha256;
+			const content = await this.sessionManager.getArtifactContent(match[1]!);
+			if (content === null) return false;
+			return sha256Hex(content) === sha256;
 		} catch {
 			return false;
 		}

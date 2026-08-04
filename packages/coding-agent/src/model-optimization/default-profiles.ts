@@ -78,7 +78,8 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 	},
 	grok: {
 		id: "grok",
-		modelPattern: ["grok-*", "xai/*"],
+		// Cover bare ids, xai provider ids, and gateway-prefixed host ids.
+		modelPattern: ["grok-*", "xai/*", "gateway/grok*", "*grok*"],
 		priority: 0,
 		promptStrategy: {
 			kind: "verbose",
@@ -105,6 +106,40 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		// Shared baseline only; no Grok prompt inheritance or guessed step-by-step.
 		toolStrategy: toolStrategy({ maxBytes: 1500, maxLines: 30, maxConcurrent: 3 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.8, keepRecentN: 5 }),
+	},
+	// Gateway production ids also match the broad gpt-5* family. Raise priority
+	// so enabled=true resolves a concrete profile instead of failing closed on
+	// equal-priority ambiguity, and so luna/terra/sol are not silent no-ops.
+	// Patterns stay model-id specific (`*sol*` alone would match console/resolve).
+	luna: {
+		id: "luna",
+		modelPattern: ["*luna*", "gpt-5.6-luna", "gateway/gpt-5.6-luna", "gpt-5.6-luna*"],
+		priority: 10,
+		// Conservative deterministic truncation only; no family prompt overlay.
+		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		contextStrategy: contextStrategy({ targetUtilization: 0.75, keepRecentN: 10 }),
+	},
+	terra: {
+		id: "terra",
+		modelPattern: ["*terra*", "gpt-5.6-terra", "gateway/gpt-5.6-terra", "gpt-5.6-terra*"],
+		priority: 10,
+		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		contextStrategy: contextStrategy({ targetUtilization: 0.75, keepRecentN: 10 }),
+	},
+	sol: {
+		id: "sol",
+		modelPattern: [
+			"gpt-5.6-sol",
+			"gpt-5.6-sol*",
+			"gateway/gpt-5.6-sol",
+			"gateway/gpt-5.6-sol*",
+			"*-sol",
+			"*-sol-*",
+		],
+		priority: 10,
+		// More conservative visible tool output for the slow/review class.
+		toolStrategy: toolStrategy({ maxBytes: 2000, maxLines: 40, maxConcurrent: 4 }),
+		contextStrategy: contextStrategy({ targetUtilization: 0.7, keepRecentN: 8 }),
 	},
 };
 

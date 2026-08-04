@@ -109,6 +109,49 @@ describe("BashAttemptLedgerV1 repetition", () => {
 		expect(cancelledLookup.repeatedFailure).toBe(false);
 		expect(buildBashFailureFingerprint({ terminal: { kind: "exit", exitCode: 0 } })).toBeNull();
 	});
+
+	it("strips wall-time noise so identical false exits share a fingerprint", () => {
+		const terminal = { kind: "exit" as const, exitCode: 1 };
+		const a = buildBashFailureFingerprint({
+			terminal,
+			stdoutExcerpt: "(no output)\n\nWall time: 0.03 seconds\n\nCommand exited with code 1",
+		});
+		const b = buildBashFailureFingerprint({
+			terminal,
+			stdoutExcerpt: "(no output)\n\nWall time: 0.00 seconds\n\nCommand exited with code 1",
+		});
+		expect(a).not.toBeNull();
+		expect(a).toBe(b);
+
+		const commandFingerprint = buildBashCommandFingerprint({ command: "false", cwd: "/repo" });
+		const stateFingerprint = buildBashStateFingerprint({ cwd: "/repo", envNames: [] });
+		let ledger = createBashAttemptLedger({
+			sessionId: "session-wall-time",
+			commandFingerprint,
+			stateFingerprint,
+			mode: "advisory",
+		});
+		ledger = appendBashAttempt(ledger, {
+			attemptId: "attempt-1",
+			startedAt: "2026-08-04T00:00:00Z",
+			endedAt: "2026-08-04T00:00:01Z",
+			terminal,
+			failureFingerprint: a,
+			stdoutDigest: "stdout-a",
+			stderrDigest: "stderr",
+			cwdIdentity: "/repo",
+			changedInputReceipt: null,
+		});
+
+		const repeated = lookupRepeatedBashFailure([ledger], {
+			commandFingerprint,
+			stateFingerprint,
+			failureFingerprint: b,
+		});
+		expect(repeated.repeatedFailure).toBe(true);
+		expect(repeated.advisoryText).toBeTruthy();
+		expect(repeated.advisoryText).toContain("execution not blocked");
+	});
 });
 
 describe("BashAttemptLedgerStore session ownership", () => {
