@@ -106,12 +106,23 @@ Contract coverage includes:
 
 ## 5. Open / follow-ups (not blocking this implementation gate)
 
+### Closed after acceptance (2026-08-04 follow-up commits)
+
+- PlanReview V2 stage wiring + engine-owned fields / C1–C3 regressions (`c67d8cd64`, `a5daa5d8b`).
+- Read identity production for local + URL paths (F4/F7) and bash create/poll timeout ledger (MEDIUM bash).
+- Queued-timeout first-cause + F8 once-key cleanup (`37e9b44d8`, `c67d8cd64`).
+- Session-fallback fixture identity for plan-review pin (`a5daa5d8b`).
+
+### Still open / deferred
+
 1. **Pilot A/B receipts** (≥30 pairs / arm) not run — design requires clean-context paired experiments with double ledger before claiming latency savings.
 2. **1.b context budget tuning** flag exists; profile threshold experiments deferred until 1.a has receipts.
 3. **Eval native migration path** is gated only; full bridge→workflow owner cutover still needs proven fixtures per decision enum + cancel/resume parity.
 4. **Plan arbitrator profiles** in default quality routes may need explicit `grok_plan_arbitrator` registration in production config for non-block arbitration (code supports resolve + degraded policy).
 5. **Session-frozen arm snapshot** helper exists; optional persistence into session custom entries / workflow artifacts can be wired at session start without changing defaults.
 6. Host `modelRoles.default` drift (grok vs historical flash) is outside arm treatment; freeze actual model identity in A/B lineage.
+7. **Explicit deferred epics** (do not claim closed): QualityRouteSnapshotV2 full, standalone `plan-arbitration.ts`, human receipt UI, five plan-review A/B arms rollout, D §10 full SQLite control-state migration.
+8. **Post-acquire timeout interleaving** beyond current first-cause tests remains partial (MEDIUM-3 residual); sync fanout has no `queuedStartupTimeoutMs` (documented non-goal).
 
 ## 6. Rollback checklist (operator)
 

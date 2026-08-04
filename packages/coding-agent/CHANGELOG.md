@@ -10,6 +10,10 @@
 
 ### Added
 - Added legacy-route session-model last resort for implement: the calling session's active model is registered as `main_agent_fallback` (last candidate, `degraded: true`, `fallback_from:<primary>`) when the three static implementer candidates are all unavailable at runtime; availability preflight real-probes it, resume re-finds it by id, and quality-route routers stay fail-closed (no session fallback). Retry budget for a role is now the distinct routable candidate count, so a preflight-excluded primary cannot truncate the fallback chain.
+- Added default-off latency arms (`latency.arms.*` plus existing `modelOptimization.enabled`) for ordinary-context optimization activation, verified read dedupe, bash failure ledger advisory/bounded injection, concurrency declaration/execution lowering, mechanical Flash repair routing, and eval-gate parity migration control.
+- Added subagent queue/runtime timeout defaults: `task.maxRuntimeMs` defaults to 1h and `task.queuedStartupTimeoutMs` defaults to 2m (both independently disable with `0`), with AbortSignal.any first-cause attribution for queued-startup failures.
+- Added PlanReview V2 control path: single strong reviewer identity pin, engine-owned trigger/receipt fields, rejection counts aligned with `maxPlanCycles`, bounded arbitration resume, and terminal `blocked` when human authority is required while preserving `awaiting_human` control state.
+- Added opt-in proactive task-delegation prompt flags (`task.proactive.*`, default false) gated behind existing eager-task settings so parallel/delegation guidance is experimental rather than unconditional.
 
 ### Added
 - Added custom-model validation for `compat.codexResponsesEndpoint`, enabling standard `/responses` WebSocket-to-SSE fallback on compatible gateways.
@@ -37,6 +41,9 @@
 - Live provider smoke is opt-in and cost-bearing; automated tests use injectable runners only.
 
 ### Fixed
+- Fixed plan-review stage parsing so model-forged engine-owned V2 fields (`triggerReason` / receipt refs) are rejected at the stage boundary while the engine may stamp them after a successful parse; implementer session-fallback fixtures now supply `resolvedModel` so plan-review identity pin works end-to-end.
+- Fixed read-tool URL/local identity production so ReadViewKey eligibility can succeed for local paths, git scopes, and URL content; bash create/poll timeouts now record into the single BashAttemptLedger.
+- Fixed queued-timeout metric once-keys to clear on settle (including cancel-then-late-timer races) and to attribute cancel vs queued timeout by AbortSignal.any first-cause only.
 - Fixed resolved tool-policy id being dropped from stage evidence: `PlanStage`, `PlanReviewStage`, `CodeReviewStage`, `ImplementStage`, and `RepairStage` now forward `resolvedToolPolicyId` from the prepared invocation into their results, so usage/evidence records for planning/plan-review/code-review/implementing/repairing carry the actually-applied policy id instead of null.
 - Fixed provider-level `referenceProvider` being ignored by proxy discovery, which replaced configured upstream metadata with generic fallback limits.
 - Split strict write-commit settlement: a live merger that reports success now persists durable `applied` state immediately after verifying the output patch path and SHA-256 (no recovery-style git proof); merger throw/cancel/unknown outcomes are reconciled against the tree, and every resume of `prepared`/`applied` state still requires strict reverse-applies / forward-does-not git proof, failing closed on missing, reverted, empty, hash-mismatched, or ambiguous patch evidence without rerunning implementers or the merge seam.
