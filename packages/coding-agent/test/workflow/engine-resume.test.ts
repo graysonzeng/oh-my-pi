@@ -159,7 +159,33 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 					}
 					if (agent === "reviewer" || agent === "plan_reviewer") {
 						const model = Array.isArray(request.model) ? request.model[0] : request.model;
-						seenReviewerModels.push(String(model));
+						const modelId = String(model ?? "gpt-5.6-sol");
+						const provider = modelId.startsWith("claude") ? "anthropic" : "openai";
+						seenReviewerModels.push(modelId);
+						if (request.onResponse) {
+							request.onResponse(
+								{
+									status: 200,
+									headers: {
+										"x-provider-model": modelId,
+										"x-omp-resolved-provider": provider,
+									},
+									requestId: "resume-plan-review",
+								},
+								{
+									id: modelId,
+									provider,
+									api: "openai-responses",
+									name: modelId,
+									baseUrl: "https://provider.invalid",
+									reasoning: true,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 16_000,
+									maxTokens: 1_000,
+								} as never,
+							);
+						}
 						return {
 							result: {
 								id: "raw_plan_review",
@@ -167,7 +193,7 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 									status: "valid",
 									data: reviewArtifact("approved", "plan"),
 								},
-								resolvedModel: model ? `openai/${model}` : undefined,
+								resolvedModel: `${provider}/${modelId}`,
 							},
 						};
 					}

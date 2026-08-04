@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { Usage } from "@oh-my-pi/pi-ai";
+import type { Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../../src/tools";
 import { buildRequirementsSnapshot, satisfyMandatoryCoverage } from "../../src/workflow/requirements-snapshot";
 import type { StructuredRunner } from "../../src/workflow/runtime-adapter";
@@ -287,6 +287,55 @@ export function scriptedRunner(script: {
 			const cwd = request.session?.cwd ?? "/tmp";
 			await materializeSamplePatch(cwd, patchPath);
 		}
+		// Emit a provider-echo attestation so RuntimeAdapter builds a real identity receipt.
+		// Prefer the request model pattern when it is an exact provider/model string; otherwise
+		// infer provider from bare model ids so lineage diversity (arbitrator avoid) still works.
+		const modelSelector = Array.isArray(request.model) ? request.model[0] : request.model;
+		let provider = "xai";
+		let modelId = "grok-code-test";
+		if (typeof modelSelector === "string" && modelSelector.trim().length > 0) {
+			if (modelSelector.includes("/")) {
+				const slash = modelSelector.indexOf("/");
+				provider = modelSelector.slice(0, slash);
+				modelId = modelSelector.slice(slash + 1) || modelId;
+			} else {
+				modelId = modelSelector;
+				if (modelId.startsWith("claude") || modelId.startsWith("anthropic")) provider = "anthropic";
+				else if (
+					modelId.startsWith("gpt") ||
+					modelId.startsWith("o1") ||
+					modelId.startsWith("o3") ||
+					modelId.startsWith("o4")
+				) {
+					provider = "openai";
+				} else if (modelId.startsWith("gemini")) provider = "google";
+				else if (modelId.startsWith("grok")) provider = "xai";
+			}
+		}
+		const resolvedModel = `${provider}/${modelId}`;
+		if (request.onResponse) {
+			const response: ProviderResponseMetadata = {
+				status: 200,
+				headers: {
+					"x-provider-model": modelId,
+					"x-omp-resolved-provider": provider,
+				},
+				requestId: `scripted_${label}`,
+			};
+			const localModel = {
+				id: modelId,
+				provider,
+				api: "openai-responses",
+				name: modelId,
+				baseUrl: "https://provider.invalid",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 16_000,
+				maxTokens: 1_000,
+			} as Model;
+			request.onResponse(response, localModel);
+		}
 		return {
 			result: {
 				id: `raw_${label}`,
@@ -295,7 +344,7 @@ export function scriptedRunner(script: {
 				branchName: impl.branchName,
 				usage,
 				toolCalls: label === "implement" || label === "repair" ? 3 : undefined,
-				resolvedModel: "xai/grok-code-test",
+				resolvedModel,
 			},
 		};
 	};

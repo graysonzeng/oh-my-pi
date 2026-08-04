@@ -112,6 +112,154 @@ describe("plan review identity pin + arbitration", () => {
 		expect(planReviews).toBe(2);
 	});
 
+	it("HIGH-4: fails closed when initial review has no attested runtime identity", async () => {
+		const engine = new WorkflowEngine({
+			store,
+			adapter: new RuntimeAdapter(async request => {
+				const agent = request.agent ?? "";
+				if (agent === "designer" || agent === "planner") {
+					return {
+						result: {
+							id: "raw_plan",
+							structuredOutput: { status: "valid", data: planArtifact({ summary: "plan-no-attestation" }) },
+							resolvedModel: "xai/grok-code-test",
+						},
+					};
+				}
+				if (agent === "reviewer" || agent === "plan_reviewer") {
+					// Intentionally omit onResponse attestation — pin must fail closed.
+					return {
+						result: {
+							id: "raw_plan_review",
+							structuredOutput: {
+								status: "valid",
+								data: planReviewArtifactV2("changes_requested"),
+							},
+							resolvedModel: "openai/gpt-5.6-sol",
+						},
+					};
+				}
+				throw new Error(`unexpected agent ${agent}`);
+			}),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+		});
+
+		const workflowId = await engine.startWorkflow({ request: "no attestation pin" });
+		await expect(engine.run(workflowId)).rejects.toMatchObject({
+			kind: "policy_violation",
+			message: expect.stringContaining("plan_reviewer_identity_unavailable"),
+		});
+		const routeSelections = (await store.listArtifacts(workflowId)).filter(
+			artifact => artifact.kind === "plan-review-route-selection",
+		);
+		expect(routeSelections).toHaveLength(0);
+	});
+
+	it("HIGH-4: persists attested route selection and reuses pin across resume", async () => {
+		let planReviews = 0;
+		let planCount = 0;
+		const engine = new WorkflowEngine({
+			store,
+			adapter: new RuntimeAdapter(
+				scriptedRunner({
+					plan: () => {
+						planCount += 1;
+						if (planCount === 1) return planArtifact({ summary: "plan-initial-attested" });
+						return planArtifact({
+							summary: "plan-replan-attested",
+							authorResponses: [
+								{
+									findingId: "f-default",
+									disposition: "accepted",
+									explanation: "will fix default finding",
+									evidenceRefs: ["plan:step-1"],
+								},
+							],
+						});
+					},
+					planReview: () => {
+						planReviews += 1;
+						if (planReviews === 1) return planReviewArtifactV2("changes_requested");
+						return planReviewArtifactV2("approved");
+					},
+				}),
+			),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+		});
+
+		const workflowId = await engine.startWorkflow({ request: "attested pin resume" });
+		await engine.resume(workflowId, { singleStep: true }); // created → planning
+		await engine.resume(workflowId, { singleStep: true }); // planning
+		await engine.resume(workflowId, { singleStep: true }); // plan_review → planning
+		expect((await engine.getState(workflowId))?.status).toBe("planning");
+		const routeMeta = (await store.listArtifacts(workflowId)).filter(
+			artifact => artifact.kind === "plan-review-route-selection",
+		);
+		expect(routeMeta.length).toBe(1);
+		const routeLoaded = await new ArtifactStore(artifactDir).load(routeMeta[0]!.relativePath, routeMeta[0]!.sha256);
+		expect(routeLoaded?.content).toBeTruthy();
+		const route = JSON.parse(routeLoaded!.content!) as {
+			kind?: string;
+			profileId?: string;
+			attestedProvider?: string;
+			attestedModel?: string;
+		};
+		expect(route.kind).toBe("plan_review_route_selection");
+		expect(typeof route.profileId).toBe("string");
+		expect(typeof route.attestedProvider).toBe("string");
+		expect(typeof route.attestedModel).toBe("string");
+		expect((route.attestedProvider ?? "").length).toBeGreaterThan(0);
+		expect((route.attestedModel ?? "").length).toBeGreaterThan(0);
+
+		const controlMeta = (await store.listArtifacts(workflowId))
+			.filter(artifact => artifact.kind === "plan-review-control-state")
+			.at(-1);
+		const controlBody = controlMeta
+			? await new ArtifactStore(artifactDir).load(controlMeta.relativePath, controlMeta.sha256)
+			: null;
+		expect(controlBody ? JSON.parse(controlBody.content ?? "{}") : null).toMatchObject({
+			substate: "awaiting_replan",
+			routeSelectionReceiptRef: expect.any(String),
+		});
+
+		const resumed = new WorkflowEngine({
+			store,
+			adapter: new RuntimeAdapter(
+				scriptedRunner({
+					plan: () =>
+						planArtifact({
+							summary: "plan-replan-attested",
+							authorResponses: [
+								{
+									findingId: "f-default",
+									disposition: "accepted",
+									explanation: "will fix default finding",
+									evidenceRefs: ["plan:step-1"],
+								},
+							],
+						}),
+					planReview: () => {
+						planReviews += 1;
+						return planReviewArtifactV2("approved");
+					},
+				}),
+			),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+		});
+		await resumed.resume(workflowId, { singleStep: true }); // replan → plan_review
+		expect((await resumed.getState(workflowId))?.status).toBe("plan_review");
+		await resumed.resume(workflowId, { singleStep: true }); // rereview with hydrated pin
+		expect((await resumed.getState(workflowId))?.status).toBe("implementing");
+		expect(planReviews).toBe(2);
+		// Route selection is established once on initial pin; resume must not rewrite it.
+		expect(
+			(await store.listArtifacts(workflowId)).filter(artifact => artifact.kind === "plan-review-route-selection"),
+		).toHaveLength(1);
+	});
+
 	it("blocks second rejection without author reject evidence", async () => {
 		let planReviews = 0;
 		let planCount = 0;

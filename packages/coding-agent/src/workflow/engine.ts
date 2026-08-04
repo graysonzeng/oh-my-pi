@@ -100,6 +100,7 @@ import type {
 	PlanArtifactV1,
 	PlanReviewArtifact,
 	PlanReviewControlStateV1,
+	PlanReviewRouteSelectionV1,
 	PlanReviewTriggerReasonV1,
 	RequirementsSnapshotV1,
 	QualityRouteSnapshotV1,
@@ -156,54 +157,36 @@ type PlanReviewerIdentity = Readonly<{
 	provider: string;
 	model: string;
 	modelFamily: string | undefined;
+	attestedProvenance: Extract<ModelIdentityProvenance, "provider_echo" | "gateway_attestation">;
+	exactMatch: boolean | null;
 }>;
 
+/**
+ * Pin only runtime-attested provider/model coordinates.
+ * Configured/local resolution alone is insufficient — provider drift would
+ * otherwise pass rereview equality checks without a real runtime receipt.
+ */
 function resolvePlanReviewerIdentity(
 	profile: ModelProfile,
 	result: PlanReviewStageResult,
 ): PlanReviewerIdentity | null {
-	const attestedProvider = result.identityReceipt?.attested.provider ?? null;
-	const attestedModel = result.identityReceipt?.attested.model ?? null;
-	if (attestedProvider && attestedModel) {
-		return {
-			profileId: profile.id,
-			provider: attestedProvider,
-			model: attestedModel,
-			modelFamily: result.identityReceipt?.modelFamily ?? result.modelFamily ?? undefined,
-		};
-	}
-	const configuredProvider = result.identityReceipt?.configured.provider ?? null;
-	const configuredModel = result.identityReceipt?.configured.model ?? null;
-	if (configuredProvider && configuredModel) {
-		return {
-			profileId: profile.id,
-			provider: configuredProvider,
-			model: configuredModel,
-			modelFamily: result.identityReceipt?.modelFamily ?? result.modelFamily ?? undefined,
-		};
-	}
-	if (result.resolvedProvider && result.resolvedModel) {
-		return {
-			profileId: profile.id,
-			provider: result.resolvedProvider,
-			model: result.resolvedModel,
-			modelFamily: result.modelFamily ?? undefined,
-		};
-	}
-	try {
-		const configured = configuredIdentityForProfile(profile);
-		if (configured.provider && configured.model) {
-			return {
-				profileId: profile.id,
-				provider: configured.provider,
-				model: configured.model,
-				modelFamily: configured.modelFamily ?? result.modelFamily ?? undefined,
-			};
-		}
-	} catch {
-		// fail closed below
-	}
-	return null;
+	const receipt = result.identityReceipt;
+	if (!receipt) return null;
+	const provenance = receipt.attested.provenance;
+	if (provenance !== "provider_echo" && provenance !== "gateway_attestation") return null;
+	const attestedProvider = receipt.attested.provider?.trim() ?? "";
+	const attestedModel = receipt.attested.model?.trim() ?? "";
+	if (!attestedProvider || !attestedModel) return null;
+	// Explicit mismatch against configured exact identity is fail-closed.
+	if (receipt.exactMatch === false) return null;
+	return {
+		profileId: profile.id,
+		provider: attestedProvider,
+		model: attestedModel,
+		modelFamily: receipt.modelFamily ?? result.modelFamily ?? undefined,
+		attestedProvenance: provenance,
+		exactMatch: receipt.exactMatch,
+	};
 }
 
 const IDENTITY_PROVENANCE: Record<ModelIdentityProvenance, true> = {
@@ -390,6 +373,7 @@ export class WorkflowEngine {
 	#plannerModelFamily: string | undefined;
 	#implementerModelFamily: string | undefined;
 	#planReviewerIdentity: PlanReviewerIdentity | undefined;
+	#planReviewerRouteSelectionRef: StageHandoffArtifactRef | undefined;
 	#planReviewControl: PlanReviewControlStateV1 | undefined;
 	#requirementsSnapshot: RequirementsSnapshotV1 | undefined;
 	#requirementsSnapshotRef: StageHandoffArtifactRef | undefined;
@@ -794,6 +778,8 @@ export class WorkflowEngine {
 			this.#planReviewLegacy = false;
 			this.#planReviewControl = undefined;
 			this.#planArtifactSha256 = undefined;
+			this.#planReviewerIdentity = undefined;
+			this.#planReviewerRouteSelectionRef = undefined;
 			this.#authorResponses = undefined;
 			this.#authorResponsesPriorFindings = undefined;
 			this.#authorResponsesArtifactRef = undefined;
@@ -1331,9 +1317,16 @@ export class WorkflowEngine {
 				this.#budgetLedger.recordReviewerCycle();
 				const reviewKind = control.reviewRound === 2 ? "rereview" : "initial";
 				const requirementsSnapshot = await this.#requireRequirementsSnapshot(workflowId, attemptId, request);
-				const pinnedReviewer =
-					this.#planReviewerIdentity?.profileId ??
-					(reviewKind === "rereview" ? (this.#planReview?.modelProfileId ?? undefined) : undefined);
+				// Rereview requires a previously attested pin — never re-resolve from config alone.
+				if (reviewKind === "rereview" && !this.#planReviewerIdentity) {
+					await this.#setPlanReviewAwaitingHuman(
+						workflowId,
+						attemptId,
+						"plan_reviewer_identity_unavailable",
+					);
+					return;
+				}
+				const pinnedReviewer = this.#planReviewerIdentity?.profileId;
 				const executeReview = async (profile: ModelProfile, assignment: string) =>
 					new PlanReviewStage(this.#adapter).execute({
 						workflowId,
@@ -1359,7 +1352,8 @@ export class WorkflowEngine {
 						reviewKind,
 						reviewRound: control.reviewRound,
 						authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
-						routeSelectionReceiptRef: control.routeSelectionReceiptRef,
+						routeSelectionReceiptRef:
+							this.#planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
 						legacyV1: this.#planReviewLegacy,
 					});
 				const reviewResult = pinnedReviewer
@@ -1391,10 +1385,29 @@ export class WorkflowEngine {
 								if (!pinned) {
 									throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", {
 										profileId: profile.id,
-										reason: "missing_identity_receipt",
+										reason: "missing_attested_runtime_identity",
 									});
 								}
 								this.#planReviewerIdentity = pinned;
+								const routeSelection: PlanReviewRouteSelectionV1 = {
+									schemaVersion: 1,
+									kind: "plan_review_route_selection",
+									profileId: pinned.profileId,
+									provider: pinned.provider,
+									model: pinned.model,
+									modelFamily: pinned.modelFamily ?? null,
+									attestedProvider: pinned.provider,
+									attestedModel: pinned.model,
+									exactMatch: pinned.exactMatch,
+									snapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
+									createdAt: new Date().toISOString(),
+								};
+								this.#planReviewerRouteSelectionRef = await this.#persistArtifact(
+									workflowId,
+									attemptId,
+									"plan-review-route-selection",
+									routeSelection,
+								);
 								return result;
 							},
 						);
@@ -1418,7 +1431,8 @@ export class WorkflowEngine {
 							...rawReview,
 							authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
 							triggerReason: derivePlanReviewTrigger(rawReview),
-							routeSelectionReceiptRef: control.routeSelectionReceiptRef,
+							routeSelectionReceiptRef:
+								this.#planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
 							cleanContextReceiptRef: null,
 							specEvidenceReceiptRef: null,
 						}
@@ -1438,7 +1452,8 @@ export class WorkflowEngine {
 					latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
 					authorResponsesArtifactRef:
 						this.#authorResponsesArtifactRef?.artifactId ?? control.authorResponsesArtifactRef,
-					routeSelectionReceiptRef: control.routeSelectionReceiptRef,
+					routeSelectionReceiptRef:
+						this.#planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
 					planRejectionCount: nextRejectionCount,
 					updatedAt: new Date().toISOString(),
 				};
@@ -2890,13 +2905,14 @@ export class WorkflowEngine {
 		if (!actual) {
 			throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", {
 				profileId: profile.id,
-				reason: "missing_identity_receipt",
+				reason: "missing_attested_runtime_identity",
 			});
 		}
 		if (
 			expected.profileId !== actual.profileId ||
 			expected.provider !== actual.provider ||
 			expected.model !== actual.model ||
+			expected.attestedProvenance !== actual.attestedProvenance ||
 			(expected.modelFamily && actual.modelFamily && expected.modelFamily !== actual.modelFamily)
 		) {
 			throw new WorkflowPolicyError("plan_reviewer_identity_mismatch", {
@@ -3533,29 +3549,53 @@ export class WorkflowEngine {
 					if (this.#plan.modelProfileId) {
 						this.#plannerVendor = this.#router.list().find(p => p.id === this.#plan?.modelProfileId)?.vendor;
 					}
+				} else if (
+					meta.kind === "plan-review-route-selection" ||
+					parsed.kind === "plan_review_route_selection"
+				) {
+					const selection = parsed as Partial<PlanReviewRouteSelectionV1>;
+					const profileId =
+						typeof selection.profileId === "string" && selection.profileId.trim().length > 0
+							? selection.profileId
+							: null;
+					const attestedProvider =
+						typeof selection.attestedProvider === "string" && selection.attestedProvider.trim().length > 0
+							? selection.attestedProvider
+							: typeof selection.provider === "string" && selection.provider.trim().length > 0
+								? selection.provider
+								: null;
+					const attestedModel =
+						typeof selection.attestedModel === "string" && selection.attestedModel.trim().length > 0
+							? selection.attestedModel
+							: typeof selection.model === "string" && selection.model.trim().length > 0
+								? selection.model
+								: null;
+					// Resume pin only from an engine-owned attested route selection receipt.
+					if (profileId && attestedProvider && attestedModel) {
+						this.#planReviewerIdentity = {
+							profileId,
+							provider: attestedProvider,
+							model: attestedModel,
+							modelFamily:
+								typeof selection.modelFamily === "string" && selection.modelFamily.trim().length > 0
+									? selection.modelFamily
+									: undefined,
+							// Persisted selection is engine-owned after a live attested pin.
+							attestedProvenance: "provider_echo",
+							exactMatch:
+								typeof selection.exactMatch === "boolean" || selection.exactMatch === null
+									? selection.exactMatch
+									: null,
+						};
+						this.#planReviewerRouteSelectionRef = ref;
+					}
 				} else if (parsed.kind === "review") {
 					const review = parsed as PlanReviewArtifact;
 					if (review.subject === "plan") {
 						this.#planReview = review;
 						this.#planReviewLegacy = review.schemaVersion === 1;
 						this.#planReviewArtifactRef = ref;
-						if (!this.#planReviewerIdentity && review.modelProfileId && review.provider && review.model) {
-							const profile = this.#router.list().find(candidate => candidate.id === review.modelProfileId);
-							let modelFamily: string | undefined;
-							if (profile) {
-								try {
-									modelFamily = configuredIdentityForProfile(profile).modelFamily ?? undefined;
-								} catch {
-									modelFamily = undefined;
-								}
-							}
-							this.#planReviewerIdentity = {
-								profileId: review.modelProfileId,
-								provider: review.provider,
-								model: review.model,
-								modelFamily,
-							};
-						}
+						// Do not pin from review.provider/model — those can be config/local fallbacks.
 					} else {
 						this.#codeReview = review;
 						this.#codeReviewArtifactRef = ref;

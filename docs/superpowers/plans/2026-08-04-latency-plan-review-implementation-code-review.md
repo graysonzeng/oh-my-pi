@@ -521,3 +521,95 @@ bun run check:types
 若继续修复：使用 $fix-implement（或 /fix-implement），
 优先 HIGH-4：Require attested runtime identity before pinning a reviewer。
 ```
+
+### Round 3 re-check (before HIGH-4) — 2026-08-05
+
+**Status**: HIGH-3 remains closed. Spot-checked production paths and regressions before starting HIGH-4.
+
+#### Re-check evidence
+
+- `validateAuthorResponses` requires replan responses for open P0/P1; `rejected` needs non-empty `evidenceRefs`
+- Engine persists durable `author_responses` on replan and stamps review artifacts with engine-owned responses
+- Second `changes_requested` without author-reject evidence → `max_plan_cycles_exceeded` / `awaiting_human` (no arbitrator)
+- `max_cycles_author_reject` only when author rejects P0/P1 with evidence; contradiction/suspicious_pass remain independent
+- Focused suite green before HIGH-4 edits: `plan-review-identity` author-reject cases + `author-responses` unit tests
+
+#### Residual for HIGH-3 (unchanged)
+
+- Planner can still omit `authorResponses` and fail closed on replan; production prompt/model quality not end-to-end proven
+
+### Round 4 — HIGH-4 require attested runtime identity before pinning a reviewer (2026-08-05)
+
+**Status**: HIGH-4 closed. Remaining HIGH/MEDIUM findings from §3 are **not** addressed in this round.
+
+#### What changed
+
+1. **Strict attested-only pin**
+   - `resolvePlanReviewerIdentity()` no longer falls back to configured/local/profile coordinates
+   - Pin requires `identityReceipt.attested.provenance ∈ {provider_echo, gateway_attestation}` plus non-empty attested provider/model
+   - Explicit `exactMatch === false` is fail-closed; missing attestation → `plan_reviewer_identity_unavailable` / `missing_attested_runtime_identity`
+
+2. **Persist engine-owned route selection receipt**
+   - On successful initial pin, persist `PlanReviewRouteSelectionV1` as `plan-review-route-selection`
+   - Control/review artifacts stamp `routeSelectionReceiptRef` from the engine-owned receipt
+   - Resume hydrates pin **only** from that receipt (not from `review.provider` / `review.model`, which can be config/local fallbacks)
+
+3. **Rereview fail-closed without pin**
+   - Rereview with no hydrated attested pin → `awaiting_human` / `plan_reviewer_identity_unavailable`
+   - `#assertPlanReviewerIdentity` compares attested provider/model/provenance (and modelFamily when both present)
+
+4. **Test fixtures**
+   - `scriptedRunner` emits provider-echo `onResponse` attestation with provider inferred from bare model ids
+   - Custom resume diversity runner also emits attestation
+   - New regressions: no-attestation fail-closed; route selection persist + resume reuse
+
+#### Verification
+
+```text
+cd packages/coding-agent
+bun test test/latency \
+  test/workflow/stages/plan-review.test.ts \
+  test/workflow/engine-happy-path.test.ts \
+  test/workflow/engine-plan-rejection.test.ts \
+  test/workflow/engine-resume.test.ts \
+  test/workflow/engine-policy-bounds.test.ts \
+  test/workflow/author-responses.test.ts \
+  test/workflow/requirements-snapshot.test.ts \
+  test/workflow/schemas.test.ts \
+  test/workflow/identity-receipt.test.ts
+→ 110 pass / 0 fail
+
+bun run check:types
+→ clean
+```
+
+#### Remaining risk / next review scope
+
+- **Still open (HIGH)**: non-replayable arbitration; arbitration budget recheck; concurrency fingerprint/scope/isolation/read-units; V1/V2 cohort marker; P0/P1 zero-tolerance stop.
+- **Still open (MEDIUM)**: concurrency DAG scaffolding honesty; smoke receipts; timeout terminal/first-cause/sync metrics; mechanical class parser; bash state identity/accounting/session lifetime.
+- **Not claimed closed**: pilot A/B receipts; QualityRouteSnapshotV2; human authority UI; full SQLite control-state migration.
+- **Residual for HIGH-4**: default plan_reviewer profiles still use non-exact `modelPattern` arrays (no configured exactMatch); pin trusts live provider/gateway attestation, not configured exact identity. Production gateways that omit attestation headers will fail closed at initial pin (intended).
+
+#### Code status
+
+**Not merge-ready for the full review scope.** HIGH-1/2/3/4 are fixed and regression-covered; remaining HIGH items still block a clean merge of the plan-review/latency trust boundary work.
+
+#### Handoff
+
+**Same session**:
+
+```
+直接执行 $fix-implement 或 /fix-implement
+继续修复审查文档剩余 HIGH 项；优先 HIGH-5：Do not replay an uncertain or already-persisted arbitration。
+```
+
+**New-session recovery prompt**:
+
+```
+请阅读实现文档 docs/superpowers/plans/2026-08-04-latency-implementation-acceptance.md、
+审查文档 docs/superpowers/plans/2026-08-04-latency-plan-review-implementation-code-review.md 的修复记录，
+对本轮修复结果补做下一轮检查；重点关注文档中记录的剩余风险与复审范围。
+
+若继续修复：使用 $fix-implement（或 /fix-implement），
+优先 HIGH-5：Do not replay an uncertain or already-persisted arbitration。
+```
