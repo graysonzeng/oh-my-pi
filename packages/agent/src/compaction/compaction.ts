@@ -192,7 +192,7 @@ export const DEFAULT_RESERVE_TOKENS = 16384;
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	strategy: "context-full",
-	thresholdPercent: -1,
+	thresholdPercent: 55,
 	thresholdTokens: -1,
 	midTurnEnabled: true,
 	keepRecentTokens: 20000,

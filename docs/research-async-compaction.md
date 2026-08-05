@@ -90,7 +90,7 @@ From `docs/compaction.md`:
 5. Mid-turn threshold (`compaction.midTurnEnabled`, default true)
 6. Idle maintenance
 
-Default threshold when no override: roughly `contextWindow - max(15% of window, reserveTokens)` — so ~80–85% is expected.
+Default threshold: `floor(contextWindow * 0.55)` (schema default `compaction.thresholdPercent` = `55`; `-1` restores the legacy reserve-based ~80–85% behavior).
 
 ### 5. Extension / hook escape hatches
 

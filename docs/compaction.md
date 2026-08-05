@@ -413,7 +413,7 @@ From `settings-schema.ts`:
 - `compaction.midTurnEnabled` = `true`
 - `compaction.remoteEnabled` = `true`
 - `compaction.remoteEndpoint` = `undefined`
-- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`
+- `compaction.thresholdPercent` = `55`; `compaction.thresholdTokens` = `-1` (unset). When no positive override is set, the threshold is `floor(contextWindow * 0.55)`; setting `thresholdPercent` to `-1` restores the legacy reserve-based threshold `contextWindow - max(15% of contextWindow, reserveTokens)`
 - `compaction.idleEnabled` = `false`
 - `compaction.idleThresholdTokens` = `200000`
 - `compaction.idleTimeoutSeconds` = `300`
