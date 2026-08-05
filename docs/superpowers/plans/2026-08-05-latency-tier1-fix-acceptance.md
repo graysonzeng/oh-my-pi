@@ -13,11 +13,12 @@
 | A2 | Ordinary session, opt+profile+readDedupe: second full read → model-visible `context ref` | Pass (integration) | `test/latency/read-dedupe-ordinary-session.test.ts` (sessioned + in-memory) |
 | A3 | `gateway/gpt-5.6-luna` / terra / sol / grok gateway ids resolve built-in profiles when enabled | Pass (unit) | `test/model-optimization/profile-resolver.test.ts` gateway production cases |
 | A4 | All latency arms remain default-off | Pass | `test/latency/contracts.test.ts` |
-| A5 | Targeted tests, static checks, typecheck, and production build | Pass | 66/66 scoped tests (excluding the separately tracked history-maintenance rollback baseline); `bun check`; `bun run build` |
+| A5 | Targeted tests, static checks, typecheck, and production build | Pass | 68/68 scoped tests across 10 files; `bun check`; `bun run build` |
 | A6 | A new logical session clears checkpoint/rewind runtime state | Pass (regression) | `test/agent-session-checkpoint-rewind-branch.test.ts` |
 | A7 | Bash retry identity changes after Git HEAD/index/worktree/untracked or hashed invocation state changes and fails open when authority is unavailable | Pass (unit + real CLI) | `test/latency/bash-attempt-ledger.test.ts`; current real CLI state-change smoke |
 | A8 | Real CLI read/Bash scenario invalidates evidence after an edit | Pass (provider-backed) | 3 reads + 3 Bash failures; second calls optimized, post-edit calls full/no-advisory; 0 tool error events |
 | A9 | Real workflow reaches implementation, verification, and code-review completion with exact child identity evidence | Pass (provider-backed path proof) | optimized `bugfix-null-deref`: pass=true, firstPass=true, fallback=0, scope=adhered, runtime=`gateway/claude-fable-5` |
+| A10 | Failed history-prune persistence restores both branch and live context | Pass (regression) | `test/agent-session-history-maintenance-rollback.test.ts`; success-path persistence remains covered by `test/agent-session-prune-persistence.test.ts` |
 
 ## What changed
 
@@ -27,6 +28,7 @@
 4. **Session isolation**: `AgentSession.newSession()` again clears checkpoint/rewind runtime state at the committed logical-session boundary.
 5. **Authoritative Bash state**: retry receipts cover Git HEAD, staged/unstaged binary diffs, non-ignored untracked file content, and hashed invocation environment/timeout/PTY state. Changed state invalidates prior attempts; missing or racing Git authority records the failure but suppresses identical-failure advice. Git-visible config and dependency-input changes are therefore covered without storing their values.
 6. **Live benchmark provenance**: fixed-model profiles now carry strict catalog-family identity. Intentional legacy degraded routing remains available for same-model planner/reviewer runs, but provenance passes only when every required child stage has verified exact identity, selected-profile agreement, and zero fallback/skip ambiguity.
+7. **Transactional history pruning**: per-turn pruning retains lightweight references to original tool-result content until the atomic rewrite commits. Persistence failure restores branch and live-agent messages before surfacing the error; success still rewrites exactly once.
 
 ## Explicit non-claims
 
@@ -42,6 +44,7 @@ cd packages/coding-agent
 bun test \
   test/agent-session-checkpoint-rewind-branch.test.ts \
   test/session-manager/new-session-boundary.test.ts \
+  test/agent-session-history-maintenance-rollback.test.ts \
   test/latency/bash-attempt-ledger.test.ts \
   test/latency/read-dedupe.test.ts \
   test/latency/read-dedupe-ordinary-session.test.ts \
@@ -57,7 +60,7 @@ bun src/cli.ts workflow-bench --mode live --provider gateway \
   --output /tmp/omp-workflow-live-ready-v3-report.json
 ```
 
-The broader 10-file focused command also includes `test/agent-session-history-maintenance-rollback.test.ts`; current result is 67 pass / 1 fail. That fail-closed rollback regression was already recorded before this fix scope and does not exercise `newSession()`, Bash state identity, model-profile activation, or live workflow provenance.
+The full 10-file readiness command passes 68/68 tests, including the previously tracked history-maintenance rollback regression.
 
 ## Single-switch readiness decision
 

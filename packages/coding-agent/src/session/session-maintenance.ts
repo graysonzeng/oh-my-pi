@@ -42,7 +42,14 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CodexCompactionContext,
+	Message,
+	Model,
+	ProviderSessionState,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -147,6 +154,11 @@ const PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8_000;
  * still-warm prefix is busted by the flush. 90 min leaves margin over the 1h TTL.
  */
 const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
+
+interface PrunedMessageSnapshot {
+	content: ToolResultMessage["content"];
+	prunedAt: number | undefined;
+}
 
 /**
  * Hysteresis band for the post-maintenance "did we actually create headroom?"
@@ -305,8 +317,40 @@ export class SessionMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
+	#snapshotUnprunedToolResults(entries: readonly SessionEntry[]): Map<ToolResultMessage, PrunedMessageSnapshot> {
+		const snapshots = new Map<ToolResultMessage, PrunedMessageSnapshot>();
+		for (const entry of entries) {
+			if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
+			const message = entry.message as ToolResultMessage;
+			if (message.prunedAt !== undefined) continue;
+			snapshots.set(message, { content: message.content, prunedAt: message.prunedAt });
+		}
+		return snapshots;
+	}
+
+	async #commitPrunedHistory(snapshots: ReadonlyMap<ToolResultMessage, PrunedMessageSnapshot>): Promise<void> {
+		try {
+			await this.#host.sessionManager.rewriteEntries();
+		} catch (error) {
+			for (const [message, snapshot] of snapshots) {
+				message.content = snapshot.content;
+				if (snapshot.prunedAt === undefined) delete message.prunedAt;
+				else message.prunedAt = snapshot.prunedAt;
+			}
+			const restoredContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(restoredContext.messages);
+			throw error;
+		}
+		const sessionContext = this.#host.buildDisplaySessionContext();
+		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.resetAdvisorRuntimes();
+		this.#host.syncTodoPhasesFromBranch();
+		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+	}
+
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranch();
+		const snapshots = this.#snapshotUnprunedToolResults(branchEntries);
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
 			branchEntries,
@@ -323,12 +367,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#host.sessionManager.rewriteEntries();
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
-		this.#host.syncTodoPhasesFromBranch();
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		await this.#commitPrunedHistory(snapshots);
 		return result;
 	}
 
@@ -349,6 +388,7 @@ export class SessionMaintenance {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranch();
+		const snapshots = this.#snapshotUnprunedToolResults(branchEntries);
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
 			branchEntries,
@@ -366,12 +406,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#host.sessionManager.rewriteEntries();
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
-		this.#host.syncTodoPhasesFromBranch();
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		await this.#commitPrunedHistory(snapshots);
 		return result;
 	}
 
