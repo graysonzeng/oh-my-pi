@@ -1,3 +1,4 @@
+import { createHash, type Hash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -35,6 +36,14 @@ export interface GitStatusSummary {
 	staged: number;
 	unstaged: number;
 	untracked: number;
+}
+
+/**
+ * SHA-256 receipt for HEAD plus all staged, unstaged, and untracked worktree
+ * inputs. `null` means the snapshot could not be read consistently.
+ */
+export interface GitWorktreeReceipt {
+	digest: string;
 }
 
 export type HunkSelection = {
@@ -415,6 +424,153 @@ function gitSpawnSyncText(cwd: string, args: readonly string[]): { exitCode: num
 		if (isEnoent(err)) return { exitCode: GIT_SPAWN_ENOENT_EXIT_CODE, stdout: "" };
 		throw err;
 	}
+}
+
+function gitSpawnSyncBytes(cwd: string, args: readonly string[]): { exitCode: number; stdout: Uint8Array } {
+	const commandArgs = withShortLivedGitConfig(withNoOptionalLocks(args));
+	try {
+		const result = Bun.spawnSync(["git", ...commandArgs], {
+			cwd,
+			env: buildGitEnv(),
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		});
+		return { exitCode: result.exitCode ?? 0, stdout: new Uint8Array(result.stdout) };
+	} catch (err) {
+		if (isEnoent(err)) return { exitCode: GIT_SPAWN_ENOENT_EXIT_CODE, stdout: new Uint8Array() };
+		throw err;
+	}
+}
+
+const WORKTREE_RECEIPT_FILE_CHUNK_BYTES = 64 * 1024;
+const WORKTREE_RECEIPT_TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
+type Sha256Hasher = Hash;
+
+function updateReceiptPart(hasher: Sha256Hasher, name: string, value: Uint8Array | string): void {
+	const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
+	hasher.update(`${name}:${bytes.byteLength}:`);
+	hasher.update(bytes);
+	hasher.update("\n");
+}
+
+function listUntrackedPaths(output: Uint8Array): Uint8Array[] | null {
+	const paths: Uint8Array[] = [];
+	let offset = 0;
+	while (offset < output.byteLength) {
+		const terminator = output.indexOf(0, offset);
+		if (terminator === -1 || terminator === offset) return null;
+		paths.push(output.slice(offset, terminator));
+		offset = terminator + 1;
+	}
+	return paths.sort((left, right) => Buffer.compare(left, right));
+}
+
+function updateFileReceipt(hasher: Sha256Hasher, repoRoot: string, relativePath: Uint8Array): boolean {
+	let decodedPath: string;
+	try {
+		decodedPath = WORKTREE_RECEIPT_TEXT_DECODER.decode(relativePath);
+	} catch {
+		return false;
+	}
+	const filePath = path.resolve(repoRoot, decodedPath);
+	if (
+		path.relative(repoRoot, filePath).startsWith(`..${path.sep}`) ||
+		path.isAbsolute(path.relative(repoRoot, filePath))
+	) {
+		return false;
+	}
+	let descriptor: number | undefined;
+	try {
+		const before = fs.lstatSync(filePath);
+		updateReceiptPart(hasher, "untracked-path", relativePath);
+		if (before.isSymbolicLink()) {
+			updateReceiptPart(hasher, "untracked-type", "symlink");
+			updateReceiptPart(hasher, "untracked-link-target", fs.readlinkSync(filePath, { encoding: "buffer" }));
+			const after = fs.lstatSync(filePath);
+			return (
+				before.dev === after.dev &&
+				before.ino === after.ino &&
+				before.size === after.size &&
+				before.mtimeMs === after.mtimeMs
+			);
+		}
+		if (!before.isFile()) return false;
+		updateReceiptPart(hasher, "untracked-type", "file");
+		updateReceiptPart(hasher, "untracked-content-size", String(before.size));
+		descriptor = fs.openSync(filePath, "r");
+		const chunk = Buffer.allocUnsafe(WORKTREE_RECEIPT_FILE_CHUNK_BYTES);
+		let position = 0;
+		while (true) {
+			const bytesRead = fs.readSync(descriptor, chunk, 0, chunk.byteLength, position);
+			if (bytesRead === 0) break;
+			hasher.update(chunk.subarray(0, bytesRead));
+			position += bytesRead;
+		}
+		const after = fs.fstatSync(descriptor);
+		return (
+			before.dev === after.dev &&
+			before.ino === after.ino &&
+			before.size === after.size &&
+			before.mtimeMs === after.mtimeMs
+		);
+	} catch {
+		return false;
+	} finally {
+		if (descriptor !== undefined) fs.closeSync(descriptor);
+	}
+}
+
+function computeWorktreeReceipt(cwd: string): string | null {
+	try {
+		const rootResult = gitSpawnSyncBytes(cwd, ["rev-parse", "--show-toplevel"]);
+		if (rootResult.exitCode !== 0) return null;
+		const repoRoot = WORKTREE_RECEIPT_TEXT_DECODER.decode(rootResult.stdout).trim();
+		if (!repoRoot) return null;
+		const headResult = gitSpawnSyncBytes(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+		const stagedResult = gitSpawnSyncBytes(repoRoot, [
+			"diff",
+			"--binary",
+			"--cached",
+			"--no-ext-diff",
+			"--no-textconv",
+		]);
+		const unstagedResult = gitSpawnSyncBytes(repoRoot, ["diff", "--binary", "--no-ext-diff", "--no-textconv"]);
+		const statusResult = gitSpawnSyncBytes(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]);
+		if (
+			headResult.exitCode !== 0 ||
+			stagedResult.exitCode !== 0 ||
+			unstagedResult.exitCode !== 0 ||
+			statusResult.exitCode !== 0
+		) {
+			return null;
+		}
+		const untrackedPaths = listUntrackedPaths(statusResult.stdout);
+		if (!untrackedPaths) return null;
+		const hasher = createHash("sha256");
+		updateReceiptPart(hasher, "version", "git-worktree-receipt:v1");
+		updateReceiptPart(hasher, "head", headResult.stdout);
+		updateReceiptPart(hasher, "staged-binary-diff", stagedResult.stdout);
+		updateReceiptPart(hasher, "unstaged-binary-diff", unstagedResult.stdout);
+		for (const untrackedPath of untrackedPaths) {
+			if (!updateFileReceipt(hasher, repoRoot, untrackedPath)) return null;
+		}
+		return hasher.digest("hex");
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Synchronously fingerprint the complete Git worktree state without persisting
+ * source content. Two matching snapshots prove this read did not race a change.
+ */
+function worktreeReceiptSync(cwd: string): GitWorktreeReceipt | null {
+	const first = computeWorktreeReceipt(cwd);
+	if (!first) return null;
+	const second = computeWorktreeReceipt(cwd);
+	if (!second || first !== second) return null;
+	return { digest: first };
 }
 
 function formatCommandFailure(
@@ -2365,6 +2521,10 @@ export const head = {
 // ════════════════════════════════════════════════════════════════════════════
 
 export const repo = {
+	/** Return a stable complete worktree receipt, or `null` when it cannot be established safely. */
+	worktreeReceipt(cwd: string): GitWorktreeReceipt | null {
+		return worktreeReceiptSync(cwd);
+	},
 	/** Resolve the repository root (may be a worktree root). */
 	async root(cwd: string, signal?: AbortSignal): Promise<string | null> {
 		const repository = await resolveRepository(cwd);

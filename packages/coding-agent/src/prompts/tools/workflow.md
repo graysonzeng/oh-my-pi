@@ -6,5 +6,5 @@ Operations (`op`):
 - `resume` — continue from the persisted stage (refuses terminal workflows). Optional `singleStep`.
 - `cancel` — abort in-flight work and persist `cancelled`.
 
-You MUST NOT invent stage transitions. Only validated artifacts and deterministic verification advance stages.
-You MUST NOT call paid providers from tests; production uses configured model profiles.
+You NEVER invent stage transitions. Only validated artifacts and deterministic verification advance stages.
+You NEVER call paid providers from tests; production uses configured model profiles.

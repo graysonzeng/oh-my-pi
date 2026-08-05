@@ -142,11 +142,8 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
+import { freezeLatencyArmSnapshot, type LatencyArmSnapshotV1 } from "../latency/arms";
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
-import {
-	freezeLatencyArmSnapshot,
-	type LatencyArmSnapshotV1,
-} from "../latency/arms";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
@@ -3063,8 +3060,7 @@ export class AgentSession {
 		const latencyArms = this.#ensureLatencyArmSnapshot();
 		const modelOptimizationActive =
 			latencyArms.arms.context_optimization && this.#activeModelOptimization.profile !== undefined;
-		const readDedupeEnabled =
-			modelOptimizationActive && latencyArms.arms.read_dedupe && ctx.toolCall.name === "read";
+		const readDedupeEnabled = modelOptimizationActive && latencyArms.arms.read_dedupe && ctx.toolCall.name === "read";
 		const toolStrategy = this.#activeModelOptimization.profile?.toolStrategy as SessionToolStrategy | undefined;
 		if (
 			!readDedupeEnabled &&
@@ -3167,7 +3163,6 @@ export class AgentSession {
 								: typeof source.value === "string"
 									? source.value
 									: rawPath;
-			const contentSha256 = sha256Hex(originalText);
 			// Unknown branch/revision/provider-view identity must fail open (no synthetic hit key).
 			const providerViewIdentity =
 				"providerViewIdentity" in details && typeof details.providerViewIdentity === "string"
@@ -6368,6 +6363,7 @@ export class AgentSession {
 				...options,
 				additionalDirectories: this.settings.get("workspace.additionalDirectories"),
 			});
+			this.#clearCheckpointRuntimeState();
 			this.#bash.markSessionTransition(bashTransition);
 			// The new session owns the transcript from here, so the previous
 			// conversation's advisor spend is retired with it. Clearing at the commit

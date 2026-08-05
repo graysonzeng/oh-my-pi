@@ -25,10 +25,7 @@ import {
 	isMechanicalFlashEligible,
 	parseWorkflowMechanicalClass,
 } from "../../src/latency/mechanical-class";
-import {
-	buildReadViewKeyV1,
-	normalizeReadSelector,
-} from "../../src/latency/read-view-key";
+import { buildReadViewKeyV1, normalizeReadSelector } from "../../src/latency/read-view-key";
 
 describe("latency arms defaults", () => {
 	it("keeps every independent arm default-off", () => {
@@ -54,6 +51,17 @@ describe("latency arms defaults", () => {
 			concurrency_declaration: false,
 			concurrency_execution: false,
 			eval_gate_migration: false,
+		});
+	});
+
+	it("maps the controlled single switch only to context optimization", () => {
+		const settings = Settings.isolated({ "modelOptimization.enabled": true });
+		const snapshot = freezeLatencyArmSnapshot({
+			getSetting: setting => settings.get(setting as Parameters<typeof settings.get>[0]),
+		});
+		expect(snapshot.arms).toEqual({
+			...emptyLatencyArms(),
+			context_optimization: true,
 		});
 	});
 });
@@ -233,9 +241,7 @@ describe("WorkflowConcurrencyDeclarationV1", () => {
 			declarationId: "d3",
 			units: [valid.units[0]!, { ...valid.units[1]!, paths: ["packages/a/src"] }],
 		});
-		expect(validateConcurrencyDeclaration(overlap).errors.some(e => e.code === "path_overlap")).toBe(
-			true,
-		);
+		expect(validateConcurrencyDeclaration(overlap).errors.some(e => e.code === "path_overlap")).toBe(true);
 
 		const unknown = validateConcurrencyDeclaration(valid, {
 			raw: { ...valid, extraField: true } as unknown as Record<string, unknown>,

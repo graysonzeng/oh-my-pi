@@ -41,7 +41,6 @@ export interface ReadViewKeyV1 {
 	failOpenReasons: string[];
 }
 
-
 export function buildReadViewKeyV1(
 	parts: Omit<ReadViewKeyPartsV1, "tool" | "rendererVersion"> & {
 		rendererVersion?: string;

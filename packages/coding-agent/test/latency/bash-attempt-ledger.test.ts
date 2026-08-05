@@ -1,18 +1,31 @@
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
-import { BashTool } from "../../src/tools/bash";
-import type { ToolSession } from "../../src/tools";
-import type { ClientBridge, ClientBridgeTerminalHandle } from "../../src/session/client-bridge";
 import {
 	appendBashAttempt,
 	buildBashCommandFingerprint,
 	buildBashFailureFingerprint,
 	buildBashStateFingerprint,
-	createBashAttemptLedger,
 	clearBashAttemptLedgerStore,
+	createBashAttemptLedger,
 	getBashAttemptLedgerStore,
 	lookupRepeatedBashFailure,
 } from "../../src/latency/bash-attempt-ledger";
+import type { ClientBridge, ClientBridgeTerminalHandle } from "../../src/session/client-bridge";
+import type { ToolSession } from "../../src/tools";
+import { BashTool } from "../../src/tools/bash";
+
+function runGit(cwd: string, args: string[]): void {
+	const result = Bun.spawnSync(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (result.exitCode !== 0) {
+		throw new Error(new TextDecoder().decode(result.stderr));
+	}
+}
 
 describe("BashAttemptLedgerV1 identity", () => {
 	it("keeps command identity conservative while normalizing whitespace", () => {
@@ -29,14 +42,26 @@ describe("BashAttemptLedgerV1 identity", () => {
 	});
 
 	it("uses cwd and sorted environment names without env values", () => {
-		const first = buildBashStateFingerprint({ cwd: "/repo", envNames: ["SECRET_TOKEN", "PATH"], codeRevision: "abc" });
+		const first = buildBashStateFingerprint({
+			cwd: "/repo",
+			envNames: ["SECRET_TOKEN", "PATH"],
+			codeRevision: "abc",
+		});
 		const reordered = buildBashStateFingerprint({
 			cwd: "/repo",
 			envNames: ["PATH", "SECRET_TOKEN"],
 			codeRevision: "abc",
 		});
-		const changedName = buildBashStateFingerprint({ cwd: "/repo", envNames: ["PATH", "OTHER_TOKEN"], codeRevision: "abc" });
-		const changedCwd = buildBashStateFingerprint({ cwd: "/tmp", envNames: ["PATH", "SECRET_TOKEN"], codeRevision: "abc" });
+		const changedName = buildBashStateFingerprint({
+			cwd: "/repo",
+			envNames: ["PATH", "OTHER_TOKEN"],
+			codeRevision: "abc",
+		});
+		const changedCwd = buildBashStateFingerprint({
+			cwd: "/tmp",
+			envNames: ["PATH", "SECRET_TOKEN"],
+			codeRevision: "abc",
+		});
 		const changedRevision = buildBashStateFingerprint({
 			cwd: "/repo",
 			envNames: ["PATH", "SECRET_TOKEN"],
@@ -214,6 +239,91 @@ describe("BashTool ledger completion integration", () => {
 		expect(secondText.startsWith("[bash-attempt-ledger] repeated identical failure")).toBe(true);
 		expect(secondText).toContain("bounded summary");
 		expect(secondText).toContain("Command exited with code 9");
+	});
+
+	it("invalidates repeated-failure advice across tracked, staged, and untracked changes", async () => {
+		const repo = TempDir.createSync("@pi-bash-ledger-state-");
+		try {
+			runGit(repo.path(), ["init", "--initial-branch=main"]);
+			runGit(repo.path(), ["config", "user.email", "tester@example.com"]);
+			runGit(repo.path(), ["config", "user.name", "Tester"]);
+			const trackedPath = path.join(repo.path(), "probe.ts");
+			await Bun.write(trackedPath, "export const value = 1;\n");
+			runGit(repo.path(), ["add", "probe.ts"]);
+			runGit(repo.path(), ["commit", "-m", "baseline"]);
+
+			const settings = Settings.isolated({ "latency.arms.bashAdvisory": true });
+			const session = {
+				cwd: repo.path(),
+				hasUI: false,
+				settings,
+				skills: [],
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				getSessionId: () => "bash-ledger-state-change-test",
+				getArtifactsDir: () => null,
+			} as unknown as ToolSession;
+			const tool = new BashTool(session);
+			const runFailure = async (callId: string): Promise<string> => {
+				const result = await tool.execute(callId, { command: "printf ledger && exit 9", timeout: 30 });
+				return result.content.find(block => block.type === "text")?.text ?? "";
+			};
+			const isAdvisory = (text: string): boolean =>
+				text.startsWith("[bash-attempt-ledger] repeated identical failure");
+
+			expect(isAdvisory(await runFailure("baseline-first"))).toBe(false);
+			expect(isAdvisory(await runFailure("baseline-repeat"))).toBe(true);
+
+			await Bun.write(trackedPath, "export const value = 2;\n");
+			expect(isAdvisory(await runFailure("unstaged-change"))).toBe(false);
+			expect(isAdvisory(await runFailure("unstaged-repeat"))).toBe(true);
+
+			runGit(repo.path(), ["add", "probe.ts"]);
+			expect(isAdvisory(await runFailure("staged-change"))).toBe(false);
+			expect(isAdvisory(await runFailure("staged-repeat"))).toBe(true);
+
+			const untrackedPath = path.join(repo.path(), "scratch.ts");
+			await Bun.write(untrackedPath, "export const scratch = 1;\n");
+			expect(isAdvisory(await runFailure("untracked-add"))).toBe(false);
+			expect(isAdvisory(await runFailure("untracked-repeat"))).toBe(true);
+
+			await Bun.write(untrackedPath, "export const scratch = 2;\n");
+			expect(isAdvisory(await runFailure("untracked-content-change"))).toBe(false);
+		} finally {
+			clearBashAttemptLedgerStore("bash-ledger-state-change-test");
+			repo.removeSync();
+		}
+	});
+
+	it("records failures but suppresses advice when worktree state is not authoritative", async () => {
+		const directory = TempDir.createSync("@pi-bash-ledger-no-git-");
+		const sessionId = "bash-ledger-no-git-test";
+		try {
+			const session = {
+				cwd: directory.path(),
+				hasUI: false,
+				settings: Settings.isolated({ "latency.arms.bashAdvisory": true }),
+				skills: [],
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				getSessionId: () => sessionId,
+				getArtifactsDir: () => null,
+			} as unknown as ToolSession;
+			const tool = new BashTool(session);
+			const first = await tool.execute("no-git-first", { command: "printf ledger && exit 9", timeout: 30 });
+			const second = await tool.execute("no-git-second", { command: "printf ledger && exit 9", timeout: 30 });
+			const firstText = first.content.find(block => block.type === "text")?.text ?? "";
+			const secondText = second.content.find(block => block.type === "text")?.text ?? "";
+
+			expect(firstText).not.toContain("repeated identical failure");
+			expect(secondText).not.toContain("repeated identical failure");
+			const [ledger] = getBashAttemptLedgerStore(session)?.list() ?? [];
+			expect(ledger?.attempts).toHaveLength(2);
+			expect(ledger?.attempts.every(attempt => attempt.changedInputReceipt === null)).toBe(true);
+		} finally {
+			clearBashAttemptLedgerStore(sessionId);
+			directory.removeSync();
+		}
 	});
 
 	it("records repeated failures from the ACP terminal path", async () => {

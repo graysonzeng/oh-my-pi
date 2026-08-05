@@ -1236,7 +1236,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 									reason: QUEUED_TIMEOUT_TOKEN,
 									timeoutMs: queuedTimeoutMs,
 								});
-						  }, queuedTimeoutMs)
+							}, queuedTimeoutMs)
 						: undefined;
 				const combinedSignal =
 					queuedTimeoutMs > 0 ? AbortSignal.any([runSignal, queuedAbortController.signal]) : runSignal;

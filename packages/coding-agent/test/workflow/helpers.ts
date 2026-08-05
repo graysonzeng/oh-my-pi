@@ -118,9 +118,7 @@ export function planReviewArtifactV2(
 		},
 	});
 	const defaultCoverage =
-		decision === "approved" && overrides.coverage === undefined
-			? satisfyMandatoryCoverage(defaultSnapshot)
-			: [];
+		decision === "approved" && overrides.coverage === undefined ? satisfyMandatoryCoverage(defaultSnapshot) : [];
 	return {
 		schemaVersion: 2,
 		workflowId: "wf",

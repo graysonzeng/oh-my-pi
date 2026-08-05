@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import type {
 	AgentTool,
@@ -13,11 +13,11 @@ import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
-import * as git from "../utils/git";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import {
 	appendBashAttempt,
+	type BashAttemptTerminal,
 	buildBashCommandFingerprint,
 	buildBashFailureFingerprint,
 	buildBashStateFingerprint,
@@ -25,7 +25,6 @@ import {
 	digestBashStream,
 	getBashAttemptLedgerStore,
 	lookupRepeatedBashFailure,
-	type BashAttemptTerminal,
 } from "../latency/bash-attempt-ledger";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
@@ -38,6 +37,7 @@ import type {
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
+import * as git from "../utils/git";
 import { getSixelLineMask } from "../utils/sixel";
 import { applySessionToolOutput, workflowToolWireName } from "../workflow/tool-optimization";
 import { assertWorkflowCommandAllowed } from "../workflow/tool-policy";
@@ -73,6 +73,30 @@ export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
+
+function digestBashExecutionState(input: {
+	env: Record<string, string> | undefined;
+	cwd: string;
+	requestedTimeoutSec: number | undefined;
+	pty: boolean;
+}): string {
+	const envEntries = Object.entries(input.env ?? {}).sort(([left], [right]) => left.localeCompare(right));
+	const hasher = createHash("sha256");
+	for (const [name, value] of envEntries) {
+		hasher.update(name);
+		hasher.update("\0");
+		hasher.update(value);
+		hasher.update("\0");
+	}
+	return digestBashStream(
+		JSON.stringify({
+			envReceipt: hasher.digest("hex"),
+			cwd: input.cwd,
+			requestedTimeoutSec: input.requestedTimeoutSec ?? null,
+			pty: input.pty,
+		}),
+	);
+}
 const BASH_APPROVAL_SHELL_CONTROL_RE = /[\n\r;&|<>`$()]/u;
 const BASH_PATTERN_APPROVAL_VALUES = new Set(["allow", "deny", "prompt"]);
 
@@ -590,6 +614,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		command: string;
 		cwd: string;
 		env?: Record<string, string>;
+		requestedTimeoutSec?: number;
+		pty: boolean;
 		result: BashResult | BashInteractiveResult;
 		startedAt: string;
 		/** Launch-time session id for late background completions after session switch. */
@@ -612,17 +638,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (!advisoryEnabled && !boundedInjectionEnabled) return [];
 
 		try {
-			const commandFingerprint = buildBashCommandFingerprint({ command: input.command, cwd: input.cwd });
-			// Prefer a verified working-tree revision when available. Incomplete
-			// authoritative state identity fails open: record the attempt, but never
-			// emit repeated-failure advice based on placeholder "unknown" state.
-			const codeRevision = git.head.resolveSync(input.cwd)?.commit ?? undefined;
-			const stateAuthoritative = Boolean(codeRevision);
-			const stateFingerprint = buildBashStateFingerprint({
-				cwd: input.cwd,
-				envNames: Object.keys(input.env ?? {}),
-				codeRevision,
-			});
 			const terminal: BashAttemptTerminal = input.result.timedOut
 				? { kind: "timeout" }
 				: input.result.cancelled
@@ -634,10 +649,24 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				terminal,
 				stdoutExcerpt: normalizeResultOutput(input.result),
 			});
+			if (!failureFingerprint) return [];
+			const commandFingerprint = buildBashCommandFingerprint({ command: input.command, cwd: input.cwd });
+			const worktreeReceipt = git.repo.worktreeReceipt(input.cwd);
+			const executionReceipt = digestBashExecutionState({
+				cwd: input.cwd,
+				env: input.env,
+				requestedTimeoutSec: input.requestedTimeoutSec,
+				pty: input.pty,
+			});
+			const stateAuthoritative = worktreeReceipt !== null;
+			const stateFingerprint = buildBashStateFingerprint({
+				cwd: input.cwd,
+				envNames: Object.keys(input.env ?? {}),
+				executionReceipt,
+				worktreeReceipt: worktreeReceipt?.digest,
+			});
 			const store = getBashAttemptLedgerStore(
-				input.sessionId
-					? { getSessionId: () => input.sessionId as string }
-					: this.session,
+				input.sessionId ? { getSessionId: () => input.sessionId as string } : this.session,
 			);
 			if (!store) return [];
 			const priorLedger = store.get(commandFingerprint, stateFingerprint);
@@ -651,14 +680,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				priorLedger
 					? { ...priorLedger, mode }
 					: createBashAttemptLedger({
-							sessionId:
-								input.sessionId ??
-								this.session.getSessionId?.() ??
-								"unknown",
+							sessionId: input.sessionId ?? this.session.getSessionId?.() ?? "unknown",
 							commandFingerprint,
 							stateFingerprint,
 							mode,
-					}),
+						}),
 				{
 					attemptId: randomUUID(),
 					startedAt: input.startedAt,
@@ -668,7 +694,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					stdoutDigest: digestBashStream(normalizeResultOutput(input.result)),
 					stderrDigest: digestBashStream(""),
 					cwdIdentity: input.cwd,
-					changedInputReceipt: null,
+					changedInputReceipt: worktreeReceipt?.digest ?? null,
 				},
 			);
 			store.upsert(ledger);
@@ -911,16 +937,15 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				// mid-flight session switch cannot re-attribute late completions.
 				const launchSessionId = this.session.getSessionId?.() ?? "unknown";
 				let outcomeRecorded = false;
-				const recordTerminalOnce = (
-					result: BashResult | BashInteractiveResult,
-					startedAt: string,
-				): string[] => {
+				const recordTerminalOnce = (result: BashResult | BashInteractiveResult, startedAt: string): string[] => {
 					if (outcomeRecorded) return [];
 					outcomeRecorded = true;
 					return this.#recordBashAttempt({
 						command: options.command,
 						cwd: options.commandCwd,
 						env: options.resolvedEnv,
+						requestedTimeoutSec: options.requestedTimeoutSec,
+						pty: false,
 						result,
 						startedAt,
 						sessionId: launchSessionId,
@@ -1338,6 +1363,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					command,
 					cwd: commandCwd,
 					env: bridgeEnv,
+					requestedTimeoutSec,
+					pty: false,
 					result,
 					startedAt,
 				});
@@ -1397,17 +1424,20 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				]);
 				if (createRaced.kind === "aborted" || signal?.aborted) {
 					cleanupLateCreate(createP);
-					recordBridgeTerminal({
-						output: "",
-						exitCode: undefined,
-						cancelled: true,
-						timedOut: false,
-						truncated: false,
-						totalLines: 0,
-						totalBytes: 0,
-						outputLines: 0,
-						outputBytes: 0,
-					}, bridgeEnv);
+					recordBridgeTerminal(
+						{
+							output: "",
+							exitCode: undefined,
+							cancelled: true,
+							timedOut: false,
+							truncated: false,
+							totalLines: 0,
+							totalBytes: 0,
+							outputLines: 0,
+							outputBytes: 0,
+						},
+						bridgeEnv,
+					);
 					throw new ToolAbortError("Command aborted");
 				}
 				if (createRaced.kind === "timeout") {
@@ -1462,17 +1492,21 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 					if (raced.kind === "aborted" || signal?.aborted) {
 						await Promise.race([fireKill(), Bun.sleep(killGraceMs)]);
-						recordBridgeTerminal({
-							output: lastPolledOutput.output,
-							exitCode: undefined,
-							cancelled: true,
-							timedOut: false,
-							truncated: lastPolledOutput.truncated,
-							totalLines: lastPolledOutput.output.length > 0 ? lastPolledOutput.output.split("\n").length : 0,
-							totalBytes: lastPolledOutput.output.length,
-							outputLines: lastPolledOutput.output.length > 0 ? lastPolledOutput.output.split("\n").length : 0,
-							outputBytes: lastPolledOutput.output.length,
-						}, bridgeEnv);
+						recordBridgeTerminal(
+							{
+								output: lastPolledOutput.output,
+								exitCode: undefined,
+								cancelled: true,
+								timedOut: false,
+								truncated: lastPolledOutput.truncated,
+								totalLines: lastPolledOutput.output.length > 0 ? lastPolledOutput.output.split("\n").length : 0,
+								totalBytes: lastPolledOutput.output.length,
+								outputLines:
+									lastPolledOutput.output.length > 0 ? lastPolledOutput.output.split("\n").length : 0,
+								outputBytes: lastPolledOutput.output.length,
+							},
+							bridgeEnv,
+						);
 						throw new ToolAbortError("Command aborted");
 					}
 
@@ -1664,7 +1698,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			this.#recordBashAttempt({
 				command,
 				cwd: commandCwd,
-				env: interactiveUi ? backendPreflight?.env ?? resolvedEnv : resolvedEnv,
+				env: interactiveUi ? (backendPreflight?.env ?? resolvedEnv) : resolvedEnv,
+				requestedTimeoutSec,
+				pty,
 				result: {
 					output: message,
 					exitCode: undefined,
@@ -1684,7 +1720,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const ledgerPrefixNotices = this.#recordBashAttempt({
 			command,
 			cwd: commandCwd,
-			env: interactiveUi ? backendPreflight?.env ?? resolvedEnv : resolvedEnv,
+			env: interactiveUi ? (backendPreflight?.env ?? resolvedEnv) : resolvedEnv,
+			requestedTimeoutSec,
+			pty,
 			result,
 			startedAt,
 		});

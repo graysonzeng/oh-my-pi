@@ -8,7 +8,7 @@ import {
 	shouldAutoParallel,
 	validateConcurrencyDeclaration,
 } from "../latency/concurrency-declaration";
-import { parseWorkflowMechanicalClass, type WorkflowMechanicalClassV1 } from "../latency/mechanical-class";
+import { parseWorkflowMechanicalClass } from "../latency/mechanical-class";
 import type { ToolSession } from "../tools";
 import * as git from "../utils/git";
 import {
@@ -19,6 +19,13 @@ import {
 } from "./abort-registry";
 import { resolveArtifactInclusion } from "./artifact-inclusion";
 import { ArtifactStore } from "./artifact-store";
+import {
+	AUTHOR_RESPONSES_KIND,
+	buildAuthorResponsesArtifact,
+	hasMaxCyclesAuthorReject,
+	isAuthorResponsesArtifact,
+	validateAuthorResponses,
+} from "./author-responses";
 import {
 	assertRequiredRolesAvailable,
 	runAvailabilityPreflight,
@@ -43,26 +50,19 @@ import {
 } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
 import { sha256Hex } from "./optimization-receipt";
-import {
-	AUTHOR_RESPONSES_KIND,
-	buildAuthorResponsesArtifact,
-	hasMaxCyclesAuthorReject,
-	isAuthorResponsesArtifact,
-	validateAuthorResponses,
-} from "./author-responses";
 import { derivePlanReviewTrigger } from "./plan-review-trigger";
-import {
-	buildRequirementsSnapshot,
-	isRequirementsSnapshot,
-	REQUIREMENTS_SNAPSHOT_KIND,
-	validateApprovedMandatoryCoverage,
-} from "./requirements-snapshot";
 import {
 	compileQualityRouteSnapshot,
 	qualityRouteProfileIds,
 	qualityRouteProfiles,
 	verifyQualityRouteSnapshot,
 } from "./quality-route-snapshot";
+import {
+	buildRequirementsSnapshot,
+	isRequirementsSnapshot,
+	REQUIREMENTS_SNAPSHOT_KIND,
+	validateApprovedMandatoryCoverage,
+} from "./requirements-snapshot";
 import { RuntimeAdapter } from "./runtime-adapter";
 import { PlanReviewControlStateSchema } from "./schemas";
 import {
@@ -91,8 +91,8 @@ import { PlanReviewStage } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
 import type {
-	AuthorResponseV1,
 	Artifact,
+	AuthorResponseV1,
 	CapturedChangesMergeResult,
 	ImplementationArtifactV1,
 	ModelIdentityProvenance,
@@ -102,8 +102,8 @@ import type {
 	PlanReviewControlStateV1,
 	PlanReviewRouteSelectionV1,
 	PlanReviewTriggerReasonV1,
-	RequirementsSnapshotV1,
 	QualityRouteSnapshotV1,
+	RequirementsSnapshotV1,
 	ReviewArtifactV1,
 	ReviewFindingV1,
 	RuntimePort,
@@ -351,8 +351,6 @@ export class WorkflowEngine {
 	// In-memory artifact cache for the current process (also persisted to store)
 	#plan: PlanArtifactV1 | undefined;
 	#planReview: PlanReviewArtifact | undefined;
-	/** True only when the latest persisted plan review is legacy V1. */
-	#planReviewLegacy = false;
 	#implementation: ImplementationArtifactV1 | undefined;
 	#verification: VerificationArtifactV1 | undefined;
 	#codeReview: ReviewArtifactV1 | undefined;
@@ -775,7 +773,6 @@ export class WorkflowEngine {
 			// Reset mutable stage caches then hydrate from the post-claim snapshot.
 			this.#plan = undefined;
 			this.#planReview = undefined;
-			this.#planReviewLegacy = false;
 			this.#planReviewControl = undefined;
 			this.#planArtifactSha256 = undefined;
 			this.#planReviewerIdentity = undefined;
@@ -1281,7 +1278,6 @@ export class WorkflowEngine {
 					if (trustedArbitration) {
 						// Artifact already persisted; finish the transition without another model call.
 						this.#planReview = trustedArbitration;
-						this.#planReviewLegacy = false;
 						if (control.arbitrationAttemptPhase !== "completed" || control.arbitrationCycles !== 1) {
 							this.#planReviewControl = {
 								...control,
@@ -1313,18 +1309,12 @@ export class WorkflowEngine {
 					);
 					return;
 				}
-				// Cohort is durable on control; never re-infer mid-flight from the latest artifact alone.
-				this.#planReviewLegacy = control.reviewSchemaCohort === "v1";
 				this.#budgetLedger.recordReviewerCycle();
 				const reviewKind = control.reviewRound === 2 ? "rereview" : "initial";
 				const requirementsSnapshot = await this.#requireRequirementsSnapshot(workflowId, attemptId, request);
 				// Rereview requires a previously attested pin — never re-resolve from config alone.
 				if (reviewKind === "rereview" && !this.#planReviewerIdentity) {
-					await this.#setPlanReviewAwaitingHuman(
-						workflowId,
-						attemptId,
-						"plan_reviewer_identity_unavailable",
-					);
+					await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "plan_reviewer_identity_unavailable");
 					return;
 				}
 				const pinnedReviewer = this.#planReviewerIdentity?.profileId;
@@ -1347,8 +1337,7 @@ export class WorkflowEngine {
 						session,
 						signal,
 						requirementsSnapshotRef:
-							this.#requirementsSnapshotRef?.recoveryUri ??
-							`artifact://${workflowId}/requirements-snapshot`,
+							this.#requirementsSnapshotRef?.recoveryUri ?? `artifact://${workflowId}/requirements-snapshot`,
 						requirementsSnapshotSha256: requirementsSnapshot.sha256,
 						reviewKind,
 						reviewRound: control.reviewRound,
@@ -1439,7 +1428,6 @@ export class WorkflowEngine {
 						}
 					: rawReview;
 				this.#planReview = review;
-				this.#planReviewLegacy = !isV2Review;
 				this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
 				const nextRejectionCount =
 					review.decision === "changes_requested" ? control.planRejectionCount + 1 : control.planRejectionCount;
@@ -1485,9 +1473,7 @@ export class WorkflowEngine {
 					maxCyclesHit &&
 					hasMaxCyclesAuthorReject(this.#authorResponses ?? [], this.#authorResponsesPriorFindings ?? []);
 				const triggerArbitration =
-					triggerReason === "contradiction" ||
-					triggerReason === "suspicious_pass" ||
-					authorRejectEvidence;
+					triggerReason === "contradiction" || triggerReason === "suspicious_pass" || authorRejectEvidence;
 				if (maxCyclesHit && !triggerArbitration) {
 					this.#planCycles = nextRejectionCount;
 					await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "max_plan_cycles_exceeded");
@@ -3262,7 +3248,7 @@ export class WorkflowEngine {
 		control: PlanReviewControlStateV1,
 	): Extract<PlanReviewArtifact, { schemaVersion: 2 }> | null {
 		const review = this.#planReview;
-		if (!review || review.schemaVersion !== 2 || review.reviewKind !== "arbitration") return null;
+		if (review?.schemaVersion !== 2 || review.reviewKind !== "arbitration") return null;
 		if (review.decision !== "approved" && review.decision !== "blocked") return null;
 		// Prefer explicit control pointer when present; otherwise accept the hydrated arbitration review.
 		if (
@@ -3288,7 +3274,6 @@ export class WorkflowEngine {
 	): Promise<void> {
 		const artifact = arbitration.artifact;
 		this.#planReview = artifact;
-		this.#planReviewLegacy = false;
 		this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", artifact);
 		if (this.#planReviewControl) {
 			this.#planReviewControl = {
@@ -3593,7 +3578,6 @@ export class WorkflowEngine {
 					if (!this.#planReviewControl || control.updatedAt >= this.#planReviewControl.updatedAt) {
 						this.#planReviewControl = control;
 						// Durable cohort is authoritative; do not re-infer from later review artifacts alone.
-						this.#planReviewLegacy = control.reviewSchemaCohort === "v1";
 					}
 					continue;
 				}
@@ -3634,10 +3618,7 @@ export class WorkflowEngine {
 					if (this.#plan.modelProfileId) {
 						this.#plannerVendor = this.#router.list().find(p => p.id === this.#plan?.modelProfileId)?.vendor;
 					}
-				} else if (
-					meta.kind === "plan-review-route-selection" ||
-					parsed.kind === "plan_review_route_selection"
-				) {
+				} else if (meta.kind === "plan-review-route-selection" || parsed.kind === "plan_review_route_selection") {
 					const selection = parsed as Partial<PlanReviewRouteSelectionV1>;
 					const profileId =
 						typeof selection.profileId === "string" && selection.profileId.trim().length > 0
@@ -3678,7 +3659,6 @@ export class WorkflowEngine {
 					const review = parsed as PlanReviewArtifact;
 					if (review.subject === "plan") {
 						this.#planReview = review;
-						this.#planReviewLegacy = review.schemaVersion === 1;
 						this.#planReviewArtifactRef = ref;
 						// Do not pin from review.provider/model — those can be config/local fallbacks.
 					} else {

@@ -84,10 +84,7 @@ function readCtx(
 	};
 }
 
-async function createSession(opts?: {
-	sessionManager?: SessionManager;
-	settings?: Record<string, unknown>;
-}) {
+async function createSession(opts?: { sessionManager?: SessionManager; settings?: Record<string, unknown> }) {
 	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!bundled) throw new Error("missing model");
 	const model = { ...bundled, contextWindow: 200_000, maxTokens: 64_000 };

@@ -198,10 +198,9 @@ export async function runAvailabilityPreflight(
 	// Re-sort expanded rows for stable report order (group expansion can re-order roles).
 	const profileIndex = new Map(registrationOrder.map((id, i) => [id, i]));
 	const roleOrder = new Map(
-		(["planner", "plan_reviewer", "plan_arbitrator", "implementer", "code_reviewer", "repair"] as WorkflowRole[]).map((role, i) => [
-			role,
-			i,
-		]),
+		(["planner", "plan_reviewer", "plan_arbitrator", "implementer", "code_reviewer", "repair"] as WorkflowRole[]).map(
+			(role, i) => [role, i],
+		),
 	);
 	profiles.sort((a, b) => {
 		const roleDelta = (roleOrder.get(a.role) ?? 99) - (roleOrder.get(b.role) ?? 99);

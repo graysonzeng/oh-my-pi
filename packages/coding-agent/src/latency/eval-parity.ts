@@ -54,10 +54,7 @@ export function buildEvalGateParityReceipt(
 }
 
 /** Only proven parity may enable native migration treatment. */
-export function mayMigrateEvalGate(
-	receipt: EvalGateParityReceiptV1 | null | undefined,
-	armEnabled: boolean,
-): boolean {
+export function mayMigrateEvalGate(receipt: EvalGateParityReceiptV1 | null | undefined, armEnabled: boolean): boolean {
 	return armEnabled === true && receipt?.parity === "proven";
 }
 

@@ -230,7 +230,6 @@ const PlanReviewFindingV2Schema = ReviewFindingSchema.extend({
 		}
 	});
 
-
 export const PlanReviewArtifactV2Schema = ArtifactHeaderV2Schema.extend({
 	kind: z.literal("review"),
 	subject: z.literal("plan"),

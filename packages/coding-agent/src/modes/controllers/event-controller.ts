@@ -1155,7 +1155,7 @@ export class EventController {
 	 */
 	#settleHeldReadCompletionIfAny(toolCallId: string): void {
 		const event = this.#orphanedToolCompletions.get(toolCallId);
-		if (!event || event.toolName !== "read") return;
+		if (event?.toolName !== "read") return;
 		this.#orphanedToolCompletions.delete(toolCallId);
 		const component = this.ctx.pendingTools.get(toolCallId);
 		if (!component) return;

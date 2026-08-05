@@ -215,6 +215,7 @@ const planReviewFindingV2Item = {
 				properties: { basis: { enum: ["spec_requirement", "user_requirement"] } },
 				required: ["basis"],
 			},
+			// biome-ignore lint/suspicious/noThenProperty: `then` is the standard JSON Schema conditional keyword.
 			then: {
 				properties: {
 					requirementId: { type: "string", minLength: 1 },
@@ -228,6 +229,7 @@ const planReviewFindingV2Item = {
 				properties: { basis: { enum: ["repo_evidence", "safety_invariant"] } },
 				required: ["basis"],
 			},
+			// biome-ignore lint/suspicious/noThenProperty: `then` is the standard JSON Schema conditional keyword.
 			then: {
 				properties: {
 					sourceRefs: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
@@ -240,6 +242,7 @@ const planReviewFindingV2Item = {
 				properties: { basis: { const: "missing_authority" } },
 				required: ["basis"],
 			},
+			// biome-ignore lint/suspicious/noThenProperty: `then` is the standard JSON Schema conditional keyword.
 			then: {
 				properties: {
 					missingAuthority: { type: "string", minLength: 1 },
@@ -262,7 +265,6 @@ const requirementCoverageItem = {
 		rationale: { type: "string", minLength: 1 },
 	},
 } as const;
-
 
 /** Strict model-facing V2 plan-review output; engine-owned metadata is merged before Zod parsing. */
 export const PlanReviewArtifactV2JsonSchema = {

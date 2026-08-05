@@ -1,12 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Settings } from "../../src/config/settings";
+import * as evalIndex from "../../src/eval";
 import {
 	buildEvalGateParityReceipt,
 	mayMigrateEvalGate,
 	recordOrRequireEvalParity,
 } from "../../src/latency/eval-parity";
-
-import { Settings } from "../../src/config/settings";
-import * as evalIndex from "../../src/eval";
 import type { ToolSession } from "../../src/tools";
 import { EvalTool } from "../../src/tools/eval";
 

@@ -7,16 +7,9 @@
 
 export const WORKFLOW_MECHANICAL_CLASS_VERSION = 1 as const;
 
-export type MechanicalClassKind =
-	| "deterministic_evidence"
-	| "mechanical_repair"
-	| "format_check"
-	| "none";
+export type MechanicalClassKind = "deterministic_evidence" | "mechanical_repair" | "format_check" | "none";
 
-export type MechanicalEvidenceSource =
-	| "caller_declaration"
-	| "deterministic_rule"
-	| "accepted_finding";
+export type MechanicalEvidenceSource = "caller_declaration" | "deterministic_rule" | "accepted_finding";
 
 export type MechanicalTargetRole = "evidence" | "repair" | "code_review_experiment";
 

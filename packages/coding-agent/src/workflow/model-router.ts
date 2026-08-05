@@ -306,12 +306,7 @@ export class ModelRouter {
 			}
 			candidates.push({ profile, modelFamily });
 		}
-		candidates = narrowMechanicalFlashCandidates(
-			candidates,
-			options,
-			role,
-			candidate => candidate.profile,
-		);
+		candidates = narrowMechanicalFlashCandidates(candidates, options, role, candidate => candidate.profile);
 		const selected = candidates[0];
 		if (!selected) {
 			throw new WorkflowPolicyError(
@@ -342,11 +337,13 @@ export class ModelRouter {
 	}
 
 	/** Resolve an optional plan arbitrator without changing the plan-review route. */
-	resolvePlanArbitrator(options: {
-		avoidModelFamilies?: readonly string[];
-		unavailableProfileIds?: Iterable<string>;
-		allowDegradedFallback?: boolean;
-	} = {}): RoutingDecision {
+	resolvePlanArbitrator(
+		options: {
+			avoidModelFamilies?: readonly string[];
+			unavailableProfileIds?: Iterable<string>;
+			allowDegradedFallback?: boolean;
+		} = {},
+	): RoutingDecision {
 		const unavailable = new Set(options.unavailableProfileIds ?? []);
 		const avoided = new Set(options.avoidModelFamilies ?? []);
 		const candidates = this.list()

@@ -91,7 +91,8 @@ export function freezeLatencyArmSnapshot(input: {
 	configHash?: string;
 	frozenAt?: string;
 }): LatencyArmSnapshotV1 {
-	const arms = input.arms ?? (input.getSetting ? resolveLatencyArmsFromSettings(input.getSetting) : emptyLatencyArms());
+	const arms =
+		input.arms ?? (input.getSetting ? resolveLatencyArmsFromSettings(input.getSetting) : emptyLatencyArms());
 	if (input.combinedArmId && (!input.childArms || input.childArms.length < 2)) {
 		throw new Error("combinedArmId requires childArms with at least two arms");
 	}
@@ -151,10 +152,7 @@ export function evaluateLatencyQualityStop(input: {
 	if (LATENCY_QUALITY_STOP.p0p1ZeroTolerance && input.treatmentAttributedP0P1Escapes > 0) {
 		return { stop: true, reason: "p0p1_escape" };
 	}
-	if (
-		typeof input.completionDropPp === "number" &&
-		input.completionDropPp > LATENCY_QUALITY_STOP.completionDropPp
-	) {
+	if (typeof input.completionDropPp === "number" && input.completionDropPp > LATENCY_QUALITY_STOP.completionDropPp) {
 		return { stop: true, reason: "completion_drop" };
 	}
 	if (typeof input.reworkRisePct === "number" && input.reworkRisePct > LATENCY_QUALITY_STOP.reworkRisePct) {

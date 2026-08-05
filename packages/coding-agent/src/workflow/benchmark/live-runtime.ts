@@ -6,6 +6,7 @@ import { Effort, type Model } from "@oh-my-pi/pi-catalog";
 import {
 	getBundledModelReferenceIndex,
 	getBundledProviderModelReferenceIndex,
+	modelFamilyToken,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -80,6 +81,7 @@ function providerFact<T>(value: T): { value: T; provenance: "provider_fact" } {
  * Preserve supported efforts; otherwise prefer the model default (`max` when available),
  * falling back to catalog clamp. deepseek-v4-flash defaults to max.
  */
+
 export function buildLiveBenchmarkProfileOverrides(
 	provider: string,
 	model: string,
@@ -108,8 +110,9 @@ export function buildLiveBenchmarkProfileOverrides(
 			}
 		}
 		const liveIdentity: Partial<ModelProfile> = {
-			vendor: provider,
+			vendor: modelFamilyToken(bareModel) ?? provider,
 			modelPattern,
+			strictIdentity: true,
 			maxRuntimeMs: 600_000,
 			retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: [] },
 			thinkingLevel,
@@ -222,7 +225,8 @@ export function verifyLiveWorkflowProvenance(
 	if (!report) return { fallbackCount: 0, errors: ["child workflow status evidence missing"] };
 	const errors: string[] = [];
 	let fallbackCount = 0;
-	if (report.qualityRoute.status !== "verified") {
+	const qualityRouteVerified = report.qualityRoute.status === "verified";
+	if (!qualityRouteVerified && report.qualityRoute.status !== "legacy") {
 		errors.push(`child quality route evidence ${report.qualityRoute.status}`);
 	}
 	const expectedModel = model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
@@ -247,9 +251,11 @@ export function verifyLiveWorkflowProvenance(
 			errors.push(`child stage evidence not verified: ${attempt.stage}`);
 		}
 		if (!attempt.configuredProfileId) errors.push(`child configured profile missing: ${attempt.stage}`);
-		if (!configuredProfiles?.length) errors.push(`child configured route missing: ${attempt.stage}`);
-		else if (attempt.configuredProfileId && !configuredProfiles.includes(attempt.configuredProfileId)) {
-			errors.push(`child profile outside configured route: ${attempt.stage}`);
+		if (qualityRouteVerified) {
+			if (!configuredProfiles?.length) errors.push(`child configured route missing: ${attempt.stage}`);
+			else if (attempt.configuredProfileId && !configuredProfiles.includes(attempt.configuredProfileId)) {
+				errors.push(`child profile outside configured route: ${attempt.stage}`);
+			}
 		}
 		if (attempt.routing.length === 0) {
 			errors.push(`child routing audit missing: ${attempt.stage}`);
@@ -257,11 +263,10 @@ export function verifyLiveWorkflowProvenance(
 			const ambiguousRouting = attempt.routing.some(
 				route =>
 					!route.selectedProfileId ||
+					route.selectedProfileId !== attempt.configuredProfileId ||
 					route.fallbackFrom !== null ||
 					route.skipped.length > 0 ||
-					(configuredProfiles !== null &&
-						configuredProfiles !== undefined &&
-						!configuredProfiles.includes(route.selectedProfileId)),
+					(qualityRouteVerified && !configuredProfiles?.includes(route.selectedProfileId)),
 			);
 			const attemptFallbacks = Math.max(0, attempt.routing.length - 1) + (ambiguousRouting ? 1 : 0);
 			fallbackCount += attemptFallbacks;
@@ -316,12 +321,13 @@ async function runProductionWorkflow(
 	cwd: string,
 	options: LiveBenchmarkRuntimeOptions,
 ): Promise<LiveBenchmarkAgentResult> {
+	const profileOverrides = buildLiveBenchmarkProfileOverrides(options.provider, options.model, request.variant);
 	const settings = Settings.isolated({
 		"workflow.enabled": true,
 		"workflow.degradedMode": true,
 		"workflow.requireIndependentReview": false,
 		"workflow.verificationCommands": request.case.verificationCommands,
-		"workflow.profiles": buildLiveBenchmarkProfileOverrides(options.provider, options.model, request.variant),
+		"workflow.profiles": profileOverrides,
 		"workflow.presentationOptimization.enabled": request.variant === "optimized",
 		"task.isolation.mode": "auto",
 	});

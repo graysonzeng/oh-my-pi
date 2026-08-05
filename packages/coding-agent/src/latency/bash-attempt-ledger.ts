@@ -49,7 +49,6 @@ export interface BashLedgerLookupResult {
 	advisoryText?: string;
 }
 
-
 /** Normalize shell whitespace outside quoted/escaped spans without proving quote equivalence. */
 function normalizeBashCommand(command: string): string {
 	let normalized = "";
@@ -93,16 +92,13 @@ function normalizeBashCommand(command: string): string {
 }
 
 /** Normalize command for fingerprinting. Conservative: unproven quote equivalence stays distinct. */
-export function buildBashCommandFingerprint(input: {
-	command: string;
-	cwd: string;
-}): string {
+export function buildBashCommandFingerprint(input: { command: string; cwd: string }): string {
 	return sha256Hex(stableSerialize({ command: normalizeBashCommand(input.command), cwd: input.cwd }));
 }
 
 /**
- * State fingerprint uses code/config revision, related file hashes, and env *names* only.
- * Never store secret env values.
+ * State fingerprint keeps stable receipts for the repository and explicit
+ * execution environment. Raw environment values never enter the ledger.
  */
 export function buildBashStateFingerprint(input: {
 	cwd?: string;
@@ -110,6 +106,9 @@ export function buildBashStateFingerprint(input: {
 	configHash?: string;
 	relatedFileHashes?: Record<string, string>;
 	envNames?: string[];
+	envReceipt?: string;
+	executionReceipt?: string;
+	worktreeReceipt?: string;
 	dependencyReceipt?: string;
 }): string {
 	const envNames = [...(input.envNames ?? [])].sort();
@@ -125,6 +124,9 @@ export function buildBashStateFingerprint(input: {
 			configHash: input.configHash ?? "unknown",
 			relatedFileHashes: related,
 			envNames,
+			envReceipt: input.envReceipt ?? null,
+			executionReceipt: input.executionReceipt ?? null,
+			worktreeReceipt: input.worktreeReceipt ?? null,
 			dependencyReceipt: input.dependencyReceipt ?? null,
 		}),
 	);
@@ -132,17 +134,19 @@ export function buildBashStateFingerprint(input: {
 
 /** Strip timestamps / ephemeral ids before digesting failure excerpts. */
 export function normalizeBashFailureExcerpt(text: string): string {
-	return text
-		// Bash tool footers embed variable wall-clock text; strip so identical
-		// failures (e.g. two `false` runs) share one failure fingerprint.
-		.replace(/^\s*Wall time:\s*\d+(?:\.\d+)?\s*(?:seconds?|ms|milliseconds?)\s*$/gim, "")
-		.replace(/\bWall time:\s*\d+(?:\.\d+)?\s*(?:seconds?|ms|milliseconds?)\b/gi, "")
-		.replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/g, "<ts>")
-		.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "<uuid>")
-		.replace(/\b\d{10,}\b/g, "<num>")
-		.replace(/\s+/g, " ")
-		.trim()
-		.slice(0, 2000);
+	return (
+		text
+			// Bash tool footers embed variable wall-clock text; strip so identical
+			// failures (e.g. two `false` runs) share one failure fingerprint.
+			.replace(/^\s*Wall time:\s*\d+(?:\.\d+)?\s*(?:seconds?|ms|milliseconds?)\s*$/gim, "")
+			.replace(/\bWall time:\s*\d+(?:\.\d+)?\s*(?:seconds?|ms|milliseconds?)\b/gi, "")
+			.replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/g, "<ts>")
+			.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "<uuid>")
+			.replace(/\b\d{10,}\b/g, "<num>")
+			.replace(/\s+/g, " ")
+			.trim()
+			.slice(0, 2000)
+	);
 }
 
 export function buildBashFailureFingerprint(input: {
@@ -187,10 +191,7 @@ export function createBashAttemptLedger(input: {
 	};
 }
 
-export function appendBashAttempt(
-	ledger: BashAttemptLedgerV1,
-	attempt: BashAttemptRecordV1,
-): BashAttemptLedgerV1 {
+export function appendBashAttempt(ledger: BashAttemptLedgerV1, attempt: BashAttemptRecordV1): BashAttemptLedgerV1 {
 	return {
 		...ledger,
 		attempts: [...ledger.attempts, attempt],
@@ -209,9 +210,7 @@ export function lookupRepeatedBashFailure(
 		return { ledger: null, repeatedFailure: false, priorAttempts: 0, unknown: false };
 	}
 	const matches = ledgers.filter(
-		l =>
-			l.commandFingerprint === input.commandFingerprint &&
-			l.stateFingerprint === input.stateFingerprint,
+		l => l.commandFingerprint === input.commandFingerprint && l.stateFingerprint === input.stateFingerprint,
 	);
 	if (matches.length === 0) {
 		return { ledger: null, repeatedFailure: false, priorAttempts: 0, unknown: false };
@@ -221,9 +220,7 @@ export function lookupRepeatedBashFailure(
 		a => a.failureFingerprint === input.failureFingerprint && a.terminal.kind !== "cancelled",
 	);
 	const repeatedFailure = priorFailures.length > 0;
-	const advisoryText = repeatedFailure
-		? formatBashAdvisory(ledger, input.failureFingerprint)
-		: undefined;
+	const advisoryText = repeatedFailure ? formatBashAdvisory(ledger, input.failureFingerprint) : undefined;
 	return {
 		ledger,
 		repeatedFailure,
@@ -241,10 +238,12 @@ function formatBashAdvisory(ledger: BashAttemptLedgerV1, failureFingerprint: str
 		`stateFingerprint=${ledger.stateFingerprint.slice(0, 12)}…`,
 		`failureFingerprint=${failureFingerprint.slice(0, 12)}…`,
 		`priorAttempts=${prior.length}`,
-		...prior.slice(-3).map(
-			(a, i) =>
-				`  #${i + 1} ${a.terminal.kind}${a.terminal.kind === "exit" ? `=${a.terminal.exitCode}` : ""} at ${a.endedAt}`,
-		),
+		...prior
+			.slice(-3)
+			.map(
+				(a, i) =>
+					`  #${i + 1} ${a.terminal.kind}${a.terminal.kind === "exit" ? `=${a.terminal.exitCode}` : ""} at ${a.endedAt}`,
+			),
 	];
 	return lines.join("\n");
 }

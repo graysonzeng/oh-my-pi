@@ -1,16 +1,16 @@
 import * as path from "node:path";
-import workPackageAssignmentTemplate from "../prompts/workflow/work-package-assignment.hbs.md" with { type: "text" };
 import {
 	buildConcurrencyDeclaration,
-	shouldAutoParallel,
 	type ConcurrencyUnitV1,
+	shouldAutoParallel,
 	type WorkflowConcurrencyDeclarationV1,
 } from "../latency/concurrency-declaration";
+import workPackageAssignmentTemplate from "../prompts/workflow/work-package-assignment.hbs.md" with { type: "text" };
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "../task/parallel";
 import { parsePatchTouchedFiles } from "../utils/git";
-import { sha256Hex } from "./optimization-receipt";
 import { renderContextTemplate } from "./context-builder";
 import { WorkflowCancelledError, WorkflowError, WorkflowPolicyError } from "./errors";
+import { sha256Hex } from "./optimization-receipt";
 import type { ImplementStageResult } from "./stages/implement";
 import type {
 	CapturedChangesMergeResult,
@@ -144,7 +144,7 @@ export function buildWorkPackageExecutionPlan(
 						mode: "write",
 						required: true,
 						idempotencyKey: `work-package:${workPackage.id}`,
-					} satisfies ConcurrencyUnitV1),
+					}) satisfies ConcurrencyUnitV1,
 			),
 		),
 	);

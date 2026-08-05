@@ -66,7 +66,8 @@ export function extractRequirementsFromRequest(
 		});
 	}
 
-	const constraintsRaw = "constraints" in request && typeof request.constraints === "string" ? request.constraints : "";
+	const constraintsRaw =
+		"constraints" in request && typeof request.constraints === "string" ? request.constraints : "";
 	const constraintParts = splitConstraintTexts(constraintsRaw);
 	constraintParts.forEach((text, index) => {
 		requirements.push({
@@ -106,7 +107,8 @@ export function computeRequirementsSnapshotSha256(
 }
 
 export function buildRequirementsSnapshot(input: BuildRequirementsSnapshotInput): RequirementsSnapshotV1 {
-	const requestText = typeof input.request.request === "string" ? input.request.request : String(input.request.request ?? "");
+	const requestText =
+		typeof input.request.request === "string" ? input.request.request : String(input.request.request ?? "");
 	const constraints =
 		"constraints" in input.request && typeof input.request.constraints === "string"
 			? input.request.constraints
@@ -189,9 +191,7 @@ export function validateApprovedMandatoryCoverage(
 				row.rationale.trim().length > 0 &&
 				row.mandatory === true,
 		);
-		const hasBlockingStatus = rows.some(
-			row => row.status === "violated" || row.status === "missing_authority",
-		);
+		const hasBlockingStatus = rows.some(row => row.status === "violated" || row.status === "missing_authority");
 		// Contradiction (satisfied+violated) is an arbitration trigger handled elsewhere;
 		// still not a clean PASS for implement until arbitrator re-approves with clean coverage.
 		if (!acceptable || hasBlockingStatus) {

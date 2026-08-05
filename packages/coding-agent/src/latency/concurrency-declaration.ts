@@ -4,8 +4,8 @@
  * Lowering targets existing task/index.ts + task/parallel.ts or workflow RuntimePort.
  */
 
-import { stableSerialize, sha256Hex } from "./stable-serialize";
-import { mapWithConcurrencyLimitAllSettled, Semaphore, type ParallelSettledResult } from "../task/parallel";
+import { mapWithConcurrencyLimitAllSettled, type ParallelSettledResult, Semaphore } from "../task/parallel";
+import { sha256Hex, stableSerialize } from "./stable-serialize";
 export const WORKFLOW_CONCURRENCY_DECLARATION_KIND = "workflow_concurrency_declaration" as const;
 export const WORKFLOW_CONCURRENCY_DECLARATION_VERSION = 1 as const;
 
@@ -104,7 +104,6 @@ export interface ConcurrencyValidationResult {
 	ok: boolean;
 	errors: Array<{ code: ConcurrencyValidationErrorCode; message: string; unitId?: string }>;
 }
-
 
 export function fingerprintConcurrencyDeclaration(
 	decl: Omit<WorkflowConcurrencyDeclarationV1, "fingerprint" | "kind">,
@@ -261,13 +260,19 @@ export function validateConcurrencyDeclaration(
 			errors.push({ code: "missing_required", message: "unit.id required", unitId: unit.id });
 			continue;
 		}
-		if (ids.has(unit.id)) errors.push({ code: "duplicate_unit_id", message: `duplicate unit id ${unit.id}`, unitId: unit.id });
+		if (ids.has(unit.id))
+			errors.push({ code: "duplicate_unit_id", message: `duplicate unit id ${unit.id}`, unitId: unit.id });
 		ids.add(unit.id);
-		if (!unit.assignment?.trim()) errors.push({ code: "missing_required", message: "assignment required", unitId: unit.id });
+		if (!unit.assignment?.trim())
+			errors.push({ code: "missing_required", message: "assignment required", unitId: unit.id });
 		if (!unit.idempotencyKey?.trim()) {
 			errors.push({ code: "missing_required", message: "idempotencyKey required", unitId: unit.id });
 		}
-		if (!Array.isArray(unit.paths) || unit.paths.length === 0 || !unit.paths.every(path => typeof path === "string" && path.trim())) {
+		if (
+			!Array.isArray(unit.paths) ||
+			unit.paths.length === 0 ||
+			!unit.paths.every(path => typeof path === "string" && path.trim())
+		) {
 			errors.push({ code: "missing_required", message: "paths required", unitId: unit.id });
 		}
 		if (!Array.isArray(unit.dependsOn) || !unit.dependsOn.every(dep => typeof dep === "string" && dep.trim())) {
@@ -329,9 +334,7 @@ export function validateConcurrencyDeclaration(
 			if (!a || !b || typeof a !== "object" || typeof b !== "object") continue;
 			const ordered = a.dependsOn.includes(b.id) || b.dependsOn.includes(a.id);
 			const overlap = pathSetsOverlap(a.paths ?? [], b.paths ?? []);
-			const sameIsolation = Boolean(
-				a.isolationScope && a.isolationScope.trim() && a.isolationScope === b.isolationScope,
-			);
+			const sameIsolation = Boolean(a.isolationScope?.trim() && a.isolationScope === b.isolationScope);
 			if (!ordered && overlap && (a.mode === "write" || b.mode === "write")) {
 				errors.push({
 					code: "path_overlap",
@@ -409,9 +412,7 @@ export function readyConcurrencyUnits(
 	});
 }
 
-export function initialDeclarationState(
-	decl: WorkflowConcurrencyDeclarationV1,
-): ConcurrencyDeclarationStateV1 {
+export function initialDeclarationState(decl: WorkflowConcurrencyDeclarationV1): ConcurrencyDeclarationStateV1 {
 	return {
 		schemaVersion: 1,
 		kind: "concurrency_declaration_state",
@@ -438,7 +439,7 @@ export function resolveEffectiveConcurrency(limits: {
 
 function unitsConflict(a: ConcurrencyUnitV1, b: ConcurrencyUnitV1): boolean {
 	if (a.dependsOn.includes(b.id) || b.dependsOn.includes(a.id)) return true;
-	const sameIsolation = Boolean(a.isolationScope && a.isolationScope.trim() && a.isolationScope === b.isolationScope);
+	const sameIsolation = Boolean(a.isolationScope?.trim() && a.isolationScope === b.isolationScope);
 	if (sameIsolation) return true;
 	if (!pathSetsOverlap(a.paths, b.paths)) return false;
 	return a.mode === "write" || b.mode === "write";
@@ -512,4 +513,3 @@ export function buildConcurrencyExecutionPlan<T>(
 			),
 	};
 }
-

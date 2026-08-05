@@ -128,14 +128,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 	},
 	sol: {
 		id: "sol",
-		modelPattern: [
-			"gpt-5.6-sol",
-			"gpt-5.6-sol*",
-			"gateway/gpt-5.6-sol",
-			"gateway/gpt-5.6-sol*",
-			"*-sol",
-			"*-sol-*",
-		],
+		modelPattern: ["gpt-5.6-sol", "gpt-5.6-sol*", "gateway/gpt-5.6-sol", "gateway/gpt-5.6-sol*", "*-sol", "*-sol-*"],
 		priority: 10,
 		// More conservative visible tool output for the slow/review class.
 		toolStrategy: toolStrategy({ maxBytes: 2000, maxLines: 40, maxConcurrent: 4 }),

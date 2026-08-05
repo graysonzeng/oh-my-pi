@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: benchmark source-code fixtures intentionally contain literal template placeholders.
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { sha256Hex } from "../optimization-receipt";

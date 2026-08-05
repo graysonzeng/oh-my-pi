@@ -8,6 +8,7 @@ import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-ti
 import { IdleTimeout } from "../eval/idle-timeout";
 import { defaultEvalSessionId } from "../eval/session-id";
 import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import { mayMigrateEvalGate, recordOrRequireEvalParity } from "../latency/eval-parity";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
 import { resolveSpawnPolicy } from "../task/spawn-policy";
@@ -21,7 +22,6 @@ import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-me
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
-import { mayMigrateEvalGate, recordOrRequireEvalParity } from "../latency/eval-parity";
 
 export { EVAL_DEFAULT_PREVIEW_LINES, evalToolRenderer } from "./eval-render";
 export { mayMigrateEvalGate, recordOrRequireEvalParity };
@@ -418,12 +418,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			sessionReceipt as import("../latency/eval-parity").EvalGateParityReceiptV1 | undefined,
 			evalGateArmEnabled,
 		);
-		const evalGateNotice =
-			evalGateArmEnabled
-				? evalGateControl === "native-control"
-					? "[eval-gate] native-control selected from proven parity receipt; bridge retained until native owner cutover"
-					: "[eval-gate] migration not proven; parity receipt unavailable/unproven; bridge control retained"
-				: undefined;
+		const evalGateNotice = evalGateArmEnabled
+			? evalGateControl === "native-control"
+				? "[eval-gate] native-control selected from proven parity receipt; bridge retained until native owner cutover"
+				: "[eval-gate] migration not proven; parity receipt unavailable/unproven; bridge control retained"
+			: undefined;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
 		const cellLanguage: EvalLanguage =

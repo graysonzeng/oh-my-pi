@@ -78,9 +78,7 @@ describe("validateAuthorResponses", () => {
 		expect(validateAuthorResponses([accepted("f-missing")], [p0]).reason).toBe(
 			"author_response_unknown_finding:f-missing",
 		);
-		expect(validateAuthorResponses([rejected("f-p0", [])], [p0]).reason).toBe(
-			"author_reject_requires_evidence:f-p0",
-		);
+		expect(validateAuthorResponses([rejected("f-p0", [])], [p0]).reason).toBe("author_reject_requires_evidence:f-p0");
 	});
 
 	it("accepts complete P0/P1 coverage including rejected evidence", () => {

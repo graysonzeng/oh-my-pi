@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildConcurrencyDeclaration,
 	buildConcurrencyExecutionPlan,
-	validateConcurrencyDeclaration,
 	type ConcurrencyUnitStateV1,
+	validateConcurrencyDeclaration,
 	type WorkflowConcurrencyDeclarationV1,
 } from "../../src/latency/concurrency-declaration";
 
@@ -51,11 +51,11 @@ describe("WorkflowConcurrencyDeclarationV1 lowering", () => {
 				peak = Math.max(peak, active);
 				if (active === 2) release.resolve();
 				const abortWait = Promise.withResolvers<void>();
-					if (signal.aborted) {
-						abortWait.resolve();
-					} else {
-						signal.addEventListener("abort", () => abortWait.resolve(), { once: true });
-					}
+				if (signal.aborted) {
+					abortWait.resolve();
+				} else {
+					signal.addEventListener("abort", () => abortWait.resolve(), { once: true });
+				}
 				await Promise.race([release.promise, abortWait.promise]);
 				active -= 1;
 				return unit.id;
@@ -107,9 +107,7 @@ describe("WorkflowConcurrencyDeclarationV1 lowering", () => {
 		const validation = validateConcurrencyDeclaration(decl);
 		expect(validation.ok).toBe(false);
 		expect(validation.errors).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ code: "invalid_rendezvous", unitId: "unit-1" }),
-			]),
+			expect.arrayContaining([expect.objectContaining({ code: "invalid_rendezvous", unitId: "unit-1" })]),
 		);
 		expect(
 			buildConcurrencyExecutionPlan(decl, {

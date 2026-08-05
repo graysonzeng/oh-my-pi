@@ -253,6 +253,18 @@ describe("live workflow benchmark runtime", () => {
 		}
 	});
 
+	it("builds strict fixed-model profiles with exact model-family identity", () => {
+		const overrides = buildLiveBenchmarkProfileOverrides("gateway", "claude-fable-5", "optimized");
+		expect(Object.values(overrides).every(profile => profile.strictIdentity === true)).toBe(true);
+
+		const profiles = resolveWorkflowProfilesFromSettings(overrides, getDefaultConfig().profiles);
+		for (const profile of Object.values(profiles)) {
+			expect(profile.vendor).toBe("anthropic");
+			expect(profile.modelPattern).toBe("gateway/claude-fable-5");
+			expect(profile.strictIdentity).toBe(true);
+		}
+	});
+
 	it("clamps live fixed-model efforts to deepseek-v4-flash max default", () => {
 		const baseline = buildLiveBenchmarkProfileOverrides("gateway", "deepseek-v4-flash", "baseline");
 		// Default claude profiles request xhigh; deepseek-v4-flash supports high/max and defaults to max.
@@ -307,6 +319,24 @@ describe("live workflow benchmark runtime", () => {
 
 	it("accepts one exact child identity across every required stage with known zero fallback", () => {
 		const verified = verifyLiveWorkflowProvenance(exactChildReport(), "fixture-provider", "fixture-model");
+		expect(verified.errors).toEqual([]);
+		expect(verified.fallbackCount).toBe(0);
+		expect(verified.runtimeProvenance).toMatchObject({
+			provider: "fixture-provider",
+			model: "fixture-model",
+			checkpoint: "checkpoint-1",
+		});
+	});
+
+	it("accepts exact same-model evidence from an intentional legacy route", () => {
+		const report = exactChildReport();
+		report.qualityRoute = {
+			status: "legacy",
+			qualityTier: null,
+			snapshotFingerprint: null,
+			configuredStages: [],
+		};
+		const verified = verifyLiveWorkflowProvenance(report, "fixture-provider", "fixture-model");
 		expect(verified.errors).toEqual([]);
 		expect(verified.fallbackCount).toBe(0);
 		expect(verified.runtimeProvenance).toMatchObject({

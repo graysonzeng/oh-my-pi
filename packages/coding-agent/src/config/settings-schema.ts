@@ -2166,7 +2166,11 @@ export const SETTINGS_SCHEMA = {
 				{ value: "30", label: "30%", description: "Early maintenance" },
 				{ value: "40", label: "40%", description: "Moderately early maintenance" },
 				{ value: "50", label: "50%", description: "Halfway point" },
-				{ value: "55", label: "55%", description: "Slightly past halfway, keeps context in the model's efficient range" },
+				{
+					value: "55",
+					label: "55%",
+					description: "Slightly past halfway, keeps context in the model's efficient range",
+				},
 				{ value: "60", label: "60%", description: "Moderate context usage" },
 				{ value: "70", label: "70%", description: "Balanced" },
 				{ value: "75", label: "75%", description: "Slightly aggressive" },

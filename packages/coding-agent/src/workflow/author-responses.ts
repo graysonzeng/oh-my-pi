@@ -116,7 +116,9 @@ export function hasMaxCyclesAuthorReject(
 	priorFindings: readonly Pick<ReviewFindingV1, "id" | "priority">[],
 ): boolean {
 	const p0p1Ids = new Set(
-		priorFindings.filter(finding => finding.priority === "P0" || finding.priority === "P1").map(finding => finding.id),
+		priorFindings
+			.filter(finding => finding.priority === "P0" || finding.priority === "P1")
+			.map(finding => finding.id),
 	);
 	return responses.some(
 		response =>
