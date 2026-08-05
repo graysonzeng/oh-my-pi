@@ -209,6 +209,7 @@ const planReviewFindingV2Item = {
 		missingAuthority: { anyOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
 	},
 	// Keep in lockstep with PlanReviewFindingV2Schema basis superRefine (Zod remains fail-closed).
+	// JSON Schema if/then is not a thenable; biome's noThenProperty is for Promise-like shapes.
 	allOf: [
 		{
 			if: {

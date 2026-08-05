@@ -5,14 +5,24 @@ import {
 	applyKnownGoodBenchmarkSolution,
 	buildDefaultBenchmarkSuite,
 	buildLiveBenchmarkProfileOverrides,
+	buildLiveBenchmarkQualityRoutes,
 	createLiveWorkflowBenchmarkRuntime,
 	runBenchmarkSuite,
 	verifyLiveWorkflowProvenance,
 } from "../../../src/workflow/benchmark";
 import type { BenchmarkRuntimeProvenance } from "../../../src/workflow/benchmark/types";
 import { getDefaultConfig } from "../../../src/workflow/default-config";
-import { resolveWorkflowProfilesFromSettings } from "../../../src/workflow/session-config";
-import type { WorkflowModelBackedStage, WorkflowRole, WorkflowStatusReportV1 } from "../../../src/workflow/types";
+import { compileQualityRouteSnapshot } from "../../../src/workflow/quality-route-snapshot";
+import {
+	buildWorkflowConfigFromSessionSettings,
+	resolveWorkflowProfilesFromSettings,
+} from "../../../src/workflow/session-config";
+import type {
+	WorkflowModelBackedStage,
+	WorkflowQualityRoutes,
+	WorkflowRole,
+	WorkflowStatusReportV1,
+} from "../../../src/workflow/types";
 
 const FIXTURE_PROVENANCE: BenchmarkRuntimeProvenance = {
 	source: "runtime_observed",
@@ -244,6 +254,7 @@ describe("live workflow benchmark runtime", () => {
 		for (const overrides of [baseline, optimized]) {
 			for (const profile of Object.values(overrides)) {
 				expect(profile.maxRuntimeMs).toBe(600_000);
+				expect(profile.strictIdentity).toBe(true);
 				expect(profile.retryPolicy).toEqual({
 					maxAttempts: 1,
 					retryableErrorKinds: [],
@@ -263,6 +274,33 @@ describe("live workflow benchmark runtime", () => {
 			expect(profile.modelPattern).toBe("gateway/claude-fable-5");
 			expect(profile.strictIdentity).toBe(true);
 		}
+	});
+
+	it("compiles a verified live quality-route snapshot for fixed-model profiles", () => {
+		const profiles = resolveWorkflowProfilesFromSettings(
+			buildLiveBenchmarkProfileOverrides("gateway", "gpt-5.6-luna", "optimized"),
+			getDefaultConfig().profiles,
+		);
+		const routes = buildLiveBenchmarkQualityRoutes();
+		const snapshot = compileQualityRouteSnapshot(
+			{ profiles, qualityRoutes: routes as WorkflowQualityRoutes },
+			"balanced",
+		);
+		expect(snapshot.qualityTier).toBe("balanced");
+		expect(snapshot.routes.planner.length).toBeGreaterThan(0);
+		expect(snapshot.routes.plan_reviewer.length).toBeGreaterThan(0);
+		expect(snapshot.routes.implementer.length).toBeGreaterThan(0);
+		expect(snapshot.routes.code_reviewer.length).toBeGreaterThan(0);
+		const settings = {
+			"workflow.profiles": buildLiveBenchmarkProfileOverrides("gateway", "gpt-5.6-luna", "optimized"),
+			"workflow.qualityRoutes": routes,
+			"workflow.defaultQualityTier": "balanced",
+			"workflow.degradedMode": false,
+		} as Record<string, unknown>;
+		const config = buildWorkflowConfigFromSessionSettings(key => settings[key]);
+		expect(config.qualityRoutes).toBeDefined();
+		expect(Object.keys(config.qualityRoutes ?? {})).toContain("balanced");
+		expect(config.degradedMode).toBe(false);
 	});
 
 	it("clamps live fixed-model efforts to deepseek-v4-flash max default", () => {

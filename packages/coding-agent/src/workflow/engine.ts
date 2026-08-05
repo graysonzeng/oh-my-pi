@@ -1309,6 +1309,7 @@ export class WorkflowEngine {
 					);
 					return;
 				}
+				// Cohort is durable on control; never re-infer mid-flight from the latest artifact alone.
 				this.#budgetLedger.recordReviewerCycle();
 				const reviewKind = control.reviewRound === 2 ? "rereview" : "initial";
 				const requirementsSnapshot = await this.#requireRequirementsSnapshot(workflowId, attemptId, request);

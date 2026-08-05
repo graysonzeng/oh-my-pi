@@ -80,6 +80,8 @@ function providerFact<T>(value: T): { value: T; provenance: "provider_fact" } {
  * Live fixed-model runs rewrite every profile onto one provider/model.
  * Preserve supported efforts; otherwise prefer the model default (`max` when available),
  * falling back to catalog clamp. deepseek-v4-flash defaults to max.
+ * Profiles are strict-identity so quality-route snapshots can be compiled and
+ * live provenance can verify configured stage routes.
  */
 
 export function buildLiveBenchmarkProfileOverrides(
@@ -109,9 +111,12 @@ export function buildLiveBenchmarkProfileOverrides(
 				thinkingLevel = clampThinkingLevelForModel(knownModel, thinkingLevel as Effort | undefined) ?? supported[0];
 			}
 		}
+		// Strict identity requires vendor == model lineage (not transport provider).
+		const lineage = modelFamilyToken(bareModel) ?? modelFamilyToken(model) ?? provider;
 		const liveIdentity: Partial<ModelProfile> = {
-			vendor: modelFamilyToken(bareModel) ?? provider,
+			vendor: lineage,
 			modelPattern,
+			// Fixed-model live acceptance requires strict identity + zero fallbacks.
 			strictIdentity: true,
 			maxRuntimeMs: 600_000,
 			retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: [] },
@@ -132,6 +137,36 @@ export function buildLiveBenchmarkProfileOverrides(
 				: liveIdentity;
 	}
 	return profiles;
+}
+
+/**
+ * Compile a single-tier quality route for live fixed-model runs.
+ * One default profile id per required role is enough: live overrides rewrite every
+ * profile onto the same provider/model, and provenance only needs a verified route.
+ */
+export function buildLiveBenchmarkQualityRoutes(): Record<
+	string,
+	Partial<
+		Record<"planner" | "plan_reviewer" | "plan_arbitrator" | "implementer" | "code_reviewer" | "repair", string[]>
+	>
+> {
+	const profiles = getDefaultConfig().profiles;
+	const firstId = (role: "planner" | "plan_reviewer" | "implementer" | "code_reviewer" | "repair"): string => {
+		const match = Object.values(profiles).find(profile => profile.roles.includes(role));
+		if (!match) throw new Error(`Live benchmark missing default profile for role ${role}`);
+		return match.id;
+	};
+	// Omit plan_arbitrator: settings resolver rejects empty arrays, and the
+	// snapshot compiler treats missing optional arbitrator routes as empty.
+	return {
+		balanced: {
+			planner: [firstId("planner")],
+			plan_reviewer: [firstId("plan_reviewer")],
+			implementer: [firstId("implementer")],
+			code_reviewer: [firstId("code_reviewer")],
+			repair: [firstId("repair")],
+		},
+	};
 }
 
 async function runCommand(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
@@ -182,7 +217,8 @@ async function executeWorkflow(
 	const started = await tool.execute(`workflow-bench-start-${request.repetition}`, {
 		op: "start",
 		request: request.case.request,
-		degradedMode: true,
+		// Quality routes require non-degraded mode; live fixed-model runs compile routes.
+		degradedMode: false,
 	} satisfies WorkflowToolInput);
 	const workflowId = workflowIdFrom(started);
 	if (!workflowId) throw new Error("Workflow start did not return a workflowId");
@@ -324,10 +360,13 @@ async function runProductionWorkflow(
 	const profileOverrides = buildLiveBenchmarkProfileOverrides(options.provider, options.model, request.variant);
 	const settings = Settings.isolated({
 		"workflow.enabled": true,
-		"workflow.degradedMode": true,
+		// Quality routes forbid degraded mode; live provenance requires a verified route snapshot.
+		"workflow.degradedMode": false,
 		"workflow.requireIndependentReview": false,
 		"workflow.verificationCommands": request.case.verificationCommands,
 		"workflow.profiles": profileOverrides,
+		"workflow.qualityRoutes": buildLiveBenchmarkQualityRoutes(),
+		"workflow.defaultQualityTier": "balanced",
 		"workflow.presentationOptimization.enabled": request.variant === "optimized",
 		"task.isolation.mode": "auto",
 	});

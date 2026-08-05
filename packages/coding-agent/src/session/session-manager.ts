@@ -349,7 +349,7 @@ export type ReadonlySessionManager = Pick<
 	| "getLineageContext"
 >;
 
-interface SessionManagerStateSnapshot {
+export interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
 	sessionId: string;

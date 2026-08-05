@@ -3163,14 +3163,18 @@ export class AgentSession {
 								: typeof source.value === "string"
 									? source.value
 									: rawPath;
+			// Prefer tool-attested content/revision identity; fall back to the
+			// visible text digest so ordinary local reads still form a key.
+			const contentOrRevisionIdentity =
+				"contentOrRevisionIdentity" in details &&
+				typeof details.contentOrRevisionIdentity === "string" &&
+				details.contentOrRevisionIdentity.length > 0
+					? details.contentOrRevisionIdentity
+					: sha256Hex(originalText);
 			// Unknown branch/revision/provider-view identity must fail open (no synthetic hit key).
 			const providerViewIdentity =
 				"providerViewIdentity" in details && typeof details.providerViewIdentity === "string"
 					? details.providerViewIdentity
-					: "";
-			const contentOrRevisionIdentity =
-				"contentOrRevisionIdentity" in details && typeof details.contentOrRevisionIdentity === "string"
-					? details.contentOrRevisionIdentity
 					: "";
 			const branchOrWorktreeScope =
 				"branchOrWorktreeScope" in details && typeof details.branchOrWorktreeScope === "string"
@@ -6375,6 +6379,7 @@ export class AgentSession {
 		}
 
 		this.#clearSessionScopedToolState(departedSessionId);
+		this.#clearCheckpointRuntimeState();
 		this.setTodoPhases([]);
 		this.#freshProviderSessionId = undefined;
 		this.#clearInheritedProviderPromptCacheKey();

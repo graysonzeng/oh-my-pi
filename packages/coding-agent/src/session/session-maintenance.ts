@@ -42,14 +42,7 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type {
-	AssistantMessage,
-	CodexCompactionContext,
-	Message,
-	Model,
-	ProviderSessionState,
-	ToolResultMessage,
-} from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -81,7 +74,7 @@ import {
 import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
-import type { SessionManager } from "./session-manager";
+import type { SessionManager, SessionManagerStateSnapshot } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 
 export type CompactionCheckResult = Readonly<{
@@ -154,11 +147,6 @@ const PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8_000;
  * still-warm prefix is busted by the flush. 90 min leaves margin over the 1h TTL.
  */
 const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
-
-interface PrunedMessageSnapshot {
-	content: ToolResultMessage["content"];
-	prunedAt: number | undefined;
-}
 
 /**
  * Hysteresis band for the post-maintenance "did we actually create headroom?"
@@ -317,40 +305,52 @@ export class SessionMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
-	#snapshotUnprunedToolResults(entries: readonly SessionEntry[]): Map<ToolResultMessage, PrunedMessageSnapshot> {
-		const snapshots = new Map<ToolResultMessage, PrunedMessageSnapshot>();
-		for (const entry of entries) {
-			if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
-			const message = entry.message as ToolResultMessage;
-			if (message.prunedAt !== undefined) continue;
-			snapshots.set(message, { content: message.content, prunedAt: message.prunedAt });
-		}
-		return snapshots;
+	/**
+	 * Deep-clone a SessionManager snapshot so in-place prune mutations can roll
+	 * back when rewriteEntries fails. captureState() is shallow by design for
+	 * switch/reload; prune mutates entry contents and needs a true restore point.
+	 */
+	#capturePruneRollbackSnapshot(): SessionManagerStateSnapshot {
+		const snapshot = this.#host.sessionManager.captureState();
+		return {
+			...snapshot,
+			header: structuredClone(snapshot.header),
+			entries: structuredClone(snapshot.entries),
+		};
 	}
 
-	async #commitPrunedHistory(snapshots: ReadonlyMap<ToolResultMessage, PrunedMessageSnapshot>): Promise<void> {
+	async #commitPrunedHistory(
+		result: { prunedCount: number; tokensSaved: number },
+		rollback: SessionManagerStateSnapshot,
+	): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+		if (result.prunedCount === 0) return undefined;
 		try {
 			await this.#host.sessionManager.rewriteEntries();
 		} catch (error) {
-			for (const [message, snapshot] of snapshots) {
-				message.content = snapshot.content;
-				if (snapshot.prunedAt === undefined) delete message.prunedAt;
-				else message.prunedAt = snapshot.prunedAt;
-			}
-			const restoredContext = this.#host.buildDisplaySessionContext();
-			this.#host.agent.replaceMessages(restoredContext.messages);
-			throw error;
+			// Fail closed: never leave branch/live messages half-pruned when disk
+			// rewrite rejects. Restore the pre-mutation entry graph and replay it.
+			logger.warn("History prune rewrite failed; restoring pre-prune branch", {
+				error: String(error),
+				prunedCount: result.prunedCount,
+			});
+			this.#host.sessionManager.restoreState(rollback);
+			const restored = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(restored.messages);
+			this.#host.resetAdvisorRuntimes();
+			this.#host.syncTodoPhasesFromBranch();
+			return undefined;
 		}
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes();
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		return result;
 	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+		const rollback = this.#capturePruneRollbackSnapshot();
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const snapshots = this.#snapshotUnprunedToolResults(branchEntries);
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
 			branchEntries,
@@ -363,12 +363,7 @@ export class SessionMaintenance {
 				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
 		);
-		if (result.prunedCount === 0) {
-			return undefined;
-		}
-
-		await this.#commitPrunedHistory(snapshots);
-		return result;
+		return await this.#commitPrunedHistory(result, rollback);
 	}
 
 	/**
@@ -387,8 +382,8 @@ export class SessionMaintenance {
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
+		const rollback = this.#capturePruneRollbackSnapshot();
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const snapshots = this.#snapshotUnprunedToolResults(branchEntries);
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
 			branchEntries,
@@ -402,12 +397,7 @@ export class SessionMaintenance {
 				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
 			}),
 		);
-		if (result.prunedCount === 0) {
-			return undefined;
-		}
-
-		await this.#commitPrunedHistory(snapshots);
-		return result;
+		return await this.#commitPrunedHistory(result, rollback);
 	}
 
 	/**

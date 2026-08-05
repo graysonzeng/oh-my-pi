@@ -4,6 +4,10 @@
  * Advisory / bounded-injection modes share this ledger; never auto-retry or auto-skip.
  */
 
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as git from "../utils/git";
 import { sha256Hex, stableSerialize } from "./stable-serialize";
 
 export const BASH_ATTEMPT_LEDGER_KIND = "bash_attempt_ledger" as const;
@@ -110,6 +114,8 @@ export function buildBashStateFingerprint(input: {
 	executionReceipt?: string;
 	worktreeReceipt?: string;
 	dependencyReceipt?: string;
+	/** Dirty index/worktree/untracked digest; required for authoritative repetition identity. */
+	worktreeDigest?: string;
 }): string {
 	const envNames = [...(input.envNames ?? [])].sort();
 	const related = Object.fromEntries(
@@ -128,8 +134,196 @@ export function buildBashStateFingerprint(input: {
 			executionReceipt: input.executionReceipt ?? null,
 			worktreeReceipt: input.worktreeReceipt ?? null,
 			dependencyReceipt: input.dependencyReceipt ?? null,
+			worktreeDigest: input.worktreeDigest ?? "unknown",
 		}),
 	);
+}
+
+/** Repo-root config files that can change command semantics without a new commit. */
+const BASH_STATE_CONFIG_PATHS = [
+	"package.json",
+	"bunfig.toml",
+	"tsconfig.json",
+	"biome.json",
+	"biome.jsonc",
+	".env",
+	".env.local",
+] as const;
+
+/** Dependency lock receipts — digests only, never lockfile bodies in the ledger. */
+const BASH_STATE_DEPENDENCY_PATHS = [
+	"package-lock.json",
+	"bun.lock",
+	"bun.lockb",
+	"yarn.lock",
+	"pnpm-lock.yaml",
+] as const;
+
+const BASH_STATE_FILE_DIGEST_CAP_BYTES = 1_048_576;
+
+export interface BashStateIdentity {
+	stateFingerprint: string;
+	/** True only when HEAD + dirty-tree receipts were established. */
+	stateAuthoritative: boolean;
+	/** Digest of the state components used for this attempt (never secret values). */
+	changedInputReceipt: string | null;
+	codeRevision?: string;
+	configHash?: string;
+	dependencyReceipt?: string;
+	worktreeDigest?: string;
+	relatedFileHashes?: Record<string, string>;
+}
+
+/**
+ * Resolve authoritative bash state identity for repetition advice.
+ * HEAD alone is insufficient: staged/unstaged/untracked dirty content must participate.
+ * Missing git or incomplete receipts → fail open (record attempt, no identical-failure claim).
+ */
+export function resolveBashStateIdentity(input: {
+	cwd: string;
+	envNames?: string[];
+}): BashStateIdentity {
+	const envNames = [...(input.envNames ?? [])].sort();
+	const head = git.head.resolveSync(input.cwd);
+	const codeRevision = head?.commit ?? undefined;
+	const repoRoot = head?.repoRoot;
+
+	let worktreeDigest: string | undefined;
+	let worktreeAuthoritative = false;
+	if (repoRoot) {
+		try {
+			// status --porcelain=v1 -uall: index + worktree + untracked path inventory
+			const status = Bun.spawnSync(
+				["git", "-c", "core.quotepath=false", "status", "--porcelain=v1", "-uall"],
+				{ cwd: repoRoot, stdout: "pipe", stderr: "pipe", windowsHide: true },
+			);
+			// write-tree: staged index tree oid (empty tree when clean index)
+			const indexTree = Bun.spawnSync(["git", "write-tree"], {
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+				windowsHide: true,
+			});
+			// diff-index: unstaged blob content vs HEAD (includes mode changes)
+			const unstaged = Bun.spawnSync(
+				["git", "diff-index", "--raw", "-z", "HEAD", "--"],
+				{ cwd: repoRoot, stdout: "pipe", stderr: "pipe", windowsHide: true },
+			);
+			if (status.exitCode === 0 && indexTree.exitCode === 0 && unstaged.exitCode === 0) {
+				const statusText = new TextDecoder().decode(status.stdout);
+				const indexOid = new TextDecoder().decode(indexTree.stdout).trim();
+				const unstagedRaw = new TextDecoder().decode(unstaged.stdout);
+				// Untracked file contents: digest each path listed as `??` (cap size).
+				const untrackedDigests: Record<string, string> = {};
+				for (const line of statusText.split("\n")) {
+					if (!line.startsWith("?? ")) continue;
+					const rel = line.slice(3);
+					if (!rel || rel.endsWith("/")) continue;
+					const abs = path.join(repoRoot, rel);
+					try {
+						const st = fs.statSync(abs);
+						if (!st.isFile()) continue;
+						if (st.size > BASH_STATE_FILE_DIGEST_CAP_BYTES) {
+							untrackedDigests[rel] = sha256Hex(`oversized:${st.size}`);
+							continue;
+						}
+						const bytes = fs.readFileSync(abs);
+						untrackedDigests[rel] = createHash("sha256").update(bytes).digest("hex");
+					} catch {
+						// Path vanished mid-scan: include tombstone so identity still moves.
+						untrackedDigests[rel] = "missing";
+					}
+				}
+				worktreeDigest = sha256Hex(
+					stableSerialize({
+						status: statusText,
+						indexOid,
+						unstagedRaw,
+						untrackedDigests,
+					}),
+				);
+				worktreeAuthoritative = true;
+			}
+		} catch {
+			worktreeAuthoritative = false;
+		}
+	}
+
+	const relatedFileHashes: Record<string, string> = {};
+	const configParts: string[] = [];
+	const dependencyParts: string[] = [];
+	if (repoRoot) {
+		for (const rel of BASH_STATE_CONFIG_PATHS) {
+			const abs = path.join(repoRoot, rel);
+			try {
+				const st = fs.statSync(abs);
+				if (!st.isFile()) continue;
+				const digest =
+					st.size > BASH_STATE_FILE_DIGEST_CAP_BYTES
+						? sha256Hex(`oversized:${st.size}`)
+						: createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+				relatedFileHashes[rel] = digest;
+				configParts.push(`${rel}:${digest}`);
+			} catch {
+				// absent config is fine
+			}
+		}
+		for (const rel of BASH_STATE_DEPENDENCY_PATHS) {
+			const abs = path.join(repoRoot, rel);
+			try {
+				const st = fs.statSync(abs);
+				if (!st.isFile()) continue;
+				const digest =
+					st.size > BASH_STATE_FILE_DIGEST_CAP_BYTES
+						? sha256Hex(`oversized:${st.size}`)
+						: createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+				relatedFileHashes[rel] = digest;
+				dependencyParts.push(`${rel}:${digest}`);
+			} catch {
+				// absent lockfile is fine
+			}
+		}
+	}
+
+	const configHash = configParts.length > 0 ? sha256Hex(configParts.sort().join("|")) : undefined;
+	const dependencyReceipt =
+		dependencyParts.length > 0 ? sha256Hex(dependencyParts.sort().join("|")) : undefined;
+
+	// Authoritative only when both HEAD commit and dirty-tree receipts are known.
+	// Outside a git repo, or when git plumbing fails, fail open.
+	const stateAuthoritative = Boolean(codeRevision && worktreeAuthoritative);
+	const stateFingerprint = buildBashStateFingerprint({
+		cwd: input.cwd,
+		envNames,
+		codeRevision,
+		configHash,
+		dependencyReceipt,
+		relatedFileHashes,
+		worktreeDigest,
+	});
+	const changedInputReceipt = stateAuthoritative
+		? sha256Hex(
+				stableSerialize({
+					codeRevision,
+					configHash: configHash ?? null,
+					dependencyReceipt: dependencyReceipt ?? null,
+					worktreeDigest,
+					relatedFileHashes,
+					envNames,
+				}),
+			)
+		: null;
+
+	return {
+		stateFingerprint,
+		stateAuthoritative,
+		changedInputReceipt,
+		codeRevision,
+		configHash,
+		dependencyReceipt,
+		worktreeDigest,
+		relatedFileHashes: Object.keys(relatedFileHashes).length > 0 ? relatedFileHashes : undefined,
+	};
 }
 
 /** Strip timestamps / ephemeral ids before digesting failure excerpts. */

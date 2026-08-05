@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
@@ -11,6 +13,7 @@ import {
 	createBashAttemptLedger,
 	getBashAttemptLedgerStore,
 	lookupRepeatedBashFailure,
+	resolveBashStateIdentity,
 } from "../../src/latency/bash-attempt-ledger";
 import type { ClientBridge, ClientBridgeTerminalHandle } from "../../src/session/client-bridge";
 import type { ToolSession } from "../../src/tools";
@@ -46,32 +49,99 @@ describe("BashAttemptLedgerV1 identity", () => {
 			cwd: "/repo",
 			envNames: ["SECRET_TOKEN", "PATH"],
 			codeRevision: "abc",
+			worktreeDigest: "wt",
 		});
 		const reordered = buildBashStateFingerprint({
 			cwd: "/repo",
 			envNames: ["PATH", "SECRET_TOKEN"],
 			codeRevision: "abc",
+			worktreeDigest: "wt",
 		});
 		const changedName = buildBashStateFingerprint({
 			cwd: "/repo",
 			envNames: ["PATH", "OTHER_TOKEN"],
 			codeRevision: "abc",
+			worktreeDigest: "wt",
 		});
 		const changedCwd = buildBashStateFingerprint({
 			cwd: "/tmp",
 			envNames: ["PATH", "SECRET_TOKEN"],
 			codeRevision: "abc",
+			worktreeDigest: "wt",
 		});
 		const changedRevision = buildBashStateFingerprint({
 			cwd: "/repo",
 			envNames: ["PATH", "SECRET_TOKEN"],
 			codeRevision: "def",
+			worktreeDigest: "wt",
+		});
+		const changedWorktree = buildBashStateFingerprint({
+			cwd: "/repo",
+			envNames: ["PATH", "SECRET_TOKEN"],
+			codeRevision: "abc",
+			worktreeDigest: "dirty",
 		});
 
 		expect(first).toBe(reordered);
 		expect(first).not.toBe(changedName);
 		expect(first).not.toBe(changedCwd);
 		expect(first).not.toBe(changedRevision);
+		expect(first).not.toBe(changedWorktree);
+	});
+
+	it("includes dirty worktree content in authoritative state identity", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bash-state-id-"));
+		const run = (args: string[]): void => {
+			const result = Bun.spawnSync(["git", ...args], {
+				cwd: root,
+				stdout: "pipe",
+				stderr: "pipe",
+				env: {
+					...process.env,
+					GIT_AUTHOR_NAME: "test",
+					GIT_AUTHOR_EMAIL: "test@example.com",
+					GIT_COMMITTER_NAME: "test",
+					GIT_COMMITTER_EMAIL: "test@example.com",
+				},
+			});
+			expect(result.exitCode).toBe(0);
+		};
+		try {
+			run(["init"]);
+			fs.writeFileSync(path.join(root, "probe.ts"), "export const value = 1;\n");
+			fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "probe" }));
+			run(["add", "probe.ts", "package.json"]);
+			run(["commit", "-m", "init"]);
+
+			const clean = resolveBashStateIdentity({ cwd: root, envNames: ["PATH"] });
+			expect(clean.stateAuthoritative).toBe(true);
+			expect(clean.changedInputReceipt).toBeTruthy();
+			expect(clean.worktreeDigest).toBeTruthy();
+
+			fs.writeFileSync(path.join(root, "probe.ts"), "export const value = 2;\n");
+			const dirty = resolveBashStateIdentity({ cwd: root, envNames: ["PATH"] });
+			expect(dirty.stateAuthoritative).toBe(true);
+			expect(dirty.stateFingerprint).not.toBe(clean.stateFingerprint);
+			expect(dirty.worktreeDigest).not.toBe(clean.worktreeDigest);
+
+			fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "probe", version: "2" }));
+			const configChanged = resolveBashStateIdentity({ cwd: root, envNames: ["PATH"] });
+			expect(configChanged.stateFingerprint).not.toBe(dirty.stateFingerprint);
+			expect(configChanged.configHash).not.toBe(clean.configHash);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("fails open without authoritative state outside a git repo", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bash-state-nongit-"));
+		try {
+			const identity = resolveBashStateIdentity({ cwd: root, envNames: ["PATH"] });
+			expect(identity.stateAuthoritative).toBe(false);
+			expect(identity.changedInputReceipt).toBeNull();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

@@ -111,6 +111,7 @@ const FIXTURES: Readonly<Record<string, BenchmarkFixtureDefinition>> = {
 		"src/retry.ts",
 		"export async function retry<T>(operation: () => Promise<T>, _maxAttempts: number): Promise<T> { return operation(); }\n",
 		'export async function retry<T>(operation: () => Promise<T>, maxAttempts: number): Promise<T> {\n\tlet last: unknown;\n\tfor (let attempt = 0; attempt < maxAttempts; attempt++) { try { return await operation(); } catch (error) { last = error; if (!(error instanceof Error) || (error as Error & { code?: string }).code !== "TRANSIENT") throw error; } }\n\tthrow last;\n}\n',
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: fixture source-code string embeds a template placeholder
 		'\tit("retries only TRANSIENT errors and surfaces the last error", async () => {\n\t\tconst { retry } = await import("../src/retry");\n\t\tlet calls = 0; const value = await retry(async () => { calls += 1; if (calls < 3) throw Object.assign(new Error(`fail-${calls}`), { code: "TRANSIENT" }); return "ok"; }, 3);\n\t\texpect(value).toBe("ok"); expect(calls).toBe(3);\n\t\tlet permanentCalls = 0; await expect(retry(async () => { permanentCalls += 1; throw Object.assign(new Error("no"), { code: "PERMANENT" }); }, 3)).rejects.toThrow("no"); expect(permanentCalls).toBe(1);\n\t});',
 	),
 	"feature-filter-option": sourceFixture(
@@ -145,7 +146,9 @@ const FIXTURES: Readonly<Record<string, BenchmarkFixtureDefinition>> = {
 	),
 	"refactor-report-format": sourceFixture(
 		"src/report.ts",
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: fixture source-code string embeds a template placeholder
 		'export function report(name: string, passed: boolean): string { return `${name}: ${passed ? "PASS" : "FAIL"}`; }\n',
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: fixture source-code string embeds a template placeholder
 		'export function formatStatus(passed: boolean): string { return passed ? "PASS" : "FAIL"; }\nexport function report(name: string, passed: boolean): string { return `${name}: ${formatStatus(passed)}`; }\n',
 		'\tit("preserves report and exposes formatter", async () => {\n\t\tconst { report, formatStatus } = await import("../src/report"); expect(report("case", true)).toBe("case: PASS"); expect(formatStatus(false)).toBe("FAIL");\n\t});',
 	),
