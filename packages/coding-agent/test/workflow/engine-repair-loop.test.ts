@@ -218,20 +218,23 @@ describe("WorkflowEngine repair loop", () => {
 		const reviewerCalls: string[] = [];
 		const repairAssignments: string[] = [];
 		const session = fakeSession({ cwd: artifactDir });
-		const adapter = new RuntimeAdapter(strictRepairRunner(artifactDir, true, reviewerCalls, repairAssignments), async request => {
-			mergeCalls.push(request.attemptId);
-			const content = await Promise.all(
-				request.patches.map(async patch => {
-					const source = path.isAbsolute(patch.patchPath)
-						? patch.patchPath
-						: path.join(request.cwd, patch.patchPath);
-					return Bun.file(source).text();
-				}),
-			);
-			await fs.mkdir(path.dirname(request.outputPatchPath), { recursive: true });
-			await Bun.write(request.outputPatchPath, content.join(""));
-			return { patchPath: request.outputPatchPath, changesApplied: true, summary: "captured" };
-		});
+		const adapter = new RuntimeAdapter(
+			strictRepairRunner(artifactDir, true, reviewerCalls, repairAssignments),
+			async request => {
+				mergeCalls.push(request.attemptId);
+				const content = await Promise.all(
+					request.patches.map(async patch => {
+						const source = path.isAbsolute(patch.patchPath)
+							? patch.patchPath
+							: path.join(request.cwd, patch.patchPath);
+						return Bun.file(source).text();
+					}),
+				);
+				await fs.mkdir(path.dirname(request.outputPatchPath), { recursive: true });
+				await Bun.write(request.outputPatchPath, content.join(""));
+				return { patchPath: request.outputPatchPath, changesApplied: true, summary: "captured" };
+			},
+		);
 		const engine = new WorkflowEngine({
 			store,
 			config: { profiles: strictRepairProfiles() },

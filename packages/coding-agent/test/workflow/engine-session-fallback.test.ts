@@ -6,7 +6,11 @@ import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { WorkflowError } from "../../src/workflow/errors";
-import { RuntimeAdapter, type StructuredRunnerRequest } from "../../src/workflow/runtime-adapter";
+import {
+	RuntimeAdapter,
+	type StructuredRunner,
+	type StructuredRunnerRequest,
+} from "../../src/workflow/runtime-adapter";
 import { SESSION_FALLBACK_PROFILE_ID } from "../../src/workflow/session-fallback-profile";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import type { ImplementationArtifactV1, ModelProfile } from "../../src/workflow/types";

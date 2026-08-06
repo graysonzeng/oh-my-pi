@@ -2042,9 +2042,7 @@ export class WorkflowEngine {
 		if (failedChecks.length !== 1 || failedChecks[0].id !== "completion-gate") return false;
 		const completionReason = failedChecks[0].summary.split(":").slice(1).join(":").trim();
 		if (completionReason !== "unresolved_items_open") return false;
-		return finalVerification.checks.every(
-			check => check.id === "completion-gate" || check.status === "passed",
-		);
+		return finalVerification.checks.every(check => check.id === "completion-gate" || check.status === "passed");
 	}
 
 	async #canAcceptStrictRepairNoOp(options: {

@@ -8,6 +8,7 @@ import {
 	buildLiveBenchmarkProfileOverrides,
 	buildLiveBenchmarkQualityRoutes,
 	buildLiveBenchmarkRoleIdentityMap,
+	buildLiveWorkflowStartInput,
 	createLiveWorkflowBenchmarkRuntime,
 	runBenchmarkSuite,
 	verifyLiveWorkflowProvenance,
@@ -154,6 +155,19 @@ function exactChildReport(reviewer = FIXTURE_REVIEWER_CHILD_IDENTITY): WorkflowS
 }
 
 describe("live workflow benchmark runtime", () => {
+	it("carries authoritative allowed and forbidden paths into the workflow start constraints", () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const benchmarkCase = suite.cases.find(item => item.id === "bugfix-null-deref");
+		expect(benchmarkCase).toBeDefined();
+		const input = buildLiveWorkflowStartInput(benchmarkCase!);
+		expect(input.op).toBe("start");
+		expect(input.request).toBe(benchmarkCase!.request);
+		expect(input.constraints).toContain(`Allowed paths: ${benchmarkCase!.allowedPaths.join(", ")}.`);
+		expect(input.constraints).toContain("Forbidden paths:");
+		expect(input.constraints).toContain(".benchmark/");
+		expect(input.degradedMode).toBe(false);
+	});
+
 	it("uses the agent seam, verifies the fixture, and reports provider facts without synthetic quality", async () => {
 		const suite = buildDefaultBenchmarkSuite();
 		const benchmarkCase = suite.cases.find(item => item.id === "bugfix-null-deref");

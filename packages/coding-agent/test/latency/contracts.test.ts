@@ -28,9 +28,9 @@ import {
 import { buildReadViewKeyV1, normalizeReadSelector } from "../../src/latency/read-view-key";
 
 describe("latency arms defaults", () => {
-	it("keeps every independent arm default-off", () => {
+	it("keeps independent arms default-off while context optimization defaults on", () => {
 		const settings = Settings.isolated();
-		expect(settings.get("modelOptimization.enabled")).toBe(false);
+		expect(settings.get("modelOptimization.enabled")).toBe(true);
 		expect(settings.get("latency.arms.readDedupe")).toBe(false);
 		expect(settings.get("latency.arms.contextBudgetTuning")).toBe(false);
 		expect(settings.get("latency.arms.roleStaticSplit")).toBe(false);

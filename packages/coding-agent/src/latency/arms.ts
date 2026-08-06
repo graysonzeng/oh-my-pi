@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 
 /**
  * Independent latency-optimization arms (design A §6.2).
- * Each arm is default-off, session-frozen when first resolved, and independently rollbackable.
+ * context_optimization (modelOptimization.enabled) is default-on since the 2026-08-06
+ * live re-verification; every remaining arm is default-off, session-frozen when first
+ * resolved, and independently rollbackable.
  * Combined experiments must use a separate combinedArmId listing child arms.
  */
 
@@ -20,7 +22,7 @@ export const LATENCY_ARM_IDS = [
 
 export type LatencyArmId = (typeof LATENCY_ARM_IDS)[number];
 
-/** Settings paths that gate each arm. All default false. */
+/** Settings paths that gate each arm. modelOptimization.enabled defaults true; the rest default false. */
 export const LATENCY_ARM_SETTINGS = {
 	context_optimization: "modelOptimization.enabled",
 	read_dedupe: "latency.arms.readDedupe",

@@ -77,8 +77,8 @@ describe("ordinary-session model optimization resolver", () => {
 		expect(second.profile?.id).toBe("second");
 	});
 
-	it("keeps the feature opt-in and strips workflow-only fields from user profiles", () => {
-		expect(Settings.isolated().get("modelOptimization.enabled")).toBe(false);
+	it("defaults context optimization on and strips workflow-only fields from user profiles", () => {
+		expect(Settings.isolated().get("modelOptimization.enabled")).toBe(true);
 		const profiles = mergeModelOptimizationProfiles({
 			custom: {
 				id: "custom",

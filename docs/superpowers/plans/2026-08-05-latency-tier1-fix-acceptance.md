@@ -32,7 +32,7 @@
 
 ## Explicit non-claims
 
-- No latency arm default flipped to `true`.
+- No `latency.arms.*` setting default flipped to `true`; only `context_optimization` (`modelOptimization.enabled`) is default-on as of 2026-08-06.
 - The live optimized workflow is an end-to-end path proof, not a paired quality-gate pass; the report is intentionally inconclusive without a baseline arm.
 - No ≥30-pair formal savings claim; the pilot has 6 comparable combined-arm pairs and no context-only ablation.
 - `readDedupe` and `bashAdvisory` remain separate, default-off arms; their correctness evidence does not authorize default-on rollout.
@@ -62,15 +62,55 @@ bun src/cli.ts workflow-bench --mode live --provider gateway \
 
 The full 10-file readiness command passes 68/68 tests, including the previously tracked history-maintenance rollback regression.
 
-## Single-switch readiness decision
+## 2026-08-06 live re-verification (HEAD 233137ecce)
 
-**Ready for a controlled cohort; not ready for default-on.** Enable only the context-optimization arm for ordinary `gateway/gpt-5.6-luna` sessions:
+Re-ran the provider-backed path proof on the current HEAD and fixed one fixture gap found live.
 
-```yaml
-modelOptimization.enabled: true
+**Passing (optimized variant, real gateway):**
+
+```bash
+bun src/cli.ts workflow-bench --mode=live --provider=gateway --model=deepseek-v4-flash \
+  --reviewer-provider=gateway --reviewer-model=gpt-5.6-luna \
+  --case=bugfix-null-deref --variant=optimized --repetitions=1 \
+  --output=/tmp/omp-workflow-live-retry-20260806
 ```
 
-Keep every `latency.arms.*` setting `false`. The switch resolves the built-in `luna` profile without an overlay; workflow stages continue to own independent workflow profiles. Start with the live-proven Luna cohort because Terra/Sol/Grok currently have resolver coverage but no equivalent paired live pilot.
+- `passed=true`, `firstPassed=true`, `fallback=0`, `scope=adhered`
+- runtime provenance `runtime_observed gateway/deepseek-v4-flash` via `workflow-status-report:v1`
+- `report.json` / `scorecard.json` / `gate.json` written (single-variant gate intentionally inconclusive)
+
+**Fix: live start requests now carry authoritative path constraints.** The workflow start input only passed
+`request.case.request` ("Touch only allowed paths" without a list), so the requirements snapshot had
+`constraints: null` and a reviewer could fail the plan with a `missing_authority` finding (`PLAN-001`) that
+blocked the scope. `buildLiveWorkflowStartInput` now emits `Allowed paths` / `Forbidden paths` as structured
+constraints; covered by `test/workflow/benchmark/live-runtime.test.ts` ("carries authoritative allowed and
+forbidden paths into the workflow start constraints").
+
+**Known live variance (not a defect):** reviewer models are allowed `web_search` by design
+(`READONLY_TOOLS`). A gpt-5.6-luna plan review can spend its whole 600s `maxRuntimeMs` on external Bun
+documentation research; the engine aborts it and fails closed with `quality_route_candidates_exhausted`
+(live profiles fix `retryPolicy` to zero retries by design). The optimized variant passed on the same reviewer
+pairing; the baseline variant remains model-variance-sensitive.
+
+**Static + test closure on HEAD:** `bun run check` passes; the changed-surface test set is green
+(agent compaction structure 10, ai codex stream 77, coding-agent latency/model-opt/tools 73, workflow 96,
+regression 15, workflow-benchmark 51, post-fix engine 44 — 0 failures).
+
+**Environment prerequisites not available:** `gateway/claude-fable-5` currently returns `503 auth_unavailable`
+(no usable Claude auth via this gateway), and `openai-codex` has no active credential, so Codex WS/SSE and
+fable-5 live runs cannot execute; their protocol behavior stays covered by mocked tests.
+
+## Single-switch readiness decision (2026-08-06: default-on)
+
+**`context_optimization` is now default-on:** `modelOptimization.enabled` defaults to `true` (flipped 2026-08-06, per user decision, after the live re-verification). Every `latency.arms.*` setting stays `false`.
+
+```yaml
+modelOptimization.enabled: true   # default; no overlay needed
+latency.arms.readDedupe: false    # still default-off
+latency.arms.bashAdvisory: false  # still default-off
+```
+
+The switch resolves the built-in `luna` profile without an overlay; workflow stages continue to own independent workflow profiles. Rollout basis remains the live-proven Luna cohort because Terra/Sol/Grok currently have resolver coverage but no equivalent paired live pilot.
 
 Roll forward only while the existing stop rules hold: no attributed P0/P1 escape, completion drop ≤2pp, rework rise ≤10%, cost p50 ≤1.5×, and latency improvement ≥10%. Roll back immediately by setting the single switch to `false` if any stop fires or attribution is unknown.
 

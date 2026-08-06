@@ -36,6 +36,7 @@ interface WorkflowToolDetails {
 interface WorkflowToolInput {
 	op: "start" | "status" | "resume";
 	request?: string;
+	constraints?: string;
 	workflowId?: string;
 	degradedMode?: boolean;
 	singleStep?: boolean;
@@ -405,17 +406,37 @@ function workflowIdFrom(result: AgentToolResult<WorkflowToolDetails>): string | 
 	return result.details?.workflowId;
 }
 
+/**
+ * Build the workflow start input for one live benchmark case.
+ * The authoritative allowed/forbidden path lists become structured constraints so the
+ * requirements snapshot carries the path authority instead of leaving it to model assumption
+ * (reviewers otherwise emit missing_authority findings and block the scope).
+ */
+export function buildLiveWorkflowStartInput(benchmarkCase: BenchmarkRuntimeRequest["case"]): WorkflowToolInput {
+	const constraints = [
+		`Allowed paths: ${benchmarkCase.allowedPaths.join(", ")}.`,
+		...(benchmarkCase.forbiddenPaths.length > 0
+			? [`Forbidden paths: ${benchmarkCase.forbiddenPaths.join(", ")}.`]
+			: []),
+	].join("\n");
+	return {
+		op: "start",
+		request: benchmarkCase.request,
+		constraints,
+		// Quality routes require non-degraded mode; live fixed-model runs compile routes.
+		degradedMode: false,
+	};
+}
+
 async function executeWorkflow(
 	tool: WorkflowToolPort,
 	request: BenchmarkRuntimeRequest,
 	maxResumeSteps: number,
 ): Promise<{ workflowId: string; terminalStatus: string; statusReport?: WorkflowStatusReportV1 }> {
-	const started = await tool.execute(`workflow-bench-start-${request.repetition}`, {
-		op: "start",
-		request: request.case.request,
-		// Quality routes require non-degraded mode; live fixed-model runs compile routes.
-		degradedMode: false,
-	} satisfies WorkflowToolInput);
+	const started = await tool.execute(
+		`workflow-bench-start-${request.repetition}`,
+		buildLiveWorkflowStartInput(request.case),
+	);
 	const workflowId = workflowIdFrom(started);
 	if (!workflowId) throw new Error("Workflow start did not return a workflowId");
 

@@ -4510,13 +4510,13 @@ export const SETTINGS_SCHEMA = {
 	// Ordinary-session model optimization (workflow uses its own profiles independently)
 	"modelOptimization.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "model",
 			group: "Model",
 			label: "Model Optimization",
 			description:
-				"When enabled, ordinary coding sessions apply model-family prompt/tool/context optimization for the active model. Off preserves baseline behavior. Workflow profiles are unaffected.",
+				"When enabled, ordinary coding sessions apply model-family prompt/tool/context optimization for the active model. On by default since the 2026-08-06 live re-verification (built-in profiles now resolve gateway/luna ids without an overlay); set false to restore baseline behavior. Workflow profiles are unaffected.",
 		},
 	},
 	"modelOptimization.profiles": {
@@ -4531,8 +4531,8 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Latency optimization arms (design A §6.2) — all default-off, independently rollbackable.
-	// context_optimization reuses modelOptimization.enabled; remaining arms are explicit.
+	// Latency optimization arms (design A §6.2) — independently rollbackable; default-off except
+	// context_optimization (reuses modelOptimization.enabled, default-on since 2026-08-06).
 	"latency.arms.readDedupe": {
 		type: "boolean",
 		default: false,

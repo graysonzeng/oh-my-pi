@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { Effort, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { Effort, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../src/config/model-registry";
 import {
 	AVAILABILITY_PROBE_TIMEOUT_MS,
@@ -256,7 +256,7 @@ describe("WorkflowAvailabilityPort contract", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 1000,
 			maxTokens: 100,
-		} as Model;
+		} as unknown as Model;
 		const registry = {
 			getAvailable: () => [model],
 			getApiKey: async () => "test-key",
