@@ -16,7 +16,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
-import type { LatencyArmId } from "../latency/arms";
+import type { LatencyArmId, LatencyArmSnapshotV1 } from "../latency/arms";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
@@ -326,6 +326,8 @@ export interface ToolSession {
 	settings: Settings;
 	/** Session-frozen latency arm lookup; lightweight test sessions may omit it. */
 	isLatencyArmEnabled?: (arm: LatencyArmId) => boolean;
+	/** Session-frozen latency arm snapshot (attribution for rollout decisions); test sessions may omit it. */
+	getLatencyArmSnapshot?: () => LatencyArmSnapshotV1;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */

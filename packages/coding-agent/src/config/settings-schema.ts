@@ -4510,13 +4510,13 @@ export const SETTINGS_SCHEMA = {
 	// Ordinary-session model optimization (workflow uses its own profiles independently)
 	"modelOptimization.enabled": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "model",
 			group: "Model",
 			label: "Model Optimization",
 			description:
-				"When enabled, ordinary coding sessions apply model-family prompt/tool/context optimization for the active model. On by default since the 2026-08-06 live re-verification (built-in profiles now resolve gateway/luna ids without an overlay); set false to restore baseline behavior. Workflow profiles are unaffected.",
+				"When enabled, ordinary coding sessions apply model-family prompt/tool/context optimization for the active model. Default off since the 2026-08-07 quality gate (no paired ordinary-session matrix per family yet; set true to opt into a monitored cohort). Workflow profiles are unaffected.",
 		},
 	},
 	"modelOptimization.profiles": {
@@ -4531,39 +4531,41 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Latency optimization arms (design A §6.2) — independently rollbackable; all default-on since
-	// 2026-08-06 (context_optimization reuses modelOptimization.enabled, default-on earlier that day).
+	// Latency optimization arms (design A §6.2) — independently rollbackable. Evidence-based defaults:
+	// only the low-risk, fail-open bash pair is on by default (2026-08-07 quality gate); every
+	// behavior-changing arm stays off until its paired ≥30-task matrix and a wired production
+	// quality stop pass (review 2026-08-07). context_optimization reuses modelOptimization.enabled.
 	"latency.arms.readDedupe": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "files",
 			group: "Reading",
 			label: "Read Result Dedupe",
 			description:
-				"When enabled with model optimization, repeated same-view read results may be replaced with verified artifact refs in model-visible context. Fail-open on unknown identity. On by default since 2026-08-06.",
+				"When enabled with model optimization, repeated same-view read results may be replaced with verified artifact refs in model-visible context. Fail-open on unknown identity. Default off until paired ordinary-session task quality passes; opt into a monitored cohort to enable.",
 		},
 	},
 	"latency.arms.contextBudgetTuning": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "model",
 			group: "Prompt",
 			label: "Context Budget Tuning",
 			description:
-				"Optional profile threshold tuning after ordinary context optimization is active. On by default since 2026-08-06; independent of the base optimization arm.",
+				"Optional profile threshold tuning after ordinary context optimization is active. Default off until long-session paired quality passes.",
 		},
 	},
 	"latency.arms.roleStaticSplit": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Workflow Mechanical Flash Route",
 			description:
-				"When enabled, caller-declared or previously-accepted mechanical workflow work may route to Flash via the frozen quality-route snapshot. Never downgrades plan reviewer. On by default since 2026-08-06.",
+				"When enabled, caller-declared or previously-accepted mechanical workflow work may route to Flash via the frozen quality-route snapshot. Never downgrades plan reviewer. Default off until false-positive and repair-quality paired tests pass.",
 		},
 	},
 	"latency.arms.bashAdvisory": {
@@ -4574,7 +4576,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Bash",
 			label: "Bash Failure Advisory",
 			description:
-				"When enabled, repeated identical bash failures show a structured advisory from the single attempt ledger. Does not block execution. On by default since 2026-08-06.",
+				"When enabled, repeated identical bash failures show a structured advisory from the single attempt ledger. Does not block execution. Low-risk; remains on by default (2026-08-07 gate).",
 		},
 	},
 	"latency.arms.bashBoundedInjection": {
@@ -4585,40 +4587,40 @@ export const SETTINGS_SCHEMA = {
 			group: "Bash",
 			label: "Bash Ledger Context Injection",
 			description:
-				"When enabled, inject a bounded bash attempt-ledger summary into model context on repeated failures. Shares the advisory ledger; does not auto-skip. On by default since 2026-08-06.",
+				"When enabled, inject a bounded bash attempt-ledger summary into model context on repeated failures. Shares the advisory ledger; does not auto-skip. Low-risk; remains on by default (2026-08-07 gate).",
 		},
 	},
 	"latency.arms.concurrencyDeclaration": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Concurrency Declaration",
 			description:
-				"When enabled, accept strict WorkflowConcurrencyDeclarationV1 for DAG/ownership validation. On by default since 2026-08-06.",
+				"When enabled, accept strict WorkflowConcurrencyDeclarationV1 for DAG/ownership validation. Default off until compatibility/live DAG coverage passes.",
 		},
 	},
 	"latency.arms.concurrencyExecution": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Concurrency Declaration Execution",
 			description:
-				"When enabled, lower validated concurrency declarations onto existing task batch/parallel or workflow RuntimePort. Requires declaration arm. On by default since 2026-08-06.",
+				"When enabled, lower validated concurrency declarations onto existing task batch/parallel or workflow RuntimePort. Requires declaration arm. Default off until independent/dependent/cancel-resume quality pairs pass.",
 		},
 	},
 	"latency.arms.evalGateMigration": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",
 			label: "Eval Gate Native Migration",
 			description:
-				"When enabled and EvalGateParityReceiptV1 is proven, migrate eligible eval gates to native workflow/task owners with optional independent overlap. On by default since 2026-08-06.",
+				"When enabled and EvalGateParityReceiptV1 is proven, migrate eligible eval gates to native workflow/task owners with optional independent overlap. Default off until a real native cutover plus parity/cancel-resume live proof exists (bridge control is always retained).",
 		},
 	},
 

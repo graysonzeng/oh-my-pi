@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { LATENCY_ARM_SETTINGS, type LatencyArmId } from "../latency/arms";
+import {
+	buildLatencyRolloutDecision,
+	freezeLatencyArmSnapshot,
+	LATENCY_ARM_SETTINGS,
+	LATENCY_ROLLOUT_DECISION_KIND,
+	type LatencyArmId,
+} from "../latency/arms";
 import type { WorkflowConcurrencyDeclarationV1 } from "../latency/concurrency-declaration";
 import {
 	readyConcurrencyUnits,
@@ -354,6 +360,8 @@ export class WorkflowEngine {
 	#lastAvailability: WorkflowAvailabilityReport | undefined;
 	#qualityRouteSnapshot: QualityRouteSnapshotV1 | undefined;
 	#qualityRouteArtifactPersisted = false;
+	/** Workflows whose latency rollout decision is already persisted (terminal evaluated once). */
+	readonly #latencyRolloutPersisted = new Set<string>();
 	#preflightUnavailableReasons: Record<string, string> = {};
 
 	// In-memory artifact cache for the current process (also persisted to store)
@@ -1006,6 +1014,14 @@ export class WorkflowEngine {
 			}
 
 			const finalState = await this.#requireState(workflowId);
+			if (session && TERMINAL.has(finalState.status)) {
+				// Production quality-stop wiring (review 2026-08-07 HIGH-1): evaluate the stop from
+				// the frozen arm snapshot + run evidence and persist a rollout decision. Never breaks
+				// workflow completion; rollback (settings override) is the configured rollback owner.
+				await this.#evaluateLatencyRolloutAtTerminal(workflowId, finalState, session).catch(() => {
+					// Rollout bookkeeping must not fail a workflow that already reached terminal.
+				});
+			}
 			return {
 				state: finalState,
 				plan: this.#plan,
@@ -1063,6 +1079,61 @@ export class WorkflowEngine {
 		if (!this.#qualityRouteSnapshot || this.#qualityRouteArtifactPersisted) return;
 		await this.#persistArtifact(workflowId, attemptId, "quality-route-snapshot", this.#qualityRouteSnapshot);
 		this.#qualityRouteArtifactPersisted = true;
+	}
+
+	/**
+	 * Production quality-stop wiring (review 2026-08-07 HIGH-1): at workflow terminal completion,
+	 * evaluate the stop from the session-frozen arm snapshot + this run's evidence and persist a
+	 * durable rollout decision. When a stop fires, disable the causal arm(s) via the session
+	 * settings override — the configured rollback owner — so subsequent runs start with them off.
+	 * Fail-open on bookkeeping errors: never blocks workflow completion.
+	 */
+	async #evaluateLatencyRolloutAtTerminal(
+		workflowId: string,
+		state: WorkflowState,
+		session: ToolSession,
+	): Promise<void> {
+		if (this.#latencyRolloutPersisted.has(workflowId)) return;
+		const snapshot =
+			session.getLatencyArmSnapshot?.() ??
+			freezeLatencyArmSnapshot({
+				getSetting: settingPath => {
+					try {
+						return session.settings.get(settingPath as never);
+					} catch {
+						return false;
+					}
+				},
+			});
+		const budget = this.#budgetLedger.snapshot();
+		const openP0P1 = this.#findingTracker
+			.getOpen()
+			.filter(finding => finding.priority === "P0" || finding.priority === "P1").length;
+		const decision = buildLatencyRolloutDecision({
+			workflowId,
+			status: state.status,
+			snapshot,
+			observed: {
+				completion: state.status === "completed",
+				repairCycles: budget.repairCycles,
+				treatmentAttributedP0P1Escapes: openP0P1,
+				costUsd: budget.costUsd,
+				stageTimeMs: budget.stageTimeMs,
+				spawnedAgents: null,
+			},
+		});
+		await this.#persistArtifact(
+			workflowId,
+			state.currentAttemptId ?? "terminal",
+			LATENCY_ROLLOUT_DECISION_KIND,
+			decision,
+		);
+		this.#latencyRolloutPersisted.add(workflowId);
+		if (decision.decision.stop && typeof session.settings.override === "function") {
+			for (const arm of decision.disabledArms) {
+				session.settings.override(LATENCY_ARM_SETTINGS[arm] as never, false);
+			}
+		}
 	}
 
 	/**

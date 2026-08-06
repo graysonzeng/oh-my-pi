@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { Settings } from "../../src/config/settings";
 import {
+	buildLatencyRolloutDecision,
+	deriveLatencyCombination,
 	emptyLatencyArms,
 	evaluateLatencyQualityStop,
 	freezeLatencyArmSnapshot,
@@ -28,17 +30,17 @@ import {
 import { buildReadViewKeyV1, normalizeReadSelector } from "../../src/latency/read-view-key";
 
 describe("latency arms defaults", () => {
-	it("defaults every latency arm on after the 2026-08-06 re-verification", () => {
+	it("keeps only the low-risk bash pair on by default after the 2026-08-07 quality gate", () => {
 		const settings = Settings.isolated();
-		expect(settings.get("modelOptimization.enabled")).toBe(true);
-		expect(settings.get("latency.arms.readDedupe")).toBe(true);
-		expect(settings.get("latency.arms.contextBudgetTuning")).toBe(true);
-		expect(settings.get("latency.arms.roleStaticSplit")).toBe(true);
+		expect(settings.get("modelOptimization.enabled")).toBe(false);
+		expect(settings.get("latency.arms.readDedupe")).toBe(false);
+		expect(settings.get("latency.arms.contextBudgetTuning")).toBe(false);
+		expect(settings.get("latency.arms.roleStaticSplit")).toBe(false);
 		expect(settings.get("latency.arms.bashAdvisory")).toBe(true);
 		expect(settings.get("latency.arms.bashBoundedInjection")).toBe(true);
-		expect(settings.get("latency.arms.concurrencyDeclaration")).toBe(true);
-		expect(settings.get("latency.arms.concurrencyExecution")).toBe(true);
-		expect(settings.get("latency.arms.evalGateMigration")).toBe(true);
+		expect(settings.get("latency.arms.concurrencyDeclaration")).toBe(false);
+		expect(settings.get("latency.arms.concurrencyExecution")).toBe(false);
+		expect(settings.get("latency.arms.evalGateMigration")).toBe(false);
 		expect(LATENCY_ARM_IDS).toContain("context_optimization");
 		expect(LATENCY_ARM_SETTINGS.context_optimization).toBe("modelOptimization.enabled");
 		expect(emptyLatencyArms()).toEqual({
@@ -54,22 +56,20 @@ describe("latency arms defaults", () => {
 		});
 	});
 
-	it("resolves the full default-on snapshot after the 2026-08-06 re-verification", () => {
+	it("resolves the default snapshot to the bash pair and registers it as a combination", () => {
 		const settings = Settings.isolated();
 		const snapshot = freezeLatencyArmSnapshot({
 			getSetting: setting => settings.get(setting as Parameters<typeof settings.get>[0]),
 		});
 		expect(snapshot.arms).toEqual({
 			...emptyLatencyArms(),
-			context_optimization: true,
-			read_dedupe: true,
-			context_budget_tuning: true,
-			role_static_split: true,
 			bash_advisory: true,
 			bash_bounded_injection: true,
-			concurrency_declaration: true,
-			concurrency_execution: true,
-			eval_gate_migration: true,
+		});
+		expect(snapshot.combinedArmId).toBeUndefined(); // freeze itself never invents a combination
+		expect(deriveLatencyCombination(snapshot.arms)).toEqual({
+			combinedArmId: "combined:bash_advisory+bash_bounded_injection",
+			childArms: ["bash_advisory", "bash_bounded_injection"],
 		});
 	});
 });
@@ -144,6 +144,141 @@ describe("latency quality stop", () => {
 				reworkRisePct: 11,
 			}),
 		).toEqual({ stop: true, reason: "rework_rise" });
+	});
+
+	it("covers cost P50/P95, latency improvement, and spawned-agent thresholds", () => {
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				costP50Multiple: 1.6,
+			}),
+		).toEqual({ stop: true, reason: "cost_breach" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				costP95Multiple: 2.1,
+			}),
+		).toEqual({ stop: true, reason: "cost_breach" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				costP50Multiple: 1.4,
+				costP95Multiple: 1.9,
+			}),
+		).toEqual({ stop: false, reason: null });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				latencyImprovePct: 9,
+			}),
+		).toEqual({ stop: true, reason: "latency_miss" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				latencyImprovePct: 12,
+			}),
+		).toEqual({ stop: false, reason: null });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				spawnedAgentsP95Multiple: 2.5,
+			}),
+		).toEqual({ stop: true, reason: "spawned_agents_breach" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				spawnedAgentsP95Multiple: 1.5,
+			}),
+		).toEqual({ stop: false, reason: null });
+	});
+
+	it("builds a persisted rollout decision with attribution and disables arms on stop", () => {
+		const snapshot = freezeLatencyArmSnapshot({
+			arms: { ...emptyLatencyArms(), bash_advisory: true, bash_bounded_injection: true },
+			combinedArmId: "combined:bash_advisory+bash_bounded_injection",
+			childArms: ["bash_advisory", "bash_bounded_injection"],
+			codeRevision: "rev-1",
+			configHash: "cfg-1",
+			frozenAt: "2026-08-07T00:00:00.000Z",
+		});
+		const clean = buildLatencyRolloutDecision({
+			workflowId: "wf-1",
+			status: "completed",
+			snapshot,
+			observed: {
+				completion: true,
+				repairCycles: 0,
+				treatmentAttributedP0P1Escapes: 0,
+				costUsd: 0.1,
+				stageTimeMs: 1000,
+				spawnedAgents: null,
+			},
+		});
+		expect(clean.attributionKnown).toBe(true);
+		expect(clean.decision).toEqual({ stop: false, reason: null });
+		expect(clean.disabledArms).toEqual([]);
+
+		const escaping = buildLatencyRolloutDecision({
+			workflowId: "wf-2",
+			status: "completed",
+			snapshot,
+			observed: {
+				completion: true,
+				repairCycles: 0,
+				treatmentAttributedP0P1Escapes: 1,
+				costUsd: 0.1,
+				stageTimeMs: 1000,
+				spawnedAgents: null,
+			},
+		});
+		expect(escaping.decision).toEqual({ stop: true, reason: "p0p1_escape" });
+		expect(escaping.disabledArms).toEqual(["bash_advisory", "bash_bounded_injection"]);
+
+		const cohortBreach = buildLatencyRolloutDecision({
+			workflowId: "wf-3",
+			status: "completed",
+			snapshot,
+			observed: {
+				completion: true,
+				repairCycles: 0,
+				treatmentAttributedP0P1Escapes: 0,
+				costUsd: 0.1,
+				stageTimeMs: 1000,
+				spawnedAgents: null,
+			},
+			cohort: { completionDropPp: 3 },
+		});
+		expect(cohortBreach.decision).toEqual({ stop: true, reason: "completion_drop" });
+	});
+
+	it("fails closed on an unregistered multi-arm snapshot", () => {
+		const unregistered = freezeLatencyArmSnapshot({
+			arms: { ...emptyLatencyArms(), context_optimization: true, read_dedupe: true },
+			frozenAt: "2026-08-07T00:00:00.000Z",
+		});
+		const decision = buildLatencyRolloutDecision({
+			workflowId: "wf-4",
+			status: "completed",
+			snapshot: unregistered,
+			observed: {
+				completion: true,
+				repairCycles: 0,
+				treatmentAttributedP0P1Escapes: 0,
+				costUsd: 0.1,
+				stageTimeMs: 1000,
+				spawnedAgents: null,
+			},
+		});
+		expect(decision.attributionKnown).toBe(false);
+		expect(decision.decision).toEqual({ stop: true, reason: "missing_attribution" });
+		expect(decision.disabledArms).toEqual(["context_optimization", "read_dedupe"]);
 	});
 });
 

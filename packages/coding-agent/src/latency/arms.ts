@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 
 /**
  * Independent latency-optimization arms (design A §6.2).
- * All arms default-on since the 2026-08-06 live re-verification (context_optimization reuses
- * modelOptimization.enabled; the rest use latency.arms.*), session-frozen when first resolved,
- * and independently rollbackable.
+ * Evidence-based defaults since the 2026-08-07 quality gate: only the low-risk, fail-open bash
+ * pair (bash_advisory + bash_bounded_injection) is on by default; every behavior-changing arm is
+ * off until its paired ≥30-task matrix and a wired production quality stop pass. Arms are
+ * session-frozen when first resolved and independently rollbackable.
  * Combined experiments must use a separate combinedArmId listing child arms.
  */
 
@@ -22,7 +23,7 @@ export const LATENCY_ARM_IDS = [
 
 export type LatencyArmId = (typeof LATENCY_ARM_IDS)[number];
 
-/** Settings paths that gate each arm. All default true since 2026-08-06. */
+/** Settings paths that gate each arm. Only the low-risk bash pair defaults true (2026-08-07). */
 export const LATENCY_ARM_SETTINGS = {
 	context_optimization: "modelOptimization.enabled",
 	read_dedupe: "latency.arms.readDedupe",
@@ -136,17 +137,34 @@ export const LATENCY_QUALITY_STOP = {
 
 export type LatencyQualityStopDecision =
 	| { stop: false; reason: null }
-	| { stop: true; reason: "p0p1_escape" | "completion_drop" | "rework_rise" | "missing_attribution" };
+	| {
+			stop: true;
+			reason:
+				| "p0p1_escape"
+				| "completion_drop"
+				| "rework_rise"
+				| "missing_attribution"
+				| "cost_breach"
+				| "latency_miss"
+				| "spawned_agents_breach";
+	  };
 
 /**
  * Evaluate treatment-attributed quality stops before promotion/rollout.
- * P0/P1 is zero-tolerance: one attributed escape stops the causal arm immediately.
+ * Covers every documented threshold (design A §6.5): P0/P1 zero-tolerance, completion drop,
+ * rework rise, cost P50/P95 multiples, latency improvement, and spawned-agent P95 multiple.
+ * Missing attribution is itself a stop: an unregistered multi-arm state cannot be rolled back
+ * causally, so it fails closed.
  */
 export function evaluateLatencyQualityStop(input: {
 	treatmentAttributedP0P1Escapes: number;
 	attributionKnown: boolean;
 	completionDropPp?: number;
 	reworkRisePct?: number;
+	costP50Multiple?: number;
+	costP95Multiple?: number;
+	latencyImprovePct?: number;
+	spawnedAgentsP95Multiple?: number;
 }): LatencyQualityStopDecision {
 	if (!input.attributionKnown) {
 		return { stop: true, reason: "missing_attribution" };
@@ -160,5 +178,115 @@ export function evaluateLatencyQualityStop(input: {
 	if (typeof input.reworkRisePct === "number" && input.reworkRisePct > LATENCY_QUALITY_STOP.reworkRisePct) {
 		return { stop: true, reason: "rework_rise" };
 	}
+	if (typeof input.costP50Multiple === "number" && input.costP50Multiple > LATENCY_QUALITY_STOP.costP50MaxMultiple) {
+		return { stop: true, reason: "cost_breach" };
+	}
+	if (typeof input.costP95Multiple === "number" && input.costP95Multiple > LATENCY_QUALITY_STOP.costP95MaxMultiple) {
+		return { stop: true, reason: "cost_breach" };
+	}
+	if (
+		typeof input.latencyImprovePct === "number" &&
+		input.latencyImprovePct < LATENCY_QUALITY_STOP.minLatencyImprovePct
+	) {
+		return { stop: true, reason: "latency_miss" };
+	}
+	if (
+		typeof input.spawnedAgentsP95Multiple === "number" &&
+		input.spawnedAgentsP95Multiple > LATENCY_QUALITY_STOP.spawnedAgentsP95MaxMultiple
+	) {
+		return { stop: true, reason: "spawned_agents_breach" };
+	}
 	return { stop: false, reason: null };
+}
+
+/**
+ * Deterministically register the active arm set as a combination when ≥2 arms are on.
+ * Production snapshots must never run an unregistered multi-arm state: without a combinedArmId
+ * and exhaustive childArms the stop evaluator treats attribution as unknown and fails closed.
+ */
+export function deriveLatencyCombination(arms: Record<LatencyArmId, boolean>): {
+	combinedArmId?: string;
+	childArms?: LatencyArmId[];
+} {
+	const active = LATENCY_ARM_IDS.filter(id => arms[id] === true);
+	if (active.length < 2) return {};
+	const sorted = [...active].sort();
+	return { combinedArmId: `combined:${sorted.join("+")}`, childArms: sorted };
+}
+
+/**
+ * Durable per-workflow/session quality-stop receipt. Persisted when a run with active arms
+ * reaches a terminal state so a quality regression is attributable and rollbackable.
+ */
+export const LATENCY_ROLLOUT_DECISION_KIND = "latency-rollout-decision" as const;
+
+export interface LatencyRolloutObservedV1 {
+	completion: boolean;
+	repairCycles: number;
+	treatmentAttributedP0P1Escapes: number;
+	costUsd: number | null;
+	stageTimeMs: number;
+	spawnedAgents: number | null;
+}
+
+export interface LatencyRolloutDecisionV1 {
+	schemaVersion: 1;
+	kind: typeof LATENCY_ROLLOUT_DECISION_KIND;
+	workflowId: string;
+	status: string;
+	snapshot: LatencyArmSnapshotV1;
+	attributionKnown: boolean;
+	observed: LatencyRolloutObservedV1;
+	decision: LatencyQualityStopDecision;
+	/** Arms disabled by this stop (empty when no stop). */
+	disabledArms: LatencyArmId[];
+	evaluatedAt: string;
+}
+
+/**
+ * Build a persisted rollout decision from the frozen snapshot + run evidence.
+ * Attribution is known only for a registered single arm or a registered combination
+ * (combinedArmId + exhaustive childArms); an unregistered multi-arm state stops with
+ * missing_attribution.
+ */
+export function buildLatencyRolloutDecision(input: {
+	workflowId: string;
+	status: string;
+	snapshot: LatencyArmSnapshotV1;
+	observed: LatencyRolloutObservedV1;
+	cohort?: {
+		completionDropPp?: number;
+		reworkRisePct?: number;
+		costP50Multiple?: number;
+		costP95Multiple?: number;
+		latencyImprovePct?: number;
+		spawnedAgentsP95Multiple?: number;
+	};
+}): LatencyRolloutDecisionV1 {
+	const active = LATENCY_ARM_IDS.filter(id => input.snapshot.arms[id] === true);
+	const registeredCombination =
+		active.length < 2 || Boolean(input.snapshot.combinedArmId && (input.snapshot.childArms?.length ?? 0) >= 2);
+	const attributionKnown = registeredCombination;
+	const decision = evaluateLatencyQualityStop({
+		treatmentAttributedP0P1Escapes: input.observed.treatmentAttributedP0P1Escapes,
+		attributionKnown,
+		completionDropPp: input.cohort?.completionDropPp,
+		reworkRisePct: input.cohort?.reworkRisePct,
+		costP50Multiple: input.cohort?.costP50Multiple,
+		costP95Multiple: input.cohort?.costP95Multiple,
+		latencyImprovePct: input.cohort?.latencyImprovePct,
+		spawnedAgentsP95Multiple: input.cohort?.spawnedAgentsP95Multiple,
+	});
+	return {
+		schemaVersion: 1,
+		kind: LATENCY_ROLLOUT_DECISION_KIND,
+		workflowId: input.workflowId,
+		status: input.status,
+		snapshot: input.snapshot,
+		attributionKnown,
+		observed: input.observed,
+		decision,
+		disabledArms: decision.stop ? active : [],
+		evaluatedAt: new Date().toISOString(),
+	};
 }

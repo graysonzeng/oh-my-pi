@@ -1844,6 +1844,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getArtifactContent: id => sessionManager.getArtifactContent(id),
 			settings,
 			isLatencyArmEnabled: (arm: LatencyArmId) => session.isLatencyArmEnabled(arm),
+			getLatencyArmSnapshot: () => session.getLatencyArmSnapshot(),
 			authStorage,
 			modelRegistry,
 			getTelemetry: () => agent?.telemetry,

@@ -142,7 +142,12 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
-import { freezeLatencyArmSnapshot, type LatencyArmSnapshotV1 } from "../latency/arms";
+import {
+	deriveLatencyCombination,
+	freezeLatencyArmSnapshot,
+	type LatencyArmSnapshotV1,
+	resolveLatencyArmsFromSettings,
+} from "../latency/arms";
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
@@ -217,6 +222,7 @@ import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
+import * as git from "../utils/git";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { generateSessionTitle } from "../utils/title-generator";
@@ -4666,14 +4672,26 @@ export class AgentSession {
 
 	#ensureLatencyArmSnapshot(): LatencyArmSnapshotV1 {
 		if (this.#latencyArmSnapshot) return this.#latencyArmSnapshot;
+		const arms = resolveLatencyArmsFromSettings(path => {
+			try {
+				return this.settings.get(path as Parameters<typeof this.settings.get>[0]);
+			} catch {
+				return false;
+			}
+		});
+		// Register the actually-active set as a combination when ≥2 arms are on so the
+		// stop evaluator can attribute outcomes (unregistered multi-arm state fails closed).
+		const combination = deriveLatencyCombination(arms);
 		this.#latencyArmSnapshot = freezeLatencyArmSnapshot({
-			getSetting: path => {
-				try {
-					return this.settings.get(path as Parameters<typeof this.settings.get>[0]);
-				} catch {
-					return false;
-				}
-			},
+			arms,
+			...combination,
+			codeRevision: (() => {
+				const cwd = this.sessionManager.getCwd();
+				return typeof cwd === "string" && cwd.length > 0
+					? (git.head.resolveSync(cwd)?.commit ?? undefined)
+					: undefined;
+			})(),
+			configHash: sha256Hex(JSON.stringify(arms)),
 		});
 		return this.#latencyArmSnapshot;
 	}
