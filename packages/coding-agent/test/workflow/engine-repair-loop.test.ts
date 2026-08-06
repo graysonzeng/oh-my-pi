@@ -55,7 +55,12 @@ function strictRepairProfiles(): Record<string, ModelProfile> {
 	return Object.fromEntries(profiles.map(profile => [profile.id, profile]));
 }
 
-function strictRepairRunner(cwd: string, noChangesRequired: boolean, reviewerCalls: string[] = []): StructuredRunner {
+function strictRepairRunner(
+	cwd: string,
+	noChangesRequired: boolean,
+	reviewerCalls: string[] = [],
+	repairAssignments: string[] = [],
+): StructuredRunner {
 	const repairPath = path.join(cwd, "patches/repair.patch");
 	const runner = scriptedRunner({
 		plan: planArtifact(),
@@ -71,6 +76,7 @@ function strictRepairRunner(cwd: string, noChangesRequired: boolean, reviewerCal
 		}),
 	});
 	return async request => {
+		if (/^Repair findings/i.test(request.assignment)) repairAssignments.push(request.assignment);
 		if (/^Repair findings/i.test(request.assignment) && !noChangesRequired) {
 			await fs.mkdir(path.dirname(repairPath), { recursive: true });
 		}
@@ -210,8 +216,9 @@ describe("WorkflowEngine repair loop", () => {
 	it("completes a strict final-verify no-op while preserving the validated patch", async () => {
 		const mergeCalls: string[] = [];
 		const reviewerCalls: string[] = [];
+		const repairAssignments: string[] = [];
 		const session = fakeSession({ cwd: artifactDir });
-		const adapter = new RuntimeAdapter(strictRepairRunner(artifactDir, true, reviewerCalls), async request => {
+		const adapter = new RuntimeAdapter(strictRepairRunner(artifactDir, true, reviewerCalls, repairAssignments), async request => {
 			mergeCalls.push(request.attemptId);
 			const content = await Promise.all(
 				request.patches.map(async patch => {
@@ -238,6 +245,9 @@ describe("WorkflowEngine repair loop", () => {
 		const result = await engine.run(workflowId, session);
 
 		expect(result.state.status).toBe("completed");
+		expect(repairAssignments).toHaveLength(1);
+		expect(repairAssignments[0]).toContain("noChangesRequired=true");
+		expect(repairAssignments[0]).toContain("unresolved_items_open");
 		expect(result.implementation?.noChangesRequired).toBe(true);
 		expect(result.implementation?.patchPath).toContain("validated.patch");
 		expect(result.implementation?.modelProfileId).toBe("implementer");

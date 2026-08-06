@@ -4564,11 +4564,49 @@ describe("openai-codex streaming", () => {
 		}).result();
 
 		// Let both callers reach the handshake before the socket opens.
-		await Bun.sleep(5);
-		for (const socket of sockets) socket.open();
+		for (let attempt = 0; attempt < 100 && sockets.length < 1; attempt++) {
+			await Bun.sleep(0);
+		}
+		const [socket] = sockets;
+		expect(socket).toBeDefined();
+		if (!socket) throw new Error("websocket handshake did not create a socket");
 
-		await prewarmPromise;
-		const result = await streamResult;
+		let prewarmSettled = false;
+		const prewarmOutcome = prewarmPromise.then(
+			() => {
+				prewarmSettled = true;
+				return { ok: true as const };
+			},
+			reason => {
+				prewarmSettled = true;
+				return { ok: false as const, reason };
+			},
+		);
+		let streamSettled = false;
+		const streamOutcome = streamResult.then(
+			value => {
+				streamSettled = true;
+				return { ok: true as const, value };
+			},
+			reason => {
+				streamSettled = true;
+				return { ok: false as const, reason };
+			},
+		);
+
+		for (let attempt = 0; attempt < 100 && (!prewarmSettled || !streamSettled); attempt++) {
+			for (const pendingSocket of sockets) {
+				if (pendingSocket.readyState === MockWebSocket.CONNECTING) pendingSocket.open();
+			}
+			await Bun.sleep(0);
+		}
+		expect(prewarmSettled).toBe(true);
+		expect(streamSettled).toBe(true);
+		const prewarmResult = await prewarmOutcome;
+		if (!prewarmResult.ok) throw prewarmResult.reason;
+		const streamResultOutcome = await streamOutcome;
+		if (!streamResultOutcome.ok) throw streamResultOutcome.reason;
+		const result = streamResultOutcome.value;
 
 		expect(constructorCount).toBe(1);
 		expect(result.stopReason).toBe("stop");

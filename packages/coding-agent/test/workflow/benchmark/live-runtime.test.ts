@@ -440,18 +440,27 @@ describe("live workflow benchmark runtime", () => {
 	});
 
 	it("compiles a verified live quality-route snapshot for fixed-model profiles", () => {
+		const experimentConfig = buildLiveBenchmarkExperimentConfig(
+			"gateway",
+			"gpt-5.6-luna",
+			"optimized",
+			"profile-strategy",
+			"gateway",
+			"claude-fable-5",
+		);
 		const profiles = resolveWorkflowProfilesFromSettings(
-			buildLiveBenchmarkProfileOverrides(
-				"gateway",
-				"gpt-5.6-luna",
-				"optimized",
-				"profile-strategy",
-				"gateway",
-				"claude-fable-5",
-			),
+			experimentConfig.profileOverrides,
 			getDefaultConfig().profiles,
 		);
-		const routes = buildLiveBenchmarkQualityRoutes();
+		const routes = buildLiveBenchmarkQualityRoutes(experimentConfig.roleIdentityMap);
+		expect(routes.balanced).toEqual({
+			planner: ["gpt_planner"],
+			plan_reviewer: ["claude_plan_reviewer"],
+			plan_arbitrator: ["grok_plan_arbitrator"],
+			implementer: ["gpt_luna_implementer"],
+			code_reviewer: ["claude_reviewer"],
+			repair: ["gpt_repair"],
+		});
 		const snapshot = compileQualityRouteSnapshot(
 			{ profiles, qualityRoutes: routes as WorkflowQualityRoutes },
 			"balanced",
@@ -463,14 +472,7 @@ describe("live workflow benchmark runtime", () => {
 		expect(snapshot.routes.plan_arbitrator.length).toBeGreaterThan(0);
 		expect(snapshot.routes.code_reviewer.length).toBeGreaterThan(0);
 		const settings = {
-			"workflow.profiles": buildLiveBenchmarkProfileOverrides(
-				"gateway",
-				"gpt-5.6-luna",
-				"optimized",
-				"profile-strategy",
-				"gateway",
-				"claude-fable-5",
-			),
+			"workflow.profiles": experimentConfig.profileOverrides,
 			"workflow.qualityRoutes": routes,
 			"workflow.defaultQualityTier": "balanced",
 			"workflow.degradedMode": false,

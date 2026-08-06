@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { Model, Usage } from "@oh-my-pi/pi-ai";
+import { Effort, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../src/config/model-registry";
 import {
@@ -19,6 +19,7 @@ import {
 	classifyScopeStatus,
 	DEFAULT_AVAILABILITY_OVERALL_TIMEOUT_MS,
 	DEFAULT_AVAILABILITY_PER_TARGET_TIMEOUT_MS,
+	isDiagnosticAvailabilityTimeout,
 	runAvailabilityPreflight,
 } from "../../src/workflow/availability-preflight";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
@@ -123,6 +124,57 @@ describe("WorkflowAvailabilityPort contract", () => {
 		expect(result.errorSummary).toMatch(/model registry/i);
 	});
 
+	it("classifies model-not-found errors containing timeout as configuration and blocks the required scope", async () => {
+		const model = {
+			provider: "provider",
+			id: "timeout-profile",
+			api: "openai-responses",
+			name: "Timeout Profile",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000,
+			maxTokens: 100,
+		} as Model;
+		const registry = {
+			getAvailable: () => [model],
+			getApiKey: async () => "test-key",
+			resolver: () => "test-key",
+		} as unknown as ModelRegistry;
+		const targetProfile = profile({
+			id: "timeout-word-error",
+			roles: ["planner"],
+			modelPattern: "provider/timeout-profile",
+		});
+		const session = fakeSession({ modelRegistry: registry });
+		vi.spyOn(ai, "completeSimple").mockRejectedValue(new Error("model not found: provider timeout profile"));
+		const port = new EmbeddedWorkflowAvailabilityPort();
+		const direct = await port.probe({
+			profile: targetProfile,
+			role: "planner",
+			session,
+			timeoutMs: 100,
+		});
+
+		expect(direct.status).toBe("unavailable");
+		expect(direct.errorKind).toBe("configuration");
+		expect(direct.errorSummary).toBe("model not found: provider timeout profile");
+
+		const report = await runAvailabilityPreflight({
+			port,
+			router: new ModelRouter([targetProfile]),
+			workflowId: "wf-timeout-word-configuration",
+			operation: "resume",
+			status: "planning",
+			singleStep: true,
+			session,
+		});
+		expect(report.status).toBe("blocked");
+		expect(report.blockedRoles).toEqual(["planner"]);
+		expect(report.profiles[0]?.errorKind).toBe("configuration");
+	});
+
 	it("sends a direct probe with session transport context and reports response metadata", async () => {
 		const model = {
 			provider: "gateway",
@@ -189,6 +241,69 @@ describe("WorkflowAvailabilityPort contract", () => {
 			cwd: "/repo",
 			serviceTier: "priority",
 		});
+	});
+
+	it("disables reasoning even when strict identity validation is enabled", async () => {
+		const model = {
+			provider: "gateway",
+			id: "gpt-5.6-sol",
+			api: "openai-responses",
+			name: "Strict Live Model",
+			baseUrl: "https://example.invalid",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.High] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000,
+			maxTokens: 100,
+		} as Model;
+		const registry = {
+			getAvailable: () => [model],
+			getApiKey: async () => "test-key",
+			resolver: () => "test-key",
+		} as unknown as ModelRegistry;
+		const complete = vi.spyOn(ai, "completeSimple").mockImplementation(async (calledModel, _context, options) => {
+			await options?.onResponse?.(
+				{
+					status: 200,
+					headers: {
+						"x-provider-model": "gateway/gpt-5.6-sol",
+						"x-omp-resolved-provider": "gateway",
+						"x-omp-model-checkpoint": "gateway-checkpoint",
+					},
+				},
+				calledModel,
+			);
+			return {
+				role: "assistant",
+				content: [{ type: "text", text: "ok" }],
+				api: calledModel.api,
+				provider: calledModel.provider,
+				model: calledModel.id,
+				usage: probeUsage,
+				stopReason: "stop",
+				timestamp: Date.now(),
+			} as never;
+		});
+
+		const result = await new EmbeddedWorkflowAvailabilityPort().probe({
+			profile: profile({
+				id: "strict-direct",
+				vendor: "openai",
+				roles: ["planner"],
+				modelPattern: "gateway/gpt-5.6-sol",
+				thinkingLevel: Effort.High,
+				strictIdentity: true,
+			}),
+			role: "planner",
+			session: fakeSession({ modelRegistry: registry }),
+			timeoutMs: 100,
+		});
+
+		expect(result.status).toBe("available");
+		const options = complete.mock.calls[0]?.[2];
+		expect(options).toMatchObject({ maxTokens: 16, disableReasoning: true });
+		expect(options?.reasoning).toBeUndefined();
 	});
 
 	it("returns available / unavailable / indeterminate as specified by the probe port", async () => {
@@ -413,7 +528,8 @@ describe("WorkflowAvailabilityPort contract", () => {
 			overallTimeoutMs: 100,
 		});
 
-		expect(report.status).toBe("blocked");
+		expect(report.status).toBe("degraded");
+		expect(report.blockedRoles ?? []).toEqual([]);
 		expect(report.profiles[0]?.status).toBe("unavailable");
 		expect(report.profiles[0]?.errorKind).toBe("timeout");
 		expect(report.profiles[0]?.errorSummary).toMatch(/target timeout/i);
@@ -561,6 +677,37 @@ describe("availability candidate set", () => {
 		]);
 		expect(status).toBe("blocked");
 		expect(blockedRoles).toContain("planner");
+	});
+
+	it("classifies a required role with only diagnostic timeouts as degraded", () => {
+		const timeoutRow = {
+			profileId: "timeout",
+			role: "planner" as const,
+			requirement: "required" as const,
+			status: "unavailable" as const,
+			runtime: "embedded" as const,
+			usageKind: "diagnostic" as const,
+			errorKind: "timeout" as const,
+		};
+		expect(isDiagnosticAvailabilityTimeout(timeoutRow)).toBe(true);
+		expect(classifyScopeStatus([timeoutRow])).toEqual({ status: "degraded", blockedRoles: [] });
+	});
+
+	it("keeps required roles blocked for identity and ordinary unavailability", () => {
+		for (const errorKind of ["missing_identity", "authentication", undefined] as const) {
+			const row = {
+				profileId: `unavailable-${errorKind ?? "plain"}`,
+				role: "planner" as const,
+				requirement: "required" as const,
+				status: "unavailable" as const,
+				runtime: "embedded" as const,
+				usageKind: "diagnostic" as const,
+				errorKind,
+			};
+			const result = classifyScopeStatus([row]);
+			expect(result.status).toBe("blocked");
+			expect(result.blockedRoles).toEqual(["planner"]);
+		}
 	});
 
 	it("required role with zero registry profiles is blocked (not not_required)", async () => {

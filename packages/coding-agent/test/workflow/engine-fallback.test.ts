@@ -7,7 +7,7 @@ import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { WorkflowError, WorkflowTimeoutError } from "../../src/workflow/errors";
 import { ModelRouter } from "../../src/workflow/model-router";
-import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
+import { RuntimeAdapter, type StructuredRunnerRequest } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import {
 	fakeSession,
@@ -17,6 +17,52 @@ import {
 	planArtifact,
 	reviewArtifact,
 } from "./helpers";
+
+function attestRuntimeIdentity(request: StructuredRunnerRequest): string {
+	const selector = Array.isArray(request.model) ? request.model[0] : request.model;
+	let provider = "xai";
+	let modelId = "grok-code-test";
+	if (typeof selector === "string" && selector.trim().length > 0) {
+		if (selector.includes("/")) {
+			const slash = selector.indexOf("/");
+			provider = selector.slice(0, slash);
+			modelId = selector.slice(slash + 1) || modelId;
+		} else {
+			modelId = selector;
+			if (modelId.startsWith("claude") || modelId.startsWith("anthropic")) provider = "anthropic";
+			else if (
+				modelId.startsWith("gpt") ||
+				modelId.startsWith("o1") ||
+				modelId.startsWith("o3") ||
+				modelId.startsWith("o4")
+			)
+				provider = "openai";
+			else if (modelId.startsWith("gemini")) provider = "google";
+			else if (modelId.startsWith("glm")) provider = "zhipu";
+			else if (modelId.startsWith("deepseek")) provider = "deepseek";
+			else if (modelId.startsWith("grok")) provider = "xai";
+		}
+	}
+	const resolvedModel = `${provider}/${modelId}`;
+	request.onResponse?.(
+		{
+			status: 200,
+			headers: { "x-provider-model": modelId, "x-omp-resolved-provider": provider },
+		} as never,
+		{
+			provider,
+			id: modelId,
+			reasoning: true,
+			thinking: {
+				efforts:
+					request.thinkingLevel && request.thinkingLevel !== "auto"
+						? [request.thinkingLevel]
+						: ["low", "medium", "high", "xhigh", "max"],
+			},
+		} as never,
+	);
+	return resolvedModel;
+}
 
 describe("WorkflowEngine profile fallback", () => {
 	let store: WorkflowStore;
@@ -54,19 +100,23 @@ describe("WorkflowEngine profile fallback", () => {
 					if (planCalls === 1) {
 						throw new WorkflowTimeoutError("planner timed out");
 					}
+					const resolvedModel = attestRuntimeIdentity(request);
 					return {
 						result: {
 							id: "raw-plan",
 							structuredOutput: { status: "valid", data: planArtifact() },
+							resolvedModel,
 						},
 					};
 				}
 				// other roles succeed
 				if (String(request.assignment).includes("Review the plan")) {
+					const resolvedModel = attestRuntimeIdentity(request);
 					return {
 						result: {
 							id: "raw-pr",
 							structuredOutput: { status: "valid", data: reviewArtifact("approved", "plan") },
+							resolvedModel,
 						},
 					};
 				}
@@ -115,18 +165,22 @@ describe("WorkflowEngine profile fallback", () => {
 					if (planCalls === 1) {
 						throw new WorkflowError("401 unauthorized api key", "authentication");
 					}
+					const resolvedModel = attestRuntimeIdentity(request);
 					return {
 						result: {
 							id: "raw-plan",
 							structuredOutput: { status: "valid", data: planArtifact() },
+							resolvedModel,
 						},
 					};
 				}
 				if (String(request.assignment).includes("Review the plan")) {
+					const resolvedModel = attestRuntimeIdentity(request);
 					return {
 						result: {
 							id: "raw-pr",
 							structuredOutput: { status: "valid", data: reviewArtifact("approved", "plan") },
+							resolvedModel,
 						},
 					};
 				}

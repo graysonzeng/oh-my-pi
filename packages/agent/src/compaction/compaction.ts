@@ -649,6 +649,69 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
+export const REQUIRED_CHECKPOINT_SUMMARY_HEADINGS = [
+	"## Goal",
+	"## Constraints & Preferences",
+	"## Progress",
+	"## Key Decisions",
+	"## Verification",
+	"## Artifact & Source Pointers",
+	"## Next Steps",
+	"## Critical Context",
+	"## Additional Notes",
+] as const;
+
+function extractCheckpointSummaryHeadings(summary: string): string[] {
+	const headings: string[] = [];
+	let fence: { character: "`" | "~"; length: number } | undefined;
+
+	for (const line of summary.split(/\r?\n/)) {
+		const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+		if (fence) {
+			if (
+				fenceMatch &&
+				fenceMatch[1][0] === fence.character &&
+				fenceMatch[1].length >= fence.length &&
+				fenceMatch[2].trim() === ""
+			) {
+				fence = undefined;
+			}
+			continue;
+		}
+
+		if (fenceMatch) {
+			const character = fenceMatch[1][0];
+			if (character === "`" || character === "~") {
+				fence = { character, length: fenceMatch[1].length };
+			}
+			continue;
+		}
+
+		const headingMatch = line.match(/^ {0,3}##[ \t]+(.+?)[ \t]*$/);
+		if (headingMatch) {
+			headings.push(`## ${headingMatch[1].trimEnd()}`);
+		}
+	}
+
+	return headings;
+}
+
+export function validateCheckpointSummaryStructure(summary: string): void {
+	const headings = extractCheckpointSummaryHeadings(summary);
+	const missingHeadings = REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.filter(heading => !headings.includes(heading));
+	if (missingHeadings.length > 0) {
+		throw new Error(
+			`Summarization failed: checkpoint summary missing required heading(s): ${missingHeadings.join(", ")}`,
+		);
+	}
+
+	if (headings.join("\n") !== REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.join("\n")) {
+		throw new Error(
+			`Summarization failed: checkpoint summary has invalid heading structure: expected required headings in order exactly once; found ${headings.join(", ")}`,
+		);
+	}
+}
+
 const SUMMARIZATION_PROMPT = prompt.render(compactionSummaryPrompt);
 
 const UPDATE_SUMMARIZATION_PROMPT = prompt.render(compactionUpdateSummaryPrompt);
@@ -872,7 +935,11 @@ export async function generateSummary(
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
-		return remote.summary;
+		const summary = remote.summary;
+		if (!options?.promptOverride) {
+			validateCheckpointSummaryStructure(summary);
+		}
+		return summary;
 	}
 
 	const response = await instrumentedCompleteSimple(
@@ -902,6 +969,10 @@ export async function generateSummary(
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
 		.join("\n");
+
+	if (!options?.promptOverride) {
+		validateCheckpointSummaryStructure(textContent);
+	}
 
 	return textContent;
 }

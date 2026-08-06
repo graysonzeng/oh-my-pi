@@ -6,8 +6,7 @@ import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { WorkflowError } from "../../src/workflow/errors";
-import type { StructuredRunner } from "../../src/workflow/runtime-adapter";
-import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
+import { RuntimeAdapter, type StructuredRunnerRequest } from "../../src/workflow/runtime-adapter";
 import { SESSION_FALLBACK_PROFILE_ID } from "../../src/workflow/session-fallback-profile";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import type { ImplementationArtifactV1, ModelProfile } from "../../src/workflow/types";
@@ -22,14 +21,61 @@ import {
 
 const SESSION_MODEL = "deepseek/deepseek-v4-flash:max";
 
+function attestRuntimeIdentity(request: StructuredRunnerRequest): string {
+	const selector = Array.isArray(request.model) ? request.model[0] : request.model;
+	let provider = "xai";
+	let modelId = "grok-code-test";
+	if (typeof selector === "string" && selector.trim().length > 0) {
+		if (selector.includes("/")) {
+			const slash = selector.indexOf("/");
+			provider = selector.slice(0, slash);
+			modelId = selector.slice(slash + 1) || modelId;
+		} else {
+			modelId = selector;
+			if (modelId.startsWith("claude") || modelId.startsWith("anthropic")) provider = "anthropic";
+			else if (
+				modelId.startsWith("gpt") ||
+				modelId.startsWith("o1") ||
+				modelId.startsWith("o3") ||
+				modelId.startsWith("o4")
+			)
+				provider = "openai";
+			else if (modelId.startsWith("gemini")) provider = "google";
+			else if (modelId.startsWith("glm")) provider = "zhipu";
+			else if (modelId.startsWith("deepseek")) provider = "deepseek";
+			else if (modelId.startsWith("grok")) provider = "xai";
+		}
+	}
+	const resolvedModel = `${provider}/${modelId}`;
+	request.onResponse?.(
+		{
+			status: 200,
+			headers: { "x-provider-model": modelId, "x-omp-resolved-provider": provider },
+		} as never,
+		{
+			provider,
+			id: modelId,
+			reasoning: true,
+			thinking: {
+				efforts:
+					request.thinkingLevel && request.thinkingLevel !== "auto"
+						? [request.thinkingLevel]
+						: ["low", "medium", "high", "xhigh", "max"],
+			},
+		} as never,
+	);
+	return resolvedModel;
+}
+
 /** Runner that fails the first `failCount` implementer invocations with provider_transient. */
 function chainRunner(opts: { failCount: number; seen: string[] }): StructuredRunner {
 	// Plan-review identity pin requires resolvedModel (or identity receipt) from the runner,
 	// matching production RuntimeAdapter + scriptedRunner fixtures.
-	const resolvedModel = "xai/grok-code-test";
+	const fallbackResolvedModel = "xai/grok-code-test";
 	return async request => {
 		const agent = request.agent ?? "";
 		if (agent === "designer" || agent === "planner") {
+			const resolvedModel = attestRuntimeIdentity(request);
 			return {
 				result: {
 					id: "plan",
@@ -42,6 +88,7 @@ function chainRunner(opts: { failCount: number; seen: string[] }): StructuredRun
 			const assignment = request.assignment ?? "";
 			const subject =
 				/code review|implementation/i.test(assignment) && !/plan/i.test(assignment) ? "implementation" : "plan";
+			const resolvedModel = subject === "plan" ? attestRuntimeIdentity(request) : fallbackResolvedModel;
 			return {
 				result: {
 					id: "review",
@@ -65,7 +112,7 @@ function chainRunner(opts: { failCount: number; seen: string[] }): StructuredRun
 					structuredOutput: { status: "valid" as const, data: artifact },
 					patchPath: artifact.patchPath,
 					branchName: artifact.branchName,
-					resolvedModel: model.includes("/") ? model : resolvedModel,
+					resolvedModel: model.includes("/") ? model : fallbackResolvedModel,
 					usage: {
 						input: 10,
 						output: 20,

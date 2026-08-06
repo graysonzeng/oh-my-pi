@@ -29,6 +29,7 @@ import {
 } from "./author-responses";
 import {
 	assertRequiredRolesAvailable,
+	isDiagnosticAvailabilityTimeout,
 	runAvailabilityPreflight,
 	skippedAvailabilityReport,
 } from "./availability-preflight";
@@ -1104,7 +1105,7 @@ export class WorkflowEngine {
 		});
 		this.#preflightUnavailableReasons = {};
 		for (const row of report.profiles) {
-			if (row.status !== "available") {
+			if (row.status !== "available" && !isDiagnosticAvailabilityTimeout(row)) {
 				this.#preflightUnavailableReasons[row.profileId] = [row.errorKind, row.errorSummary]
 					.filter((part): part is string => Boolean(part))
 					.join(":");
@@ -1831,6 +1832,14 @@ export class WorkflowEngine {
 						return;
 					}
 				}
+				const repairAssignment = [
+					`Repair findings: ${open.map(f => f.id).join(", ")}`,
+					...(this.#requiresRepairNoOpDeclaration(open)
+						? [
+								"Final verification passed every check except the completion gate with unresolved_items_open, and there are no blocking findings. No code changes are required. You MUST return noChangesRequired=true with no patchPath, branchName, or unresolved items.",
+							]
+						: []),
+				].join("\n\n");
 				const primary = open[0];
 				const repairHandoff = this.#codeReview
 					? await this.#buildAndPersistHandoff(
@@ -1885,7 +1894,7 @@ export class WorkflowEngine {
 							profile,
 							findingIds: open.map(f => f.id),
 							findings: open,
-							assignment: `Repair findings: ${open.map(f => f.id).join(", ")}`,
+							assignment: repairAssignment,
 							context: await this.#buildStageContext(
 								this.#contextBuilder.buildRepairContext({
 									plan: this.#plan!,
@@ -2025,6 +2034,19 @@ export class WorkflowEngine {
 		}
 	}
 
+	#requiresRepairNoOpDeclaration(open: readonly ReviewFindingV1[]): boolean {
+		if (open.some(finding => finding.blocking === true)) return false;
+		const finalVerification = this.#finalVerification;
+		if (!finalVerification || finalVerification.passed) return false;
+		const failedChecks = finalVerification.checks.filter(check => check.status === "failed");
+		if (failedChecks.length !== 1 || failedChecks[0].id !== "completion-gate") return false;
+		const completionReason = failedChecks[0].summary.split(":").slice(1).join(":").trim();
+		if (completionReason !== "unresolved_items_open") return false;
+		return finalVerification.checks.every(
+			check => check.id === "completion-gate" || check.status === "passed",
+		);
+	}
+
 	async #canAcceptStrictRepairNoOp(options: {
 		repaired: ImplementationArtifactV1;
 		previous: ImplementationArtifactV1 | undefined;
@@ -2039,17 +2061,7 @@ export class WorkflowEngine {
 		const hasRealUnresolved = options.previous.unresolved.some(
 			item => item.trim().length > 0 && !item.startsWith("priorPatch:"),
 		);
-		if (!hasRealUnresolved || options.open.some(finding => finding.blocking === true)) return false;
-
-		const finalVerification = this.#finalVerification;
-		if (!finalVerification || finalVerification.passed) return false;
-		const failedChecks = finalVerification.checks.filter(check => check.status === "failed");
-		if (failedChecks.length !== 1 || failedChecks[0].id !== "completion-gate") return false;
-		const completionReason = failedChecks[0].summary.split(":").slice(1).join(":").trim();
-		if (completionReason !== "unresolved_items_open") return false;
-		if (finalVerification.checks.some(check => check.id !== "completion-gate" && check.status !== "passed")) {
-			return false;
-		}
+		if (!hasRealUnresolved || !this.#requiresRepairNoOpDeclaration(options.open)) return false;
 		return this.#isMissingOrEmptyPatch(options.repaired.patchPath, options.cwd);
 	}
 

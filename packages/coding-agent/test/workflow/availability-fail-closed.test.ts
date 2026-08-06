@@ -169,6 +169,91 @@ describe("availability fail-closed (required role unavailable)", () => {
 		expect(snapAfter?.attempts.length ?? 0).toBe(attemptsBefore);
 	});
 
+	it("allows a timed-out required quality route to reach its strict stage attempt", async () => {
+		const profiles = [
+			qualityTestProfile("planner_a", "planner"),
+			qualityTestProfile("reviewer_a", "plan_reviewer"),
+			qualityTestProfile("impl_a", "implementer"),
+			qualityTestProfile("code_a", "code_reviewer"),
+			qualityTestProfile("repair_a", "repair"),
+		];
+		let plannerTimedOut = false;
+		const availability: WorkflowAvailabilityPort = {
+			async probe(req) {
+				if (plannerTimedOut && req.profile.id === "planner_a") {
+					return {
+						status: "unavailable",
+						latencyMs: 2,
+						errorKind: "timeout",
+						errorSummary: "planner diagnostic timed out",
+					};
+				}
+				return { status: "available", actualProvider: "mock", actualModel: "ok", latencyMs: 1 };
+			},
+		};
+		const scripted = scriptedRunner({
+			plan: planArtifact(),
+			planReview: reviewArtifact("approved", "plan"),
+			implement: implArtifact(),
+			codeReview: reviewArtifact("approved", "implementation"),
+		});
+		let stageAttempts = 0;
+		const engine = new WorkflowEngine({
+			store,
+			router: new ModelRouter(profiles),
+			config: {
+				profiles: Object.fromEntries(profiles.map(p => [p.id, p])),
+				qualityRoutes: {
+					balanced: {
+						planner: ["planner_a"],
+						plan_reviewer: ["reviewer_a"],
+						plan_arbitrator: [],
+						implementer: ["impl_a"],
+						code_reviewer: ["code_a"],
+						repair: ["repair_a"],
+					},
+				},
+			},
+			adapter: new RuntimeAdapter(async request => {
+				stageAttempts += 1;
+				const result = await scripted({ ...request, onResponse: undefined });
+				const selector = Array.isArray(request.model) ? request.model[0] : request.model;
+				if (typeof selector !== "string" || !selector.includes("/")) {
+					throw new Error("timeout quality fixture requires provider/model selector");
+				}
+				const separator = selector.indexOf("/");
+				const provider = selector.slice(0, separator);
+				const model = selector.slice(separator + 1);
+				request.onResponse?.(
+					{ status: 200, headers: { "x-provider-model": selector } } as never,
+					{
+						provider,
+						id: model,
+						reasoning: true,
+						thinking: { mode: "effort", efforts: [Effort.Medium] },
+					} as never,
+				);
+				return result;
+			}),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+			availability,
+		});
+
+		const { workflowId } = await engine.start({ request: "timeout diagnostic", qualityTier: "balanced" });
+		await engine.resume(workflowId, { singleStep: true, session: fakeSession() });
+		plannerTimedOut = true;
+		await engine.resume(workflowId, { singleStep: true, session: fakeSession() });
+
+		const report = engine.getLastAvailabilityReport();
+		expect(report?.status).toBe("degraded");
+		expect(report?.blockedRoles ?? []).toEqual([]);
+		expect(report?.profiles.find(row => row.profileId === "planner_a")?.errorKind).toBe("timeout");
+		expect(stageAttempts).toBeGreaterThan(0);
+		expect((await engine.getState(workflowId))?.status).not.toBe("blocked");
+	});
+
 	it("keeps legacy advisory behavior when a registered role is unavailable", async () => {
 		const profiles = [testProfile("planner_only", ["planner"], "m-planner")];
 		const availability: WorkflowAvailabilityPort = {

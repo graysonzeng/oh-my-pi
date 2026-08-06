@@ -1,7 +1,6 @@
 import * as ai from "@oh-my-pi/pi-ai";
 import { resolveModelOverride } from "../config/model-resolver";
 import availabilityProbePrompt from "../prompts/workflow/availability-probe.hbs.md" with { type: "text" };
-import { concreteThinkingLevel, toReasoningEffort } from "../thinking";
 import {
 	assertStrictRuntimeIdentity,
 	buildRuntimeIdentityReceipt,
@@ -99,7 +98,6 @@ async function probeSessionModel(
 	}
 	const prompt = availabilityProbePrompt.trim();
 	const identityCollector = new ProviderIdentityCollector();
-	const requestedEffort = toReasoningEffort(concreteThinkingLevel(request.profile.thinkingLevel));
 	const response = await ai.completeSimple(
 		model,
 		{
@@ -108,9 +106,8 @@ async function probeSessionModel(
 		},
 		{
 			apiKey: registry.resolver(model, sessionId),
-			maxTokens: request.profile.strictIdentity ? 64 : 16,
-			reasoning: request.profile.strictIdentity ? requestedEffort : undefined,
-			disableReasoning: request.profile.strictIdentity ? undefined : true,
+			maxTokens: 16,
+			disableReasoning: true,
 			signal,
 			fetch: request.session.fetch,
 			cwd: request.session.cwd,
@@ -268,8 +265,8 @@ function classifyProbeError(message: string, aborted: boolean): WorkflowErrorKin
 	if (/auth|api[_-]?key|unauthorized|401|403|credential|login/i.test(lower)) return "authentication";
 	if (/quota|billing|insufficient/i.test(lower)) return "quota";
 	if (/rate.?limit|429|too many requests/i.test(lower)) return "rate_limit";
-	if (/timeout|timed out|deadline/i.test(lower)) return "timeout";
 	if (/config|model registry|not found|unknown model|invalid model/i.test(lower)) return "configuration";
+	if (/timeout|timed out|deadline/i.test(lower)) return "timeout";
 	if (/temporary|unavailable|502|503|504|overloaded/i.test(lower)) return "provider_transient";
 	return "provider_permanent";
 }

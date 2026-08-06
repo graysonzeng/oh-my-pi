@@ -326,34 +326,41 @@ export function buildLiveBenchmarkExperimentConfig(
 }
 
 /**
- * Compile a single-tier quality route for live fixed-model runs.
- * One default profile id per required role is enough: live overrides rewrite each
- * role's profiles onto its expected primary or independent reviewer identity.
+ * Select one default profile per required role using the target role identity's model family.
+ * Live overrides rewrite each selected profile onto its expected primary or reviewer identity.
  */
-export function buildLiveBenchmarkQualityRoutes(): Record<
+export function buildLiveBenchmarkQualityRoutes(
+	roleIdentityMap: BenchmarkRoleIdentityMap,
+): Record<
 	string,
 	Partial<
 		Record<"planner" | "plan_reviewer" | "plan_arbitrator" | "implementer" | "code_reviewer" | "repair", string[]>
 	>
 > {
 	const profiles = getDefaultConfig().profiles;
-	const firstId = (
-		role: "planner" | "plan_reviewer" | "plan_arbitrator" | "implementer" | "code_reviewer" | "repair",
-	): string => {
-		const match = Object.values(profiles).find(profile => profile.roles.includes(role));
-		if (!match) throw new Error(`Live benchmark missing default profile for role ${role}`);
-		return match.id;
+	const profileForRole = (role: WorkflowRole): string => {
+		const candidates = Object.values(profiles).filter(profile => profile.roles.includes(role));
+		const targetFamily = modelFamilyToken(roleIdentityMap[role].model);
+		const match = targetFamily
+			? candidates.find(profile => {
+					const patterns = Array.isArray(profile.modelPattern) ? profile.modelPattern : [profile.modelPattern];
+					return patterns.some(pattern => modelFamilyToken(pattern) === targetFamily);
+				})
+			: undefined;
+		const selected = match ?? candidates[0];
+		if (!selected) throw new Error(`Live benchmark missing default profile for role ${role}`);
+		return selected.id;
 	};
 	// Arbitration is conditional at runtime, but its identity and route must be
 	// compiled so a real arbitration attempt is verifiable rather than unknown.
 	return {
 		balanced: {
-			planner: [firstId("planner")],
-			plan_reviewer: [firstId("plan_reviewer")],
-			plan_arbitrator: [firstId("plan_arbitrator")],
-			implementer: [firstId("implementer")],
-			code_reviewer: [firstId("code_reviewer")],
-			repair: [firstId("repair")],
+			planner: [profileForRole("planner")],
+			plan_reviewer: [profileForRole("plan_reviewer")],
+			plan_arbitrator: [profileForRole("plan_arbitrator")],
+			implementer: [profileForRole("implementer")],
+			code_reviewer: [profileForRole("code_reviewer")],
+			repair: [profileForRole("repair")],
 		},
 	};
 }
@@ -618,7 +625,7 @@ async function runProductionWorkflow(
 		"workflow.requireIndependentReview": true,
 		"workflow.verificationCommands": request.case.verificationCommands,
 		"workflow.profiles": experimentConfig.profileOverrides,
-		"workflow.qualityRoutes": buildLiveBenchmarkQualityRoutes(),
+		"workflow.qualityRoutes": buildLiveBenchmarkQualityRoutes(experimentConfig.roleIdentityMap),
 		"workflow.defaultQualityTier": "balanced",
 		"workflow.presentationOptimization.enabled": experimentConfig.presentationOptimizationEnabled,
 		"task.isolation.mode": "auto",

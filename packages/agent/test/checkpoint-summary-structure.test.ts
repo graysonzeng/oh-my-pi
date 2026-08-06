@@ -57,6 +57,31 @@ describe("validateCheckpointSummaryStructure", () => {
 			/Summarization failed: checkpoint summary missing required heading\(s\): ## Verification/,
 		);
 	});
+
+	it("ignores required-looking headings inside fenced code blocks", () => {
+		const fenced = ["```markdown", completeSummary(), "```"].join("\n");
+		expect(() => validateCheckpointSummaryStructure(fenced)).toThrow(
+			"Summarization failed: checkpoint summary missing required heading(s): ## Goal, ## Constraints & Preferences, ## Progress, ## Key Decisions, ## Verification, ## Artifact & Source Pointers, ## Next Steps, ## Critical Context, ## Additional Notes",
+		);
+	});
+
+	it("rejects required headings in the wrong order", () => {
+		const reversed = [...REQUIRED_CHECKPOINT_SUMMARY_HEADINGS]
+			.reverse()
+			.map(heading => `${heading}\nNone`)
+			.join("\n\n");
+		expect(() => validateCheckpointSummaryStructure(reversed)).toThrow(/invalid heading structure/);
+	});
+
+	it("rejects duplicate required headings", () => {
+		const duplicate = `${completeSummary()}\n\n## Goal\nNone`;
+		expect(() => validateCheckpointSummaryStructure(duplicate)).toThrow(/invalid heading structure/);
+	});
+
+	it("rejects extra top-level headings", () => {
+		const extra = `${completeSummary()}\n\n## Extra\nNone`;
+		expect(() => validateCheckpointSummaryStructure(extra)).toThrow(/invalid heading structure/);
+	});
 });
 
 describe("generateSummary default schema enforcement", () => {

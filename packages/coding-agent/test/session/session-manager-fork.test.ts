@@ -74,7 +74,7 @@ describe("SessionManager.forkFrom", () => {
 			const cloneHeader = cloneEntries.find((entry): entry is SessionHeader => entry.type === "session");
 			const cloneMessage = cloneEntries.find((entry): entry is SessionMessageEntry => entry.type === "message");
 			expect(cloneHeader?.id).not.toBe(sourceHeader.id);
-			expect(cloneHeader?.parentSession).toBe(sourceHeader.id);
+			expect(cloneHeader?.parentSession).toBe(path.resolve(sourceFile));
 			expect(cloneHeader?.cwd).toBe(cwd);
 			if (cloneMessage?.message.role !== "user") throw new Error("expected forked user message");
 			expect(cloneMessage.message.content).toBe("hello");

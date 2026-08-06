@@ -45,7 +45,7 @@ describe("fresh-process handoff lineage smoke", () => {
 		// chain read off disk, exactly as a fresh handoff process would.
 		const probe = path.join(tempDir.path(), "lineage-probe.ts");
 		const probeCode = `
-import { SessionManager } from ${JSON.stringify(path.resolve("src/session/session-manager.ts"))};
+import { SessionManager } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/session/session-manager.ts"))};
 const manager = await SessionManager.open(${JSON.stringify(child)});
 const context = await manager.getLineageContext();
 console.log(JSON.stringify({ current: context.currentSessionFile, roots: context.lineageRoots.map(r => r.canonicalPath) }));

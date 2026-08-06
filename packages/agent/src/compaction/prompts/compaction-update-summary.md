@@ -1,4 +1,5 @@
 You MUST incorporate the new messages above into the existing handoff summary in <previous-summary> tags, used by another LLM to resume the task.
+
 RULES:
 - MUST preserve all information from the previous summary
 - MUST add new progress, decisions, and context from new messages
@@ -9,7 +10,7 @@ RULES:
 
 IMPORTANT: If the new messages end with an unanswered question or request to the user, you MUST add it to Critical Context (replacing any previous pending question if answered).
 
-You MUST use this format (omit sections if not applicable):
+You MUST use exactly this format. Every section is required, even when no content applies; write `None` instead of omitting a section. Do not add or remove sections.
 
 ## Goal
 [Preserve existing goals; add new ones if task expanded]
@@ -18,18 +19,21 @@ You MUST use this format (omit sections if not applicable):
 - [Preserve existing; add new ones discovered]
 
 ## Progress
-
 ### Done
 - [x] [Include previously done and newly completed items]
-
 ### In Progress
 - [ ] [Current work—update based on progress]
-
 ### Blocked
 - [Current blockers—remove if resolved]
 
 ## Key Decisions
 - **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Verification
+- [Checks, tests, validation, and their results]
+
+## Artifact & Source Pointers
+- [Important file paths, URLs, identifiers, or source references]
 
 ## Next Steps
 1. [Update based on current state]

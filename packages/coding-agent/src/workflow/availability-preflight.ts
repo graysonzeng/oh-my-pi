@@ -31,6 +31,13 @@ export const DEFAULT_AVAILABILITY_PER_TARGET_TIMEOUT_MS = AVAILABILITY_PROBE_TIM
 export const DEFAULT_AVAILABILITY_OVERALL_TIMEOUT_MS = 60_000;
 export const DEFAULT_AVAILABILITY_MAX_CONCURRENCY = 4;
 
+/** True only for a timed-out diagnostic profile probe; identity/auth failures remain hard failures. */
+export function isDiagnosticAvailabilityTimeout(
+	profile: Pick<WorkflowAvailabilityProfileResult, "status" | "errorKind">,
+): boolean {
+	return profile.status === "unavailable" && profile.errorKind === "timeout";
+}
+
 export interface RunAvailabilityPreflightOptions {
 	port: WorkflowAvailabilityPort;
 	router: ModelRouter;
@@ -440,6 +447,10 @@ export function classifyScopeStatus(
 		}
 		const available = rows.filter(p => p.status === "available");
 		if (available.length === 0) {
+			if (rows.some(isDiagnosticAvailabilityTimeout)) {
+				degraded = true;
+				continue;
+			}
 			blockedRoles.push(role);
 			continue;
 		}
