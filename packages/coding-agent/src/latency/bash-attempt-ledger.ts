@@ -179,10 +179,7 @@ export interface BashStateIdentity {
  * HEAD alone is insufficient: staged/unstaged/untracked dirty content must participate.
  * Missing git or incomplete receipts → fail open (record attempt, no identical-failure claim).
  */
-export function resolveBashStateIdentity(input: {
-	cwd: string;
-	envNames?: string[];
-}): BashStateIdentity {
+export function resolveBashStateIdentity(input: { cwd: string; envNames?: string[] }): BashStateIdentity {
 	const envNames = [...(input.envNames ?? [])].sort();
 	const head = git.head.resolveSync(input.cwd);
 	const codeRevision = head?.commit ?? undefined;
@@ -193,10 +190,12 @@ export function resolveBashStateIdentity(input: {
 	if (repoRoot) {
 		try {
 			// status --porcelain=v1 -uall: index + worktree + untracked path inventory
-			const status = Bun.spawnSync(
-				["git", "-c", "core.quotepath=false", "status", "--porcelain=v1", "-uall"],
-				{ cwd: repoRoot, stdout: "pipe", stderr: "pipe", windowsHide: true },
-			);
+			const status = Bun.spawnSync(["git", "-c", "core.quotepath=false", "status", "--porcelain=v1", "-uall"], {
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+				windowsHide: true,
+			});
 			// write-tree: staged index tree oid (empty tree when clean index)
 			const indexTree = Bun.spawnSync(["git", "write-tree"], {
 				cwd: repoRoot,
@@ -205,10 +204,12 @@ export function resolveBashStateIdentity(input: {
 				windowsHide: true,
 			});
 			// diff-index: unstaged blob content vs HEAD (includes mode changes)
-			const unstaged = Bun.spawnSync(
-				["git", "diff-index", "--raw", "-z", "HEAD", "--"],
-				{ cwd: repoRoot, stdout: "pipe", stderr: "pipe", windowsHide: true },
-			);
+			const unstaged = Bun.spawnSync(["git", "diff-index", "--raw", "-z", "HEAD", "--"], {
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+				windowsHide: true,
+			});
 			if (status.exitCode === 0 && indexTree.exitCode === 0 && unstaged.exitCode === 0) {
 				const statusText = new TextDecoder().decode(status.stdout);
 				const indexOid = new TextDecoder().decode(indexTree.stdout).trim();
@@ -286,8 +287,7 @@ export function resolveBashStateIdentity(input: {
 	}
 
 	const configHash = configParts.length > 0 ? sha256Hex(configParts.sort().join("|")) : undefined;
-	const dependencyReceipt =
-		dependencyParts.length > 0 ? sha256Hex(dependencyParts.sort().join("|")) : undefined;
+	const dependencyReceipt = dependencyParts.length > 0 ? sha256Hex(dependencyParts.sort().join("|")) : undefined;
 
 	// Authoritative only when both HEAD commit and dirty-tree receipts are known.
 	// Outside a git repo, or when git plumbing fails, fail open.
