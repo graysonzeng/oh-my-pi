@@ -5061,6 +5061,13 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		// Restore a retry-fallback primary BEFORE the model-optimization reconcile
+		// below: the reconcile keys off the current model, so a fallback still in
+		// cooldown would otherwise pin the old fallback's profile (e.g.
+		// structured-gpt) onto a turn that must run on the restored primary.
+		// #promptWithMessage also calls this, but too late — after the reconcile
+		// has already committed the stale profile.
+		await this.#recovery.maybeRestoreRetryFallbackPrimary();
 		// Cover fallback/restore paths that set the model without #syncAfterModelChange.
 		await this.#ensureModelOptimizationReconciled();
 

@@ -139,7 +139,9 @@ describe("provider prompt-cache key session affinity", () => {
 			authStorage = created.authStorage;
 			const childSessionId = forkedManager.getSessionId();
 
-			expect(forkedManager.getHeader()?.parentSession).toBe(source.sourceHeader.id);
+			// forkFrom persists the canonical absolute source-file path (registry-free
+			// fresh-process lineage resolution); opaque legacy ids remain readable.
+			expect(forkedManager.getHeader()?.parentSession).toBe(path.resolve(source.sourceFile));
 			expect(childSessionId).toBeString();
 			expect(childSessionId).not.toBe(source.sourceHeader.id);
 			expect(session.agent.sessionId).toBe(childSessionId);
@@ -186,7 +188,7 @@ describe("provider prompt-cache key session affinity", () => {
 				session = created.session;
 				authStorage = created.authStorage;
 
-				expect(forkedManager.getHeader()?.parentSession).toBe(source.sourceHeader.id);
+				expect(forkedManager.getHeader()?.parentSession).toBe(path.resolve(source.sourceFile));
 				expect(session.agent.promptCacheKey, entry.name).toBeUndefined();
 			} finally {
 				await session?.dispose();

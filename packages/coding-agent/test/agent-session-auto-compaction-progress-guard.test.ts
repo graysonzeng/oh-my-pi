@@ -467,6 +467,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// "freed too little context" warning even though compaction had
 		// genuinely shrunk the context (observed live: 312k → 86k real tokens,
 		// warning still emitted).
+		// Pin the pre-change default threshold (contextWindow − max(15%, reserve)
+		// = 170k on the 200k window) so the ~150k in-flight prompt stays below it:
+		// the pre-prompt maintenance pass must stay quiet and the threshold turn
+		// (assistant usage 190k) must be the one that fires compaction.
+		session.settings.set("compaction.thresholdTokens", 170000);
+		session.settings.set("compaction.thresholdPercent", -1);
+		session.settings.set("compaction.strategy", "context-full");
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		// Hold the initial prompt in flight so the pending snapshot stays alive
 		// through the compaction, exactly like a live tool-loop run. The second
