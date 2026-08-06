@@ -4,7 +4,12 @@
  */
 
 import { DEFAULT_TRUNCATION_RULES } from "../workflow/tool-output-manager";
-import type { ModelOptimizationProfile, SessionContextStrategy, SessionToolStrategy } from "./types";
+import {
+	CONTEXT_BUDGET_CANDIDATE_VERSION,
+	type ModelOptimizationProfile,
+	type SessionContextStrategy,
+	type SessionToolStrategy,
+} from "./types";
 
 function toolStrategy(opts?: { maxBytes?: number; maxLines?: number; maxConcurrent?: number }): SessionToolStrategy {
 	const maxBytes = opts?.maxBytes ?? 4000;
@@ -118,6 +123,12 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		// Conservative deterministic truncation only; no family prompt overlay.
 		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.75, keepRecentN: 10 }),
+		contextBudgetCandidate: {
+			version: CONTEXT_BUDGET_CANDIDATE_VERSION,
+			targetUtilization: 0.7,
+			keepRecentN: 8,
+			maxToolCalls: 8,
+		},
 	},
 	terra: {
 		id: "terra",

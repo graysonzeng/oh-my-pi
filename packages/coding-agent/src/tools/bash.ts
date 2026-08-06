@@ -624,10 +624,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		let advisoryEnabled = false;
 		let boundedInjectionEnabled = false;
 		try {
-			const frozen = (this.session as { isLatencyArmEnabled?: (arm: string) => boolean }).isLatencyArmEnabled;
-			if (typeof frozen === "function") {
-				advisoryEnabled = frozen.call(this.session, "bash_advisory") === true;
-				boundedInjectionEnabled = frozen.call(this.session, "bash_bounded_injection") === true;
+			if (this.session.isLatencyArmEnabled) {
+				advisoryEnabled = this.session.isLatencyArmEnabled("bash_advisory");
+				boundedInjectionEnabled = this.session.isLatencyArmEnabled("bash_bounded_injection");
 			} else {
 				advisoryEnabled = this.session.settings.get("latency.arms.bashAdvisory");
 				boundedInjectionEnabled = this.session.settings.get("latency.arms.bashBoundedInjection");

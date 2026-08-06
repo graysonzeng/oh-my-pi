@@ -311,6 +311,8 @@ export interface ImplementationArtifactV1 extends ArtifactHeader {
 		summary: string;
 	}>;
 	patchPath?: string;
+	/** Strict repair may explicitly report that no new changes are required. */
+	noChangesRequired?: boolean;
 	branchName?: string;
 	unresolved: string[];
 }

@@ -105,6 +105,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import type { LatencyArmId } from "./latency/arms";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
 	deduplicateMCPToolsByName,
@@ -1840,7 +1841,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			},
 			getArtifactManager: () => sessionManager.getArtifactManager(),
+			getArtifactContent: id => sessionManager.getArtifactContent(id),
 			settings,
+			isLatencyArmEnabled: (arm: LatencyArmId) => session.isLatencyArmEnabled(arm),
 			authStorage,
 			modelRegistry,
 			getTelemetry: () => agent?.telemetry,

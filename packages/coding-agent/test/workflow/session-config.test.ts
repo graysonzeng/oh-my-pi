@@ -118,4 +118,49 @@ describe("buildWorkflowConfigFromSessionSettings profiles", () => {
 		expect(() => resolveWorkflowQualityRoutesFromSettings(routes, profiles)).toThrow(WorkflowPolicyError);
 		expect(() => resolveWorkflowQualityRoutesFromSettings(routes, profiles)).toThrow(/unknown_quality_route_profile/);
 	});
+	it("treats arbitration as optional known route with strict configured validation", () => {
+		const strict = (
+			id: string,
+			role: "planner" | "plan_reviewer" | "plan_arbitrator" | "implementer" | "code_reviewer" | "repair",
+		) => ({
+			...DEFAULT_MODEL_PROFILES.deepseek_implementer,
+			id,
+			roles: [role],
+			strictIdentity: true,
+			modelPattern: [`test/${id}`],
+		});
+		const profiles = {
+			...DEFAULT_MODEL_PROFILES,
+			s_planner: strict("s_planner", "planner"),
+			s_pr: strict("s_pr", "plan_reviewer"),
+			s_arb: strict("s_arb", "plan_arbitrator"),
+			s_impl: strict("s_impl", "implementer"),
+			s_cr: strict("s_cr", "code_reviewer"),
+			s_repair: strict("s_repair", "repair"),
+		};
+		const required = {
+			planner: ["s_planner"],
+			plan_reviewer: ["s_pr"],
+			implementer: ["s_impl"],
+			code_reviewer: ["s_cr"],
+			repair: ["s_repair"],
+		};
+		const withoutArbitration = resolveWorkflowQualityRoutesFromSettings({ balanced: required }, profiles);
+		expect(withoutArbitration.balanced?.plan_arbitrator).toEqual([]);
+		const withArbitration = resolveWorkflowQualityRoutesFromSettings(
+			{ balanced: { ...required, plan_arbitrator: ["s_arb"] } },
+			profiles,
+		);
+		expect(withArbitration.balanced?.plan_arbitrator).toEqual(["s_arb"]);
+		const badArbitrator = {
+			...profiles,
+			s_bad_arb: strict("s_bad_arb", "plan_reviewer"),
+		};
+		expect(() =>
+			resolveWorkflowQualityRoutesFromSettings(
+				{ balanced: { ...required, plan_arbitrator: ["s_bad_arb"] } },
+				badArbitrator,
+			),
+		).toThrow(/quality_route_profile_role_mismatch/);
+	});
 });

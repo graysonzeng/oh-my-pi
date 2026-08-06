@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { LATENCY_ARM_SETTINGS, type LatencyArmId } from "../latency/arms";
 import type { WorkflowConcurrencyDeclarationV1 } from "../latency/concurrency-declaration";
 import {
 	readyConcurrencyUnits,
@@ -281,6 +282,12 @@ function modelExecutionEvidence(value: unknown): WorkflowModelExecutionEvidenceV
 function modelStageRole(stage: string): Readonly<{ stage: WorkflowModelBackedStage; role: WorkflowRole }> | null {
 	return MODEL_STAGE_ROLES.find(entry => entry.stage === stage) ?? null;
 }
+
+function isLatencyArmEnabled(session: ToolSession, arm: LatencyArmId): boolean {
+	if (session.isLatencyArmEnabled) return session.isLatencyArmEnabled(arm);
+	return session.settings.get(LATENCY_ARM_SETTINGS[arm]) === true;
+}
+
 export interface WorkflowEngineOptions {
 	store?: WorkflowStore;
 	router?: ModelRouter;
@@ -1119,7 +1126,7 @@ export class WorkflowEngine {
 		const policy = this.#parsePolicy(state.policyJson);
 		const request = this.#parseRequest(state.requestJson);
 		const stage = state.status;
-		const roleStaticSplitEnabled = session.settings.get("latency.arms.roleStaticSplit") === true;
+		const roleStaticSplitEnabled = isLatencyArmEnabled(session, "role_static_split");
 
 		// Fail-closed resume: never silently re-run a write stage without detection.
 		// If an open in_progress attempt exists for this stage, mark it failed then start fresh.
@@ -1905,13 +1912,29 @@ export class WorkflowEngine {
 				);
 				// Build the cumulative candidate without mutating durable workflow state before validation/merge.
 				const previous = this.#implementation;
+				const strictRepairNoOp = await this.#canAcceptStrictRepairNoOp({
+					repaired,
+					previous,
+					open,
+					cwd,
+				});
 				let candidateImplementation: ImplementationArtifactV1 = {
 					...repaired,
+					...(strictRepairNoOp && previous
+						? {
+								patchPath: previous.patchPath,
+								branchName: undefined,
+								modelProfileId: previous.modelProfileId,
+								provider: previous.provider,
+								model: previous.model,
+								promptVersion: previous.promptVersion,
+							}
+						: {}),
 					changedFiles: [...new Set([...(previous?.changedFiles ?? []), ...repaired.changedFiles])],
 					unresolved: [
 						...new Set([
 							...(repaired.unresolved ?? []),
-							...(previous?.patchPath && previous.patchPath !== repaired.patchPath
+							...(!strictRepairNoOp && previous?.patchPath && previous.patchPath !== repaired.patchPath
 								? [`priorPatch:${previous.patchPath}`]
 								: []),
 						]),
@@ -1930,17 +1953,28 @@ export class WorkflowEngine {
 					resolvedToolPolicyId,
 					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 				});
-				candidateImplementation = await this.#commitValidatedWrite({
-					workflowId,
-					attemptId,
-					cwd,
-					artifact: candidateImplementation,
-					identityReceipt,
-					modelFamily,
-					signal,
-				});
+				if (strictRepairNoOp) {
+					const profile = this.#router.list().find(candidate => candidate.id === repaired.modelProfileId);
+					if (!profile) {
+						throw new WorkflowPolicyError("strict_write_profile_missing", {
+							profileId: repaired.modelProfileId,
+						});
+					}
+					this.#assertStrictWriteIdentity(profile, identityReceipt);
+					this.#assertStrictWriteScope(profile);
+				} else {
+					candidateImplementation = await this.#commitValidatedWrite({
+						workflowId,
+						attemptId,
+						cwd,
+						artifact: candidateImplementation,
+						identityReceipt,
+						modelFamily,
+						signal,
+					});
+				}
 				await this.#completeRepairStage(workflowId, attemptId, fresh, candidateImplementation, open, {
-					modelFamily,
+					modelFamily: strictRepairNoOp ? this.#implementerModelFamily : modelFamily,
 				});
 				return;
 			}
@@ -1976,6 +2010,47 @@ export class WorkflowEngine {
 			default:
 				throw new WorkflowPolicyError("unsupported_stage", { stage });
 		}
+	}
+
+	async #isMissingOrEmptyPatch(patchPath: string | undefined, cwd: string): Promise<boolean> {
+		if (!patchPath) return true;
+		const resolved = path.isAbsolute(patchPath) ? patchPath : path.join(cwd, patchPath);
+		try {
+			return (await Bun.file(resolved).text()).trim().length === 0;
+		} catch (error) {
+			if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+				return true;
+			}
+			throw error;
+		}
+	}
+
+	async #canAcceptStrictRepairNoOp(options: {
+		repaired: ImplementationArtifactV1;
+		previous: ImplementationArtifactV1 | undefined;
+		open: readonly ReviewFindingV1[];
+		cwd: string;
+	}): Promise<boolean> {
+		if (options.repaired.noChangesRequired !== true) return false;
+		const profile = this.#router.list().find(candidate => candidate.id === options.repaired.modelProfileId);
+		if (!profile?.strictIdentity || !options.previous?.patchPath) return false;
+		if (options.repaired.branchName) return false;
+		if (options.repaired.unresolved.length !== 0) return false;
+		const hasRealUnresolved = options.previous.unresolved.some(
+			item => item.trim().length > 0 && !item.startsWith("priorPatch:"),
+		);
+		if (!hasRealUnresolved || options.open.some(finding => finding.blocking === true)) return false;
+
+		const finalVerification = this.#finalVerification;
+		if (!finalVerification || finalVerification.passed) return false;
+		const failedChecks = finalVerification.checks.filter(check => check.status === "failed");
+		if (failedChecks.length !== 1 || failedChecks[0].id !== "completion-gate") return false;
+		const completionReason = failedChecks[0].summary.split(":").slice(1).join(":").trim();
+		if (completionReason !== "unresolved_items_open") return false;
+		if (finalVerification.checks.some(check => check.id !== "completion-gate" && check.status !== "passed")) {
+			return false;
+		}
+		return this.#isMissingOrEmptyPatch(options.repaired.patchPath, options.cwd);
 	}
 
 	async #completeRepairStage(
@@ -2033,10 +2108,8 @@ export class WorkflowEngine {
 		const settingsGet = session.settings?.get?.bind(session.settings);
 		const configuredConcurrency = settingsGet?.("task.maxConcurrency" as "task.maxConcurrency");
 		const taskMaxConcurrency = typeof configuredConcurrency === "number" ? configuredConcurrency : 0;
-		const declarationArmEnabled =
-			settingsGet?.("latency.arms.concurrencyDeclaration" as "latency.arms.concurrencyDeclaration") === true;
-		const executionArmEnabled =
-			settingsGet?.("latency.arms.concurrencyExecution" as "latency.arms.concurrencyExecution") === true;
+		const declarationArmEnabled = isLatencyArmEnabled(session, "concurrency_declaration");
+		const executionArmEnabled = isLatencyArmEnabled(session, "concurrency_execution");
 		let concurrencyDeclaration: WorkflowConcurrencyDeclarationV1 | undefined;
 		if (declarationArmEnabled) {
 			const rawDeclaration = policy.concurrencyDeclaration;
@@ -2117,7 +2190,8 @@ export class WorkflowEngine {
 					unitIds: unsupportedRequired.map(unit => unit.id),
 				});
 			}
-			if (!shouldAutoParallel(ready)) {
+			const hasDependencies = concurrencyDeclaration.units.some(unit => unit.dependsOn.length > 0);
+			if (hasDependencies || !shouldAutoParallel(ready)) {
 				packageInput = undefined;
 			} else {
 				packageInput = concurrencyDeclaration.units

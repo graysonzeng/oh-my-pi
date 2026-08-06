@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../tools";
+import { AVAILABILITY_PROBE_TIMEOUT_MS } from "./availability-adapter";
 import {
 	type AvailabilityRoleSpec,
 	availabilityProbeDedupeKey,
@@ -26,8 +27,8 @@ import type {
 /** Synthetic profile id when a role has zero registry profiles (still appears in report). */
 export const MISSING_PROFILE_ID = "(none)";
 
-export const DEFAULT_AVAILABILITY_PER_TARGET_TIMEOUT_MS = 15_000;
-export const DEFAULT_AVAILABILITY_OVERALL_TIMEOUT_MS = 45_000;
+export const DEFAULT_AVAILABILITY_PER_TARGET_TIMEOUT_MS = AVAILABILITY_PROBE_TIMEOUT_MS;
+export const DEFAULT_AVAILABILITY_OVERALL_TIMEOUT_MS = 60_000;
 export const DEFAULT_AVAILABILITY_MAX_CONCURRENCY = 4;
 
 export interface RunAvailabilityPreflightOptions {

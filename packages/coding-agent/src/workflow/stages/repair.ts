@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ToolSession } from "../../tools";
 import { WorkflowPolicyError } from "../errors";
@@ -70,11 +71,38 @@ export class RepairStage {
 			signal: input.signal,
 		});
 		const result = await this.#runtime.run<ImplementationArtifactV1>(request);
-		const modelArtifact = result.artifact as ImplementationArtifactV1;
-		// Trust only runtime isolation metadata for patch/branch.
+		const modelArtifact = result.artifact;
+		const noChangesRequired = modelArtifact.noChangesRequired === true;
+		// Trust runtime isolation metadata for real writes. An explicit strict no-op may
+		// carry no patch or a newly emitted empty patch, but never a branch artifact or
+		// a non-empty patch (that would contradict the declaration).
 		const patchPath = result.patchPath;
 		const branchName = result.branchName;
-		if (!patchPath && !branchName) {
+		if (noChangesRequired) {
+			if (branchName) {
+				throw new WorkflowPolicyError("repair_noop_branch_conflict", {
+					attemptId: input.attemptId,
+					branchName,
+				});
+			}
+			if (patchPath) {
+				const resolved = path.isAbsolute(patchPath) ? patchPath : path.join(input.session.cwd, patchPath);
+				try {
+					const patch = await Bun.file(resolved).text();
+					if (patch.trim().length > 0) {
+						throw new WorkflowPolicyError("repair_noop_patch_non_empty", {
+							attemptId: input.attemptId,
+							patchPath,
+						});
+					}
+				} catch (error) {
+					if (error instanceof WorkflowPolicyError) throw error;
+					if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") {
+						throw error;
+					}
+				}
+			}
+		} else if (!patchPath && !branchName) {
 			throw new WorkflowPolicyError("repair_missing_isolation_artifact", {
 				attemptId: input.attemptId,
 				hint: "Repair must return patchPath or branchName from the runtime adapter",

@@ -10,6 +10,7 @@ import { Settings } from "../../src/config/settings";
 import {
 	buildOrdinaryDecisionReceipt,
 	buildResolvedModelOptimization,
+	DEFAULT_MODEL_OPTIMIZATION_PROFILES,
 	ORDINARY_DECISION_RECEIPT_KIND,
 } from "../../src/model-optimization";
 import type { ModelOptimizationProfile, ResolvedModelOptimization } from "../../src/model-optimization/types";
@@ -88,6 +89,32 @@ function createDispatchSession() {
 		}),
 	});
 	return { session, gpt, prompts };
+}
+
+function createCandidateSession(profile: ModelOptimizationProfile, settings: Record<string, unknown> = {}) {
+	const model = requiredModel("anthropic", "claude-sonnet-4-5");
+	const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+	const runtime: { resolved: ResolvedModelOptimization } = { resolved: {} };
+	const agent = new Agent({
+		initialState: { model, systemPrompt: ["base"], tools: [], messages: [] },
+		streamFn: (activeModel, context, options) => mock.stream(activeModel, context, options),
+	});
+	const session = new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(),
+		settings: Settings.isolated({
+			"compaction.enabled": false,
+			"modelOptimization.enabled": true,
+			"latency.arms.contextBudgetTuning": false,
+			...settings,
+		}),
+		modelRegistry,
+		reconcileModelOptimization: async () => buildResolvedModelOptimization(profile),
+		applyModelOptimization: resolved => {
+			runtime.resolved = resolved;
+		},
+	});
+	return { session, runtime };
 }
 
 describe("ordinary-session model optimization lifecycle", () => {
@@ -229,6 +256,92 @@ describe("ordinary-session model optimization lifecycle", () => {
 			expect(session.modelOptimizationContextStrategy).toBeUndefined();
 			expect(runtime.resolved).toEqual({});
 			expect(session.agent.state.systemPrompt).toEqual(["base"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+});
+
+describe("context-budget candidate arm", () => {
+	const lunaProfile = DEFAULT_MODEL_OPTIMIZATION_PROFILES.luna;
+	const claudeDefaultProfile = DEFAULT_MODEL_OPTIMIZATION_PROFILES.claude;
+
+	it("keeps Luna on its base context strategy when the tuning arm is off", async () => {
+		const { session, runtime } = createCandidateSession(lunaProfile);
+		try {
+			await session.ensureModelOptimization();
+			expect(session.modelOptimizationContextStrategy?.targetUtilization).toBe(0.75);
+			expect(session.modelOptimizationContextStrategy?.eviction?.keepRecentN).toBe(10);
+			expect(session.modelOptimizationContextStrategy?.toolHistory?.maxToolCalls).toBe(10);
+			expect(runtime.resolved.contextBudgetTuning?.applied).toBe(false);
+			expect(runtime.resolved.contextBudgetTuning?.version).toBe(1);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("applies only the Luna v1 candidate when both frozen context arms are on", async () => {
+		const { session, runtime } = createCandidateSession(lunaProfile, {
+			"latency.arms.contextBudgetTuning": true,
+		});
+		try {
+			await session.ensureModelOptimization();
+			expect(session.modelOptimizationContextStrategy?.targetUtilization).toBe(0.7);
+			expect(session.modelOptimizationContextStrategy?.eviction?.keepRecentN).toBe(8);
+			expect(session.modelOptimizationContextStrategy?.toolHistory?.maxToolCalls).toBe(8);
+			expect(runtime.resolved.contextBudgetTuning).toMatchObject({
+				applied: true,
+				version: 1,
+				targetUtilization: 0.7,
+				keepRecentN: 8,
+				maxToolCalls: 8,
+			});
+			const receipt = buildOrdinaryDecisionReceipt({
+				resolved: runtime.resolved,
+				descriptorPlacement: "provider_schema",
+			});
+			expect(receipt.applied.contextBudgetTuning).toBe(true);
+			expect(receipt.contextBudgetTuning).toMatchObject({ applied: true, version: 1, targetUtilization: 0.7 });
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("fails open for a missing main gate and for profiles without a candidate", async () => {
+		const gated = createCandidateSession(lunaProfile, {
+			"modelOptimization.enabled": false,
+			"latency.arms.contextBudgetTuning": true,
+		});
+		const noCandidate = createCandidateSession(claudeDefaultProfile, {
+			"latency.arms.contextBudgetTuning": true,
+		});
+		try {
+			await gated.session.ensureModelOptimization();
+			await noCandidate.session.ensureModelOptimization();
+			expect(gated.runtime.resolved.contextBudgetTuning?.applied).toBe(false);
+			expect(gated.session.modelOptimizationContextStrategy?.targetUtilization).toBe(0.75);
+			expect(noCandidate.runtime.resolved.contextBudgetTuning?.applied).toBe(false);
+			expect(noCandidate.runtime.resolved.contextBudgetTuning?.version).toBeUndefined();
+			expect(noCandidate.session.modelOptimizationContextStrategy?.targetUtilization).toBe(0.75);
+			expect(noCandidate.session.modelOptimizationContextStrategy?.eviction?.keepRecentN).toBe(12);
+		} finally {
+			await gated.session.dispose();
+			await noCandidate.session.dispose();
+		}
+	});
+
+	it("keeps the candidate decision frozen after live settings change", async () => {
+		const { session, runtime } = createCandidateSession(lunaProfile, {
+			"latency.arms.contextBudgetTuning": true,
+		});
+		try {
+			await session.ensureModelOptimization();
+			session.settings.set("modelOptimization.enabled", false);
+			session.settings.set("latency.arms.contextBudgetTuning", false);
+			await session.ensureModelOptimization();
+			expect(runtime.resolved.contextBudgetTuning?.applied).toBe(true);
+			expect(session.modelOptimizationContextStrategy?.targetUtilization).toBe(0.7);
+			expect(session.modelOptimizationContextStrategy?.eviction?.keepRecentN).toBe(8);
 		} finally {
 			await session.dispose();
 		}

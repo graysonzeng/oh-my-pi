@@ -310,6 +310,68 @@ describe("BashTool ledger completion integration", () => {
 		expect(secondText).toContain("bounded summary");
 		expect(secondText).toContain("Command exited with code 9");
 	});
+	it("injects only the bounded summary when advisory is disabled and invalidates it after state changes", async () => {
+		const repo = TempDir.createSync("@pi-bash-ledger-bounded-");
+		const sessionId = "bash-ledger-bounded-only-test";
+		try {
+			runGit(repo.path(), ["init", "--initial-branch=main"]);
+			runGit(repo.path(), ["config", "user.email", "tester@example.com"]);
+			runGit(repo.path(), ["config", "user.name", "Tester"]);
+			const trackedPath = path.join(repo.path(), "probe.ts");
+			await Bun.write(trackedPath, "export const value = 1;\n");
+			runGit(repo.path(), ["add", "probe.ts"]);
+			runGit(repo.path(), ["commit", "-m", "baseline"]);
+
+			const settings = Settings.isolated({ "latency.arms.bashBoundedInjection": true });
+			const session = {
+				cwd: repo.path(),
+				hasUI: false,
+				settings,
+				skills: [],
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				getSessionId: () => sessionId,
+				getArtifactsDir: () => null,
+			} as unknown as ToolSession;
+			const tool = new BashTool(session);
+			const runFailure = async (callId: string): Promise<string> => {
+				const result = await tool.execute(callId, {
+					command: "printf ledger && exit 9",
+					env: { BASH_LEDGER_SECRET: "must-not-appear-in-receipt" },
+					timeout: 30,
+				});
+				return result.content.find(block => block.type === "text")?.text ?? "";
+			};
+
+			const first = await runFailure("bounded-first");
+			expect(first).toContain("Command exited with code 9");
+			expect(first).not.toContain("[bash-attempt-ledger] bounded summary");
+			expect(first).not.toContain("repeated identical failure");
+
+			const second = await runFailure("bounded-second");
+			expect(second.startsWith("[bash-attempt-ledger] bounded summary")).toBe(true);
+			expect(second).not.toContain("repeated identical failure");
+			expect(second).toContain("Command exited with code 9");
+
+			await Bun.write(trackedPath, "export const value = 2;\n");
+			const changed = await runFailure("bounded-state-change");
+			expect(changed).not.toContain("[bash-attempt-ledger] bounded summary");
+			expect(changed).not.toContain("repeated identical failure");
+
+			const changedRepeat = await runFailure("bounded-state-repeat");
+			expect(changedRepeat.startsWith("[bash-attempt-ledger] bounded summary")).toBe(true);
+			expect(changedRepeat).not.toContain("repeated identical failure");
+			expect(changedRepeat).toContain("Command exited with code 9");
+
+			const ledgers = getBashAttemptLedgerStore(session)?.list() ?? [];
+			expect(ledgers).toHaveLength(2);
+			expect(ledgers.every(ledger => ledger.mode === "bounded_injection")).toBe(true);
+			expect(ledgers.every(ledger => !JSON.stringify(ledger).includes("must-not-appear-in-receipt"))).toBe(true);
+		} finally {
+			clearBashAttemptLedgerStore(sessionId);
+			repo.removeSync();
+		}
+	});
 
 	it("invalidates repeated-failure advice across tracked, staged, and untracked changes", async () => {
 		const repo = TempDir.createSync("@pi-bash-ledger-state-");

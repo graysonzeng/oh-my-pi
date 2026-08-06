@@ -117,4 +117,14 @@ describe("read tool large artifact handling", () => {
 			homeSpy.mockRestore();
 		}
 	});
+	it("prefers the current no-session artifact over a colliding active-session id", async () => {
+		const currentSessionBody = "current-session artifact body";
+		const noSession = {
+			...makeSession(testDir),
+			getSessionFile: () => null,
+			getArtifactContent: async (id: string) => (id === "0" ? currentSessionBody : null),
+		};
+		const result = await new ReadTool(noSession).execute("call-current", { path: "artifact://0" });
+		expect(getTextOutput(result)).toBe(currentSessionBody);
+	});
 });

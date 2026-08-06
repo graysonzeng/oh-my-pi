@@ -4,8 +4,10 @@ import { Effort } from "@oh-my-pi/pi-catalog";
 import {
 	applyKnownGoodBenchmarkSolution,
 	buildDefaultBenchmarkSuite,
+	buildLiveBenchmarkExperimentConfig,
 	buildLiveBenchmarkProfileOverrides,
 	buildLiveBenchmarkQualityRoutes,
+	buildLiveBenchmarkRoleIdentityMap,
 	createLiveWorkflowBenchmarkRuntime,
 	runBenchmarkSuite,
 	verifyLiveWorkflowProvenance,
@@ -34,7 +36,41 @@ const FIXTURE_PROVENANCE: BenchmarkRuntimeProvenance = {
 	parser: "pi-ai:openai-completions",
 };
 
-function exactChildReport(): WorkflowStatusReportV1 {
+interface FixtureChildIdentity {
+	provider: string;
+	model: string;
+	checkpoint: string;
+	modelFamily: string;
+}
+
+const FIXTURE_PRIMARY_CHILD_IDENTITY: FixtureChildIdentity = {
+	provider: "fixture-provider",
+	model: "fixture-model",
+	checkpoint: "checkpoint-1",
+	modelFamily: "fixture",
+};
+const FIXTURE_REVIEWER_CHILD_IDENTITY: FixtureChildIdentity = {
+	provider: "fixture-reviewer-provider",
+	model: "fixture-reviewer-model",
+	checkpoint: "reviewer-checkpoint-1",
+	modelFamily: "fixture-reviewer",
+};
+
+function fixtureIdentityForStage(
+	stage: WorkflowModelBackedStage,
+	reviewer: FixtureChildIdentity,
+): FixtureChildIdentity {
+	return stage === "plan_review" || stage === "code_review" ? reviewer : FIXTURE_PRIMARY_CHILD_IDENTITY;
+}
+
+const FIXTURE_ROLE_IDENTITIES = buildLiveBenchmarkRoleIdentityMap(
+	"fixture-provider",
+	"fixture-model",
+	"fixture-reviewer-provider",
+	"fixture-reviewer-model",
+);
+
+function exactChildReport(reviewer = FIXTURE_REVIEWER_CHILD_IDENTITY): WorkflowStatusReportV1 {
 	const stages: WorkflowModelBackedStage[] = ["planning", "plan_review", "implementing", "code_review"];
 	const roles: Record<WorkflowModelBackedStage, WorkflowRole> = {
 		planning: "planner",
@@ -63,54 +99,57 @@ function exactChildReport(): WorkflowStatusReportV1 {
 				orderedProfileIds: [`profile-${stage}`],
 			})),
 		},
-		modelAttempts: stages.map((stage, index) => ({
-			attemptId: `attempt-${stage}`,
-			stage,
-			role: roles[stage],
-			ordinal: index + 1,
-			status: "completed",
-			configuredProfileId: `profile-${stage}`,
-			evidenceStatus: "verified",
-			routing: [
-				{
-					selectedProfileId: `profile-${stage}`,
-					configuredProfileIds: [`profile-${stage}`],
-					reason: "primary",
-					fallbackFrom: null,
-					skipped: [],
-				},
-			],
-			executions: [
-				{
-					profileId: `profile-${stage}`,
-					configuredIdentity: {
+		modelAttempts: stages.map((stage, index) => {
+			const identity = fixtureIdentityForStage(stage, reviewer);
+			return {
+				attemptId: `attempt-${stage}`,
+				stage,
+				role: roles[stage],
+				ordinal: index + 1,
+				status: "completed",
+				configuredProfileId: `profile-${stage}`,
+				evidenceStatus: "verified",
+				routing: [
+					{
+						selectedProfileId: `profile-${stage}`,
+						configuredProfileIds: [`profile-${stage}`],
+						reason: "primary",
+						fallbackFrom: null,
+						skipped: [],
+					},
+				],
+				executions: [
+					{
 						profileId: `profile-${stage}`,
-						provider: "fixture-provider",
-						model: "fixture-model",
-						checkpoint: null,
-						provenance: "configured",
-						modelPattern: "fixture-provider/fixture-model",
-						requestedEffort: "high",
-						modelFamily: "fixture",
+						configuredIdentity: {
+							profileId: `profile-${stage}`,
+							provider: identity.provider,
+							model: identity.model,
+							checkpoint: null,
+							provenance: "configured",
+							modelPattern: `${identity.provider}/${identity.model}`,
+							requestedEffort: "high",
+							modelFamily: identity.modelFamily,
+						},
+						localResolution: {
+							provider: identity.provider,
+							model: identity.model,
+							checkpoint: null,
+							provenance: "local_resolution",
+						},
+						attestedIdentity: {
+							provider: identity.provider,
+							model: identity.model,
+							checkpoint: identity.checkpoint,
+							provenance: "provider_echo",
+						},
+						exactIdentityMatch: true,
+						effortSupported: true,
+						modelFamily: identity.modelFamily,
 					},
-					localResolution: {
-						provider: "fixture-provider",
-						model: "fixture-model",
-						checkpoint: null,
-						provenance: "local_resolution",
-					},
-					attestedIdentity: {
-						provider: "fixture-provider",
-						model: "fixture-model",
-						checkpoint: "checkpoint-1",
-						provenance: "provider_echo",
-					},
-					exactIdentityMatch: true,
-					effortSupported: true,
-					modelFamily: "fixture",
-				},
-			],
-		})),
+				],
+			};
+		}),
 	};
 }
 
@@ -124,6 +163,8 @@ describe("live workflow benchmark runtime", () => {
 		const runtime = createLiveWorkflowBenchmarkRuntime({
 			provider: "fixture-provider",
 			model: "fixture-model",
+			reviewerProvider: "fixture-reviewer-provider",
+			reviewerModel: "fixture-reviewer-model",
 			agentRunner: async (request, cwd) => {
 				calls += 1;
 				await applyKnownGoodBenchmarkSolution(cwd, request.case);
@@ -170,6 +211,8 @@ describe("live workflow benchmark runtime", () => {
 		const runtime = createLiveWorkflowBenchmarkRuntime({
 			provider: "fixture-provider",
 			model: "fixture-model",
+			reviewerProvider: "fixture-reviewer-provider",
+			reviewerModel: "fixture-reviewer-model",
 			agentRunner: async (request, cwd) => {
 				await applyKnownGoodBenchmarkSolution(cwd, request.case);
 				return {
@@ -206,6 +249,8 @@ describe("live workflow benchmark runtime", () => {
 		const runtime = createLiveWorkflowBenchmarkRuntime({
 			provider: "fixture-provider",
 			model: "fixture-model",
+			reviewerProvider: "fixture-reviewer-provider",
+			reviewerModel: "fixture-reviewer-model",
 			agentRunner: async (request, cwd) => {
 				await applyKnownGoodBenchmarkSolution(cwd, request.case);
 				return {
@@ -232,18 +277,54 @@ describe("live workflow benchmark runtime", () => {
 		expect(result?.tokens.costUsd).toEqual({ value: null, provenance: "unknown" });
 	});
 
-	it("fails closed when provider or model is omitted", () => {
-		expect(() => createLiveWorkflowBenchmarkRuntime({ provider: "", model: "model" })).toThrow(
-			"explicit provider and model",
-		);
-		expect(() => createLiveWorkflowBenchmarkRuntime({ provider: "provider", model: "" })).toThrow(
-			"explicit provider and model",
-		);
+	it("fails closed when provider, model, or reviewer identity is omitted or not independent", () => {
+		expect(() =>
+			createLiveWorkflowBenchmarkRuntime({
+				provider: "",
+				model: "model",
+				reviewerModel: "reviewer-model",
+			}),
+		).toThrow("explicit provider and model");
+		expect(() =>
+			createLiveWorkflowBenchmarkRuntime({
+				provider: "provider",
+				model: "",
+				reviewerModel: "reviewer-model",
+			}),
+		).toThrow("explicit provider and model");
+		expect(() =>
+			createLiveWorkflowBenchmarkRuntime({
+				provider: "gateway",
+				model: "gpt-5.6-luna",
+				reviewerModel: "",
+			}),
+		).toThrow("explicit reviewer model");
+		expect(() =>
+			createLiveWorkflowBenchmarkRuntime({
+				provider: "gateway",
+				model: "gpt-5.6-luna",
+				reviewerModel: "gpt-5.6-sol",
+			}),
+		).toThrow(/reviewer model family must differ/);
 	});
 
 	it("builds a real baseline without optimization strategies and preserves them for optimized", () => {
-		const baseline = buildLiveBenchmarkProfileOverrides("provider", "model", "baseline");
-		const optimized = buildLiveBenchmarkProfileOverrides("provider", "model", "optimized");
+		const baseline = buildLiveBenchmarkProfileOverrides(
+			"provider",
+			"model",
+			"baseline",
+			"profile-strategy",
+			"reviewer-provider",
+			"reviewer-model",
+		);
+		const optimized = buildLiveBenchmarkProfileOverrides(
+			"provider",
+			"model",
+			"optimized",
+			"profile-strategy",
+			"reviewer-provider",
+			"reviewer-model",
+		);
 		const profileId = Object.keys(baseline)[0]!;
 		expect(baseline[profileId]?.modelPattern).toBe("provider/model");
 		expect(optimized[profileId]?.modelPattern).toBe("provider/model");
@@ -264,21 +345,110 @@ describe("live workflow benchmark runtime", () => {
 		}
 	});
 
-	it("builds strict fixed-model profiles with exact model-family identity", () => {
-		const overrides = buildLiveBenchmarkProfileOverrides("gateway", "claude-fable-5", "optimized");
-		expect(Object.values(overrides).every(profile => profile.strictIdentity === true)).toBe(true);
+	it("keeps presentation control and treatment profile overrides byte-equivalent", () => {
+		const control = buildLiveBenchmarkProfileOverrides(
+			"provider",
+			"model",
+			"baseline",
+			"presentation",
+			"reviewer-provider",
+			"reviewer-model",
+		);
+		const treatment = buildLiveBenchmarkProfileOverrides(
+			"provider",
+			"model",
+			"optimized",
+			"presentation",
+			"reviewer-provider",
+			"reviewer-model",
+		);
+		expect(JSON.stringify(control)).toBe(JSON.stringify(treatment));
+		const profileId = Object.keys(control)[0]!;
+		expect(control[profileId]).toMatchObject({
+			modelPattern: "provider/model",
+			strictIdentity: true,
+			maxRuntimeMs: 600_000,
+			retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: [] },
+		});
+	});
 
+	it("compiles isolated presentation and profile-strategy setting inputs", () => {
+		const presentationControl = buildLiveBenchmarkExperimentConfig(
+			"provider",
+			"model",
+			"baseline",
+			"presentation",
+			"reviewer-provider",
+			"reviewer-model",
+		);
+		const presentationTreatment = buildLiveBenchmarkExperimentConfig(
+			"provider",
+			"model",
+			"optimized",
+			"presentation",
+			"reviewer-provider",
+			"reviewer-model",
+		);
+		expect(presentationControl.profileOverrides).toEqual(presentationTreatment.profileOverrides);
+		expect(JSON.stringify(presentationControl.profileOverrides)).toBe(
+			JSON.stringify(presentationTreatment.profileOverrides),
+		);
+		expect(presentationControl.roleIdentityMap).toEqual(presentationTreatment.roleIdentityMap);
+		expect(presentationControl.presentationOptimizationEnabled).toBe(false);
+		expect(presentationTreatment.presentationOptimizationEnabled).toBe(true);
+
+		const profileStrategyControl = buildLiveBenchmarkExperimentConfig(
+			"provider",
+			"model",
+			"baseline",
+			"profile-strategy",
+			"reviewer-provider",
+			"reviewer-model",
+		);
+		const profileStrategyTreatment = buildLiveBenchmarkExperimentConfig(
+			"provider",
+			"model",
+			"optimized",
+			"profile-strategy",
+			"reviewer-provider",
+			"reviewer-model",
+		);
+		expect(profileStrategyControl.presentationOptimizationEnabled).toBe(false);
+		expect(profileStrategyTreatment.presentationOptimizationEnabled).toBe(false);
+		expect(profileStrategyControl.profileOverrides).not.toEqual(profileStrategyTreatment.profileOverrides);
+		expect(profileStrategyControl.roleIdentityMap).toEqual(profileStrategyTreatment.roleIdentityMap);
+	});
+
+	it("builds strict role-specific profiles with distinct model-family identity", () => {
+		const overrides = buildLiveBenchmarkProfileOverrides(
+			"gateway",
+			"gpt-5.6-luna",
+			"optimized",
+			"profile-strategy",
+			"gateway",
+			"claude-fable-5",
+		);
 		const profiles = resolveWorkflowProfilesFromSettings(overrides, getDefaultConfig().profiles);
-		for (const profile of Object.values(profiles)) {
-			expect(profile.vendor).toBe("anthropic");
-			expect(profile.modelPattern).toBe("gateway/claude-fable-5");
+		for (const [id, profile] of Object.entries(profiles)) {
+			const isReviewer = getDefaultConfig().profiles[id]?.roles.some(
+				role => role === "plan_reviewer" || role === "plan_arbitrator" || role === "code_reviewer",
+			);
 			expect(profile.strictIdentity).toBe(true);
+			expect(profile.vendor).toBe(isReviewer ? "anthropic" : "openai");
+			expect(profile.modelPattern).toBe(isReviewer ? "gateway/claude-fable-5" : "gateway/gpt-5.6-luna");
 		}
 	});
 
 	it("compiles a verified live quality-route snapshot for fixed-model profiles", () => {
 		const profiles = resolveWorkflowProfilesFromSettings(
-			buildLiveBenchmarkProfileOverrides("gateway", "gpt-5.6-luna", "optimized"),
+			buildLiveBenchmarkProfileOverrides(
+				"gateway",
+				"gpt-5.6-luna",
+				"optimized",
+				"profile-strategy",
+				"gateway",
+				"claude-fable-5",
+			),
 			getDefaultConfig().profiles,
 		);
 		const routes = buildLiveBenchmarkQualityRoutes();
@@ -290,9 +460,17 @@ describe("live workflow benchmark runtime", () => {
 		expect(snapshot.routes.planner.length).toBeGreaterThan(0);
 		expect(snapshot.routes.plan_reviewer.length).toBeGreaterThan(0);
 		expect(snapshot.routes.implementer.length).toBeGreaterThan(0);
+		expect(snapshot.routes.plan_arbitrator.length).toBeGreaterThan(0);
 		expect(snapshot.routes.code_reviewer.length).toBeGreaterThan(0);
 		const settings = {
-			"workflow.profiles": buildLiveBenchmarkProfileOverrides("gateway", "gpt-5.6-luna", "optimized"),
+			"workflow.profiles": buildLiveBenchmarkProfileOverrides(
+				"gateway",
+				"gpt-5.6-luna",
+				"optimized",
+				"profile-strategy",
+				"gateway",
+				"claude-fable-5",
+			),
 			"workflow.qualityRoutes": routes,
 			"workflow.defaultQualityTier": "balanced",
 			"workflow.degradedMode": false,
@@ -304,23 +482,29 @@ describe("live workflow benchmark runtime", () => {
 	});
 
 	it("clamps live fixed-model efforts to deepseek-v4-flash max default", () => {
-		const baseline = buildLiveBenchmarkProfileOverrides("gateway", "deepseek-v4-flash", "baseline");
-		// Default claude profiles request xhigh; deepseek-v4-flash supports high/max and defaults to max.
+		const baseline = buildLiveBenchmarkProfileOverrides(
+			"gateway",
+			"deepseek-v4-flash",
+			"baseline",
+			"profile-strategy",
+			"gateway",
+			"claude-fable-5",
+		);
+		// Primary profiles use deepseek defaults; reviewer profiles remain on Claude's supported effort dial.
 		expect(baseline.claude_planner?.thinkingLevel).toBe(Effort.Max);
-		expect(baseline.claude_plan_reviewer?.thinkingLevel).toBe(Effort.Max);
-		expect(baseline.claude_reviewer?.thinkingLevel).toBe(Effort.Max);
 		expect(baseline.deepseek_implementer?.thinkingLevel).toBe(Effort.Max);
-		// Profiles without an effort still get the deepseek default for fixed-model live runs.
 		expect(baseline.gpt_planner?.thinkingLevel).toBe(Effort.Max);
-		// Already-supported efforts are preserved (grok_implementer defaults to high).
 		expect(baseline.grok_implementer?.thinkingLevel).toBe(Effort.High);
+		expect(baseline.claude_plan_reviewer?.thinkingLevel).toBe(Effort.XHigh);
+		expect(baseline.claude_reviewer?.thinkingLevel).toBe(Effort.XHigh);
 
 		const merged = resolveWorkflowProfilesFromSettings(baseline, getDefaultConfig().profiles);
-		for (const profile of Object.values(merged)) {
-			expect(profile.modelPattern).toBe("gateway/deepseek-v4-flash");
-			expect(profile.thinkingLevel === Effort.High || profile.thinkingLevel === Effort.Max).toBe(true);
-		}
+		expect(merged.claude_planner?.modelPattern).toBe("gateway/deepseek-v4-flash");
+		expect(merged.deepseek_implementer?.modelPattern).toBe("gateway/deepseek-v4-flash");
+		expect(merged.claude_plan_reviewer?.modelPattern).toBe("gateway/claude-fable-5");
+		expect(merged.claude_reviewer?.modelPattern).toBe("gateway/claude-fable-5");
 		expect(merged.claude_planner?.thinkingLevel).toBe(Effort.Max);
+		expect(merged.claude_plan_reviewer?.thinkingLevel).toBe(Effort.XHigh);
 		expect(merged.grok_implementer?.thinkingLevel).toBe(Effort.High);
 	});
 
@@ -330,6 +514,8 @@ describe("live workflow benchmark runtime", () => {
 		const runtime = createLiveWorkflowBenchmarkRuntime({
 			provider: "fixture-provider",
 			model: "fixture-model",
+			reviewerProvider: "fixture-reviewer-provider",
+			reviewerModel: "fixture-reviewer-model",
 			agentRunner: async (_request, cwd) => {
 				await Bun.write(path.join(cwd, "untracked.txt"), "out of scope\n");
 				return {
@@ -356,7 +542,7 @@ describe("live workflow benchmark runtime", () => {
 	}, 10_000);
 
 	it("accepts one exact child identity across every required stage with known zero fallback", () => {
-		const verified = verifyLiveWorkflowProvenance(exactChildReport(), "fixture-provider", "fixture-model");
+		const verified = verifyLiveWorkflowProvenance(exactChildReport(), FIXTURE_ROLE_IDENTITIES);
 		expect(verified.errors).toEqual([]);
 		expect(verified.fallbackCount).toBe(0);
 		expect(verified.runtimeProvenance).toMatchObject({
@@ -367,7 +553,7 @@ describe("live workflow benchmark runtime", () => {
 	});
 
 	it("accepts exact same-model evidence from an intentional legacy route", () => {
-		const report = exactChildReport();
+		const report = exactChildReport(FIXTURE_PRIMARY_CHILD_IDENTITY);
 		report.qualityRoute = {
 			status: "legacy",
 			qualityTier: null,
@@ -387,15 +573,40 @@ describe("live workflow benchmark runtime", () => {
 	it("fails closed when a required child stage lacks runtime evidence", () => {
 		const report = exactChildReport();
 		report.modelAttempts.find(attempt => attempt.stage === "code_review")!.executions = [];
-		const verified = verifyLiveWorkflowProvenance(report, "fixture-provider", "fixture-model");
+		const verified = verifyLiveWorkflowProvenance(report, FIXTURE_ROLE_IDENTITIES);
 		expect(verified.runtimeProvenance).toBeUndefined();
 		expect(verified.errors).toContain("child runtime evidence missing: code_review");
+	});
+
+	it("fails closed when a reviewer stage attests the primary identity", () => {
+		const report = exactChildReport();
+		const execution = report.modelAttempts.find(attempt => attempt.stage === "plan_review")!.executions[0]!;
+		execution.configuredIdentity!.provider = "fixture-provider";
+		execution.configuredIdentity!.model = "fixture-model";
+		execution.attestedIdentity!.provider = "fixture-provider";
+		execution.attestedIdentity!.model = "fixture-model";
+		const verified = verifyLiveWorkflowProvenance(report, FIXTURE_ROLE_IDENTITIES);
+		expect(verified.runtimeProvenance).toBeUndefined();
+		expect(verified.errors).toContain("child exact identity not verified: plan_review");
+	});
+
+	it("accepts plan arbitration as an exact reviewer identity", () => {
+		const report = exactChildReport();
+		report.qualityRoute.configuredStages.find(stage => stage.stage === "plan_review")!.role = "plan_arbitrator";
+		report.modelAttempts.find(attempt => attempt.stage === "plan_review")!.role = "plan_arbitrator";
+		const verified = verifyLiveWorkflowProvenance(report, FIXTURE_ROLE_IDENTITIES);
+		expect(verified.errors).toEqual([]);
+		expect(verified.fallbackCount).toBe(0);
+		expect(verified.runtimeProvenance).toMatchObject({
+			provider: "fixture-provider",
+			model: "fixture-model",
+		});
 	});
 
 	it("fails closed when child checkpoints are mixed", () => {
 		const report = exactChildReport();
 		report.modelAttempts[0]!.executions[0]!.attestedIdentity!.checkpoint = "checkpoint-2";
-		const verified = verifyLiveWorkflowProvenance(report, "fixture-provider", "fixture-model");
+		const verified = verifyLiveWorkflowProvenance(report, FIXTURE_ROLE_IDENTITIES);
 		expect(verified.runtimeProvenance).toBeUndefined();
 		expect(verified.errors).toContain("child runtime identity mixed or missing: 2");
 	});
@@ -410,7 +621,7 @@ describe("live workflow benchmark runtime", () => {
 			fallbackFrom: "unavailable-planner",
 			skipped: [{ profileId: "unavailable-planner", reason: "unavailable" }],
 		});
-		const verified = verifyLiveWorkflowProvenance(report, "fixture-provider", "fixture-model");
+		const verified = verifyLiveWorkflowProvenance(report, FIXTURE_ROLE_IDENTITIES);
 		expect(verified.runtimeProvenance).toBeUndefined();
 		expect(verified.fallbackCount).toBeGreaterThan(0);
 		expect(verified.errors).toContain("child fallback or routing ambiguity: planning");
@@ -422,6 +633,8 @@ describe("live workflow benchmark runtime", () => {
 		const runtime = createLiveWorkflowBenchmarkRuntime({
 			provider: "fixture-provider",
 			model: "fixture-model",
+			reviewerProvider: "fixture-reviewer-provider",
+			reviewerModel: "fixture-reviewer-model",
 			agentRunner: async () => {
 				throw new Error("Policy violation: required_role_unavailable: planner");
 			},

@@ -35,6 +35,17 @@ describe("ordinary-session model optimization resolver", () => {
 		}
 	});
 
+	it("preserves the built-in Luna candidate through partial profile overrides", () => {
+		const merged = mergeModelOptimizationProfiles({ luna: { toolStrategy: { maxConcurrentTools: 3 } } });
+		const luna = merged.find(profile => profile.id === "luna");
+		expect(luna?.contextBudgetCandidate).toEqual({
+			version: 1,
+			targetUtilization: 0.7,
+			keepRecentN: 8,
+			maxToolCalls: 8,
+		});
+	});
+
 	it("fails closed on an equal-priority ambiguity", () => {
 		const model = requiredModel("openai", "gpt-5");
 		const profiles: ModelOptimizationProfile[] = [

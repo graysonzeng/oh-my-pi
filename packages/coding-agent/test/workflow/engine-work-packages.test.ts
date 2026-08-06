@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { $ } from "bun";
+import { LATENCY_ARM_IDS, LATENCY_ARM_SETTINGS, type LatencyArmId } from "../../src/latency/arms";
+import { buildMechanicalClass } from "../../src/latency/mechanical-class";
 import type { ToolSession } from "../../src/tools";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import type { WorkflowDefaultConfig } from "../../src/workflow/default-config";
@@ -77,13 +80,14 @@ function emitRuntimeIdentity(request: StructuredRunnerRequest, mode: IdentityMod
 	const provider = slash > 0 ? configured.slice(0, slash) : "xai";
 	const model = slash > 0 ? configured.slice(slash + 1) : configured;
 	const attestedModel = mode === "mismatch" ? `${model}-mismatch` : model;
+	const reportedEffort = request.thinkingLevel ?? MEDIUM;
 	request.onResponse?.(
 		{ status: 200, headers: { "x-provider-model": `${provider}/${attestedModel}` } } as never,
 		{
 			provider,
 			id: model,
 			reasoning: true,
-			thinking: { efforts: [MEDIUM] },
+			thinking: { efforts: [reportedEffort] },
 		} as never,
 	);
 }
@@ -138,6 +142,20 @@ function strictPackageConfig(
 		defaultQualityTier: "balanced",
 		forbiddenPaths,
 	};
+}
+
+function roleStaticSplitConfig(): Partial<WorkflowDefaultConfig> {
+	const flashRepair = strictProfile("role_repair_flash", "repair", "deepseek/deepseek-v4-flash", "deepseek");
+	flashRepair.thinkingLevel = ThinkingLevel.Max;
+	const profiles = [
+		strictProfile("role_planner", "planner", "anthropic/claude-fable-5", "anthropic"),
+		strictProfile("role_plan_reviewer", "plan_reviewer", "openai/gpt-5.6-sol", "openai"),
+		strictProfile("role_implementer", "implementer", "xai/grok-4.5", "xai"),
+		strictProfile("role_code_reviewer", "code_reviewer", "openai/gpt-5.6-terra", "openai"),
+		strictProfile("role_repair_strong", "repair", "anthropic/claude-fable-5", "anthropic"),
+		flashRepair,
+	];
+	return { profiles: Object.fromEntries(profiles.map(profile => [profile.id, profile])), qualityRoutes: {} };
 }
 
 function availableProfiles(): WorkflowAvailabilityPort {
@@ -363,9 +381,23 @@ function scriptedRunner(script: RunnerScript): StructuredRunner {
 	};
 }
 
-function fakeSession(cwd: string, maxConcurrency = 1, exposeMaxConcurrency = true): ToolSession {
+function fakeSession(
+	cwd: string,
+	maxConcurrency = 1,
+	exposeMaxConcurrency = true,
+	latency?: {
+		frozen?: Partial<Record<LatencyArmId, boolean>>;
+		live?: Partial<Record<LatencyArmId, boolean>>;
+	},
+): ToolSession {
 	const settings = {
-		get: (key: string) => (key === "task.maxConcurrency" && exposeMaxConcurrency ? maxConcurrency : undefined),
+		get: (key: string): unknown => {
+			if (key === "task.maxConcurrency" && exposeMaxConcurrency) return maxConcurrency;
+			for (const arm of LATENCY_ARM_IDS) {
+				if (key === LATENCY_ARM_SETTINGS[arm]) return latency?.live?.[arm];
+			}
+			return undefined;
+		},
 		set: () => {},
 	};
 	return {
@@ -374,6 +406,7 @@ function fakeSession(cwd: string, maxConcurrency = 1, exposeMaxConcurrency = tru
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: settings as unknown as ToolSession["settings"],
+		...(latency?.frozen ? { isLatencyArmEnabled: (arm: LatencyArmId) => latency.frozen?.[arm] === true } : {}),
 	};
 }
 
@@ -572,6 +605,78 @@ describe("WorkflowEngine work-package execution", () => {
 		await store.addArtifact(storedScope);
 	}
 
+	it("routes frozen role-static repair to Flash without degrading the plan reviewer", async () => {
+		const cases = [
+			{ frozen: true, live: false, expectedRepairModel: "deepseek/deepseek-v4-flash" },
+			{ frozen: false, live: true, expectedRepairModel: "anthropic/claude-fable-5" },
+		] as const;
+		for (const testCase of cases) {
+			const repairModels: string[] = [];
+			const planReviewerModels: string[] = [];
+			let codeReviewCalls = 0;
+			const finding: ReviewFindingV1 = {
+				id: "mechanical-repair",
+				priority: "P2",
+				category: "maintainability",
+				status: "open",
+				confidence: 0.99,
+				summary: "Apply the deterministic repair",
+				explanation: "The scripted repair is mechanical",
+				suggestedOwner: "implementer",
+				blocking: true,
+			};
+			const scripted = scriptedRunner({
+				plan: makePlan(),
+				planReview: makeReview("plan"),
+				implement: async (request, packageId) => {
+					const isRepair = /Repair findings/i.test(request.assignment);
+					if (isRepair) repairModels.push(requestModel(request));
+					const artifact = makeImplementation(
+						`patches/${packageId ?? "whole-plan"}.patch`,
+						["src/a.ts"],
+						packageId ? "repair" : "implementation",
+					);
+					return isRepair ? { ...artifact, addressedStepIds: [finding.id] } : artifact;
+				},
+				codeReview: () => {
+					codeReviewCalls += 1;
+					if (codeReviewCalls === 1) {
+						return { ...makeReview("implementation"), decision: "changes_requested", findings: [finding] };
+					}
+					return makeReview("implementation");
+				},
+			});
+			const runner: StructuredRunner = async request => {
+				if (request.agent === "reviewer") {
+					planReviewerModels.push(requestModel(request));
+				}
+				return scripted(request);
+			};
+			const engine = makeEngine(runner, combinedMerger([]), 1, roleStaticSplitConfig());
+			const workflowId = await engine.startWorkflow(
+				{ request: `role static split ${testCase.frozen ? "frozen-on" : "frozen-off"}` },
+				{
+					mechanicalClass: buildMechanicalClass({
+						class: "mechanical_repair",
+						source: "caller_declaration",
+						targetRole: "repair",
+					}),
+				},
+			);
+			const result = await engine.run(
+				workflowId,
+				fakeSession(cwd, 1, true, {
+					frozen: { role_static_split: testCase.frozen },
+					live: { role_static_split: testCase.live },
+				}),
+			);
+
+			expect(result.state.status).toBe("completed");
+			expect(repairModels).toEqual([testCase.expectedRepairModel]);
+			expect(planReviewerModels).toContain("openai/gpt-5.6-sol");
+		}
+	});
+
 	it("runs a package-less plan through exactly one whole-plan implementer call without merging", async () => {
 		const wholePlanRequests: StructuredRunnerRequest[] = [];
 		const mergeCalls: CapturedChangesMergeRequest[] = [];
@@ -601,7 +706,7 @@ describe("WorkflowEngine work-package execution", () => {
 		expect(result.workPackageState).toBeUndefined();
 	});
 
-	it("runs independent packages concurrently, captures patches, and applies one deterministic merge", async () => {
+	it("runs baseline plan.workPackages concurrently with optimization arms off", async () => {
 		const packages: WorkPackageV1[] = [
 			{ id: "a", assignment: "Implement A", paths: ["src/a.ts"], dependsOn: [] },
 			{ id: "b", assignment: "Implement B", paths: ["src/b.ts"], dependsOn: [] },
@@ -675,6 +780,76 @@ describe("WorkflowEngine work-package execution", () => {
 		]);
 	});
 
+	// Declaration-derived lowering is independently gated from the baseline plan.workPackages path.
+	it("lowers frozen-enabled independent write declarations while live settings drift off", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "decl-a", assignment: "Declared A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "decl-b", assignment: "Declared B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const packageCalls: string[] = [];
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const runner = scriptedRunner({
+			plan: makePlan(packages),
+			planReview: makeReview("plan"),
+			implement: async (_request, packageId) => {
+				if (!packageId) throw new Error("declaration should lower to packages");
+				packageCalls.push(packageId);
+				const file = packageId === "decl-a" ? "src/a.ts" : "src/b.ts";
+				return makeImplementation(`patches/${packageId}.patch`, [file], packageId);
+			},
+			codeReview: makeReview("implementation"),
+		});
+		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2);
+		const workflowId = await engine.startWorkflow({ request: "lower independent declaration units" });
+		const result = await engine.run(
+			workflowId,
+			fakeSession(cwd, 2, true, {
+				frozen: { concurrency_declaration: true, concurrency_execution: true },
+				live: { concurrency_declaration: false, concurrency_execution: false },
+			}),
+		);
+
+		expect(result.state.status).toBe("completed");
+		expect([...packageCalls].sort()).toEqual(["decl-a", "decl-b"]);
+		expect(mergeCalls).toHaveLength(1);
+		expect(result.workPackageState?.packages.map(workPackage => workPackage.id)).toEqual(["decl-a", "decl-b"]);
+	});
+
+	it("ignores a declaration when its frozen declaration arm is off and preserves baseline work packages", async () => {
+		const packages: WorkPackageV1[] = [
+			{ id: "base-a", assignment: "Baseline A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "base-b", assignment: "Baseline B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const packageCalls: string[] = [];
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const runner = scriptedRunner({
+			plan: makePlan(packages),
+			planReview: makeReview("plan"),
+			implement: async (_request, packageId) => {
+				if (!packageId) throw new Error("baseline packages should remain active");
+				packageCalls.push(packageId);
+				return makeImplementation(`patches/${packageId}.patch`, [`src/${packageId.replace("base-", "")}.ts`]);
+			},
+			codeReview: makeReview("implementation"),
+		});
+		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2);
+		const workflowId = await engine.startWorkflow(
+			{ request: "preserve baseline work packages" },
+			{ concurrencyDeclaration: { unknownField: true } },
+		);
+		const result = await engine.run(
+			workflowId,
+			fakeSession(cwd, 2, true, {
+				frozen: { concurrency_declaration: false, concurrency_execution: true },
+				live: { concurrency_declaration: true, concurrency_execution: false },
+			}),
+		);
+
+		expect(result.state.status).toBe("completed");
+		expect([...packageCalls].sort()).toEqual(["base-a", "base-b"]);
+		expect(result.workPackageState?.packages.map(workPackage => workPackage.id)).toEqual(["base-a", "base-b"]);
+	});
+
 	it("falls back to one whole-plan implementation when one package consumes a predecessor API", async () => {
 		const packages: WorkPackageV1[] = [
 			{ id: "b", assignment: "Consume the API added by A", paths: ["src/b.ts"], dependsOn: ["a"] },
@@ -700,7 +875,13 @@ describe("WorkflowEngine work-package execution", () => {
 		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2);
 		const workflowId = await engine.startWorkflow({ request: "run dependent packages safely" });
 
-		const result = await engine.run(workflowId, fakeSession(cwd, 2));
+		const result = await engine.run(
+			workflowId,
+			fakeSession(cwd, 2, true, {
+				frozen: { concurrency_declaration: true, concurrency_execution: true },
+				live: { concurrency_declaration: false, concurrency_execution: false },
+			}),
+		);
 
 		expect(result.state.status).toBe("completed");
 		expect(packageCalls).toEqual([]);

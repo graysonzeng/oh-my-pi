@@ -3,6 +3,7 @@ import type { Model, Usage } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../src/config/model-registry";
 import {
+	AVAILABILITY_PROBE_TIMEOUT_MS,
 	availabilityProbePromptText,
 	EmbeddedWorkflowAvailabilityPort,
 	interpretProbeResult,
@@ -90,6 +91,23 @@ describe("WorkflowAvailabilityPort contract", () => {
 
 		expect(result.status).toBe("available");
 		expect(sessionCalls).toBe(1);
+	});
+
+	it("fails closed on an explicit short timeout", async () => {
+		const pending = Promise.withResolvers<WorkflowAvailabilityProbeResult>();
+		const port = new EmbeddedWorkflowAvailabilityPort((_request, signal) => {
+			signal.addEventListener("abort", () => pending.reject(signal.reason), { once: true });
+			return pending.promise;
+		});
+		const result = await port.probe({
+			profile: profile({ id: "slow", roles: ["planner"], modelPattern: "gateway/slow" }),
+			role: "planner",
+			session: fakeSession(),
+			timeoutMs: 5,
+		});
+
+		expect(result.status).toBe("unavailable");
+		expect(result.errorKind).toBe("timeout");
 	});
 
 	it("fails closed when the session model registry is missing", async () => {
@@ -375,8 +393,10 @@ describe("WorkflowAvailabilityPort contract", () => {
 	});
 
 	it("uses the specified production timeout defaults", () => {
-		expect(DEFAULT_AVAILABILITY_PER_TARGET_TIMEOUT_MS).toBe(15_000);
-		expect(DEFAULT_AVAILABILITY_OVERALL_TIMEOUT_MS).toBe(45_000);
+		expect(AVAILABILITY_PROBE_TIMEOUT_MS).toBe(30_000);
+		expect(DEFAULT_AVAILABILITY_PER_TARGET_TIMEOUT_MS).toBe(30_000);
+		expect(DEFAULT_AVAILABILITY_PER_TARGET_TIMEOUT_MS).toBe(AVAILABILITY_PROBE_TIMEOUT_MS);
+		expect(DEFAULT_AVAILABILITY_OVERALL_TIMEOUT_MS).toBe(60_000);
 	});
 
 	it("marks a non-cooperative target unavailable on its per-target timeout", async () => {

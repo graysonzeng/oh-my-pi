@@ -185,6 +185,8 @@ function legacyRunner(calls: string[], patchPath: string): StructuredRunner {
 	return async request => {
 		const agent = request.agent ?? "";
 		calls.push(agent);
+		const model = requestModel(request);
+		emitRuntimeIdentity(request, "valid");
 		let data: unknown;
 		if (agent === "designer" || agent === "planner") data = planArtifact();
 		else if (agent === "reviewer" || agent === "plan_reviewer") data = reviewArtifact("approved", "plan");
@@ -199,7 +201,7 @@ function legacyRunner(calls: string[], patchPath: string): StructuredRunner {
 				id: `legacy-${calls.length}`,
 				structuredOutput: { status: "valid", data },
 				patchPath: agent === "task" || agent === "implementer" ? patchPath : undefined,
-				resolvedModel: "xai/grok-4.5",
+				resolvedModel: model,
 			},
 		};
 	};

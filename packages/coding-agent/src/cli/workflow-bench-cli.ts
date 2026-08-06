@@ -8,13 +8,16 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type BenchmarkReport,
+	type BenchmarkRoleIdentityMap,
 	type BenchmarkRuntime,
 	type BenchmarkSuite,
 	type BenchmarkVariantKind,
 	buildBenchmarkReport,
 	buildDefaultBenchmarkSuite,
+	buildLiveBenchmarkRoleIdentityMap,
 	createFakeBenchmarkRuntime,
 	renderBenchmarkReportMarkdown,
+	resolveBenchmarkExperiment,
 	runBenchmarkSuite,
 } from "../workflow/benchmark";
 
@@ -24,7 +27,8 @@ export interface WorkflowBenchCommandArgs {
 		mode?: string;
 		provider?: string;
 		model?: string;
-		json?: boolean;
+		reviewerProvider?: string;
+		reviewerModel?: string;
 		/** Override min repetitions (alias: reps). */
 		repetitions?: number;
 		/** Legacy alias for repetitions. */
@@ -35,6 +39,10 @@ export interface WorkflowBenchCommandArgs {
 		case?: string;
 		/** baseline | optimized | both (default both). */
 		variant?: string;
+		/** profile-strategy (default) or presentation. */
+		experiment?: string;
+		/** Emit machine-readable stdout. */
+		json?: boolean;
 		/** Directory to write scorecard.json + compare-report.md. */
 		output?: string;
 	};
@@ -97,6 +105,8 @@ export async function runWorkflowBenchCommand(
 	args: WorkflowBenchCommandArgs,
 	dependencies: WorkflowBenchCommandDependencies = {},
 ): Promise<WorkflowBenchCommandResult> {
+	const experiment = resolveBenchmarkExperiment(args.flags.experiment);
+	const activeLever = experiment === "presentation" ? "workflow.presentationOptimization.enabled" : "profile_strategy";
 	let suite = selectSuite(args.flags.suite);
 	suite = filterCases(suite, args.flags.case);
 	const variants = parseVariants(args.flags.variant);
@@ -112,6 +122,18 @@ export async function runWorkflowBenchCommand(
 
 	const mode = args.flags.mode?.trim().toLowerCase() || "fake";
 	if (mode !== "fake" && mode !== "live") throw new Error(`Invalid --mode=${args.flags.mode}. Use fake or live.`);
+	let roleIdentityMap: BenchmarkRoleIdentityMap | null = null;
+	if (mode === "live") {
+		if (!args.flags.provider || !args.flags.model || !args.flags.reviewerModel) {
+			throw new Error("--mode live requires explicit --provider, --model, and --reviewer-model flags");
+		}
+		roleIdentityMap = buildLiveBenchmarkRoleIdentityMap(
+			args.flags.provider,
+			args.flags.model,
+			args.flags.reviewerProvider,
+			args.flags.reviewerModel,
+		);
+	}
 	if (mode === "live" && !dependencies.liveRuntime) {
 		throw new Error("Live benchmark runtime was not configured at the command boundary");
 	}
@@ -124,6 +146,9 @@ export async function runWorkflowBenchCommand(
 		optimizedProfileId: "grok_implementer",
 		optimizedStrategyFingerprint: "workflow-bench-cli",
 		liveQualityUnknown,
+		experiment,
+		activeLever,
+		roleIdentityMap,
 		provider: mode === "live" ? args.flags.provider : null,
 		model: mode === "live" ? args.flags.model : null,
 	});
@@ -131,10 +156,12 @@ export async function runWorkflowBenchCommand(
 	const report = buildBenchmarkReport(suite, results, {
 		liveQualityUnknown,
 		acceptanceMinRepetitions,
+		experiment,
 		notes:
 			mode === "live"
 				? [
 						`Live workflow benchmark used explicit provider/model ${args.flags.provider}/${args.flags.model}.`,
+						`Live workflow reviewers used ${args.flags.reviewerProvider?.trim() || args.flags.provider}/${args.flags.reviewerModel}.`,
 						"Fixture verificationCommands and git diff scope were executed.",
 						...(shortAcceptance
 							? [
@@ -166,6 +193,7 @@ export async function runWorkflowBenchCommand(
 			`${JSON.stringify(
 				{
 					suiteId: suite.id,
+					experiment: report.experiment,
 					suiteVersion: suite.suiteVersion,
 					caseCount: suite.cases.length,
 					resultCount: results.length,
@@ -182,6 +210,7 @@ export async function runWorkflowBenchCommand(
 	} else {
 		const header = [
 			`workflow-bench suite=${suite.id} version=${suite.suiteVersion} cases=${suite.cases.length} results=${results.length}`,
+			`experiment=${report.experiment}`,
 			`mode=${mode === "live" ? "live-workflow" : "fake-runtime-smoke (not live agent quality)"}`,
 			`gate.passed=${report.gate.passed} liveQualityUnknown=${report.liveQualityUnknown}`,
 			`summaries=${report.scorecard.summaries.length}`,

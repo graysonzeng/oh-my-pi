@@ -326,6 +326,7 @@ export function formatComparisonMarkdown(report: BenchmarkReport): string {
 	lines.push(`# Benchmark comparison: ${report.suiteId}`);
 	lines.push("");
 	lines.push(`- suiteVersion: \`${report.suiteVersion}\``);
+	lines.push(`- experiment: \`${report.experiment}\``);
 	lines.push(`- generatedAt: \`${report.generatedAt}\``);
 	lines.push(`- liveQualityUnknown: \`${report.liveQualityUnknown}\``);
 	if (report.compiledPolicyReceiptId) {

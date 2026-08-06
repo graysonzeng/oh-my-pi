@@ -13,10 +13,19 @@ import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-ca
 import { Settings } from "../../config/settings";
 import { createAgentSession } from "../../sdk";
 import { getDefaultConfig } from "../default-config";
-import type { ModelProfile, WorkflowModelBackedStage, WorkflowStatusReportV1 } from "../types";
+import type { ModelProfile, WorkflowModelBackedStage, WorkflowRole, WorkflowStatusReportV1 } from "../types";
 import { materializeBenchmarkFixture } from "./fixtures";
 import type { BenchmarkRuntime, BenchmarkRuntimeRequest, BenchmarkRuntimeResponse } from "./runner";
-import type { BenchmarkRuntimeProvenance } from "./types";
+import { resolveBenchmarkExperiment } from "./runner";
+import type {
+	BenchmarkExperiment,
+	BenchmarkRoleIdentity,
+	BenchmarkRoleIdentityMap,
+	BenchmarkRuntimeProvenance,
+} from "./types";
+
+export type LiveBenchmarkRoleIdentity = BenchmarkRoleIdentity;
+export type LiveBenchmarkRoleIdentityMap = BenchmarkRoleIdentityMap;
 
 interface WorkflowToolDetails {
 	workflowId?: string;
@@ -39,6 +48,10 @@ interface WorkflowToolPort {
 export interface LiveBenchmarkRuntimeOptions {
 	provider: string;
 	model: string;
+	/** Reviewer provider defaults to the primary provider at the CLI boundary. */
+	reviewerProvider?: string;
+	/** Reviewer model is mandatory for live runs and must be a different model family. */
+	reviewerModel: string;
 	agentDir?: string;
 	maxResumeSteps?: number;
 	/** Test seam; production defaults to a real createAgentSession + workflow tool run. */
@@ -76,73 +89,246 @@ function providerFact<T>(value: T): { value: T; provenance: "provider_fact" } {
 	return { value, provenance: "provider_fact" };
 }
 
-/**
- * Live fixed-model runs rewrite every profile onto one provider/model.
- * Preserve supported efforts; otherwise prefer the model default (`max` when available),
- * falling back to catalog clamp. deepseek-v4-flash defaults to max.
- * Profiles are strict-identity so quality-route snapshots can be compiled and
- * live provenance can verify configured stage routes.
- */
+const REVIEWER_ROLES: Partial<Record<WorkflowRole, true>> = {
+	plan_reviewer: true,
+	plan_arbitrator: true,
+	code_reviewer: true,
+};
 
+interface LiveModelIdentityInput extends BenchmarkRoleIdentity {
+	bareModel: string;
+	modelPattern: string;
+}
+
+interface ParsedLiveProfileArguments {
+	variant: BenchmarkRuntimeRequest["variant"];
+	experiment: BenchmarkExperiment;
+	reviewerProvider: string;
+	reviewerModel: string;
+}
+
+function isBenchmarkVariant(value: string | undefined): value is BenchmarkRuntimeRequest["variant"] {
+	return value === "baseline" || value === "optimized";
+}
+
+function isBenchmarkExperiment(value: string | undefined): boolean {
+	return value === "profile-strategy" || value === "presentation";
+}
+
+function normalizeLiveModelIdentity(provider: string, model: string): LiveModelIdentityInput {
+	const normalizedProvider = provider.trim();
+	const normalizedModel = model.trim();
+	const modelPattern = normalizedModel.includes("/") ? normalizedModel : `${normalizedProvider}/${normalizedModel}`;
+	const bareModel = normalizedModel.startsWith(`${normalizedProvider}/`)
+		? normalizedModel.slice(normalizedProvider.length + 1)
+		: (normalizedModel.split("/").pop() ?? normalizedModel);
+	return { provider: normalizedProvider, model: bareModel, bareModel, modelPattern };
+}
+
+function liveModelFamily(identity: LiveModelIdentityInput): string {
+	return (
+		modelFamilyToken(identity.bareModel) || modelFamilyToken(identity.modelPattern) || identity.provider.toLowerCase()
+	);
+}
+
+/** Fail closed before any fixture/repetition work when live roles are not independent. */
+export function validateLiveBenchmarkModelPair(
+	provider: string,
+	model: string,
+	reviewerProvider?: string,
+	reviewerModel?: string,
+): { primary: LiveModelIdentityInput; reviewer: LiveModelIdentityInput } {
+	const primary = normalizeLiveModelIdentity(provider, model);
+	if (!primary.provider || !primary.bareModel) {
+		throw new Error("Live benchmark requires explicit provider and model values");
+	}
+	const normalizedReviewerProvider = reviewerProvider?.trim() || primary.provider;
+	if (!reviewerModel?.trim()) {
+		throw new Error("Live benchmark requires explicit reviewer model");
+	}
+	const reviewer = normalizeLiveModelIdentity(normalizedReviewerProvider, reviewerModel);
+	if (liveModelFamily(primary) === liveModelFamily(reviewer)) {
+		throw new Error(
+			`Live benchmark reviewer model family must differ from primary model family: ` +
+				`primary=${liveModelFamily(primary)} reviewer=${liveModelFamily(reviewer)}`,
+		);
+	}
+	return { primary, reviewer };
+}
+
+/** Build the fixed role→identity contract consumed by profile compilation and provenance verification. */
+export function buildLiveBenchmarkRoleIdentityMap(
+	provider: string,
+	model: string,
+	reviewerProviderOrModel?: string,
+	reviewerModel?: string,
+): BenchmarkRoleIdentityMap {
+	const reviewerProvider = reviewerModel === undefined ? undefined : reviewerProviderOrModel;
+	const reviewerModelValue = reviewerModel ?? reviewerProviderOrModel;
+	const { primary, reviewer } = validateLiveBenchmarkModelPair(provider, model, reviewerProvider, reviewerModelValue);
+	return {
+		planner: { provider: primary.provider, model: primary.model },
+		plan_reviewer: { provider: reviewer.provider, model: reviewer.model },
+		plan_arbitrator: { provider: reviewer.provider, model: reviewer.model },
+		implementer: { provider: primary.provider, model: primary.model },
+		code_reviewer: { provider: reviewer.provider, model: reviewer.model },
+		repair: { provider: primary.provider, model: primary.model },
+	};
+}
+
+function parseLiveProfileArguments(
+	provider: string,
+	arg3: string | undefined,
+	arg4: string | undefined,
+	arg5: string | undefined,
+	arg6: string | undefined,
+): ParsedLiveProfileArguments {
+	let variant: string | undefined;
+	let experiment: string | undefined;
+	let reviewerProvider: string | undefined;
+	let reviewerModel: string | undefined;
+	if (isBenchmarkVariant(arg3)) {
+		variant = arg3;
+		if (isBenchmarkExperiment(arg4) || arg4 === undefined) {
+			experiment = arg4;
+			if (arg6 === undefined && arg5 !== undefined) {
+				reviewerModel = arg5;
+			} else {
+				reviewerProvider = arg5;
+				reviewerModel = arg6;
+			}
+		} else {
+			reviewerProvider = arg4;
+			reviewerModel = arg5;
+			experiment = arg6;
+		}
+	} else {
+		reviewerProvider = arg3;
+		reviewerModel = arg4;
+		variant = arg5;
+		experiment = arg6;
+	}
+	if (!isBenchmarkVariant(variant)) {
+		throw new Error(`Invalid benchmark variant=${variant ?? "undefined"}. Use baseline or optimized.`);
+	}
+	return {
+		variant,
+		experiment: resolveBenchmarkExperiment(experiment),
+		reviewerProvider: reviewerProvider?.trim() || provider.trim(),
+		reviewerModel: reviewerModel?.trim() || "",
+	};
+}
+
+/**
+ * Live fixed-model runs rewrite every profile onto its role's provider/model.
+ * Planner/implementer/repair profiles use primary; plan/code arbitration reviewers use reviewer.
+ * Both arms keep strict identity, fixed retry policy, and catalog-supported thinking.
+ */
 export function buildLiveBenchmarkProfileOverrides(
 	provider: string,
 	model: string,
-	variant: BenchmarkRuntimeRequest["variant"],
+	arg3: string | undefined,
+	arg4?: string,
+	arg5?: string,
+	arg6?: string,
 ): Record<string, Partial<ModelProfile>> {
-	const modelPattern = model.includes("/") ? model : `${provider}/${model}`;
-	const bareModel = model.includes("/") ? (model.split("/").pop() ?? model) : model;
-	const providerReferences = getBundledProviderModelReferenceIndex(provider);
-	const knownModel: Model | undefined =
-		(providerReferences ? resolveModelReference(bareModel, providerReferences) : undefined) ??
-		resolveModelReference(bareModel, getBundledModelReferenceIndex()) ??
-		resolveModelReference(model, getBundledModelReferenceIndex());
-	const supported = knownModel ? getSupportedEfforts(knownModel) : [];
+	const parsed = parseLiveProfileArguments(provider, arg3, arg4, arg5, arg6);
+	const { primary, reviewer } = validateLiveBenchmarkModelPair(
+		provider,
+		model,
+		parsed.reviewerProvider,
+		parsed.reviewerModel,
+	);
 	const profiles: Record<string, Partial<ModelProfile>> = {};
 	for (const [id, base] of Object.entries(getDefaultConfig().profiles)) {
+		const target = base.roles.some(role => REVIEWER_ROLES[role] === true) ? reviewer : primary;
+		const providerReferences = getBundledProviderModelReferenceIndex(target.provider);
+		const knownModel: Model | undefined =
+			(providerReferences ? resolveModelReference(target.bareModel, providerReferences) : undefined) ??
+			resolveModelReference(target.bareModel, getBundledModelReferenceIndex()) ??
+			resolveModelReference(target.modelPattern, getBundledModelReferenceIndex());
+		const supported = knownModel ? getSupportedEfforts(knownModel) : [];
 		let thinkingLevel: ModelProfile["thinkingLevel"] = base.thinkingLevel;
 		if (knownModel) {
 			if (supported.length === 0) {
 				thinkingLevel = undefined;
 			} else if (thinkingLevel && thinkingLevel !== "auto" && supported.includes(thinkingLevel as Effort)) {
-				// keep requested supported effort
+				// Keep requested supported effort.
 			} else if (supported.includes(Effort.Max)) {
 				thinkingLevel = Effort.Max;
 			} else {
 				thinkingLevel = clampThinkingLevelForModel(knownModel, thinkingLevel as Effort | undefined) ?? supported[0];
 			}
 		}
-		// Strict identity requires vendor == model lineage (not transport provider).
-		const lineage = modelFamilyToken(bareModel) ?? modelFamilyToken(model) ?? provider;
 		const liveIdentity: Partial<ModelProfile> = {
-			vendor: lineage,
-			modelPattern,
-			// Fixed-model live acceptance requires strict identity + zero fallbacks.
+			vendor: modelFamilyToken(target.bareModel) || modelFamilyToken(target.modelPattern) || target.provider,
+			modelPattern: target.modelPattern,
 			strictIdentity: true,
 			maxRuntimeMs: 600_000,
 			retryPolicy: { maxAttempts: 1, retryableErrorKinds: [], fallbackProfileIds: [] },
 			thinkingLevel,
 		};
 		profiles[id] =
-			variant === "baseline"
-				? {
-						...liveIdentity,
-						promptStrategy: undefined,
-						toolStrategy: undefined,
-						contextStrategy: undefined,
-						outputStrategy: undefined,
-						toolAliases: undefined,
-						argumentAliases: undefined,
-						presentationPolicy: { enabled: false, mode: "direct" },
-					}
-				: liveIdentity;
+			parsed.experiment === "presentation"
+				? liveIdentity
+				: parsed.variant === "baseline"
+					? {
+							...liveIdentity,
+							promptStrategy: undefined,
+							toolStrategy: undefined,
+							contextStrategy: undefined,
+							outputStrategy: undefined,
+							toolAliases: undefined,
+							argumentAliases: undefined,
+							presentationPolicy: { enabled: false, mode: "direct" },
+						}
+					: liveIdentity;
 	}
 	return profiles;
 }
 
+export interface LiveBenchmarkExperimentConfig {
+	experiment: BenchmarkExperiment;
+	profileOverrides: Record<string, Partial<ModelProfile>>;
+	roleIdentityMap: BenchmarkRoleIdentityMap;
+	presentationOptimizationEnabled: boolean;
+}
+
+/** Compile profile, role identity, and presentation inputs for one benchmark arm. */
+export function buildLiveBenchmarkExperimentConfig(
+	provider: string,
+	model: string,
+	arg3: string | undefined,
+	arg4?: string,
+	arg5?: string,
+	arg6?: string,
+): LiveBenchmarkExperimentConfig {
+	const parsed = parseLiveProfileArguments(provider, arg3, arg4, arg5, arg6);
+	const roleIdentityMap = buildLiveBenchmarkRoleIdentityMap(
+		provider,
+		model,
+		parsed.reviewerProvider,
+		parsed.reviewerModel,
+	);
+	return {
+		experiment: parsed.experiment,
+		profileOverrides: buildLiveBenchmarkProfileOverrides(
+			provider,
+			model,
+			parsed.variant,
+			parsed.experiment,
+			parsed.reviewerProvider,
+			parsed.reviewerModel,
+		),
+		roleIdentityMap,
+		presentationOptimizationEnabled: parsed.experiment === "presentation" && parsed.variant === "optimized",
+	};
+}
+
 /**
  * Compile a single-tier quality route for live fixed-model runs.
- * One default profile id per required role is enough: live overrides rewrite every
- * profile onto the same provider/model, and provenance only needs a verified route.
+ * One default profile id per required role is enough: live overrides rewrite each
+ * role's profiles onto its expected primary or independent reviewer identity.
  */
 export function buildLiveBenchmarkQualityRoutes(): Record<
 	string,
@@ -151,17 +337,20 @@ export function buildLiveBenchmarkQualityRoutes(): Record<
 	>
 > {
 	const profiles = getDefaultConfig().profiles;
-	const firstId = (role: "planner" | "plan_reviewer" | "implementer" | "code_reviewer" | "repair"): string => {
+	const firstId = (
+		role: "planner" | "plan_reviewer" | "plan_arbitrator" | "implementer" | "code_reviewer" | "repair",
+	): string => {
 		const match = Object.values(profiles).find(profile => profile.roles.includes(role));
 		if (!match) throw new Error(`Live benchmark missing default profile for role ${role}`);
 		return match.id;
 	};
-	// Omit plan_arbitrator: settings resolver rejects empty arrays, and the
-	// snapshot compiler treats missing optional arbitrator routes as empty.
+	// Arbitration is conditional at runtime, but its identity and route must be
+	// compiled so a real arbitration attempt is verifiable rather than unknown.
 	return {
 		balanced: {
 			planner: [firstId("planner")],
 			plan_reviewer: [firstId("plan_reviewer")],
+			plan_arbitrator: [firstId("plan_arbitrator")],
 			implementer: [firstId("implementer")],
 			code_reviewer: [firstId("code_reviewer")],
 			repair: [firstId("repair")],
@@ -246,6 +435,15 @@ const REQUIRED_LIVE_MODEL_STAGES: readonly WorkflowModelBackedStage[] = [
 	"code_review",
 ];
 
+const REQUIRED_LIVE_STAGE_ROLES = {
+	planning: ["planner"],
+	plan_review: ["plan_reviewer", "plan_arbitrator"],
+	implementing: ["implementer"],
+	code_review: ["code_reviewer"],
+} as const satisfies Record<Exclude<WorkflowModelBackedStage, "repairing">, readonly WorkflowRole[]>;
+
+const PRIMARY_LIVE_ROLES: readonly WorkflowRole[] = ["planner", "implementer", "repair"];
+
 export interface LiveWorkflowProvenanceVerification {
 	runtimeProvenance?: BenchmarkRuntimeProvenance;
 	fallbackCount: number;
@@ -255,20 +453,46 @@ export interface LiveWorkflowProvenanceVerification {
 /** Verify fixed-model provenance exclusively from hash-checked child workflow evidence. */
 export function verifyLiveWorkflowProvenance(
 	report: WorkflowStatusReportV1 | undefined,
-	provider: string,
-	model: string,
+	expectedOrProvider: BenchmarkRoleIdentityMap | string,
+	model?: string,
+	reviewerProvider?: string | BenchmarkRoleIdentityMap,
+	reviewerModel?: string,
 ): LiveWorkflowProvenanceVerification {
 	if (!report) return { fallbackCount: 0, errors: ["child workflow status evidence missing"] };
+	const expectedRoleIdentities: BenchmarkRoleIdentityMap =
+		typeof expectedOrProvider === "string"
+			? (() => {
+					if (!model?.trim()) throw new Error("Live provenance verification requires an expected model");
+					if (reviewerProvider && typeof reviewerProvider === "object") return reviewerProvider;
+					if (reviewerModel?.trim()) {
+						return buildLiveBenchmarkRoleIdentityMap(expectedOrProvider, model, reviewerProvider, reviewerModel);
+					}
+					const primary = normalizeLiveModelIdentity(expectedOrProvider, model);
+					return {
+						planner: primary,
+						plan_reviewer: primary,
+						plan_arbitrator: primary,
+						implementer: primary,
+						code_reviewer: primary,
+						repair: primary,
+					};
+				})()
+			: expectedOrProvider;
 	const errors: string[] = [];
 	let fallbackCount = 0;
 	const qualityRouteVerified = report.qualityRoute.status === "verified";
 	if (!qualityRouteVerified && report.qualityRoute.status !== "legacy") {
 		errors.push(`child quality route evidence ${report.qualityRoute.status}`);
 	}
-	const expectedModel = model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
 	const configuredProfilesByStage = new Map(
 		report.qualityRoute.configuredStages.map(stage => [stage.stage, stage.orderedProfileIds] as const),
 	);
+	for (const route of report.qualityRoute.configuredStages) {
+		const expectedRole = REQUIRED_LIVE_STAGE_ROLES[route.stage as keyof typeof REQUIRED_LIVE_STAGE_ROLES];
+		if (expectedRole && !expectedRole.some(role => role === route.role)) {
+			errors.push(`child configured route role mismatch: ${route.stage}`);
+		}
+	}
 	const attemptsByStage = new Map<WorkflowModelBackedStage, typeof report.modelAttempts>();
 	for (const attempt of report.modelAttempts) {
 		const prior = attemptsByStage.get(attempt.stage) ?? [];
@@ -279,9 +503,16 @@ export function verifyLiveWorkflowProvenance(
 		if ((attemptsByStage.get(stage)?.length ?? 0) === 0) errors.push(`child stage evidence missing: ${stage}`);
 	}
 
-	const identities = new Map<string, BenchmarkRuntimeProvenance>();
+	const identitiesByRole = new Map<WorkflowRole, Map<string, BenchmarkRuntimeProvenance>>();
 	for (const attempt of report.modelAttempts) {
 		const configuredProfiles = configuredProfilesByStage.get(attempt.stage);
+		const expectedRole = REQUIRED_LIVE_STAGE_ROLES[attempt.stage as keyof typeof REQUIRED_LIVE_STAGE_ROLES];
+		if (expectedRole && !expectedRole.some(role => role === attempt.role)) {
+			errors.push(`child stage role mismatch: ${attempt.stage}`);
+		}
+		const expected = expectedRoleIdentities[attempt.role];
+		const expectedIdentity = expected ? normalizeLiveModelIdentity(expected.provider, expected.model) : undefined;
+		if (!expectedIdentity) errors.push(`child expected role identity missing: ${attempt.role}`);
 		if (attempt.status !== "completed") errors.push(`child stage attempt not completed: ${attempt.stage}`);
 		if (attempt.evidenceStatus !== "verified") {
 			errors.push(`child stage evidence not verified: ${attempt.stage}`);
@@ -317,11 +548,13 @@ export function verifyLiveWorkflowProvenance(
 				execution.effortSupported !== true ||
 				!configured ||
 				!attested ||
+				!expectedIdentity ||
 				(attested.provenance !== "provider_echo" && attested.provenance !== "gateway_attestation") ||
-				configured.provider !== provider ||
-				configured.model !== expectedModel ||
-				attested.provider !== provider ||
-				attested.model !== expectedModel ||
+				configured.provider !== expectedIdentity.provider ||
+				configured.model !== expectedIdentity.model ||
+				attested.provider !== expectedIdentity.provider ||
+				attested.model !== expectedIdentity.model ||
+				configured.profileId !== attempt.configuredProfileId ||
 				!execution.profileId ||
 				execution.profileId !== attempt.configuredProfileId
 			) {
@@ -337,14 +570,27 @@ export function verifyLiveWorkflowProvenance(
 				adapter: "coding-agent:workflow-child-evidence",
 				parser: "workflow-status-report:v1",
 			};
-			identities.set(JSON.stringify([provenance.provider, provenance.model, provenance.checkpoint]), provenance);
+			const roleIdentities = identitiesByRole.get(attempt.role) ?? new Map<string, BenchmarkRuntimeProvenance>();
+			roleIdentities.set(JSON.stringify([provenance.provider, provenance.model, provenance.checkpoint]), provenance);
+			identitiesByRole.set(attempt.role, roleIdentities);
 		}
 	}
-	if (identities.size !== 1) errors.push(`child runtime identity mixed or missing: ${identities.size}`);
+	for (const [role, identities] of identitiesByRole) {
+		if (identities.size !== 1) errors.push(`child runtime identity mixed or missing: ${role}:${identities.size}`);
+	}
+	const primaryIdentityKeys = new Set<string>();
+	for (const role of PRIMARY_LIVE_ROLES) {
+		for (const key of identitiesByRole.get(role)?.keys() ?? []) primaryIdentityKeys.add(key);
+	}
+	if (primaryIdentityKeys.size !== 1)
+		errors.push(`child runtime identity mixed or missing: ${primaryIdentityKeys.size}`);
+	const primaryProvenance = identitiesByRole.get("planner")?.values().next().value;
 	return {
 		fallbackCount,
 		errors: [...new Set(errors)],
-		...(errors.length === 0 && identities.size === 1 ? { runtimeProvenance: identities.values().next().value! } : {}),
+		...(errors.length === 0 && primaryIdentityKeys.size === 1 && primaryProvenance
+			? { runtimeProvenance: primaryProvenance }
+			: {}),
 	};
 }
 
@@ -357,24 +603,31 @@ async function runProductionWorkflow(
 	cwd: string,
 	options: LiveBenchmarkRuntimeOptions,
 ): Promise<LiveBenchmarkAgentResult> {
-	const profileOverrides = buildLiveBenchmarkProfileOverrides(options.provider, options.model, request.variant);
+	const experimentConfig = buildLiveBenchmarkExperimentConfig(
+		options.provider,
+		options.model,
+		request.variant,
+		request.experiment,
+		options.reviewerProvider,
+		options.reviewerModel,
+	);
 	const settings = Settings.isolated({
 		"workflow.enabled": true,
 		// Quality routes forbid degraded mode; live provenance requires a verified route snapshot.
 		"workflow.degradedMode": false,
-		"workflow.requireIndependentReview": false,
+		"workflow.requireIndependentReview": true,
 		"workflow.verificationCommands": request.case.verificationCommands,
-		"workflow.profiles": profileOverrides,
+		"workflow.profiles": experimentConfig.profileOverrides,
 		"workflow.qualityRoutes": buildLiveBenchmarkQualityRoutes(),
 		"workflow.defaultQualityTier": "balanced",
-		"workflow.presentationOptimization.enabled": request.variant === "optimized",
+		"workflow.presentationOptimization.enabled": experimentConfig.presentationOptimizationEnabled,
 		"task.isolation.mode": "auto",
 	});
 	const { session } = await createAgentSession({
 		cwd,
 		agentDir: options.agentDir,
 		settings,
-		modelPattern: `${options.provider}/${options.model}`,
+		modelPattern: normalizeLiveModelIdentity(options.provider, options.model).modelPattern,
 		hasUI: false,
 		autoApprove: true,
 		toolNames: ["workflow", "read", "bash", "grep", "glob", "edit", "write", "todo", "yield"],
@@ -383,7 +636,7 @@ async function runProductionWorkflow(
 		const tool = session.getToolByName("workflow") as WorkflowToolPort | undefined;
 		if (!tool) throw new Error("Workflow tool is unavailable in the live benchmark session");
 		const workflow = await executeWorkflow(tool, request, options.maxResumeSteps ?? 32);
-		const verified = verifyLiveWorkflowProvenance(workflow.statusReport, options.provider, options.model);
+		const verified = verifyLiveWorkflowProvenance(workflow.statusReport, experimentConfig.roleIdentityMap);
 		const stats = session.getSessionStats();
 		return {
 			terminalStatus: workflow.terminalStatus,
@@ -507,8 +760,18 @@ async function runLiveCase(
 
 /** Costly, credentialed benchmark path. Callers must opt in explicitly. */
 export function createLiveWorkflowBenchmarkRuntime(options: LiveBenchmarkRuntimeOptions): BenchmarkRuntime {
-	if (!options.provider.trim() || !options.model.trim()) {
-		throw new Error("Live benchmark requires explicit provider and model values");
-	}
-	return request => runLiveCase(request, options);
+	const { primary, reviewer } = validateLiveBenchmarkModelPair(
+		options.provider,
+		options.model,
+		options.reviewerProvider,
+		options.reviewerModel,
+	);
+	const normalizedOptions: LiveBenchmarkRuntimeOptions = {
+		...options,
+		provider: primary.provider,
+		model: primary.model,
+		reviewerProvider: reviewer.provider,
+		reviewerModel: reviewer.model,
+	};
+	return request => runLiveCase(request, normalizedOptions);
 }

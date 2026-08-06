@@ -16,6 +16,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
+import type { LatencyArmId } from "../latency/arms";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
@@ -280,6 +281,8 @@ export interface ToolSession {
 	getArtifactsDir?: () => string | null;
 	/** Get the ArtifactManager backing this session (shared across parent + subagents). */
 	getArtifactManager?: () => ArtifactManager | null;
+	/** Resolve an artifact body from the current session (including in-memory artifacts). */
+	getArtifactContent?: (id: string) => Promise<string | null>;
 	/** Allocate a new artifact path and ID for session-scoped truncated output. */
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
@@ -321,6 +324,8 @@ export interface ToolSession {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
+	/** Session-frozen latency arm lookup; lightweight test sessions may omit it. */
+	isLatencyArmEnabled?: (arm: LatencyArmId) => boolean;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */

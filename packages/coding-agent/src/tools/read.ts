@@ -39,7 +39,11 @@ import { normalizeToLF } from "../edit/normalize";
 import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
-import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
+import {
+	MAX_INLINE_ARTIFACT_BYTES,
+	type ResolvedArtifactFile,
+	resolveArtifactFile,
+} from "../internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { getLanguageFromPath, isMarkdownPath, type Theme } from "../modes/theme/theme";
@@ -3232,11 +3236,61 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		)}). Reading the whole artifact verbatim can exhaust memory. Use ${artifactUrl}:raw:1-3000 for bounded verbatim chunks, ${artifactUrl}:1-3000 for numbered exploration, and the artifact file path for search/copy workflows: ${displayPath}`;
 	}
 
+	async #readInMemoryArtifact(
+		id: string,
+		url: InternalUrl,
+		parsedSel: ParsedSelector,
+		content: string,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		if (parsedSel.kind === "conflicts") {
+			throw new ToolError("Artifact conflict selectors are unavailable for in-memory artifacts.");
+		}
+		const lines = content.split("\n");
+		let text = content;
+		if (parsedSel.kind === "lines") {
+			text = parsedSel.ranges
+				.map(range => {
+					const start = Math.max(1, range.startLine);
+					const end = Math.min(lines.length, range.endLine ?? lines.length);
+					const selected = lines.slice(start - 1, end).join("\n");
+					return parsedSel.raw ? selected : prependLineNumbers(selected, start);
+				})
+				.join("\n");
+		}
+		const byteLength = Buffer.byteLength(text, "utf8");
+		if (byteLength > MAX_INLINE_ARTIFACT_BYTES) {
+			throw new ToolError(
+				`Artifact ${id} is ${formatBytes(byteLength)}; full internal resolution is blocked. Use bounded selectors such as artifact://${id}:1-3000 or artifact://${id}:raw:1-3000.`,
+			);
+		}
+		const artifactUrl = `artifact://${id}`;
+		const details: ReadToolDetails = { resolvedPath: artifactUrl, contentType: "text/plain" };
+		const result = toolResult<ReadToolDetails>(details)
+			.text(text)
+			.sourcePath(artifactUrl)
+			.sourceInternal(url.href)
+			.done();
+		return attachReadIdentity(result, {
+			absolutePath: artifactUrl,
+			cwd: this.session.cwd,
+			canonicalSource: artifactUrl,
+			providerViewIdentity: `artifact:${id}`,
+			outputMode: "raw",
+		});
+	}
+
 	async #readArtifactFile(
 		url: InternalUrl,
 		parsedSel: ParsedSelector,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		const sessionFile = this.session.getSessionFile?.() ?? null;
+		if (!sessionFile && this.session.getArtifactContent) {
+			const id = url.rawHost || url.hostname;
+			const content = id ? await this.session.getArtifactContent(id) : null;
+			if (content !== null) return this.#readInMemoryArtifact(id, url, parsedSel, content);
+			throw new ToolError(`Artifact ${id || "unknown"} not found in the current session.`);
+		}
 		const artifact = await resolveArtifactFile(url, {
 			cwd: this.session.cwd,
 			settings: this.session.settings,

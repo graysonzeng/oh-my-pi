@@ -117,6 +117,8 @@ function makeToolSession(cwd: string, sessionManager: SessionManager): ToolSessi
 		getSessionName: () => undefined,
 		getSessionDir: () => cwd,
 		getSessionManager: () => sessionManager,
+		getSessionFile: () => sessionManager.getSessionFile() ?? null,
+		getArtifactContent: (id: string) => sessionManager.getArtifactContent(id),
 		createUI: () => null,
 		signal: undefined,
 	} as unknown as ToolSession;
@@ -156,7 +158,7 @@ describe("ordinary session read dedupe", () => {
 		}
 	});
 
-	it("rewrites on no-session in-memory artifact storage", async () => {
+	it("rewrites on no-session in-memory artifact storage and recovers the saved body", async () => {
 		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "nosess-"));
 		const filePath = path.join(workDir, "module.ts");
 		await fs.writeFile(filePath, makeFileBody());
@@ -169,12 +171,94 @@ describe("ordinary session read dedupe", () => {
 			const args = { path: filePath };
 
 			const firstExec = await readTool.execute("read-1", args);
-			await session.agent.afterToolCall!(readCtx("read-1", firstExec, args));
+			const firstAfter = await session.agent.afterToolCall!(readCtx("read-1", firstExec, args));
+			const firstVisible = textFromResult(firstAfter ?? firstExec);
+			const artifactRef = firstVisible.match(/\[raw output: (artifact:\/\/\d+)\]/)?.[1];
+			if (!artifactRef) throw new Error("expected a recoverable in-memory artifact reference");
+			const recovered = await readTool.execute("artifact-recover", { path: `${artifactRef}:raw:1-21` });
+			const recoveredText = textFromResult(recovered);
+			const fileLines = makeFileBody().split("\n");
+			const firstLine = fileLines[0];
+			const twentiethLine = fileLines[19];
+			if (!firstLine || !twentiethLine) throw new Error("expected read fixture sentinel lines");
+			expect(recoveredText).toContain(firstLine);
+			expect(recoveredText).toContain(twentiethLine);
+			expect(recoveredText).not.toContain("No session - artifacts unavailable");
+			expect(recoveredText).not.toContain("not found in the current session");
 
 			const secondExec = await readTool.execute("read-2", args);
 			const secondAfter = await session.agent.afterToolCall!(readCtx("read-2", secondExec, args));
 			const secondVisible = textFromResult(secondAfter);
 			expect(secondVisible).toMatch(/^\[context ref: artifact:\/\/\d+ sha256:[a-f0-9]{64}\]$/);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not reference a retained artifact after verification fails", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "stale-"));
+		const filePath = path.join(workDir, "module.ts");
+		await fs.writeFile(filePath, makeFileBody());
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const args = { path: filePath };
+			const firstExec = await readTool.execute("read-1", args);
+			const firstAfter = await session.agent.afterToolCall!(readCtx("read-1", firstExec, args));
+			const artifactRef = textFromResult(firstAfter).match(/\[raw output: (artifact:\/\/\d+)\]/)?.[1];
+			if (!artifactRef) throw new Error("expected a recoverable artifact reference");
+			const artifactPath = await sessionManager.getArtifactPath(artifactRef.slice("artifact://".length));
+			if (!artifactPath) throw new Error("expected an artifact path");
+			await fs.rm(artifactPath, { force: true });
+			const secondExec = await readTool.execute("read-2", args);
+			const secondAfter = await session.agent.afterToolCall!(readCtx("read-2", secondExec, args));
+			expect(textFromResult(secondAfter)).not.toMatch(/^\[context ref: artifact:\/\//);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not dedupe reads when the selector changes", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "selector-"));
+		const filePath = path.join(workDir, "module.ts");
+		await fs.writeFile(filePath, makeFileBody());
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const firstArgs = { path: filePath, offset: 1, limit: 20 };
+			const secondArgs = { path: filePath, offset: 21, limit: 20 };
+			const firstExec = await readTool.execute("read-1", firstArgs);
+			await session.agent.afterToolCall!(readCtx("read-1", firstExec, firstArgs));
+			const secondExec = await readTool.execute("read-2", secondArgs);
+			const secondAfter = await session.agent.afterToolCall!(readCtx("read-2", secondExec, secondArgs));
+			expect(textFromResult(secondAfter)).not.toMatch(/^\[context ref: artifact:\/\//);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("clears retained read artifacts when the model changes", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "model-switch-"));
+		const filePath = path.join(workDir, "module.ts");
+		await fs.writeFile(filePath, makeFileBody());
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const args = { path: filePath };
+			const firstExec = await readTool.execute("read-1", args);
+			await session.agent.afterToolCall!(readCtx("read-1", firstExec, args));
+			const currentModel = session.model;
+			if (!currentModel) throw new Error("expected an active model");
+			await session.setModelTemporary({ ...currentModel, id: `${currentModel.id}-switched` });
+			const secondExec = await readTool.execute("read-2", args);
+			const secondAfter = await session.agent.afterToolCall!(readCtx("read-2", secondExec, args));
+			expect(textFromResult(secondAfter)).not.toMatch(/^\[context ref: artifact:\/\//);
 		} finally {
 			await session.dispose();
 		}

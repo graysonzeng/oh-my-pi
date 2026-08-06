@@ -11,6 +11,8 @@ import {
 } from "../model-policy/adapters";
 import { promptBlockFingerprint, resolveSessionPromptBlock } from "./prompts";
 import {
+	type ContextBudgetCandidateV1,
+	type ContextBudgetTuningDecisionV1,
 	type DescriptorPlacementDecision,
 	type ModelOptimizationProfile,
 	ORDINARY_DECISION_RECEIPT_KIND,
@@ -59,6 +61,64 @@ export function hardenSessionContextStrategy(
 	};
 }
 
+function contextBudgetDecision(
+	strategy: SessionContextStrategy | undefined,
+	candidate: ContextBudgetCandidateV1 | undefined,
+	applied: boolean,
+): ContextBudgetTuningDecisionV1 {
+	return {
+		applied,
+		version: candidate?.version,
+		targetUtilization: strategy?.targetUtilization,
+		keepRecentN: strategy?.eviction?.keepRecentN,
+		maxToolCalls: strategy?.toolHistory?.maxToolCalls,
+	};
+}
+
+function isValidContextBudgetCandidate(
+	candidate: ContextBudgetCandidateV1 | undefined,
+): candidate is ContextBudgetCandidateV1 {
+	return (
+		candidate?.version === 1 &&
+		Number.isFinite(candidate.targetUtilization) &&
+		candidate.targetUtilization > 0 &&
+		candidate.targetUtilization < 1 &&
+		Number.isInteger(candidate.keepRecentN) &&
+		candidate.keepRecentN > 0 &&
+		Number.isInteger(candidate.maxToolCalls) &&
+		candidate.maxToolCalls > 0
+	);
+}
+
+/** Apply a known profile candidate only when its frozen arm gate is enabled. */
+export function applyContextBudgetCandidate(
+	resolved: ResolvedModelOptimization,
+	armEnabled: boolean,
+): ResolvedModelOptimization {
+	const candidate = resolved.profile?.contextBudgetCandidate;
+	if (!resolved.profile && !resolved.contextStrategy && !candidate) return resolved;
+	if (!armEnabled || !isValidContextBudgetCandidate(candidate)) {
+		return {
+			...resolved,
+			contextBudgetTuning: contextBudgetDecision(resolved.contextStrategy, candidate, false),
+		};
+	}
+	const contextStrategy = hardenSessionContextStrategy({
+		targetUtilization: candidate.targetUtilization,
+		eviction: {
+			enabled: true,
+			preserveUserTurns: true,
+			evictPersisted: false,
+			keepRecentN: candidate.keepRecentN,
+		},
+		toolHistory: { maxToolCalls: candidate.maxToolCalls, summarizeOld: true },
+	});
+	return {
+		...resolved,
+		contextStrategy,
+		contextBudgetTuning: contextBudgetDecision(contextStrategy, candidate, true),
+	};
+}
 /** Build a full resolved policy from a profile (or empty none). */
 export function buildResolvedModelOptimization(
 	profile: ModelOptimizationProfile | undefined,
@@ -134,6 +194,7 @@ export function describeOrdinaryAppliedFields(
 		outputTruncation: tool?.outputTruncation?.enabled === true,
 		resultSummarization: tool?.resultSummarization?.enabled === true,
 		contextStrategy: resolved.contextStrategy !== undefined,
+		contextBudgetTuning: resolved.contextBudgetTuning?.applied === true,
 		descriptorPlacement,
 	};
 }
@@ -151,6 +212,11 @@ export function buildOrdinaryDecisionReceipt(input: {
 	recoveryUri?: string;
 }): OrdinaryDecisionReceiptV1 {
 	const strategy = input.resolved.contextStrategy;
+	const contextBudgetTuning =
+		input.resolved.contextBudgetTuning ??
+		(input.resolved.profile || strategy
+			? contextBudgetDecision(strategy, input.resolved.profile?.contextBudgetCandidate, false)
+			: { applied: false });
 	return {
 		schemaVersion: ORDINARY_DECISION_RECEIPT_VERSION,
 		kind: ORDINARY_DECISION_RECEIPT_KIND,
@@ -172,5 +238,6 @@ export function buildOrdinaryDecisionReceipt(input: {
 					providerViewOnly: true,
 				}
 			: undefined,
+		contextBudgetTuning,
 	};
 }

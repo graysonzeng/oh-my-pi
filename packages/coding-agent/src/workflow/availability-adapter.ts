@@ -16,7 +16,7 @@ import type {
 } from "./types";
 
 /** Default per-target probe deadline. */
-export const AVAILABILITY_PROBE_TIMEOUT_MS = 15_000;
+export const AVAILABILITY_PROBE_TIMEOUT_MS = 30_000;
 
 export type SessionAvailabilityProbe = (
 	request: WorkflowAvailabilityProbeRequest,

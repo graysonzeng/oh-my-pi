@@ -7,6 +7,26 @@ import type { ToolOptimizationReceiptV1 } from "../optimization-receipt";
 
 export type BenchmarkVariantKind = "baseline" | "optimized";
 
+/** Independent benchmark ablation under test. */
+export type BenchmarkExperiment = "profile-strategy" | "presentation";
+/** Workflow roles whose live model identity is fixed by the benchmark harness. */
+export type BenchmarkWorkflowRole =
+	| "planner"
+	| "plan_reviewer"
+	| "plan_arbitrator"
+	| "implementer"
+	| "code_reviewer"
+	| "repair";
+
+/** Expected provider/model identity for one workflow role (model is bare, without provider prefix). */
+export interface BenchmarkRoleIdentity {
+	provider: string;
+	model: string;
+}
+
+/** Complete role identity map used by live provenance and benchmark fingerprints. */
+export type BenchmarkRoleIdentityMap = Readonly<Record<BenchmarkWorkflowRole, BenchmarkRoleIdentity>>;
+
 /** Fact vs exact bytes vs estimate vs unknown — report fields must use these. */
 export type MetricProvenance = "provider_fact" | "exact" | "estimate" | "unknown";
 
@@ -84,6 +104,8 @@ export interface BenchmarkRunFingerprint {
 	suiteId: string;
 	caseId: string;
 	variant: BenchmarkVariantKind;
+	/** Explicit experiment identity carried through runtime and reports. */
+	experiment: BenchmarkExperiment;
 	/** Stable hash of case inputs (request, paths, commit). */
 	caseFingerprint: string;
 	/** Canonical fixture materializer version actually selected. */
@@ -91,9 +113,9 @@ export interface BenchmarkRunFingerprint {
 	/** Canonical initial fixture tree identity, not a temporary git commit id. */
 	fixtureBaseIdentity: string;
 	/** Profile / strategy id used for optimized variant. */
-	profileId?: string;
-	/** sha256 of tool strategy JSON when optimized. */
-	strategyFingerprint?: string;
+	profileId?: string | null;
+	/** sha256 of tool strategy JSON when optimized; null for presentation control. */
+	strategyFingerprint?: string | null;
 	/** Exact provider identity — null when unknown. */
 	provider: string | null;
 	model: string | null;
@@ -117,6 +139,8 @@ export interface BenchmarkRunFingerprint {
 	 * Combination run: `combo:sorted+levers` when explicitly flagged.
 	 */
 	activeLever: string | null;
+	/** Expected child provider/model identities by workflow role, when live routing is compiled. */
+	roleIdentityMap?: BenchmarkRoleIdentityMap | null;
 }
 
 export interface StageRunMetrics {
@@ -241,6 +265,8 @@ export interface BenchmarkScorecard {
 	/** True when any live model quality is unknown (fake-runtime only). */
 	liveQualityUnknown: boolean;
 	notes: string[];
+	/** Experiment identity shared by all runs in this scorecard. */
+	experiment: BenchmarkExperiment;
 	/** Associated compiled policy receipt id when runs share one. */
 	compiledPolicyReceiptId?: string | null;
 	/** Associated compiled policy fingerprint when runs share one. */
@@ -302,6 +328,8 @@ export interface BenchmarkReport {
 	comparison: BenchmarkComparisonRow[];
 	gate: BenchmarkGateResult;
 	notes: string[];
+	/** Experiment identity shared by all runs in this report. */
+	experiment: BenchmarkExperiment;
 	/** Associated compiled policy receipt id when present. */
 	compiledPolicyReceiptId?: string | null;
 	/** Associated compiled policy fingerprint when present. */

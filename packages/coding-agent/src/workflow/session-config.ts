@@ -47,7 +47,11 @@ const QUALITY_ROUTE_ROLES: readonly WorkflowRole[] = [
 	"implementer",
 	"code_reviewer",
 	"repair",
+	"plan_arbitrator",
 ];
+
+/** Arbitration is known but optional: absent routes remain default-off. */
+const OPTIONAL_QUALITY_ROUTE_ROLES: readonly WorkflowRole[] = ["plan_arbitrator"];
 
 export function resolveWorkflowQualityRoutesFromSettings(
 	rawRoutes: unknown,
@@ -75,6 +79,11 @@ export function resolveWorkflowQualityRoutesFromSettings(
 		const roleMap = {} as Record<WorkflowRole, readonly string[]>;
 		for (const role of QUALITY_ROUTE_ROLES) {
 			const rawIds = rawRoleMap[role];
+			const optional = OPTIONAL_QUALITY_ROUTE_ROLES.includes(role);
+			if (rawIds === undefined && optional) {
+				roleMap[role] = [];
+				continue;
+			}
 			if (
 				!Array.isArray(rawIds) ||
 				rawIds.length === 0 ||

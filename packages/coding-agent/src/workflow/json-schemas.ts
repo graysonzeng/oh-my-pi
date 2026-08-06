@@ -333,6 +333,7 @@ export const ImplementationArtifactJsonSchema = {
 		addressedStepIds: { type: "array", items: { type: "string" } },
 		commandsRun: { type: "array", items: commandRunItem },
 		patchPath: { type: "string" },
+		noChangesRequired: { type: "boolean" },
 		branchName: { type: "string" },
 		unresolved: { type: "array", items: { type: "string" } },
 	},

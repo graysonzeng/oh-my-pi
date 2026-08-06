@@ -9,6 +9,12 @@ export default class WorkflowBench extends Command {
 	static flags = {
 		mode: Flags.string({ description: "fake (default) | live (credentialed workflow run)" }),
 		provider: Flags.string({ description: "Live mode provider id (required with --mode live)" }),
+		"reviewer-provider": Flags.string({
+			description: "Live mode reviewer provider id (defaults to --provider)",
+		}),
+		"reviewer-model": Flags.string({
+			description: "Live mode reviewer model id (required; must be a different model family)",
+		}),
 		model: Flags.string({ description: "Live mode model id (required with --mode live)" }),
 		json: Flags.boolean({ description: "Machine-readable scorecard JSON" }),
 		reps: Flags.integer({
@@ -26,6 +32,9 @@ export default class WorkflowBench extends Command {
 		variant: Flags.string({
 			description: "baseline | optimized | both (default: both)",
 		}),
+		experiment: Flags.string({
+			description: "Experiment: profile-strategy (default) | presentation",
+		}),
 		output: Flags.string({
 			char: "o",
 			description: "Directory to write scorecard.json, compare-report.md, gate.json",
@@ -42,18 +51,25 @@ export default class WorkflowBench extends Command {
 	async run(): Promise<void> {
 		const { flags } = await this.parse(WorkflowBench);
 		const mode = flags.mode?.trim().toLowerCase() || "fake";
-		if (mode === "live" && (!flags.provider || !flags.model)) {
-			throw new Error("--mode live requires explicit --provider and --model flags");
+		if (mode === "live" && (!flags.provider || !flags.model || !flags["reviewer-model"])) {
+			throw new Error("--mode live requires explicit --provider, --model, and --reviewer-model flags");
 		}
 		const liveRuntime =
 			mode === "live"
-				? createLiveWorkflowBenchmarkRuntime({ provider: flags.provider!, model: flags.model! })
+				? createLiveWorkflowBenchmarkRuntime({
+						provider: flags.provider!,
+						model: flags.model!,
+						reviewerProvider: flags["reviewer-provider"],
+						reviewerModel: flags["reviewer-model"]!,
+					})
 				: undefined;
 		const result = await runWorkflowBenchCommand(
 			{
 				flags: {
 					mode: flags.mode,
 					provider: flags.provider,
+					reviewerProvider: flags["reviewer-provider"],
+					reviewerModel: flags["reviewer-model"],
 					model: flags.model,
 					json: flags.json,
 					reps: flags.reps,
@@ -61,6 +77,7 @@ export default class WorkflowBench extends Command {
 					suite: flags.suite,
 					case: flags.case,
 					variant: flags.variant,
+					experiment: flags.experiment,
 					output: flags.output,
 				},
 			},

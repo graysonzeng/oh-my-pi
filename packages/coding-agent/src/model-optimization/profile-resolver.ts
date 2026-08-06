@@ -108,6 +108,7 @@ export function mergeModelOptimizationProfiles(
 				promptStrategy: partial.promptStrategy ?? base?.promptStrategy,
 				toolStrategy: partial.toolStrategy ?? base?.toolStrategy,
 				contextStrategy: partial.contextStrategy ?? base?.contextStrategy,
+				contextBudgetCandidate: partial.contextBudgetCandidate ?? base?.contextBudgetCandidate,
 			};
 			merged.set(id, next);
 		}

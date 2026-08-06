@@ -65,6 +65,29 @@ export interface SessionContextStrategy {
 		summarizeOld: boolean;
 	};
 }
+export const CONTEXT_BUDGET_CANDIDATE_VERSION = 1 as const;
+
+/** Versioned, profile-declared context-budget tuning candidate. */
+export interface ContextBudgetCandidateV1 {
+	version: typeof CONTEXT_BUDGET_CANDIDATE_VERSION;
+	targetUtilization: number;
+	keepRecentN: number;
+	maxToolCalls: number;
+}
+
+export type ContextBudgetCandidate = ContextBudgetCandidateV1;
+
+/** Observable ordinary-session decision for the context-budget candidate. */
+export interface ContextBudgetTuningDecisionV1 {
+	applied: boolean;
+	version?: typeof CONTEXT_BUDGET_CANDIDATE_VERSION;
+	/** Effective provider-view utilization threshold after policy resolution. */
+	targetUtilization?: number;
+	/** Effective retained recent tool-result count after policy resolution. */
+	keepRecentN?: number;
+	/** Effective provider-view tool-history call limit after policy resolution. */
+	maxToolCalls?: number;
+}
 
 export interface ModelOptimizationProfile {
 	id: string;
@@ -73,6 +96,8 @@ export interface ModelOptimizationProfile {
 	promptStrategy?: SessionPromptStrategy;
 	toolStrategy?: SessionToolStrategy;
 	contextStrategy?: SessionContextStrategy;
+	/** Optional versioned candidate, applied only by its independently gated arm. */
+	contextBudgetCandidate?: ContextBudgetCandidateV1;
 }
 
 /** Fully resolved runtime policy for the active model (or cleared none). */
@@ -83,6 +108,8 @@ export interface ResolvedModelOptimization {
 	/** Content fingerprint for cache invalidation. */
 	promptBlockFingerprint?: string;
 	toolScheduling?: ToolSchedulingConfig;
+	/** Observable candidate decision; present even when the candidate was not applied. */
+	contextBudgetTuning?: ContextBudgetTuningDecisionV1;
 	contextStrategy?: SessionContextStrategy;
 	/**
 	 * Shadow/active capability-compiled policy for the active model.
@@ -108,6 +135,7 @@ export interface OrdinaryAppliedFields {
 	outputTruncation: boolean;
 	resultSummarization: boolean;
 	contextStrategy: boolean;
+	contextBudgetTuning: boolean;
 	descriptorPlacement: DescriptorPlacementDecision;
 }
 
@@ -140,4 +168,6 @@ export interface OrdinaryDecisionReceiptV1 {
 		toolHistoryMaxToolCalls?: number;
 		providerViewOnly: true;
 	};
+	/** Versioned context-budget candidate decision and effective thresholds. */
+	contextBudgetTuning?: ContextBudgetTuningDecisionV1;
 }

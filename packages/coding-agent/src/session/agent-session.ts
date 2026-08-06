@@ -148,6 +148,7 @@ import { normalizeReadSelector } from "../latency/read-view-key";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import {
+	applyContextBudgetCandidate,
 	type DescriptorPlacementDecision,
 	evaluateOrdinaryContinuation,
 	formatCompletionDiagnostic,
@@ -3200,7 +3201,7 @@ export class AgentSession {
 						raw: args.raw === true,
 						offset: typeof args.offset === "number" ? args.offset : undefined,
 						limit: typeof args.limit === "number" ? args.limit : undefined,
-						selector: typeof args.selector === "string" ? args.selector : rawPath,
+						selector: typeof args.selector === "string" ? args.selector : undefined,
 						query: typeof args.query === "string" ? args.query : undefined,
 					}),
 					branchOrWorktreeScope,
@@ -4210,6 +4211,7 @@ export class AgentSession {
 	}
 
 	async #syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
+		this.#readDedupeArtifacts.clear();
 		const previousInline = this.#pruneToolDescriptions;
 		this.#refreshInlineToolDescriptors();
 		await this.#ensureModelOptimizationReconciled();
@@ -4272,10 +4274,13 @@ export class AgentSession {
 
 	async #applyModelOptimization(resolved: ResolvedModelOptimization): Promise<void> {
 		const previousFingerprint = this.#activeModelOptimization.promptBlockFingerprint;
-		this.#activeModelOptimization = resolved;
-		this.#applyModelOptimizationRuntime?.(resolved);
-		this.agent.setToolScheduling(resolved.toolScheduling);
-		if (previousFingerprint !== resolved.promptBlockFingerprint) {
+		const contextBudgetArmEnabled =
+			this.isLatencyArmEnabled("context_optimization") && this.isLatencyArmEnabled("context_budget_tuning");
+		const applied = applyContextBudgetCandidate(resolved, contextBudgetArmEnabled);
+		this.#activeModelOptimization = applied;
+		this.#applyModelOptimizationRuntime?.(applied);
+		this.agent.setToolScheduling(applied.toolScheduling);
+		if (previousFingerprint !== applied.promptBlockFingerprint) {
 			this.#clearInheritedProviderPromptCacheKey();
 			await this.refreshBaseSystemPrompt();
 		}

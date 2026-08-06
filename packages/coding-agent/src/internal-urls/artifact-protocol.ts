@@ -15,7 +15,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
-const MAX_INLINE_ARTIFACT_BYTES = 8 * 1024 * 1024;
+export const MAX_INLINE_ARTIFACT_BYTES = 8 * 1024 * 1024;
 
 /** Filesystem location for a session artifact, resolved without materializing its content. */
 export interface ResolvedArtifactFile {

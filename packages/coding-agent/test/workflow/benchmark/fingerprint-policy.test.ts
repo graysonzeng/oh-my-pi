@@ -218,4 +218,40 @@ describe("benchmark fingerprint + single-lever policy", () => {
 		expect(run.tokens.cacheReadTokens.provenance).toBe("unknown");
 		expect(run.tokens.cacheObservable).toBe(false);
 	});
+	it("stamps presentation experiment and its single active lever across runtime, fingerprints, and reports", async () => {
+		const suite = miniSuite();
+		const seenExperiments: string[] = [];
+		const results = await runBenchmarkSuite({
+			...baseOpts(suite),
+			runtime: async request => {
+				seenExperiments.push(request.experiment);
+				return { passed: true };
+			},
+			experiment: "presentation",
+			activeLever: "workflow.presentationOptimization.enabled",
+			minRepetitions: 1,
+		});
+		const report = buildBenchmarkReport(suite, results, { experiment: "presentation" });
+		expect(seenExperiments.every(experiment => experiment === "presentation")).toBe(true);
+		expect(results.every(result => result.fingerprint.experiment === "presentation")).toBe(true);
+		expect(
+			results.every(result => result.fingerprint.activeLever === "workflow.presentationOptimization.enabled"),
+		).toBe(true);
+		const baselineRuns = results.filter(result => result.fingerprint.variant === "baseline");
+		const treatmentRuns = results.filter(result => result.fingerprint.variant === "optimized");
+		expect(baselineRuns.every(result => result.fingerprint.profileId === null)).toBe(true);
+		expect(baselineRuns.every(result => result.fingerprint.strategyFingerprint === null)).toBe(true);
+		expect(treatmentRuns.every(result => result.fingerprint.profileId === "grok_implementer")).toBe(true);
+		expect(treatmentRuns.every(result => result.fingerprint.strategyFingerprint === "smart-v1")).toBe(true);
+		expect(report.experiment).toBe("presentation");
+		expect(report.scorecard.experiment).toBe("presentation");
+		expect(report.activeLever).toBe("workflow.presentationOptimization.enabled");
+	});
+
+	it("rejects an unknown experiment before executing benchmark cases", async () => {
+		const suite = miniSuite();
+		await expect(runBenchmarkSuite({ ...baseOpts(suite), experiment: "unknown-experiment" })).rejects.toThrow(
+			/Invalid --experiment=unknown-experiment/,
+		);
+	});
 });

@@ -385,6 +385,7 @@ export const ImplementationArtifactSchema = ArtifactHeaderSchema.extend({
 			.strict(),
 	),
 	patchPath: z.string().optional(),
+	noChangesRequired: z.boolean().optional(),
 	branchName: z.string().optional(),
 	unresolved: z.array(z.string()),
 }).strict();

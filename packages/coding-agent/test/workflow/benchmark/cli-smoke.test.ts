@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { runWorkflowBenchCommand } from "../../../src/cli/workflow-bench-cli";
+import { runWorkflowBenchCommand, type WorkflowBenchCommandResult } from "../../../src/cli/workflow-bench-cli";
+import WorkflowBench from "../../../src/commands/workflow-bench";
 
 describe("workflow-bench CLI adapter", () => {
 	const originalStdoutWrite = process.stdout.write.bind(process.stdout);
@@ -65,6 +66,39 @@ describe("workflow-bench CLI adapter", () => {
 		await fs.rm(outDir, { recursive: true, force: true });
 	});
 
+	it("wires presentation experiment and its single active lever into report fingerprints", async () => {
+		captureStdout();
+		let result: WorkflowBenchCommandResult | undefined;
+		try {
+			result = await runWorkflowBenchCommand({
+				flags: {
+					json: true,
+					case: "simple-bug-fix",
+					variant: "both",
+					repetitions: 1,
+					experiment: "presentation",
+				},
+			});
+		} finally {
+			process.stdout.write = originalStdoutWrite;
+		}
+		expect(result!.report.experiment).toBe("presentation");
+		expect(result!.report.activeLever).toBe("workflow.presentationOptimization.enabled");
+		expect(
+			result!.report.scorecard.summaries.every(summary =>
+				summary.runs.every(run => run.fingerprint.experiment === "presentation"),
+			),
+		).toBe(true);
+		expect(captured).toContain('"experiment": "presentation"');
+		expect(captured).toContain('"activeLever": "workflow.presentationOptimization.enabled"');
+	});
+
+	it("fails fast for an unknown CLI experiment", async () => {
+		await expect(
+			runWorkflowBenchCommand({ flags: { case: "simple-bug-fix", experiment: "not-an-experiment" } }),
+		).rejects.toThrow(/Invalid --experiment=not-an-experiment/);
+	});
+
 	it("filters to a single variant and marks gate inconclusive", async () => {
 		captureStdout();
 		try {
@@ -103,6 +137,8 @@ describe("workflow-bench CLI adapter", () => {
 						mode: "live",
 						provider: "fixture-provider",
 						model: "fixture-model",
+						reviewerProvider: "fixture-reviewer-provider",
+						reviewerModel: "fixture-reviewer-model",
 						case: "simple-bug-fix",
 						variant: "baseline",
 					},
@@ -122,10 +158,45 @@ describe("workflow-bench CLI adapter", () => {
 				provider: "fixture-provider",
 				model: "fixture-model",
 			});
+			expect(result.report.scorecard.summaries[0]?.runs[0]?.fingerprint.roleIdentityMap).toEqual({
+				planner: { provider: "fixture-provider", model: "fixture-model" },
+				plan_reviewer: { provider: "fixture-reviewer-provider", model: "fixture-reviewer-model" },
+				plan_arbitrator: { provider: "fixture-reviewer-provider", model: "fixture-reviewer-model" },
+				implementer: { provider: "fixture-provider", model: "fixture-model" },
+				code_reviewer: { provider: "fixture-reviewer-provider", model: "fixture-reviewer-model" },
+				repair: { provider: "fixture-provider", model: "fixture-model" },
+			});
 		} finally {
 			process.stdout.write = originalStdoutWrite;
 		}
 		const payload = JSON.parse(captured) as { liveQualityUnknown: boolean };
 		expect(payload.liveQualityUnknown).toBe(false);
+	});
+
+	it("fails live runs before repetitions when reviewer model is missing or same-family", async () => {
+		await expect(
+			runWorkflowBenchCommand(
+				{ flags: { mode: "live", provider: "gateway", model: "gpt-5.6-luna" } },
+				{ liveRuntime: async () => ({ passed: true }) },
+			),
+		).rejects.toThrow(/explicit --provider, --model, and --reviewer-model/);
+		await expect(
+			runWorkflowBenchCommand(
+				{
+					flags: {
+						mode: "live",
+						provider: "gateway",
+						model: "gpt-5.6-luna",
+						reviewerModel: "gpt-5.6-sol",
+					},
+				},
+				{ liveRuntime: async () => ({ passed: true }) },
+			),
+		).rejects.toThrow(/reviewer model family must differ/);
+	});
+
+	it("declares reviewer provider and model live flags", () => {
+		expect(Object.hasOwn(WorkflowBench.flags, "reviewer-provider")).toBe(true);
+		expect(Object.hasOwn(WorkflowBench.flags, "reviewer-model")).toBe(true);
 	});
 });
