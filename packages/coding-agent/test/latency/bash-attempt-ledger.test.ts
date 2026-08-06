@@ -322,7 +322,10 @@ describe("BashTool ledger completion integration", () => {
 			runGit(repo.path(), ["add", "probe.ts"]);
 			runGit(repo.path(), ["commit", "-m", "baseline"]);
 
-			const settings = Settings.isolated({ "latency.arms.bashBoundedInjection": true });
+			const settings = Settings.isolated({
+				"latency.arms.bashAdvisory": false,
+				"latency.arms.bashBoundedInjection": true,
+			});
 			const session = {
 				cwd: repo.path(),
 				hasUI: false,

@@ -4531,94 +4531,94 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Latency optimization arms (design A §6.2) — independently rollbackable; default-off except
-	// context_optimization (reuses modelOptimization.enabled, default-on since 2026-08-06).
+	// Latency optimization arms (design A §6.2) — independently rollbackable; all default-on since
+	// 2026-08-06 (context_optimization reuses modelOptimization.enabled, default-on earlier that day).
 	"latency.arms.readDedupe": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "files",
 			group: "Reading",
 			label: "Read Result Dedupe",
 			description:
-				"When enabled with model optimization, repeated same-view read results may be replaced with verified artifact refs in model-visible context. Fail-open on unknown identity. Default off.",
+				"When enabled with model optimization, repeated same-view read results may be replaced with verified artifact refs in model-visible context. Fail-open on unknown identity. On by default since 2026-08-06.",
 		},
 	},
 	"latency.arms.contextBudgetTuning": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "model",
 			group: "Prompt",
 			label: "Context Budget Tuning",
 			description:
-				"Optional profile threshold tuning after ordinary context optimization is active. Default off; independent of the base optimization arm.",
+				"Optional profile threshold tuning after ordinary context optimization is active. On by default since 2026-08-06; independent of the base optimization arm.",
 		},
 	},
 	"latency.arms.roleStaticSplit": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Workflow Mechanical Flash Route",
 			description:
-				"When enabled, caller-declared or previously-accepted mechanical workflow work may route to Flash via the frozen quality-route snapshot. Never downgrades plan reviewer. Default off.",
+				"When enabled, caller-declared or previously-accepted mechanical workflow work may route to Flash via the frozen quality-route snapshot. Never downgrades plan reviewer. On by default since 2026-08-06.",
 		},
 	},
 	"latency.arms.bashAdvisory": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "shell",
 			group: "Bash",
 			label: "Bash Failure Advisory",
 			description:
-				"When enabled, repeated identical bash failures show a structured advisory from the single attempt ledger. Does not block execution. Default off.",
+				"When enabled, repeated identical bash failures show a structured advisory from the single attempt ledger. Does not block execution. On by default since 2026-08-06.",
 		},
 	},
 	"latency.arms.bashBoundedInjection": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "shell",
 			group: "Bash",
 			label: "Bash Ledger Context Injection",
 			description:
-				"When enabled, inject a bounded bash attempt-ledger summary into model context on repeated failures. Shares the advisory ledger; does not auto-skip. Default off.",
+				"When enabled, inject a bounded bash attempt-ledger summary into model context on repeated failures. Shares the advisory ledger; does not auto-skip. On by default since 2026-08-06.",
 		},
 	},
 	"latency.arms.concurrencyDeclaration": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Concurrency Declaration",
 			description:
-				"When enabled, accept strict WorkflowConcurrencyDeclarationV1 for DAG/ownership validation. Default off.",
+				"When enabled, accept strict WorkflowConcurrencyDeclarationV1 for DAG/ownership validation. On by default since 2026-08-06.",
 		},
 	},
 	"latency.arms.concurrencyExecution": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Concurrency Declaration Execution",
 			description:
-				"When enabled, lower validated concurrency declarations onto existing task batch/parallel or workflow RuntimePort. Requires declaration arm. Default off.",
+				"When enabled, lower validated concurrency declarations onto existing task batch/parallel or workflow RuntimePort. Requires declaration arm. On by default since 2026-08-06.",
 		},
 	},
 	"latency.arms.evalGateMigration": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",
 			label: "Eval Gate Native Migration",
 			description:
-				"When enabled and EvalGateParityReceiptV1 is proven, migrate eligible eval gates to native workflow/task owners with optional independent overlap. Default off.",
+				"When enabled and EvalGateParityReceiptV1 is proven, migrate eligible eval gates to native workflow/task owners with optional independent overlap. On by default since 2026-08-06.",
 		},
 	},
 

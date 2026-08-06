@@ -32,10 +32,10 @@
 
 ## Explicit non-claims
 
-- No `latency.arms.*` setting default flipped to `true`; only `context_optimization` (`modelOptimization.enabled`) is default-on as of 2026-08-06.
+- All latency arms default `true` as of 2026-08-06 (user decision, live re-verification day); every arm keeps its fail-closed/fail-open guard and the documented rollback path below.
 - The live optimized workflow is an end-to-end path proof, not a paired quality-gate pass; the report is intentionally inconclusive without a baseline arm.
 - No ≥30-pair formal savings claim; the pilot has 6 comparable combined-arm pairs and no context-only ablation.
-- `readDedupe` and `bashAdvisory` remain separate, default-off arms; their correctness evidence does not authorize default-on rollout.
+- Default-on means "guarded rollout": each arm still requires session-frozen snapshots, quality-stop monitoring, and immediate rollback on stop-rule fire.
 
 ## Verification commands
 
@@ -100,24 +100,34 @@ regression 15, workflow-benchmark 51, post-fix engine 44 — 0 failures).
 (no usable Claude auth via this gateway), and `openai-codex` has no active credential, so Codex WS/SSE and
 fable-5 live runs cannot execute; their protocol behavior stays covered by mocked tests.
 
-## Single-switch readiness decision (2026-08-06: default-on)
+## All-arms default-on decision (2026-08-06)
 
-**`context_optimization` is now default-on:** `modelOptimization.enabled` defaults to `true` (flipped 2026-08-06, per user decision, after the live re-verification). Every `latency.arms.*` setting stays `false`.
+**Every latency arm now defaults `true`** (`modelOptimization.enabled` plus all 8 `latency.arms.*`), per user decision, ordered by measured benefit from `docs/long-session-latency-analysis.md` (689 sessions, 306.6h active):
 
-```yaml
-modelOptimization.enabled: true   # default; no overlay needed
-latency.arms.readDedupe: false    # still default-off
-latency.arms.bashAdvisory: false  # still default-off
-```
+| Order | Arm | Benefit basis | Evidence on HEAD | Guard |
+|---|---|---|---|---|
+| 0 | `modelOptimization.enabled` | ordinary tool-output truncation (compaction 11.5M tokens / 26 sessions) | live optimized workflow pass + `session-switch.test.ts` | per-profile, default profiles resolve gateway ids |
+| 1 | `readDedupe` | read 19117 calls, same-file repeats up to 42×; repeated full payload is pure waste | A8 provider-backed CLI; `read-dedupe-ordinary-session.test.ts` (real AgentSession, 6 scenarios) | fail-open on unknown identity; SHA verify before ref |
+| 2 | `bashAdvisory` | bash 6.2h / 5534 calls; E2E reruns ≥8× ≈30m | A7 real CLI state smoke; `bash-attempt-ledger.test.ts` (real git repo + real BashTool) | does not block execution; cancellation not counted |
+| 3 | `bashBoundedInjection` | same ledger; bounded context injection on repeat | same suite (`bounded summary` integration) | bounded payload; does not auto-skip |
+| 4 | `concurrencyDeclaration` | hub sync waits 21.3h (7% of active) | `concurrency-execution.test.ts`; `engine-work-packages.test.ts` real engine waves | strict schema; unknown field fails closed |
+| 5 | `concurrencyExecution` | same; lowering onto existing task/workflow runtimes | same suites | requires declaration arm; serial when <2 ready units |
+| 6 | `contextBudgetTuning` | profile threshold tuning on top of context optimization | `session-switch.test.ts` (maxToolCalls 8 / targetUtilization 0.7 vs 10 off) | applied only with an active optimization profile |
+| 7 | `roleStaticSplit` | mechanical repair → Flash (repair-stage only) | `model-router-mechanical.test.ts` + `mechanical-class.ts` | never downgrades plan reviewer; malformed class → strong route |
+| 8 | `evalGateMigration` | eval gates 3.7h (1.2% of active) | `eval-parity.test.ts` | native only when parity proven; otherwise bridge control |
 
-The switch resolves the built-in `luna` profile without an overlay; workflow stages continue to own independent workflow profiles. Rollout basis remains the live-proven Luna cohort because Terra/Sol/Grok currently have resolver coverage but no equivalent paired live pilot.
-
-Roll forward only while the existing stop rules hold: no attributed P0/P1 escape, completion drop ≤2pp, rework rise ≤10%, cost p50 ≤1.5×, and latency improvement ≥10%. Roll back immediately by setting the single switch to `false` if any stop fires or attribution is unknown.
-
-## Rollback
+Rollback (all independently revertible):
 
 ```yaml
 modelOptimization.enabled: false
 latency.arms.readDedupe: false
+latency.arms.contextBudgetTuning: false
+latency.arms.roleStaticSplit: false
 latency.arms.bashAdvisory: false
+latency.arms.bashBoundedInjection: false
+latency.arms.concurrencyDeclaration: false
+latency.arms.concurrencyExecution: false
+latency.arms.evalGateMigration: false
 ```
+
+Stop rules unchanged: no attributed P0/P1 escape, completion drop ≤2pp, rework rise ≤10%, cost p50 ≤1.5×, latency improvement ≥10%.

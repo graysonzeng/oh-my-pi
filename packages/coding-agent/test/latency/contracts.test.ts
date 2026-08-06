@@ -28,17 +28,17 @@ import {
 import { buildReadViewKeyV1, normalizeReadSelector } from "../../src/latency/read-view-key";
 
 describe("latency arms defaults", () => {
-	it("keeps independent arms default-off while context optimization defaults on", () => {
+	it("defaults every latency arm on after the 2026-08-06 re-verification", () => {
 		const settings = Settings.isolated();
 		expect(settings.get("modelOptimization.enabled")).toBe(true);
-		expect(settings.get("latency.arms.readDedupe")).toBe(false);
-		expect(settings.get("latency.arms.contextBudgetTuning")).toBe(false);
-		expect(settings.get("latency.arms.roleStaticSplit")).toBe(false);
-		expect(settings.get("latency.arms.bashAdvisory")).toBe(false);
-		expect(settings.get("latency.arms.bashBoundedInjection")).toBe(false);
-		expect(settings.get("latency.arms.concurrencyDeclaration")).toBe(false);
-		expect(settings.get("latency.arms.concurrencyExecution")).toBe(false);
-		expect(settings.get("latency.arms.evalGateMigration")).toBe(false);
+		expect(settings.get("latency.arms.readDedupe")).toBe(true);
+		expect(settings.get("latency.arms.contextBudgetTuning")).toBe(true);
+		expect(settings.get("latency.arms.roleStaticSplit")).toBe(true);
+		expect(settings.get("latency.arms.bashAdvisory")).toBe(true);
+		expect(settings.get("latency.arms.bashBoundedInjection")).toBe(true);
+		expect(settings.get("latency.arms.concurrencyDeclaration")).toBe(true);
+		expect(settings.get("latency.arms.concurrencyExecution")).toBe(true);
+		expect(settings.get("latency.arms.evalGateMigration")).toBe(true);
 		expect(LATENCY_ARM_IDS).toContain("context_optimization");
 		expect(LATENCY_ARM_SETTINGS.context_optimization).toBe("modelOptimization.enabled");
 		expect(emptyLatencyArms()).toEqual({
@@ -54,14 +54,22 @@ describe("latency arms defaults", () => {
 		});
 	});
 
-	it("maps the controlled single switch only to context optimization", () => {
-		const settings = Settings.isolated({ "modelOptimization.enabled": true });
+	it("resolves the full default-on snapshot after the 2026-08-06 re-verification", () => {
+		const settings = Settings.isolated();
 		const snapshot = freezeLatencyArmSnapshot({
 			getSetting: setting => settings.get(setting as Parameters<typeof settings.get>[0]),
 		});
 		expect(snapshot.arms).toEqual({
 			...emptyLatencyArms(),
 			context_optimization: true,
+			read_dedupe: true,
+			context_budget_tuning: true,
+			role_static_split: true,
+			bash_advisory: true,
+			bash_bounded_injection: true,
+			concurrency_declaration: true,
+			concurrency_execution: true,
+			eval_gate_migration: true,
 		});
 	});
 });
@@ -71,6 +79,7 @@ describe("latency arm snapshots", () => {
 		const settings = Settings.isolated({
 			"modelOptimization.enabled": true,
 			"latency.arms.readDedupe": true,
+			"latency.arms.roleStaticSplit": false,
 		});
 		const snapshot = freezeLatencyArmSnapshot({
 			getSetting: path => settings.get(path as Parameters<typeof settings.get>[0]),

@@ -4,8 +4,8 @@ import { buildReadToolContextEntry } from "../../src/workflow/context-ledger";
 import { sha256Hex } from "../../src/workflow/optimization-receipt";
 
 describe("read dedupe arm", () => {
-	it("keeps the independent arm default-off", () => {
-		expect(Settings.isolated().get("latency.arms.readDedupe")).toBe(false);
+	it("defaults the read dedupe arm on", () => {
+		expect(Settings.isolated().get("latency.arms.readDedupe")).toBe(true);
 	});
 
 	it("builds an eligible context entry from a successful read result", () => {
