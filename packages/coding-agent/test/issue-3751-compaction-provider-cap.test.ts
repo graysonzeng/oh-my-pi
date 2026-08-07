@@ -26,6 +26,7 @@ import {
 	compact,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
+	REQUIRED_CHECKPOINT_SUMMARY_HEADINGS,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
@@ -71,6 +72,10 @@ function makeAssistantMessage(text: string, model: Model): AssistantMessage {
 	};
 }
 
+function checkpointSummary(body: string): string {
+	return REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.map(heading => `${heading}\n${body}`).join("\n\n");
+}
+
 function makePreparation(model: Model): CompactionPreparation {
 	return {
 		firstKeptEntryId: "kept-1",
@@ -108,7 +113,7 @@ describe("issue #3751: compaction summaries respect provider concurrency cap", (
 		const overrideCalls: { model: Model; system: string | undefined }[] = [];
 		const override = async (requestModel: Model, ctx: ai.Context): Promise<AssistantMessage> => {
 			overrideCalls.push({ model: requestModel, system: ctx.systemPrompt?.[0] });
-			return makeAssistantMessage("summary text", requestModel);
+			return makeAssistantMessage(checkpointSummary("summary text"), requestModel);
 		};
 
 		await compact(makePreparation(model), model, "test-key", undefined, undefined, {
@@ -142,7 +147,11 @@ describe("issue #3751: compaction summaries respect provider concurrency cap", (
 			const events = new AssistantMessageEventStream();
 			void gate.promise.then(() => {
 				inFlight--;
-				events.push({ type: "done", reason: "stop", message: makeAssistantMessage("ok", streamModel) });
+				events.push({
+					type: "done",
+					reason: "stop",
+					message: makeAssistantMessage(checkpointSummary("ok"), streamModel),
+				});
 				events.end();
 			});
 			return events;
