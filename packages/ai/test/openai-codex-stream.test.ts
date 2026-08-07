@@ -4551,25 +4551,20 @@ describe("openai-codex streaming", () => {
 		// Prewarm starts the handshake; the stream call races it before the socket
 		// opens. Tearing down the CONNECTING socket would reject the prewarm with a
 		// fatal "websocket closed before open" and disable websockets for the session.
+		const cleanupController = new AbortController();
 		const prewarmPromise = prewarmOpenAICodexResponses(model, {
 			apiKey: token,
 			sessionId: "ws-join-session",
 			providerSessionState,
+			signal: cleanupController.signal,
 		});
 		const streamResult = streamOpenAICodexResponses(model, createCodexTestContext(), {
 			fetch: fetchMock as FetchImpl,
 			apiKey: token,
 			sessionId: "ws-join-session",
 			providerSessionState,
+			signal: cleanupController.signal,
 		}).result();
-
-		// Let both callers reach the handshake before the socket opens.
-		for (let attempt = 0; attempt < 100 && sockets.length < 1; attempt++) {
-			await Bun.sleep(0);
-		}
-		const [socket] = sockets;
-		expect(socket).toBeDefined();
-		if (!socket) throw new Error("websocket handshake did not create a socket");
 
 		let prewarmSettled = false;
 		const prewarmOutcome = prewarmPromise.then(
@@ -4593,31 +4588,57 @@ describe("openai-codex streaming", () => {
 				return { ok: false as const, reason };
 			},
 		);
-
-		for (let attempt = 0; attempt < 100 && (!prewarmSettled || !streamSettled); attempt++) {
+		const openPendingSockets = (): void => {
 			for (const pendingSocket of sockets) {
 				if (pendingSocket.readyState === MockWebSocket.CONNECTING) pendingSocket.open();
 			}
-			await Bun.sleep(0);
-		}
-		expect(prewarmSettled).toBe(true);
-		expect(streamSettled).toBe(true);
-		const prewarmResult = await prewarmOutcome;
-		if (!prewarmResult.ok) throw prewarmResult.reason;
-		const streamResultOutcome = await streamOutcome;
-		if (!streamResultOutcome.ok) throw streamResultOutcome.reason;
-		const result = streamResultOutcome.value;
+		};
+		const closeSockets = (): void => {
+			for (const pendingSocket of sockets) {
+				if (pendingSocket.readyState !== MockWebSocket.CLOSED) pendingSocket.close();
+			}
+		};
 
-		expect(constructorCount).toBe(1);
-		expect(result.stopReason).toBe("stop");
-		expect(result.errorMessage).toBeUndefined();
-		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "Joined" })]);
-		const details = getOpenAICodexTransportDetails(model, {
-			sessionId: "ws-join-session",
-			providerSessionState,
-		});
-		expect(details.websocketDisabled).toBe(false);
-		expect(fetchMock).not.toHaveBeenCalled();
+		try {
+			// Let both callers reach the handshake before the socket opens. A real
+			// timer yield is required here: under full-suite load, repeated zero-time
+			// sleeps can exhaust before the async websocket constructor runs.
+			const socketDeadline = Date.now() + 1000;
+			while (sockets.length < 1 && Date.now() < socketDeadline) await Bun.sleep(1);
+			const [socket] = sockets;
+			expect(socket).toBeDefined();
+			if (!socket) throw new Error("websocket handshake did not create a socket");
+
+			const settleDeadline = Date.now() + 1000;
+			while ((!prewarmSettled || !streamSettled) && Date.now() < settleDeadline) {
+				openPendingSockets();
+				if (!prewarmSettled || !streamSettled) await Bun.sleep(1);
+			}
+			expect(prewarmSettled).toBe(true);
+			expect(streamSettled).toBe(true);
+			const prewarmResult = await prewarmOutcome;
+			if (!prewarmResult.ok) throw prewarmResult.reason;
+			const streamResultOutcome = await streamOutcome;
+			if (!streamResultOutcome.ok) throw streamResultOutcome.reason;
+			const result = streamResultOutcome.value;
+
+			expect(constructorCount).toBe(1);
+			expect(result.stopReason).toBe("stop");
+			expect(result.errorMessage).toBeUndefined();
+			expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "Joined" })]);
+			const details = getOpenAICodexTransportDetails(model, {
+				sessionId: "ws-join-session",
+				providerSessionState,
+			});
+			expect(details.websocketDisabled).toBe(false);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			openPendingSockets();
+			cleanupController.abort();
+			closeSockets();
+			await Promise.allSettled([prewarmOutcome, streamOutcome]);
+			closeSockets();
+		}
 	});
 
 	it("surfaces a whitespace flood arriving after a delivered tool call instead of replaying", async () => {
