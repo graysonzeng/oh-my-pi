@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [17.1.9] - 2026-08-07
 
 ### Added
 - Optional `toolScheduling` on agent loop/config: `maxConcurrentTools` semaphore, per-batch tool-call budget reservation with skip-on-exhaustion, and conservative same-path write / unknown-resource serialization (no cross-turn DAG).

@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [17.1.9] - 2026-08-07
 
 ### Breaking Changes
 - Default workflow implementer chain changed to **DeepSeek-V4-Flash (`max`) → Grok-4.5 (`high`) → GPT-5.6-Luna (`max`) → calling session model (last resort)**. Default `glm_implementer`, `gpt_terra_implementer`, and `deepseek_bulk` profiles were removed; implementer `modelPattern`s are exact (no wildcards) so routing can never downgrade to `gpt-5.*` / `deepseek-v4*` / `glm-5.*` variants. Existing `workflow.profiles` overrides for removed ids fail closed with `incomplete_model_profile` (orphan partial profiles no longer survive without a default base — migrate to a full custom profile), and `workflow.qualityRoutes` referencing removed ids fail closed with `unknown_quality_route_profile`.
@@ -11,6 +11,8 @@
 ### Added
 - Added legacy-route session-model last resort for implement: the calling session's active model is registered as `main_agent_fallback` (last candidate, `degraded: true`, `fallback_from:<primary>`) when the three static implementer candidates are all unavailable at runtime; availability preflight real-probes it, resume re-finds it by id, and quality-route routers stay fail-closed (no session fallback). Retry budget for a role is now the distinct routable candidate count, so a preflight-excluded primary cannot truncate the fallback chain.
 - Added default-off latency arms (`latency.arms.*` plus existing `modelOptimization.enabled`) for ordinary-context optimization activation, verified read dedupe, bash failure ledger advisory/bounded injection, concurrency flat independent-wave scaffolding (dependsOn falls back to whole-plan), mechanical Flash repair routing with strict evidence parse, and eval-gate parity migration control.
+- Added the latency rollout quality-stop data plane: durable per-run cohort observations (`~/.omp/workflow-artifacts/latency-rollout-cohort.jsonl`) recorded at workflow terminal, cohort-derived completion/rework/cost P50/P95/latency/spawned guardrails that activate once both the treatment cohort and the no-arm baseline accrue ≥8 samples, fired-arm treatment receipts so a stop disables only arms that actually engaged (fail-closed on the whole active set when none fired), an ordinary-session teardown stop consumer, and frozen-snapshot invalidation after rollback overrides.
+- Changed `modelOptimization.enabled` and `latency.arms.readDedupe` to default on — the high-benefit ordinary-session pair — guarded by the wired quality stop; every other behavior-changing arm stays default-off pending its paired task matrix.
 - Added subagent queue/runtime timeout defaults: `task.maxRuntimeMs` defaults to 1h and `task.queuedStartupTimeoutMs` defaults to 2m (both independently disable with `0`), with AbortSignal.any first-cause attribution for queued-startup failures.
 - Added PlanReview V2 control path: single strong reviewer identity pin, engine-owned trigger/receipt fields, rejection counts aligned with `maxPlanCycles`, bounded arbitration resume, and terminal `blocked` when human authority is required while preserving `awaiting_human` control state.
 - Added opt-in proactive task-delegation prompt flags (`task.proactive.*`, default false) gated behind existing eager-task settings so parallel/delegation guidance is experimental rather than unconditional.
