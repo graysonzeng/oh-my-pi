@@ -86,18 +86,19 @@ Last updated: 2026-08-07 (Asia/Shanghai).
 
 | Item | Verified value |
 |---|---|
-| Source commit | `2a8e545e2` / `2a8e545e2f17c1a3be2ac20cfc05e6acf0d54387` (clean worktree at verify time) |
-| Package version | `omp/17.1.8` |
+| Source commit | `69857c8f7` / `69857c8f74643bd387a24427a75a26df6a38e0a76` (clean worktree at verify time; tag `v17.1.9`) |
+| Package version | `omp/17.1.9` |
 | Artifact | `packages/coding-agent/dist/omp` |
 | Installed path | `/Users/sheng/.local/bin/omp` |
-| SHA-256 | `66e89c1f4cdb533301406fd36dc6e3195b9947d5b9618a1519a206ff55ecf9e0` |
-| Native SHA-256 | `ee6f860bb77e000879670f4e63944287cdc563b3d608744c8e8307d6b28dd901` (embedded `packages/natives/native/pi_natives.darwin-arm64.node`) |
+| SHA-256 | `acc483ff3c22d5ec7183d05911a5280690cb8e24cf6e53fc99ff9a6c5399f1c1` |
+| Native SHA-256 | `ee6f860bb77e000879670f4e63944287cdc563b3d608744c8e8307d6b28dd901` (embedded `packages/natives/native/pi_natives.darwin-arm64.node`, sentinel `__piNativesV17_1_9`) |
 | Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build` |
 | Artifact type | signed arm64 Mach-O executable |
-| Gates | `bun --cwd=packages/coding-agent run check` (biome 2563 files + tsgo); production binary build; artifact type/signature/version/checksum and `--smoke-test`; installed path/type/version/checksum and `--smoke-test`; spawn-free latency/model-optimization/session/workflow suites (10 pre-existing process-spawn-limited tests require a full `bun test` host outside this sandbox) |
+| Gates | `bun run check:ts` (biome 3982 files + all workspace tsgo) exit 0; full spawn-capable test matrix: agent 477, ai 3795, utils 479, catalog 529, hashline 236, wire, collab-web 75, tui 1403, coding-agent 12190 pass with 4 pre-existing environment-limited failures (status-line symlink ×2, Python runtime completion ×2; RpcClient restart flake 4/4 green on rerun); production binary build; artifact type/signature/version/checksum and `--smoke-test`; installed path/type/version/checksum and `--smoke-test` |
 
 The installed checksum matched the build artifact, both artifact and installed
 `--smoke-test` returned `smoke-test: ok`, and the installed command resolved to
-`/Users/sheng/.local/bin/omp`. The source tree was clean at build time (commit
-`2a8e545e2`), so the baseline is reproducible from that commit alone. The previous
-installed command remains available at the rollback path above.
+`/Users/sheng/.local/bin/omp` (`omp/17.1.9`). The source tree was clean at build
+time (commit `69857c8f7`, local tag `v17.1.9`), so the baseline is reproducible
+from that commit alone. The previous installed command remains available at the
+rollback path above.
