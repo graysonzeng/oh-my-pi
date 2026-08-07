@@ -64,6 +64,12 @@ async function createMinimalSession(
 		settings: Settings.isolated({
 			"async.enabled": false,
 			"marketplace.autoUpdate": "off",
+			// These cases assert prompt-cache key affinity across forks, which
+			// presumes the fork startup prompt is unchanged. Model optimization is
+			// on by default and rewrites the prompt block, which must invalidate
+			// the inherited key; that behavior is covered by the dedicated
+			// "clears the inherited…" case below.
+			"modelOptimization.enabled": false,
 		}),
 		disableExtensionDiscovery: true,
 		preloadedExtensions: undefined,
@@ -147,6 +153,32 @@ describe("provider prompt-cache key session affinity", () => {
 			expect(session.agent.sessionId).toBe(childSessionId);
 			expect(session.agent.promptCacheKey).toBe(source.sourceHeader.id);
 			expect(session.agent.promptCacheKey).not.toBe(session.agent.sessionId);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+		}
+	});
+
+	it("clears the inherited parent prompt-cache key when fork startup activates model optimization", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-opt-");
+		const source = await createSourceSessionFixture(tempDir, "optimized-parent");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			// modelOptimization is on by default: the fork applies a model-family
+			// optimization profile, the prompt block fingerprint changes, and the
+			// inherited cache key must be dropped so it never mismatches the new
+			// prompt prefix.
+			const created = await createMinimalSession(tempDir, {
+				cwd: source.cwd,
+				sessionManager: forkedManager,
+				model: OPENAI_TEST_MODEL,
+			});
+			session = created.session;
+			authStorage = created.authStorage;
+			expect(session.agent.sessionId).toBe(forkedManager.getSessionId());
+			expect(session.agent.promptCacheKey).not.toBe(source.sourceHeader.id);
 		} finally {
 			await session?.dispose();
 			authStorage?.close();
