@@ -4,6 +4,7 @@ import * as path from "node:path";
 import {
 	buildLatencyRolloutDecision,
 	freezeLatencyArmSnapshot,
+	LATENCY_ARM_IDS,
 	LATENCY_ARM_SETTINGS,
 	LATENCY_ROLLOUT_DECISION_KIND,
 	type LatencyArmId,
@@ -16,6 +17,13 @@ import {
 	validateConcurrencyDeclaration,
 } from "../latency/concurrency-declaration";
 import { parseWorkflowMechanicalClass } from "../latency/mechanical-class";
+import {
+	computeLatencyCohortMetrics,
+	deriveLatencyCohortKey,
+	LATENCY_BASELINE_COHORT_KEY,
+	LatencyRolloutCohortStore,
+	type LatencyRolloutObservationV1,
+} from "../latency/rollout-cohort";
 import type { ToolSession } from "../tools";
 import * as git from "../utils/git";
 import {
@@ -309,6 +317,8 @@ export interface WorkflowEngineOptions {
 	session?: ToolSession;
 	signal?: AbortSignal;
 	config?: Partial<WorkflowDefaultConfig>;
+	/** Cohort observation store for rollout guardrails; defaults to the machine-level JSONL. */
+	latencyCohortStore?: LatencyRolloutCohortStore;
 	/** When true (default if store was created by engine), dispose() closes SQLite. */
 	ownsStore?: boolean;
 }
@@ -346,6 +356,7 @@ export class WorkflowEngine {
 	readonly #availability: WorkflowAvailabilityPort | undefined;
 	readonly #verifier: VerifierPort;
 	readonly #artifactStore: ArtifactStore;
+	readonly #latencyCohortStore: LatencyRolloutCohortStore;
 	readonly #contextBuilder = new ContextBuilder();
 	readonly #session: ToolSession | undefined;
 	readonly #config: WorkflowDefaultConfig;
@@ -401,6 +412,7 @@ export class WorkflowEngine {
 	constructor(options: WorkflowEngineOptions = {}) {
 		this.#ownsStore = options.ownsStore ?? options.store === undefined;
 		this.#store = options.store ?? new WorkflowStore();
+		this.#latencyCohortStore = options.latencyCohortStore ?? new LatencyRolloutCohortStore();
 		const mergedConfig = { ...getDefaultConfig(), ...options.config };
 		const normalizedProfiles = Object.fromEntries(
 			Object.entries(mergedConfig.profiles).map(([key, profile]) => {
@@ -1109,10 +1121,45 @@ export class WorkflowEngine {
 		const openP0P1 = this.#findingTracker
 			.getOpen()
 			.filter(finding => finding.priority === "P0" || finding.priority === "P1").length;
+		const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
+		const firedArms = (session.getFiredLatencyArms?.() ?? []).filter(arm => active.includes(arm));
+		// Record this run into the cohort before evaluating, so the guardrail
+		// reads a cohort that includes it. Best-effort: never fails the terminal.
+		const observation: LatencyRolloutObservationV1 = {
+			schemaVersion: 1,
+			kind: "latency_rollout_observation",
+			key: deriveLatencyCohortKey(snapshot),
+			workflowId,
+			status: state.status,
+			completed: state.status === "completed",
+			repairCycles: budget.repairCycles,
+			p0p1Escapes: openP0P1,
+			costUsd: budget.costUsd,
+			stageTimeMs: budget.stageTimeMs,
+			spawnedAgents: null,
+			firedArms,
+			endedAt: new Date().toISOString(),
+		};
+		try {
+			this.#latencyCohortStore.append(observation);
+		} catch {
+			// Cohort bookkeeping is advisory.
+		}
+		// Cohort-derived thresholds activate only when both the treatment cohort and
+		// the no-arm baseline have accumulated enough samples (min-sample guard).
+		const key = observation.key;
+		const treatment = this.#latencyCohortStore.summaryForKey(key);
+		const baseline =
+			key === LATENCY_BASELINE_COHORT_KEY
+				? undefined
+				: this.#latencyCohortStore.summaryForKey(LATENCY_BASELINE_COHORT_KEY);
+		const cohort = treatment && baseline ? computeLatencyCohortMetrics(treatment, baseline) : undefined;
 		const decision = buildLatencyRolloutDecision({
 			workflowId,
 			status: state.status,
 			snapshot,
+			firedArms,
+			cohort,
 			observed: {
 				completion: state.status === "completed",
 				repairCycles: budget.repairCycles,
@@ -1133,6 +1180,9 @@ export class WorkflowEngine {
 			for (const arm of decision.disabledArms) {
 				session.settings.override(LATENCY_ARM_SETTINGS[arm] as never, false);
 			}
+			// The frozen snapshot must reflect the rollback: later lookups re-read
+			// live settings instead of the pre-rollback arm map.
+			session.invalidateLatencyArmSnapshot?.();
 		}
 	}
 
@@ -1937,6 +1987,10 @@ export class WorkflowEngine {
 							[this.#codeReviewArtifactRef, this.#verificationArtifactRef, this.#implementationArtifactRef],
 						)
 					: undefined;
+				// Treatment receipt: a mechanical repair was routed with static split engaged.
+				if (roleStaticSplitEnabled && (parseWorkflowMechanicalClass(policy.mechanicalClass) ?? undefined)) {
+					session.markLatencyArmFired?.("role_static_split");
+				}
 				const {
 					artifact: repaired,
 					usage,
@@ -2244,6 +2298,8 @@ export class WorkflowEngine {
 				}
 			}
 		}
+		// Treatment receipt: a validated declaration actually drove this run's plan.
+		if (concurrencyDeclaration) session.markLatencyArmFired?.("concurrency_declaration");
 		const maxConcurrency =
 			concurrencyDeclaration && executionArmEnabled
 				? resolveEffectiveConcurrency({
@@ -2254,6 +2310,8 @@ export class WorkflowEngine {
 		const mergeCapturedChanges = this.#adapter.mergeCapturedChanges;
 		let packageInput = this.#plan?.workPackages;
 		if (concurrencyDeclaration && executionArmEnabled) {
+			// Treatment receipt: the declaration was lowered onto the work-package runtime.
+			session.markLatencyArmFired?.("concurrency_execution");
 			const initialStates = concurrencyDeclaration.units.map(unit => ({
 				id: unit.id,
 				status: "declared" as const,

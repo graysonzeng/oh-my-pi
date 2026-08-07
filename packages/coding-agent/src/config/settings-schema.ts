@@ -4510,13 +4510,13 @@ export const SETTINGS_SCHEMA = {
 	// Ordinary-session model optimization (workflow uses its own profiles independently)
 	"modelOptimization.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "model",
 			group: "Model",
 			label: "Model Optimization",
 			description:
-				"When enabled, ordinary coding sessions apply model-family prompt/tool/context optimization for the active model. Default off since the 2026-08-07 quality gate (no paired ordinary-session matrix per family yet; set true to opt into a monitored cohort). Workflow profiles are unaffected.",
+				"When enabled, ordinary coding sessions apply model-family prompt/tool/context optimization for the active model. Default on with the wired quality stop (cohort + fired-arm attribution + session-end rollback); behavior-changing profile thresholds stay off until their paired matrix passes. Workflow profiles are unaffected.",
 		},
 	},
 	"modelOptimization.profiles": {
@@ -4531,19 +4531,21 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Latency optimization arms (design A §6.2) — independently rollbackable. Evidence-based defaults:
-	// only the low-risk, fail-open bash pair is on by default (2026-08-07 quality gate); every
-	// behavior-changing arm stays off until its paired ≥30-task matrix and a wired production
-	// quality stop pass (review 2026-08-07). context_optimization reuses modelOptimization.enabled.
+	// Latency optimization arms (design A §6.2) — independently rollbackable. Defaults since the
+	// 2026-08-07 quality gate: the low-risk fail-open bash pair, plus the high-benefit ordinary-session
+	// pair (modelOptimization.enabled + readDedupe), are on; every other behavior-changing arm stays
+	// off until its paired ≥30-task matrix passes. Production quality-stop wiring (cohort data plane,
+	// fired-arm attribution, ordinary-session consumer) guards the on-by-default set.
+	// context_optimization reuses modelOptimization.enabled.
 	"latency.arms.readDedupe": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "files",
 			group: "Reading",
 			label: "Read Result Dedupe",
 			description:
-				"When enabled with model optimization, repeated same-view read results may be replaced with verified artifact refs in model-visible context. Fail-open on unknown identity. Default off until paired ordinary-session task quality passes; opt into a monitored cohort to enable.",
+				"When enabled with model optimization, repeated same-view read results may be replaced with verified artifact refs in model-visible context. Fail-open on unknown identity. Default on with the wired quality stop; reverts automatically on an attributed quality regression.",
 		},
 	},
 	"latency.arms.contextBudgetTuning": {

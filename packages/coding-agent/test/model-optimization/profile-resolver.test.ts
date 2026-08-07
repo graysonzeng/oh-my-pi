@@ -77,8 +77,8 @@ describe("ordinary-session model optimization resolver", () => {
 		expect(second.profile?.id).toBe("second");
 	});
 
-	it("keeps context optimization default-off until paired ordinary-session quality passes", () => {
-		expect(Settings.isolated().get("modelOptimization.enabled")).toBe(false);
+	it("keeps context optimization default-on with the wired quality stop", () => {
+		expect(Settings.isolated().get("modelOptimization.enabled")).toBe(true);
 		const profiles = mergeModelOptimizationProfiles({
 			custom: {
 				id: "custom",

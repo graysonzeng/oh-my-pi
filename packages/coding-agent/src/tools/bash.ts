@@ -711,6 +711,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					`[bash-attempt-ledger] bounded summary: prior identical failure; priorAttempts=${prior.priorAttempts}; failureFingerprint=${failureFingerprint.slice(0, 12)}…`,
 				);
 			}
+			// Treatment receipts: an advisory or bounded summary was actually emitted.
+			if (notices.some(text => text.includes("bounded summary"))) {
+				this.session.markLatencyArmFired?.("bash_bounded_injection");
+			}
+			if (notices.some(text => text.startsWith("[bash-attempt-ledger] repeated identical failure"))) {
+				this.session.markLatencyArmFired?.("bash_advisory");
+			}
 			return notices;
 		} catch {
 			// Ledger evidence is advisory only. Never prevent the command from

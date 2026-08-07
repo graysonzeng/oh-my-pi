@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 
 /**
  * Independent latency-optimization arms (design A §6.2).
- * Evidence-based defaults since the 2026-08-07 quality gate: only the low-risk, fail-open bash
- * pair (bash_advisory + bash_bounded_injection) is on by default; every behavior-changing arm is
- * off until its paired ≥30-task matrix and a wired production quality stop pass. Arms are
- * session-frozen when first resolved and independently rollbackable.
+ * Defaults since the 2026-08-07 quality gate: the low-risk fail-open bash pair plus the
+ * high-benefit ordinary-session pair (context_optimization + read_dedupe) are on by default;
+ * every other behavior-changing arm is off until its paired ≥30-task matrix passes. The wired
+ * production quality stop (cohort data plane, fired-arm attribution, ordinary-session consumer)
+ * guards the on-by-default set. Arms are session-frozen when first resolved and independently
+ * rollbackable.
  * Combined experiments must use a separate combinedArmId listing child arms.
  */
 
@@ -23,7 +25,7 @@ export const LATENCY_ARM_IDS = [
 
 export type LatencyArmId = (typeof LATENCY_ARM_IDS)[number];
 
-/** Settings paths that gate each arm. Only the low-risk bash pair defaults true (2026-08-07). */
+/** Settings paths that gate each arm. High-benefit pair + low-risk bash pair default true. */
 export const LATENCY_ARM_SETTINGS = {
 	context_optimization: "modelOptimization.enabled",
 	read_dedupe: "latency.arms.readDedupe",
@@ -254,6 +256,8 @@ export function buildLatencyRolloutDecision(input: {
 	status: string;
 	snapshot: LatencyArmSnapshotV1;
 	observed: LatencyRolloutObservedV1;
+	/** Arms that actually engaged during the run. Only these are causally rollbackable. */
+	firedArms?: LatencyArmId[];
 	cohort?: {
 		completionDropPp?: number;
 		reworkRisePct?: number;
@@ -277,6 +281,11 @@ export function buildLatencyRolloutDecision(input: {
 		latencyImprovePct: input.cohort?.latencyImprovePct,
 		spawnedAgentsP95Multiple: input.cohort?.spawnedAgentsP95Multiple,
 	});
+	// Causal rollback: only arms that actually engaged may be disabled. When a
+	// stop fires but no active arm is in the fired set, fail closed on the whole
+	// active set — an unattributable regression must not re-engage next run.
+	const fired = input.firedArms?.filter(arm => active.includes(arm)) ?? [];
+	const disabledArms = decision.stop ? (fired.length > 0 ? fired : active) : [];
 	return {
 		schemaVersion: 1,
 		kind: LATENCY_ROLLOUT_DECISION_KIND,
@@ -286,7 +295,7 @@ export function buildLatencyRolloutDecision(input: {
 		attributionKnown,
 		observed: input.observed,
 		decision,
-		disabledArms: decision.stop ? active : [],
+		disabledArms,
 		evaluatedAt: new Date().toISOString(),
 	};
 }

@@ -416,6 +416,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			sessionReceipt as import("../latency/eval-parity").EvalGateParityReceiptV1 | undefined,
 			evalGateArmEnabled,
 		);
+		// Treatment receipt: native control actually engaged on this eval gate.
+		if (evalGateControl === "native-control") session.markLatencyArmFired?.("eval_gate_migration");
 		const evalGateNotice = evalGateArmEnabled
 			? evalGateControl === "native-control"
 				? "[eval-gate] native-control selected from proven parity receipt; bridge retained until native owner cutover"

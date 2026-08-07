@@ -328,6 +328,12 @@ export interface ToolSession {
 	isLatencyArmEnabled?: (arm: LatencyArmId) => boolean;
 	/** Session-frozen latency arm snapshot (attribution for rollout decisions); test sessions may omit it. */
 	getLatencyArmSnapshot?: () => LatencyArmSnapshotV1;
+	/** Record that a latency arm actually engaged (treatment receipt for causal rollback). */
+	markLatencyArmFired?: (arm: LatencyArmId) => void;
+	/** Arms that actually engaged during this run; test sessions may omit it. */
+	getFiredLatencyArms?: () => LatencyArmId[];
+	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
+	invalidateLatencyArmSnapshot?: () => void;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */

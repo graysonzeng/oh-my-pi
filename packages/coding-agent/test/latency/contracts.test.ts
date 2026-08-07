@@ -30,10 +30,10 @@ import {
 import { buildReadViewKeyV1, normalizeReadSelector } from "../../src/latency/read-view-key";
 
 describe("latency arms defaults", () => {
-	it("keeps only the low-risk bash pair on by default after the 2026-08-07 quality gate", () => {
+	it("keeps the high-benefit pair and the low-risk bash pair on by default", () => {
 		const settings = Settings.isolated();
-		expect(settings.get("modelOptimization.enabled")).toBe(false);
-		expect(settings.get("latency.arms.readDedupe")).toBe(false);
+		expect(settings.get("modelOptimization.enabled")).toBe(true);
+		expect(settings.get("latency.arms.readDedupe")).toBe(true);
 		expect(settings.get("latency.arms.contextBudgetTuning")).toBe(false);
 		expect(settings.get("latency.arms.roleStaticSplit")).toBe(false);
 		expect(settings.get("latency.arms.bashAdvisory")).toBe(true);
@@ -56,20 +56,22 @@ describe("latency arms defaults", () => {
 		});
 	});
 
-	it("resolves the default snapshot to the bash pair and registers it as a combination", () => {
+	it("resolves the default snapshot to the on-by-default set and registers the combination", () => {
 		const settings = Settings.isolated();
 		const snapshot = freezeLatencyArmSnapshot({
 			getSetting: setting => settings.get(setting as Parameters<typeof settings.get>[0]),
 		});
 		expect(snapshot.arms).toEqual({
 			...emptyLatencyArms(),
+			context_optimization: true,
+			read_dedupe: true,
 			bash_advisory: true,
 			bash_bounded_injection: true,
 		});
 		expect(snapshot.combinedArmId).toBeUndefined(); // freeze itself never invents a combination
 		expect(deriveLatencyCombination(snapshot.arms)).toEqual({
-			combinedArmId: "combined:bash_advisory+bash_bounded_injection",
-			childArms: ["bash_advisory", "bash_bounded_injection"],
+			combinedArmId: "combined:bash_advisory+bash_bounded_injection+context_optimization+read_dedupe",
+			childArms: ["bash_advisory", "bash_bounded_injection", "context_optimization", "read_dedupe"],
 		});
 	});
 });
@@ -279,6 +281,95 @@ describe("latency quality stop", () => {
 		expect(decision.attributionKnown).toBe(false);
 		expect(decision.decision).toEqual({ stop: true, reason: "missing_attribution" });
 		expect(decision.disabledArms).toEqual(["context_optimization", "read_dedupe"]);
+	});
+
+	it("disables only fired arms when a stop fires and fails closed when none fired", () => {
+		const snapshot = freezeLatencyArmSnapshot({
+			arms: { ...emptyLatencyArms(), bash_advisory: true, bash_bounded_injection: true },
+			combinedArmId: "combined:bash_advisory+bash_bounded_injection",
+			childArms: ["bash_advisory", "bash_bounded_injection"],
+			frozenAt: "2026-08-07T00:00:00.000Z",
+		});
+		const observed = {
+			completion: true,
+			repairCycles: 0,
+			treatmentAttributedP0P1Escapes: 1,
+			costUsd: 0.1,
+			stageTimeMs: 1000,
+			spawnedAgents: null,
+		};
+		// Only the fired arm is causally rollbackable.
+		const fired = buildLatencyRolloutDecision({
+			workflowId: "wf-5",
+			status: "completed",
+			snapshot,
+			observed,
+			firedArms: ["bash_advisory"],
+		});
+		expect(fired.decision).toEqual({ stop: true, reason: "p0p1_escape" });
+		expect(fired.disabledArms).toEqual(["bash_advisory"]);
+		// No fired arm + a stop → fail closed on the whole active set.
+		const noneFired = buildLatencyRolloutDecision({
+			workflowId: "wf-6",
+			status: "completed",
+			snapshot,
+			observed,
+			firedArms: [],
+		});
+		expect(noneFired.disabledArms).toEqual(["bash_advisory", "bash_bounded_injection"]);
+		// Unknown fired arm ids are ignored.
+		const bogus = buildLatencyRolloutDecision({
+			workflowId: "wf-7",
+			status: "completed",
+			snapshot,
+			observed,
+			firedArms: ["not_an_arm" as never],
+		});
+		expect(bogus.disabledArms).toEqual(["bash_advisory", "bash_bounded_injection"]);
+	});
+
+	it("passes cohort thresholds into the stop decision", () => {
+		const snapshot = freezeLatencyArmSnapshot({
+			arms: { ...emptyLatencyArms(), read_dedupe: true },
+			frozenAt: "2026-08-07T00:00:00.000Z",
+		});
+		const base = {
+			workflowId: "wf-8",
+			status: "completed",
+			snapshot,
+			observed: {
+				completion: true,
+				repairCycles: 0,
+				treatmentAttributedP0P1Escapes: 0,
+				costUsd: 0.1,
+				stageTimeMs: 1000,
+				spawnedAgents: null,
+			},
+		};
+		expect(buildLatencyRolloutDecision({ ...base, cohort: { reworkRisePct: 15 } }).decision).toEqual({
+			stop: true,
+			reason: "rework_rise",
+		});
+		expect(buildLatencyRolloutDecision({ ...base, cohort: { costP50Multiple: 1.6 } }).decision).toEqual({
+			stop: true,
+			reason: "cost_breach",
+		});
+		expect(buildLatencyRolloutDecision({ ...base, cohort: { costP95Multiple: 2.1 } }).decision).toEqual({
+			stop: true,
+			reason: "cost_breach",
+		});
+		expect(buildLatencyRolloutDecision({ ...base, cohort: { latencyImprovePct: 8 } }).decision).toEqual({
+			stop: true,
+			reason: "latency_miss",
+		});
+		expect(buildLatencyRolloutDecision({ ...base, cohort: { spawnedAgentsP95Multiple: 3 } }).decision).toEqual({
+			stop: true,
+			reason: "spawned_agents_breach",
+		});
+		expect(buildLatencyRolloutDecision({ ...base, cohort: { completionDropPp: 1 } }).decision).toEqual({
+			stop: false,
+			reason: null,
+		});
 	});
 });
 

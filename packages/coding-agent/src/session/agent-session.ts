@@ -143,13 +143,23 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import {
+	buildLatencyRolloutDecision,
 	deriveLatencyCombination,
 	freezeLatencyArmSnapshot,
+	LATENCY_ARM_IDS,
+	LATENCY_ARM_SETTINGS,
+	type LatencyArmId,
 	type LatencyArmSnapshotV1,
 	resolveLatencyArmsFromSettings,
 } from "../latency/arms";
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import { normalizeReadSelector } from "../latency/read-view-key";
+import {
+	computeLatencyCohortMetrics,
+	deriveLatencyCohortKey,
+	LATENCY_BASELINE_COHORT_KEY,
+	LatencyRolloutCohortStore,
+} from "../latency/rollout-cohort";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import {
@@ -574,6 +584,8 @@ export class AgentSession {
 	#modelOptimizationDirty = true;
 	#readDedupeArtifacts = new Map<string, { artifactRef: string; immutableSha256: string }>();
 	#latencyArmSnapshot: LatencyArmSnapshotV1 | undefined;
+	/** Arms that actually engaged during this run (treatment receipts for causal rollback). */
+	#firedLatencyArms = new Set<LatencyArmId>();
 
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
@@ -1842,15 +1854,15 @@ export class AgentSession {
 		this.sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, data);
 	}
 
-	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
-		if (this.#exitRecorded) return;
+	#recordSessionExit(reason: postmortem.Reason | "dispose"): SessionExitData["kind"] | null {
+		if (this.#exitRecorded) return null;
 		this.#exitRecorded = true;
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
 			pendingToolCalls.length === 0 &&
 			!this.sessionManager.getEntries().some(entry => entry.type === "message" && entry.message.role === "assistant")
 		) {
-			return;
+			return null;
 		}
 		const kind: SessionExitData["kind"] =
 			reason === "dispose" || reason === postmortem.Reason.MANUAL
@@ -1887,6 +1899,7 @@ export class AgentSession {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		return kind;
 	}
 
 	#queuedExtensionEvents: Promise<void> = Promise.resolve();
@@ -3129,6 +3142,10 @@ export class AgentSession {
 				return undefined;
 			}
 		}
+		// Treatment receipts: the optimizer replaced model-visible content, and the
+		// dedupe path rewrote a read result — both actually engaged this turn.
+		this.markLatencyArmFired("context_optimization");
+		if (readDedupeEnabled) this.markLatencyArmFired("read_dedupe");
 		return { content: [{ type: "text", text: visibleText }, ...nonText] };
 	}
 
@@ -3806,7 +3823,8 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
-		this.#recordSessionExit(options.reason ?? "dispose");
+		const exitKind = this.#recordSessionExit(options.reason ?? "dispose");
+		this.#evaluateLatencyRolloutAtSessionEnd(exitKind);
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		try {
@@ -4283,6 +4301,7 @@ export class AgentSession {
 		const contextBudgetArmEnabled =
 			this.isLatencyArmEnabled("context_optimization") && this.isLatencyArmEnabled("context_budget_tuning");
 		const applied = applyContextBudgetCandidate(resolved, contextBudgetArmEnabled);
+		if (contextBudgetArmEnabled) this.markLatencyArmFired("context_budget_tuning");
 		this.#activeModelOptimization = applied;
 		this.#applyModelOptimizationRuntime?.(applied);
 		this.agent.setToolScheduling(applied.toolScheduling);
@@ -4664,6 +4683,7 @@ export class AgentSession {
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#readDedupeArtifacts.clear();
+		this.#firedLatencyArms.clear();
 		this.#clearLatencyArmSnapshot();
 		// Prefer the departed session id captured before newSession/switch mutates
 		// SessionManager; clearing only the current id would leave the old ledger.
@@ -4705,8 +4725,70 @@ export class AgentSession {
 		return this.#ensureLatencyArmSnapshot();
 	}
 
+	/** Record that a latency arm actually engaged; only fired arms are causally rollbackable. */
+	markLatencyArmFired(arm: LatencyArmId): void {
+		this.#firedLatencyArms.add(arm);
+	}
+
+	/** Arms that actually engaged during this run (treatment receipts). */
+	getFiredLatencyArms(): LatencyArmId[] {
+		return [...this.#firedLatencyArms];
+	}
+
+	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
+	invalidateLatencyArmSnapshot(): void {
+		this.#clearLatencyArmSnapshot();
+	}
+
 	#clearLatencyArmSnapshot(): void {
 		this.#latencyArmSnapshot = undefined;
+	}
+
+	/**
+	 * Ordinary-session quality-stop consumer. At teardown, evaluate the frozen arm
+	 * snapshot against cohort aggregates accrued by completed runs and this
+	 * session's own treatment receipts. Synchronous best-effort: teardown must
+	 * never block or fail on rollout bookkeeping.
+	 */
+	#evaluateLatencyRolloutAtSessionEnd(exitKind: SessionExitData["kind"] | null): void {
+		try {
+			const snapshot = this.#latencyArmSnapshot;
+			if (!snapshot) return; // arms never resolved → nothing to guard
+			const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
+			if (active.length === 0) return;
+			const cohortStore = new LatencyRolloutCohortStore();
+			const key = deriveLatencyCohortKey(snapshot);
+			const treatment = cohortStore.summaryForKey(key);
+			const baseline =
+				key === LATENCY_BASELINE_COHORT_KEY ? undefined : cohortStore.summaryForKey(LATENCY_BASELINE_COHORT_KEY);
+			const cohort = treatment && baseline ? computeLatencyCohortMetrics(treatment, baseline) : undefined;
+			const decision = buildLatencyRolloutDecision({
+				workflowId: this.sessionManager.getSessionId() ?? "session",
+				status: exitKind ?? "unknown",
+				snapshot,
+				observed: {
+					completion: exitKind === "normal",
+					repairCycles: 0,
+					treatmentAttributedP0P1Escapes: 0,
+					costUsd: null,
+					// Ordinary sessions do not track per-run stage time; the persisted
+					// decision records unknown as 0 (cohort aggregation uses observations,
+					// which keep stageTimeMs null and are excluded there).
+					stageTimeMs: 0,
+					spawnedAgents: null,
+				},
+				firedArms: this.getFiredLatencyArms(),
+				cohort,
+			});
+			if (decision.decision.stop && typeof this.settings.override === "function") {
+				for (const arm of decision.disabledArms) {
+					this.settings.override(LATENCY_ARM_SETTINGS[arm] as never, false);
+				}
+				this.invalidateLatencyArmSnapshot();
+			}
+		} catch {
+			// Rollout bookkeeping must never fail session teardown.
+		}
 	}
 
 	/**

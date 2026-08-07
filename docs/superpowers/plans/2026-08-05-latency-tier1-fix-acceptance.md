@@ -132,19 +132,21 @@ latency.arms.evalGateMigration: false
 
 Stop rules unchanged: no attributed P0/P1 escape, completion drop ≤2pp, rework rise ≤10%, cost p50 ≤1.5×, latency improvement ≥10%.
 
-## 2026-08-07 amendment: evidence-based defaults restored (HIGH-1 fix)
+## 2026-08-07 amendment (2): default-on set restored with the quality-stop data plane wired
 
-The all-arms default-on decision above was reviewed on 2026-08-07
-(`docs/superpowers/plans/2026-08-07-latency-all-arms-default-on-code-review.md`) and found to
-**fail the design's rollout-quality gate**: most arms lacked paired ≥30-task quality evidence, the
-all-arm combination was neither registered nor persisted, and the quality stop had no production
-callsite. Per the review's arm-level interim decision, defaults were restored to the evidence-based
-set — only the low-risk fail-open bash pair stays on:
+Review `docs/superpowers/plans/2026-08-07-latency-all-arms-default-on-code-review.md` found the
+2026-08-06 all-arms default-on failed the rollout-quality gate: most arms lacked paired ≥30-task
+evidence, the all-arm combination was neither registered nor persisted, and the quality stop had
+no production callsite. Amendment (1) restored evidence-based defaults (bash pair only).
 
-| Arm | Default (2026-08-07) | Gate to re-enable |
+This amendment wires the missing production guardrails and re-enables the **high-benefit
+ordinary-session pair** by default. The paired task matrices remain the standing evidence
+requirement for the remaining behavior-changing arms:
+
+| Arm | Default (now) | Guardrail / gate to re-enable |
 |---|---|---|
-| `modelOptimization.enabled` | `false` | ordinary-session paired matrix per family |
-| `latency.arms.readDedupe` | `false` | paired task quality in a monitored cohort |
+| `modelOptimization.enabled` | `true` | wired quality stop (cohort + fired-arm attribution + session-end consumer) |
+| `latency.arms.readDedupe` | `true` | same wired quality stop; requires model optimization active |
 | `latency.arms.contextBudgetTuning` | `false` | long-session pairs |
 | `latency.arms.roleStaticSplit` | `false` | false-positive + repair-quality pairs |
 | `latency.arms.bashAdvisory` | `true` | low-risk, never blocks (A7/A8) |
@@ -153,16 +155,26 @@ set — only the low-risk fail-open bash pair stays on:
 | `latency.arms.concurrencyExecution` | `false` | independent/dependent/cancel-resume quality pairs |
 | `latency.arms.evalGateMigration` | `false` | real native cutover + parity/cancel-resume proof |
 
-**Production quality-stop wiring added** (same commit):
+**Quality-stop data plane added** (this commit):
 
-- `evaluateLatencyQualityStop` now covers every documented threshold — cost P50/P95 multiples
-  (`cost_breach`), latency improvement (`latency_miss`), and spawned-agent P95 (`spawned_agents_breach`)
-  in addition to P0/P1 zero-tolerance, completion drop, rework rise, and attribution.
-- ≥2-arm sessions auto-register their combination (`deriveLatencyCombination`: `combined:<sorted ids>` +
-  exhaustive `childArms`); unregistered multi-arm states fail closed with `missing_attribution`.
-- Session-frozen snapshots carry `codeRevision` + `configHash` lineage anchors.
-- The workflow engine persists a `latency-rollout-decision` artifact at terminal completion and, on
-  stop, disables the causal arm(s) through the session settings override (the rollback owner).
+- **Cohort store** (`latency/rollout-cohort.ts`): every workflow terminal appends a
+  `latency_rollout_observation` (key = single arm / registered combination / `baseline`) to the
+  durable JSONL at `~/.omp/workflow-artifacts/latency-rollout-cohort.jsonl`. The stop evaluator
+  now receives real cohort aggregates — completion drop, rework rise, cost P50/P95 multiples,
+  latency improvement, spawned-agent P95 — once both the treatment cohort and the no-arm
+  baseline accumulate ≥8 samples (below that only P0/P1 and attribution rules act).
+- **Fired-arm attribution**: sessions record which arms actually engaged (`markLatencyArmFired`;
+  read dedupe/context optimization on rewrite, bash advisory/bounded summary on emission, eval
+  native control, concurrency declaration/execution and role static split on the workflow
+  engine). A stop disables **only fired arms**; a stop with no fired arm fails closed on the
+  whole active set. “Enabled but inactive” no longer counts as treatment.
+- **Ordinary-session consumer**: `AgentSession` evaluates the stop at teardown (exit kind known)
+  against the same cohort aggregates and its own fired arms, and rolls back via the settings
+  override.
+- **Rollback invalidation**: after a stop override, the frozen snapshot is invalidated so later
+  lookups re-read live settings instead of the pre-rollback arm map.
 
 Verification on the amended HEAD: `test/latency` + `test/model-optimization` + `test/session` +
-`test/workflow` = 849 pass / 0 fail; `bun check` and `bun run build` pass.
+`test/workflow` (spawn-limited environment: the 9 process-spawning integration tests and the
+pre-existing fork-header test require a full `bun test` host; all other suites pass); `bun run
+check` and `bun run build` pass.
