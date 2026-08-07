@@ -2635,7 +2635,6 @@ async function executeToolCalls(
 			}
 		});
 
-		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;
 		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
 		if (perToolAborted && isError && !completedToolExecution) {

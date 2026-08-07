@@ -122,7 +122,6 @@ describe("filterProcessEnv", () => {
 	});
 });
 
-
 describe("filterChildShellEnv", () => {
 	it("removes secrets loaded from .env.${NODE_ENV}.local mode-local files", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-mode-local-"));
