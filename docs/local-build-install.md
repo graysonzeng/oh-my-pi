@@ -82,23 +82,22 @@ created by the current build; never delete pre-existing user files.
 
 ## Latest verified baseline
 
-Last updated: 2026-08-03 (Asia/Shanghai).
+Last updated: 2026-08-07 (Asia/Shanghai).
 
 | Item | Verified value |
 |---|---|
-| Source commit | `c588443b43a76f28b17ad66a93cb8fa25d252a53` / `c588443b4` plus the current uncommitted Biome safe fixes required by the package check and this baseline update |
+| Source commit | `2a8e545e2` / `2a8e545e2f17c1a3be2ac20cfc05e6acf0d54387` (clean worktree at verify time) |
 | Package version | `omp/17.1.8` |
 | Artifact | `packages/coding-agent/dist/omp` |
 | Installed path | `/Users/sheng/.local/bin/omp` |
-| SHA-256 | `c996794e7919008d2752260f55198375a0bb2195bbbcb24fbe73f0defb7ddc05` |
-| Native SHA-256 | `6c79bfbd95a3626a038c5f21b4d00636a23e32c8480f2b3ff114821e16474c27` (source and installed cache match; sentinel `__piNativesV17_1_8`) |
+| SHA-256 | `66e89c1f4cdb533301406fd36dc6e3195b9947d5b9618a1519a206ff55ecf9e0` |
+| Native SHA-256 | `ee6f860bb77e000879670f4e63944287cdc563b3d608744c8e8307d6b28dd901` (embedded `packages/natives/native/pi_natives.darwin-arm64.node`) |
 | Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build` |
 | Artifact type | signed arm64 Mach-O executable |
-| Gates | Biome safe fixes for the pre-existing check failures; `bun --cwd=packages/coding-agent run check`; production binary build; artifact version/help/stats/type/signature/checksum and `--smoke-test`; installed path/type/signature/version/checksum and `--smoke-test`; native source/cache checksum |
+| Gates | `bun --cwd=packages/coding-agent run check` (biome 2563 files + tsgo); production binary build; artifact type/signature/version/checksum and `--smoke-test`; installed path/type/version/checksum and `--smoke-test`; spawn-free latency/model-optimization/session/workflow suites (10 pre-existing process-spawn-limited tests require a full `bun test` host outside this sandbox) |
 
 The installed checksum matched the build artifact, both artifact and installed
 `--smoke-test` returned `smoke-test: ok`, and the installed command resolved to
-`/Users/sheng/.local/bin/omp`. The worktree started clean; the formatter fixes
-and this baseline update remain uncommitted. No commit or official upgrade
-command was run, and the previous installed command remains available at the
-rollback path above.
+`/Users/sheng/.local/bin/omp`. The source tree was clean at build time (commit
+`2a8e545e2`), so the baseline is reproducible from that commit alone. The previous
+installed command remains available at the rollback path above.
