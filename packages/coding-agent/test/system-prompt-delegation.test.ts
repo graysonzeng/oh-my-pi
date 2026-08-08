@@ -12,7 +12,7 @@ const EMPTY_TREE = {
 
 type ProactiveDelegationFlags = Pick<
 	BuildSystemPromptOptions,
-	"taskProactiveAutoParallel" | "taskProactivePipelineGuidance" | "taskProactiveStageRouting"
+	"taskProactiveAutoParallel" | "taskProactivePipelineGuidance" | "taskProactiveStageRouting" | "taskIrcEnabled"
 >;
 
 async function renderDelegationPrompt(
@@ -92,6 +92,26 @@ describe("proactive delegation guidance", () => {
 		expect(rendered).not.toContain("Auto-parallelize only real width.");
 		expect(rendered).not.toContain("Escalate complete gated delivery to workflow.");
 		expect(rendered).not.toContain("Route through existing agents.");
+	});
+
+	it("preflights and reuses an exact late reviewer when IRC is available", async () => {
+		const rendered = await renderDelegationPrompt({ taskIrcEnabled: true });
+
+		expect(rendered).toContain("a mandatory end-stage gate after substantial independent work");
+		expect(rendered).toContain("fallback or identity mismatch as failed readiness");
+		expect(rendered).toContain("launch that exact reviewer early");
+		expect(rendered).toContain("NEVER a greeting or synthetic ping");
+		expect(rendered).toContain("wake that same idle/parked agent");
+		expect(rendered).toContain("cancel or ignore any late loser");
+		expect(rendered).not.toContain("No continuation channel");
+	});
+
+	it("does not claim reviewer reuse without IRC", async () => {
+		const rendered = await renderDelegationPrompt();
+
+		expect(rendered).toContain("never claim that a successful probe reserves or reuses a reviewer");
+		expect(rendered).not.toContain("Reuse the checked reviewer");
+		expect(rendered).not.toContain("wake that same idle/parked agent");
 	});
 
 	it("does not render the old unconditional default-to-parallel guidance", async () => {

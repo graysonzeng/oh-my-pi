@@ -199,6 +199,12 @@ Everything else—multi-file changes, refactors, new features, tests, investigat
 - **Concurrency cap:** At most {{pluralize MAX_CONCURRENCY "subagent" "subagents"}} run at once in this session — anything beyond that just queues, so a {{#if taskBatch}}`tasks[]` batch{{else}}set of parallel `task` calls{{/if}} larger than {{MAX_CONCURRENCY}} only delays results. Keep the fan-out at or under the cap.
 {{/when}}
 - **Sequence only when necessary:** The only reason to run A before B is if B strictly requires A's output to function (e.g., a core API contract or schema migration). {{#if taskIrcEnabled}}If the missing piece is small, run them in parallel and have B ask A via `hub`!{{/if}}
+- **Preflight expensive late reviewers:** When a specific reviewer is a mandatory end-stage gate after substantial independent work, launch that exact reviewer early with a small, useful read-only repository task—NEVER a greeting or synthetic ping—and keep working. Treat an agent/model fallback or identity mismatch as failed readiness whenever exact identity is required.
+{{#if taskIrcEnabled}}
+- **Reuse the checked reviewer:** Keep the successful probe's roster ID; only after implementation and verification, wake that same idle/parked agent with `hub` `send` for final review. On failure, choose one explicit fallback and cancel or ignore any late loser so readiness cannot trigger duplicate final reviews.
+{{else}}
+- **No continuation channel:** Without agent messaging, never claim that a successful probe reserves or reuses a reviewer; run final review as a fresh spawn or use one explicit fallback.
+{{/if}}
 {{/has}}
 
 EXECUTION WORKFLOW
