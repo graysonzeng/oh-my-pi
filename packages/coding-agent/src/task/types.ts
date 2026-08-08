@@ -1,4 +1,4 @@
-import type { Usage } from "@oh-my-pi/pi-ai";
+import type { Effort, Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import { type BaseType, type } from "arktype";
 import type { AgentSessionEvent } from "../session/agent-session";
@@ -364,6 +364,8 @@ export interface AgentDefinition {
 	spawns?: string[] | "*";
 	model?: string[];
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Maximum provider reasoning effort this agent may use, including caller overrides and fallback models. */
+	maxEffort?: Effort;
 	output?: unknown;
 	blocking?: boolean;
 	autoloadSkills?: string[];

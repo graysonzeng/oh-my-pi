@@ -53,6 +53,11 @@ interface ReviewPrRef {
 	kind: "github-url" | "pr-url";
 }
 
+interface ReviewSnapshot {
+	id: string;
+	ref?: string;
+}
+
 interface ParsedReviewArgs {
 	prRef: ReviewPrRef | undefined;
 	extraInstructions: string;
@@ -174,25 +179,20 @@ function getFileExt(path: string): string {
 }
 
 /**
- * Determine recommended number of reviewer agents based on diff weight.
- * Uses total lines changed as the primary metric.
+ * Determine a bounded reviewer fan-out from both diff weight and independent
+ * file scopes. One or two files stay with one reviewer; broad changes gain
+ * parallelism, capped to avoid provider contention and aggregation overhead.
  */
 function getRecommendedAgentCount(stats: DiffStats): number {
 	const totalLines = stats.totalAdded + stats.totalRemoved;
 	const fileCount = stats.files.length;
 
-	// Heuristics:
-	// - Tiny (<100 lines or 1-2 files): 1 agent
-	// - Small (<500 lines): 1-2 agents
-	// - Medium (<2000 lines): 2-4 agents
-	// - Large (<5000 lines): 4-8 agents
-	// - Huge (>5000 lines): 8-16 agents
-
-	if (totalLines < 100 || fileCount <= 2) return 1;
-	if (totalLines < 500) return Math.min(2, fileCount);
-	if (totalLines < 2000) return Math.min(4, Math.ceil(fileCount / 3));
-	if (totalLines < 5000) return Math.min(8, Math.ceil(fileCount / 2));
-	return Math.min(16, fileCount);
+	if (fileCount <= 2) return 1;
+	if (totalLines < 100) return Math.min(3, Math.ceil(fileCount / 5));
+	if (totalLines < 500) return Math.min(3, Math.ceil(fileCount / 4));
+	if (totalLines < 2000) return Math.min(4, Math.max(2, Math.ceil(fileCount / 3)));
+	if (totalLines < 5000) return Math.min(6, Math.max(2, Math.ceil(fileCount / 2)));
+	return Math.min(6, fileCount);
 }
 
 /**
@@ -221,13 +221,16 @@ function getDiffPreview(hunks: string, maxLines: number): string {
 }
 
 // Thresholds for diff inclusion
-const MAX_DIFF_CHARS = 50_000; // Don't include diff above this
-const MAX_FILES_FOR_INLINE_DIFF = 20; // Don't include diff if more files than this
-const DEFAULT_LARGE_DIFF_INSTRUCTION = "MUST run `git diff`/`git show` for assigned files";
-const DEFAULT_CONTEXT_INSTRUCTION = "MAY read full file context as needed via `read`";
+const MAX_DIFF_CHARS = 50_000; // Don't inline diff above this
+const MAX_FILES_FOR_INLINE_DIFF = 20;
+const DEFAULT_LARGE_DIFF_INSTRUCTION =
+	"MUST run only path-scoped `git diff`/`git show` commands for assigned files; NEVER run an unscoped repository diff";
+const DEFAULT_CONTEXT_INSTRUCTION =
+	"MAY read assigned files and direct producer/consumer call sites needed to prove a finding; NEVER scan unrelated modules";
 const GIT_UNCOMMITTED_DIFF_INSTRUCTION =
-	"MUST run both `git diff -- <path>` and `git diff --cached -- <path>` for assigned files";
-const JJ_UNCOMMITTED_DIFF_INSTRUCTION = "MUST run `jj --ignore-working-copy diff --git -- <path>` for assigned files";
+	"MUST run both `git diff -- <path>` and `git diff --cached -- <path>` for assigned files only";
+const JJ_UNCOMMITTED_DIFF_INSTRUCTION =
+	"MUST run `jj --ignore-working-copy diff --git -- <path>` for assigned files only";
 
 /**
  * Build the full review prompt with diff stats and distribution guidance.
@@ -236,6 +239,7 @@ function buildReviewPrompt(
 	mode: string,
 	stats: DiffStats,
 	rawDiff: string,
+	snapshot: ReviewSnapshot,
 	options: { additionalInstructions?: string; diffInstruction?: string; contextInstruction?: string } = {},
 ): string {
 	const agentCount = getRecommendedAgentCount(stats);
@@ -251,6 +255,8 @@ function buildReviewPrompt(
 
 	return prompt.render(reviewRequestTemplate, {
 		mode,
+		snapshotId: snapshot.id,
+		snapshotRef: snapshot.ref,
 		files: filesWithExt,
 		excluded: stats.excluded,
 		totalAdded: stats.totalAdded,
@@ -366,14 +372,14 @@ function extractReviewPrRefsFromText(text: string): ReviewPrRef[] {
 	);
 }
 
-function buildReviewPromptFromDiff(
+async function buildReviewPromptFromDiff(
 	ctx: HookCommandContext,
 	mode: string,
 	diffText: string,
 	extraInstructions: string | undefined,
 	emptyMessage: string,
 	options: { diffInstruction?: string; filteredMessage?: string; contextInstruction?: string } = {},
-): string | undefined {
+): Promise<string | undefined> {
 	if (!diffText.trim()) {
 		if (ctx.hasUI) ctx.ui.notify(emptyMessage, "warning");
 		return undefined;
@@ -386,7 +392,19 @@ function buildReviewPromptFromDiff(
 		return undefined;
 	}
 
-	return buildReviewPrompt(mode, stats, diffText, {
+	const snapshot: ReviewSnapshot = {
+		id: new Bun.CryptoHasher("sha256").update(diffText).digest("hex"),
+	};
+	const artifactId = await ctx.sessionManager?.saveArtifact(diffText, "review-diff");
+	if (artifactId !== undefined) snapshot.ref = `artifact://${artifactId}`;
+
+	const requiresArtifact = diffText.length > MAX_DIFF_CHARS || stats.files.length > MAX_FILES_FOR_INLINE_DIFF;
+	if (requiresArtifact && snapshot.ref === undefined) {
+		if (ctx.hasUI) ctx.ui.notify("Unable to persist the full review diff as a stable artifact", "error");
+		return undefined;
+	}
+
+	return buildReviewPrompt(mode, stats, diffText, snapshot, {
 		additionalInstructions: extraInstructions,
 		diffInstruction: options.diffInstruction,
 		contextInstruction: options.contextInstruction,
@@ -413,7 +431,7 @@ async function buildPrReviewPrompt(
 		return failure;
 	}
 
-	const promptText = buildReviewPromptFromDiff(
+	const promptText = await buildReviewPromptFromDiff(
 		ctx,
 		`PR ${ref.repo}#${ref.number}`,
 		diffText,
@@ -615,15 +633,13 @@ export class ReviewCommand implements CustomCommand {
 				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(() => undefined);
 
 				if (reviewDiff?.diffText.trim()) {
-					const stats = parseDiff(reviewDiff.diffText);
-					return buildReviewPrompt(
+					return buildReviewPromptFromDiff(
+						ctx,
 						`Custom review: ${instructions.split("\n")[0].slice(0, 60)}…`,
-						stats,
 						reviewDiff.diffText,
-						{
-							additionalInstructions: instructions,
-							diffInstruction: reviewDiff.diffInstruction,
-						},
+						instructions,
+						reviewDiff.emptyMessage ?? "No diff content found",
+						{ diffInstruction: reviewDiff.diffInstruction },
 					);
 				}
 

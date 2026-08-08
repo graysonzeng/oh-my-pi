@@ -35,6 +35,15 @@ function expectPolicyError(run: () => unknown, reason: string, details: unknown)
 	expect(policyError.details).toEqual(details);
 }
 
+describe("default reviewer effort", () => {
+	it("keeps routine plan and code review profiles at medium", () => {
+		expect(DEFAULT_MODEL_PROFILES.claude_plan_reviewer.thinkingLevel).toBe(Effort.Medium);
+		expect(DEFAULT_MODEL_PROFILES.gpt_plan_reviewer.thinkingLevel).toBe(Effort.Medium);
+		expect(DEFAULT_MODEL_PROFILES.claude_reviewer.thinkingLevel).toBe(Effort.Medium);
+		expect(DEFAULT_MODEL_PROFILES.gpt_reviewer.thinkingLevel).toBe(Effort.Medium);
+	});
+});
+
 describe("normalizeModelProfile", () => {
 	it("accepts embedded multi-model profiles without runtime field", () => {
 		const profile = DEFAULT_MODEL_PROFILES.claude_planner;

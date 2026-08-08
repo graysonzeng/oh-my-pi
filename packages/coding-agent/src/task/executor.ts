@@ -46,7 +46,15 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	clampThinkingLevelToCeiling,
+	modelSupportsEffortCeiling,
+	prewalkWouldBeNoop,
+	resolveTaskEffortLevel,
+	type TaskEffort,
+} from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
@@ -2696,28 +2704,45 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				progress.contextWindow = model.contextWindow;
 			}
 			// Caller-requested coarse effort maps onto the resolved model's
-			// supported range, then respects the operator-configured ceiling.
-			// Undefined (no effort, or no controllable effort surface) falls
-			// through to the normal selectors below.
-			// The ceiling outlives initial resolution: it rides into the session so
-			// retry-fallback recovery can never clamp effort back up past it.
-			const spawnEffortCeiling = options.effort !== undefined ? settings.get("task.maxEffort") : undefined;
+			// supported range. The operator ceiling applies to explicit effort;
+			// an agent ceiling applies to every path, including explicit suffixes,
+			// agent defaults, and retry fallbacks.
+			const globalEffortCeiling = options.effort !== undefined ? settings.get("task.maxEffort") : undefined;
+			const spawnEffortCeiling =
+				agent.maxEffort !== undefined
+					? clampThinkingLevelToCeiling(undefined, globalEffortCeiling ?? agent.maxEffort, agent.maxEffort)
+					: globalEffortCeiling;
+			if (
+				options.effort === undefined &&
+				model !== undefined &&
+				spawnEffortCeiling !== undefined &&
+				!modelSupportsEffortCeiling(model, spawnEffortCeiling)
+			) {
+				throw new RangeError(
+					`${model.provider}/${model.id} has no supported thinking effort at or below agent ${agent.name} maxEffort=${spawnEffortCeiling}`,
+				);
+			}
 			const effortLevel =
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
+			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
+			// model pattern > agent-definition default (e.g. task's `auto`) >
+			// pattern-derived level. Agent ceilings clamp every concrete selector;
+			// `auto` is constrained later by the same session ceiling.
+			const selectedThinkingLevel =
+				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
+			const effectiveThinkingLevel =
+				selectedThinkingLevel === AUTO_THINKING
+					? selectedThinkingLevel
+					: clampThinkingLevelToCeiling(model, selectedThinkingLevel, spawnEffortCeiling);
 			if (model) {
-				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+				const displayLevel = effortLevel ?? (explicitThinkingLevel ? effectiveThinkingLevel : undefined);
 				progress.resolvedModel =
-					displayLevel !== undefined
+					displayLevel !== undefined && displayLevel !== AUTO_THINKING
 						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
 						: formatModelStringWithRouting(model);
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
-			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
 			// `task.agentPrewalk` settings override hands the subagent off to a

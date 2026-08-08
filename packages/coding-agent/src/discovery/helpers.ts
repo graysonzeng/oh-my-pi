@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Effort } from "@oh-my-pi/pi-ai";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
 import {
 	CONFIG_DIR_NAME,
@@ -16,7 +17,7 @@ import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../ca
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel, parseEffort } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
 import { buildPluginDirRoot } from "./plugin-dir-roots";
@@ -229,6 +230,7 @@ export interface ParsedAgentFields {
 	model?: string[];
 	output?: unknown;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	maxEffort?: Effort;
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
@@ -285,6 +287,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 				: undefined;
 
 	const thinkingLevel = parseConfiguredThinkingLevel(rawThinkingLevel);
+	const maxEffort = typeof frontmatter.maxEffort === "string" ? parseEffort(frontmatter.maxEffort) : undefined;
 	const model = parseModelList(frontmatter.model);
 	const blocking = parseBoolean(frontmatter.blocking);
 	const readSummarize = parseBoolean(frontmatter.readSummarize);
@@ -305,6 +308,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		model,
 		output,
 		thinkingLevel,
+		maxEffort,
 		blocking,
 		autoloadSkills,
 		readSummarize,

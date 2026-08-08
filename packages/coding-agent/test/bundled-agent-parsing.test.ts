@@ -12,8 +12,9 @@ describe("bundled agent parsing", () => {
 
 		expect(reviewer).toBeDefined();
 		expect(reviewer?.source).toBe("bundled");
-		expect(reviewer?.model).toEqual(["gateway/gpt-5.6-sol:xhigh", "gateway/claude-opus-5:max", "@task"]);
-		expect(reviewer?.thinkingLevel).toBeUndefined();
+		expect(reviewer?.model).toEqual(["gateway/gpt-5.6-sol", "gateway/claude-opus-5", "@task"]);
+		expect(reviewer?.thinkingLevel).toBe(Effort.Medium);
+		expect(reviewer?.maxEffort).toBe(Effort.XHigh);
 	});
 
 	it("defaults the task agent to the auto thinking selector", () => {
@@ -65,28 +66,28 @@ describe("bundled agent parsing", () => {
 		});
 		const settings = Settings.isolated();
 		const agent = getBundledAgent("reviewer");
-		expect(agent?.thinkingLevel).toBeUndefined();
+		expect(agent?.thinkingLevel).toBe(Effort.Medium);
 
 		const patterns = resolveAgentModelPatterns({
 			agentModel: agent?.model,
 			settings,
 			activeModelPattern: "gateway/deepseek-v4-flash",
 		});
-		expect(patterns).toEqual(["gateway/gpt-5.6-sol:xhigh", "gateway/claude-opus-5:max", "gateway/deepseek-v4-flash"]);
+		expect(patterns).toEqual(["gateway/gpt-5.6-sol", "gateway/claude-opus-5", "gateway/deepseek-v4-flash"]);
 
-		// First candidate available → gpt-5.6-sol at xhigh.
+		// First available candidate resolves without overriding the agent's medium default.
 		const all = { getAvailable: () => [gpt56Sol, opus5, sessionModel] } as Parameters<typeof resolveModelOverride>[1];
 		const first = resolveModelOverride(patterns, all, settings);
 		expect(first.model?.provider).toBe("gateway");
 		expect(first.model?.id).toBe("gpt-5.6-sol");
-		expect(first.thinkingLevel).toBe(Effort.XHigh);
-		expect(first.explicitThinkingLevel).toBe(true);
+		expect(first.explicitThinkingLevel).toBe(false);
 
-		// Second candidate only → claude-opus-5 at max.
+		// Second candidate also preserves the agent-level policy.
 		const opusOnly = { getAvailable: () => [opus5] } as Parameters<typeof resolveModelOverride>[1];
 		const second = resolveModelOverride(patterns, opusOnly, settings);
 		expect(second.model?.provider).toBe("gateway");
 		expect(second.model?.id).toBe("claude-opus-5");
+		expect(second.explicitThinkingLevel).toBe(false);
 
 		// Neither gateway candidate available → the session (main agent) model.
 		const sessionOnly = { getAvailable: () => [sessionModel] } as Parameters<typeof resolveModelOverride>[1];

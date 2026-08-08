@@ -24,6 +24,7 @@ interface AgentFrontmatter {
 	spawns?: string;
 	model?: string | string[];
 	thinkingLevel?: string;
+	maxEffort?: string;
 	blocking?: boolean;
 	prewalk?: boolean | string;
 }
