@@ -2724,11 +2724,12 @@ export class AgentSession {
 					return;
 				}
 			}
-			const resumeResolvedStreamStall = resolvedInterruptedToolTurn === "stream-stall";
-			if (resumeResolvedStreamStall || this.#recovery.isRetryableError(msg)) {
+			const resumeResolvedToolTurn =
+				resolvedInterruptedToolTurn === "stream-stall" || resolvedInterruptedToolTurn === "codex-websocket-1006";
+			if (resumeResolvedToolTurn || this.#recovery.isRetryableError(msg)) {
 				const didRetry = await this.#recovery.handleRetryableError(
 					msg,
-					resumeResolvedStreamStall ? { preserveFailedTurn: true } : undefined,
+					resumeResolvedToolTurn ? { preserveFailedTurn: true } : undefined,
 				);
 				if (didRetry) {
 					await emitAgentEndNotification({ willContinue: true });

@@ -64,6 +64,7 @@ const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
+const CODEX_WEBSOCKET_ABNORMAL_CLOSE_RE = /^Codex websocket transport error: websocket closed \(1006\)$/i;
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
@@ -83,6 +84,41 @@ function retryableAssistantTurnEnd(messages: readonly AgentMessage[]): number | 
 	if (message?.role !== "assistant") return undefined;
 	if (message.stopReason !== "error" && message.stopReason !== "aborted") return undefined;
 	return turnEnd;
+}
+
+/**
+ * Codex 1006 recovery is safe only when the persisted tail is exactly one
+ * unexecuted assistant-stop result for each uniquely identified tool call.
+ * The exact tail shape rejects real, unknown, missing, or duplicate results.
+ */
+function hasExactAssistantStopErrorResults(
+	messages: readonly AgentMessage[],
+	assistantIndex: number,
+	toolCallIds: readonly string[],
+): boolean {
+	if (toolCallIds.length === 0 || messages.length - assistantIndex - 1 !== toolCallIds.length) return false;
+
+	const expectedIds = new Set<string>();
+	for (const toolCallId of toolCallIds) {
+		if (expectedIds.has(toolCallId)) return false;
+		expectedIds.add(toolCallId);
+	}
+
+	const seenIds = new Set<string>();
+	for (let index = assistantIndex + 1; index < messages.length; index++) {
+		const result = messages[index];
+		if (
+			!isSyntheticToolResultMessage(result) ||
+			result.details?.source !== "assistant_stop_error" ||
+			result.details?.executed !== false
+		) {
+			return false;
+		}
+		if (!expectedIds.has(result.toolCallId) || seenIds.has(result.toolCallId)) return false;
+		seenIds.add(result.toolCallId);
+	}
+
+	return seenIds.size === expectedIds.size;
 }
 
 /** Result shape shared with automatic maintenance recovery. */
@@ -836,12 +872,14 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Classify a reasonless abort or stream stall whose emitted tool calls all
-	 * have results. The failed assistant/tool-result pair stays in context so
-	 * continuation cannot replay completed side effects; synthetic results tell
-	 * the next turn that an unexecuted call must be reissued.
+	 * Classify an interrupted tool turn whose emitted calls all have resolved results.
+	 * Reasonless aborts and stream stalls preserve their existing reconciliation;
+	 * Codex 1006 recovery additionally requires an exact tail of synthetic,
+	 * unexecuted provider-error results before continuation is allowed.
 	 */
-	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
+	classifyResolvedInterruptedToolTurn(
+		message: AssistantMessage,
+	): "reasonless-abort" | "stream-stall" | "codex-websocket-1006" | undefined {
 		const id = this.#classifyRetryMessage(message);
 		const genericAbort =
 			message.errorMessage === "Request was aborted" || message.errorMessage === "Request was aborted.";
@@ -855,7 +893,11 @@ export class TurnRecovery {
 			message.stopReason === "error" &&
 			message.errorMessage?.toLowerCase().includes("stream stall") === true &&
 			AIError.retriable(id);
-		if (!reasonlessAbort && !streamStall) return undefined;
+		const codexWebsocketAbnormalClose =
+			message.stopReason === "error" &&
+			CODEX_WEBSOCKET_ABNORMAL_CLOSE_RE.test(message.errorMessage ?? "") &&
+			AIError.retriable(id);
+		if (!reasonlessAbort && !streamStall && !codexWebsocketAbnormalClose) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
 		// The Cursor server-execution marker gate applies only to the stream-stall
@@ -889,6 +931,11 @@ export class TurnRecovery {
 			}
 		}
 		if (assistantIndex < 0) return undefined;
+		if (codexWebsocketAbnormalClose) {
+			return hasExactAssistantStopErrorResults(messages, assistantIndex, resolvedToolCallIds)
+				? "codex-websocket-1006"
+				: undefined;
+		}
 
 		const unresolvedToolCallIds = new Set(resolvedToolCallIds);
 		for (let i = assistantIndex + 1; i < messages.length; i++) {

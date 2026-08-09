@@ -4,6 +4,7 @@ import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ApiKeyResolveContext, AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -770,6 +771,7 @@ describe("AgentSession retry delay cap", () => {
 	it.each([
 		["OpenAI-completions stall", "error", "OpenAI completions stream stalled while waiting for the next event"],
 		["reasonless abort", "aborted", "Request was aborted"],
+		["Codex websocket 1006", "error", "Codex websocket transport error: websocket closed (1006)"],
 	] as const)("resumes a %s after a synthetic unexecuted tool result", async (_case, stopReason, errorMessage) => {
 		const model = createMockModel({
 			id: "grok-4",
@@ -843,6 +845,7 @@ describe("AgentSession retry delay cap", () => {
 							...partial,
 							stopReason,
 							errorMessage,
+							errorId: _case === "Codex websocket 1006" ? AIError.create(AIError.Flag.Transient) : undefined,
 						},
 					});
 				});
