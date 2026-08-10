@@ -79,6 +79,7 @@ describe("ordinary-session model optimization resolver", () => {
 
 	it("keeps context optimization default-on with the wired quality stop", () => {
 		expect(Settings.isolated().get("modelOptimization.enabled")).toBe(true);
+		expect(Settings.isolated().get("latency.arms.readDedupe")).toBe(true);
 		const profiles = mergeModelOptimizationProfiles({
 			custom: {
 				id: "custom",
@@ -132,6 +133,7 @@ describe("ordinary-session model optimization resolver", () => {
 			{ id: "gpt-5.6-terra", provider: "gateway", expected: "terra" },
 			{ id: "gpt-5.6-sol", provider: "gateway", expected: "sol" },
 			{ id: "gpt-5.6-sol-pro", provider: "gateway", expected: "sol" },
+			{ id: "gateway/gpt-5.6-sol", provider: "gateway", expected: "sol" },
 			{ id: "grok-4.5", provider: "gateway", expected: "grok" },
 			{ id: "gateway/grok-4.5", provider: "custom", expected: "grok" },
 		];

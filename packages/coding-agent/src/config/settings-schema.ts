@@ -4527,7 +4527,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Model",
 			label: "Model Optimization Profiles",
 			description:
-				"Optional map of model optimization profiles by id (empty uses built-in claude/gpt-5/grok/glm family profiles). Same id overrides a built-in. Does not accept workflow role profiles.",
+				"Optional map of model optimization profiles by id (empty uses built-in claude/gpt-5/grok/glm/luna/terra/sol family profiles). Same id overrides a built-in. Does not accept workflow role profiles.",
 		},
 	},
 
