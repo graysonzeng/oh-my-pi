@@ -11,6 +11,7 @@ import {
 	LatencyRolloutCohortStore,
 	type LatencyRolloutObservationV1,
 	percentile,
+	summarizeDshDimensionMetrics,
 	summarizeLatencyCohort,
 } from "../../src/latency/rollout-cohort";
 
@@ -157,5 +158,188 @@ describe("LatencyRolloutCohortStore", () => {
 		store.append(observation({}));
 		expect(store.readAll()).toEqual([]);
 		expect(store.summaryForKey("baseline")).toBeUndefined();
+	});
+
+	it("treats old committed plus new pending as incomplete", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-cohort-"));
+		const file = path.join(dir, "cohort.jsonl");
+		const store = new LatencyRolloutCohortStore(file);
+		const now = "2026-08-15T00:00:00.000Z";
+		const future = "2026-09-15T00:00:00.000Z";
+		store.appendRunIntent({
+			kind: "dsh-run-intent",
+			event_id: "dshint:s:EXP-A1:old",
+			sessionId: "s",
+			experimentId: "EXP-A1",
+			executionId: "old",
+			state: "committed",
+			startedAt: now,
+			committedAt: now,
+			metricsEventId: "dsh:s:metrics:EXP-A1",
+			expiresAt: future,
+		});
+		store.appendObservation(
+			observation({
+				event_id: "dsh:s:metrics:EXP-A1",
+				sessionId: "s",
+				experimentId: "EXP-A1",
+				phase: "metrics",
+				endedAt: now,
+			}),
+		);
+		store.appendRunIntent({
+			kind: "dsh-run-intent",
+			event_id: "dshint:s:EXP-A1:new",
+			sessionId: "s",
+			experimentId: "EXP-A1",
+			executionId: "new",
+			state: "pending",
+			startedAt: now,
+			committedAt: null,
+			metricsEventId: null,
+			expiresAt: future,
+		});
+		expect(store.recomputeStopsFromDurableMetrics(now).complete).toBe(false);
+		store.appendRunIntent({
+			kind: "dsh-run-intent",
+			event_id: "dshint:s:EXP-A1:new",
+			sessionId: "s",
+			experimentId: "EXP-A1",
+			executionId: "new",
+			state: "committed",
+			startedAt: now,
+			committedAt: now,
+			metricsEventId: "dsh:s:metrics:EXP-A1",
+			expiresAt: future,
+		});
+		expect(store.recomputeStopsFromDurableMetrics(now).complete).toBe(true);
+	});
+
+	it("does not let session B missing commit look complete", () => {
+		const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "omp-cohort-")), "cohort.jsonl");
+		const store = new LatencyRolloutCohortStore(file);
+		const now = "2026-08-15T00:00:00.000Z";
+		const future = "2026-09-15T00:00:00.000Z";
+		store.appendRunIntent({
+			kind: "dsh-run-intent",
+			event_id: "dshint:a:EXP-A1:ea",
+			sessionId: "a",
+			experimentId: "EXP-A1",
+			executionId: "ea",
+			state: "committed",
+			startedAt: now,
+			committedAt: now,
+			metricsEventId: "dsh:a:metrics:EXP-A1",
+			expiresAt: future,
+		});
+		store.appendObservation(
+			observation({ event_id: "dsh:a:metrics:EXP-A1", sessionId: "a", experimentId: "EXP-A1" }),
+		);
+		store.appendRunIntent({
+			kind: "dsh-run-intent",
+			event_id: "dshint:b:EXP-A4:eb",
+			sessionId: "b",
+			experimentId: "EXP-A4",
+			executionId: "eb",
+			state: "pending",
+			startedAt: now,
+			committedAt: null,
+			metricsEventId: null,
+			expiresAt: future,
+		});
+		expect(store.recomputeStopsFromDurableMetrics(now).complete).toBe(false);
+	});
+
+	it("keeps the other writer's fence after one decision persists", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-fence-"));
+		const file = path.join(dir, "cohort.jsonl");
+		const a = new LatencyRolloutCohortStore(file);
+		const b = new LatencyRolloutCohortStore(file);
+		expect(
+			a.writeOwnFence({
+				revision: "rev-a",
+				disabledArms: ["dsh_session_search"],
+				evaluatedAt: "2026-08-15T00:00:00.000Z",
+				expiresAt: "2026-09-15T00:00:00.000Z",
+			}),
+		).toBe(true);
+		expect(
+			b.writeOwnFence({
+				revision: "rev-b",
+				disabledArms: ["dsh_headless_continuation"],
+				evaluatedAt: "2026-08-15T00:00:00.000Z",
+				expiresAt: "2026-09-15T00:00:00.000Z",
+			}),
+		).toBe(true);
+		expect(b.unlinkOwnFence("rev-b")).toBe(true);
+		expect(a.readFenceDecisions("2026-08-15T00:00:00.000Z").map(item => item.revision)).toEqual(["rev-a"]);
+	});
+
+	it("rejects an old bootNonce ack", () => {
+		const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "omp-ack-")), "cohort.jsonl");
+		const store = new LatencyRolloutCohortStore(file, {
+			bootNonce: "boot-new",
+			startupAt: "2026-08-15T01:00:00.000Z",
+		});
+		store.appendOperatorAck({ bootNonce: "boot-old", createdAt: "2026-08-15T00:00:00.000Z" });
+		expect(store.consumeOperatorAck("2026-08-15T01:00:01.000Z")).toBe(false);
+		store.appendOperatorAck({ bootNonce: "boot-new", createdAt: "2026-08-15T01:00:00.000Z" });
+		expect(store.consumeOperatorAck("2026-08-15T01:00:01.000Z")).toBe(true);
+	});
+
+	it("does not mint a bootNonce when constructed without process context", () => {
+		const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "omp-nonce-")), "cohort.jsonl");
+		const store = new LatencyRolloutCohortStore(file);
+		expect(store.bootNonce).toBeNull();
+	});
+
+	it("treats an empty ledger as incomplete", () => {
+		const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "omp-empty-")), "cohort.jsonl");
+		const store = new LatencyRolloutCohortStore(file);
+		expect(store.recomputeStopsFromDurableMetrics("2026-08-15T00:00:00.000Z").complete).toBe(false);
+	});
+
+	it("uses matched control, not the all-false baseline, for NI", () => {
+		const nowMs = Date.parse("2026-08-15T00:00:00.000Z");
+		const metrics = summarizeDshDimensionMetrics(
+			[
+				observation({
+					key: "dsh:dim.a1:t|bg:none",
+					experimentId: "EXP-A1",
+					dimensionId: "dim.a1",
+					bgFingerprint: "none",
+					completed: false,
+					stopApplied: false,
+					event_id: "dsh:t1:metrics:EXP-A1",
+				}),
+				observation({
+					key: "dsh:dim.a1:c|bg:none",
+					experimentId: "EXP-A1",
+					dimensionId: "dim.a1",
+					bgFingerprint: "none",
+					completed: true,
+					stopApplied: false,
+					event_id: "dsh:c1:metrics:EXP-A1",
+				}),
+				observation({
+					key: "baseline",
+					completed: true,
+					stopApplied: false,
+					event_id: "dsh:base:metrics:EXP-A1",
+				}),
+				observation({
+					key: "dsh:dim.a1:t|bg:none",
+					experimentId: "EXP-A1",
+					dimensionId: "dim.a1",
+					bgFingerprint: "none",
+					completed: false,
+					stopApplied: true,
+					event_id: "dsh:stopped:metrics:EXP-A1",
+				}),
+			],
+			nowMs,
+		);
+		expect(metrics.get("dim.a1")?.nonInferiorityDropPp).toBe(100);
+		expect(metrics.get("dim.a1")?.minSampleMet).toBe(false);
 	});
 });

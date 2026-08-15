@@ -105,7 +105,9 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
-import type { LatencyArmId } from "./latency/arms";
+import type { LatencyArmId, LatencyArmSnapshotV1 } from "./latency/arms";
+import { executionIdTable, prepareLatencySnapshot } from "./latency/prepare-snapshot";
+import { LatencyRolloutCohortStore, mintProcessScopedRolloutContext } from "./latency/rollout-cohort";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
 	deduplicateMCPToolsByName,
@@ -605,6 +607,10 @@ export interface CreateAgentSessionOptions {
 	 */
 	onFirstChatDispatch?: () => void;
 
+	/** Runner capability for DSH A4. TUI interactive main is false; extra/headless/task true. */
+	allowHeadlessGoalContinuation?: boolean;
+	/** Shared process-scoped rollout store. New stores without this context must not mint a bootNonce. */
+	latencyRolloutStore?: LatencyRolloutCohortStore;
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
 }
@@ -1698,6 +1704,29 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
+	const processRolloutContext = mintProcessScopedRolloutContext();
+	const latencyRolloutStore =
+		options.latencyRolloutStore ?? new LatencyRolloutCohortStore(undefined, processRolloutContext);
+	const allowHeadlessGoalContinuation =
+		options.allowHeadlessGoalContinuation ??
+		((options.hasUI !== true && !options.deferUsageReserveConfirmation) ||
+			(options.taskDepth ?? 0) > 0 ||
+			Boolean(options.parentTaskPrefix));
+	const preparedLatency = prepareLatencySnapshot({
+		sessionManager,
+		settings,
+		store: latencyRolloutStore,
+		eligibility: {
+			sessionId: sessionManager.getSessionId(),
+			agentKind,
+			taskSubagentOptIn: options.taskDepth !== undefined && options.taskDepth > 0,
+			allowHeadlessGoalContinuation,
+			acpDeferAgentInitiatedTurns: options.deferUsageReserveConfirmation === true,
+			now: new Date().toISOString(),
+		},
+		resume: hasExistingSession,
+	});
+	const frozenLatencySnapshot: LatencyArmSnapshotV1 = preparedLatency.snapshot;
 	let registeredAgentRef: AgentRef | undefined;
 	/**
 	 * Forget the agent ref on teardown — unless the agent is being parked (or is
@@ -1815,7 +1844,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getLastCompletedRewind: () => session.getLastCompletedRewind(),
 			getToolChoiceQueue: () => session.toolChoiceQueue,
 			buildToolChoice: name => {
-				const m = session.model;
+				const m = agent.state.model;
 				return m ? buildNamedToolChoice(name, m) : undefined;
 			},
 			steer: msg =>
@@ -1843,8 +1872,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getArtifactManager: () => sessionManager.getArtifactManager(),
 			getArtifactContent: id => sessionManager.getArtifactContent(id),
 			settings,
-			isLatencyArmEnabled: (arm: LatencyArmId) => session.isLatencyArmEnabled(arm),
-			getLatencyArmSnapshot: () => session.getLatencyArmSnapshot(),
+			isLatencyArmEnabled: (arm: LatencyArmId) =>
+				(hasSession ? session.getLatencyArmSnapshot() : frozenLatencySnapshot).arms[arm] === true,
+			getLatencyArmSnapshot: () => (hasSession ? session.getLatencyArmSnapshot() : frozenLatencySnapshot),
+			markLatencyArmFired: (arm: LatencyArmId) => {
+				session?.markLatencyArmFired(arm);
+			},
+			recordDshGetBranchError: () => {
+				session?.recordDshGetBranchError();
+			},
+			invalidateLatencyArmSnapshot: () => {
+				session?.invalidateLatencyArmSnapshot();
+			},
 			authStorage,
 			modelRegistry,
 			getTelemetry: () => agent?.telemetry,
@@ -3468,6 +3507,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			createComputerTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.computer(toolSession)) ?? null,
+			createSessionSearchTool: restrictToolNames
+				? undefined
+				: async () => (await BUILTIN_TOOLS.session_search(toolSession)) ?? null,
 			createInspectImageTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.inspect_image(toolSession)) ?? null,
@@ -3487,6 +3529,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			rebuildSystemPrompt,
 			// Workflow stages install their own scheduling/result policy; ordinary sessions reconcile profiles here.
 			reconcileModelOptimization: options.workflowToolOptimization ? undefined : reconcileModelOptimization,
+			latencyArmSnapshot: frozenLatencySnapshot,
+			dshAssignment: preparedLatency.assignment,
+			dshExecutionIds: executionIdTable(preparedLatency.assignment),
+			latencyRolloutStore,
+			allowHeadlessGoalContinuation,
 			applyModelOptimization: resolved => {
 				modelOptimizationRuntime.resolved = resolved;
 			},

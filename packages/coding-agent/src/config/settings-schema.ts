@@ -4625,6 +4625,50 @@ export const SETTINGS_SCHEMA = {
 				"When enabled and EvalGateParityReceiptV1 is proven, migrate eligible eval gates to native workflow/task owners with optional independent overlap. Default off until a real native cutover plus parity/cancel-resume live proof exists (bridge control is always retained).",
 		},
 	},
+	"latency.arms.dshSessionSearch": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Session Search (DSH A1)",
+			description:
+				"When true, register session_search so the model can retrieve compacted raw assistant/tool journal on the current branch. Independently rollbackable. Default off until the DSH quality matrix passes. Control is explicit false; never inferred from a missing key.",
+		},
+	},
+	"latency.arms.dshOmitGoalTime": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Omit Goal Time (DSH A2)",
+			description:
+				"When true, active goal prompts omit timeUsedSeconds so the clock does not force re-injection every turn. EXP-A23 treatment requires this and dshGoalHashShadow both true (dim.a23). Assignment, not this toggle alone, decides treatment vs control. Default off.",
+		},
+	},
+	"latency.arms.dshGoalHashShadow": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Hash Shadow (DSH A3)",
+			description:
+				"When true, persist versioned adjacent-comparison shadow entries for the canonical final goal-mode string. Usage (tokens/time) does not reset the hash. Default off. EXP-A23 treatment requires this and dshOmitGoalTime both true.",
+		},
+	},
+	"latency.arms.dshHeadlessContinuation": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Headless Goal Continuation (DSH A4)",
+			description:
+				'When true, the session may request headless goal continuation. Actual injection also requires goal.continuationModes to include "headless" (array resolver, not a boolean) and the runner capability allowHeadlessGoalContinuation. Independently rollbackable. Default off.',
+		},
+	},
 
 	"title.refreshOnReplan": {
 		type: "boolean",

@@ -137,21 +137,40 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
+import {
+	adjacentShadow,
+	DSH_GOAL_HASH_SHADOW_CUSTOM_TYPE,
+	type GoalHashResetReason,
+	type GoalHashShadowV1,
+	hashGoalFinalString,
+	shouldResetGoalContextHash,
+} from "../goals/hash";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import {
+	backgroundArmIdFromArms,
 	buildLatencyRolloutDecision,
+	DSH_ARM_IDS,
 	deriveLatencyCombination,
 	freezeLatencyArmSnapshot,
 	LATENCY_ARM_IDS,
 	LATENCY_ARM_SETTINGS,
 	type LatencyArmId,
 	type LatencyArmSnapshotV1,
+	type LatencyRolloutDecisionV1,
 	resolveLatencyArmsFromSettings,
 } from "../latency/arms";
+import {
+	applyAssignedDshArms,
+	DSH_DIMENSION_EXPERIMENT,
+	type DshAssignmentV1,
+	type DshExperimentId,
+	intentEventId,
+	metricsEventId,
+} from "../latency/assignment";
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import {
@@ -159,6 +178,8 @@ import {
 	deriveLatencyCohortKey,
 	LATENCY_BASELINE_COHORT_KEY,
 	LatencyRolloutCohortStore,
+	replayObservations,
+	summarizeDshDimensionMetrics,
 } from "../latency/rollout-cohort";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
@@ -300,6 +321,12 @@ import {
 	TOOL_EXECUTION_START_CUSTOM_TYPE,
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
+import {
+	type DeliveryId,
+	HEADLESS_GOAL_CONTINUATION_CAP,
+	HiddenNextTurnScheduler,
+	type ScheduleDecision,
+} from "./hidden-next-turn-scheduler";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
 import {
 	type BashExecutionMessage,
@@ -474,6 +501,8 @@ export class AgentSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
+	#hiddenNextTurnScheduler = new HiddenNextTurnScheduler("pending");
+	#acceptedContinuationDeliveryId: DeliveryId | undefined;
 	#queuedMessageDrainScheduled = false;
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
@@ -586,6 +615,16 @@ export class AgentSession {
 	#latencyArmSnapshot: LatencyArmSnapshotV1 | undefined;
 	/** Arms that actually engaged during this run (treatment receipts for causal rollback). */
 	#firedLatencyArms = new Set<LatencyArmId>();
+	#goalContextHash: string | undefined;
+	#goalHashResetReason: GoalHashResetReason = "none";
+	#lastGoalHashShadow: GoalHashShadowV1 | undefined;
+	#dshGoalInjected: boolean | null = null;
+	#dshAdjacentIdentical: boolean | null = null;
+	#dshGetBranchError = false;
+	#dshAssignment: DshAssignmentV1 | undefined;
+	#dshExecutionIds = new Map<DshExperimentId, string>();
+	#latencyRolloutStore: LatencyRolloutCohortStore | undefined;
+	#allowHeadlessGoalContinuation = false;
 
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
@@ -879,7 +918,13 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		this.#hiddenNextTurnScheduler = new HiddenNextTurnScheduler(this.sessionManager.getSessionId());
 		this.settings = config.settings;
+		this.#latencyArmSnapshot = config.latencyArmSnapshot;
+		this.#dshAssignment = config.dshAssignment;
+		if (config.dshExecutionIds) this.#dshExecutionIds = config.dshExecutionIds;
+		this.#latencyRolloutStore = config.latencyRolloutStore;
+		this.#allowHeadlessGoalContinuation = config.allowHeadlessGoalContinuation === true;
 		this.#modelRegistry = config.modelRegistry;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
@@ -1164,6 +1209,7 @@ export class AgentSession {
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createComputerTool: config.createComputerTool,
+			createSessionSearchTool: config.createSessionSearchTool,
 			createInspectImageTool: config.createInspectImageTool,
 			builtInToolNames: config.builtInToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -1265,6 +1311,11 @@ export class AgentSession {
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
 			setState: state => {
+				const decision = shouldResetGoalContextHash({ prev: this.#goalModeState, next: state });
+				if (decision.reset) {
+					this.#goalContextHash = undefined;
+					this.#goalHashResetReason = decision.reason;
+				}
 				this.#goalModeState = state;
 			},
 			getCurrentUsage: () => {
@@ -1299,6 +1350,8 @@ export class AgentSession {
 					{ deliverAs: message.deliverAs },
 				);
 			},
+			omitGoalTime: () => this.#ensureLatencyArmSnapshot().arms.dsh_omit_goal_time === true,
+			markOmitGoalTimeFired: () => this.markLatencyArmFired("dsh_omit_goal_time"),
 		});
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
@@ -1926,6 +1979,8 @@ export class AgentSession {
 	async #emitSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "auto_compaction_end") {
 			this.#readDedupeArtifacts.clear();
+			this.#goalContextHash = undefined;
+			this.#goalHashResetReason = "compaction";
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -2541,11 +2596,16 @@ export class AgentSession {
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
-			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
-				// Public agent_end is held out of the eager display pass and emitted
-				// here after maintenance routing, tagged isTerminal so subscribers can
-				// tell final settles from scheduled continuations.
-				await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
+			const emitAgentEndNotification = async (options?: { willContinue?: boolean; deliveryId?: DeliveryId }) => {
+				const deliveryId = options?.deliveryId ?? this.#acceptedContinuationDeliveryId;
+				const willContinue = options?.willContinue === true && Boolean(deliveryId);
+				if (willContinue && deliveryId) this.#hiddenNextTurnScheduler.markNonterminal(deliveryId);
+				await this.#emitSessionEvent({
+					...event,
+					isTerminal: !willContinue,
+					...(deliveryId ? { deliveryId } : {}),
+				});
+				if (!willContinue && deliveryId) this.#hiddenNextTurnScheduler.finalSettle(deliveryId, "completed");
 				void this.#emitAgentEndNotification(activeMessages, options).catch(err => {
 					logger.error("Agent end extension notification failed", { err });
 				});
@@ -2863,7 +2923,13 @@ export class AgentSession {
 
 	#schedulePostPromptTask(
 		task: (signal: AbortSignal) => Promise<void>,
-		options?: { delayMs?: number; generation?: number; onSkip?: (reason: PostPromptSkipReason) => void },
+		options?: {
+			delayMs?: number;
+			generation?: number;
+			onSkip?: (reason: PostPromptSkipReason) => void;
+			onError?: (error: unknown) => void;
+			deliveryId?: DeliveryId;
+		},
 	): void {
 		const delayMs = options?.delayMs ?? 0;
 		const signal = this.#postPromptTasksAbortController.signal;
@@ -2883,7 +2949,12 @@ export class AgentSession {
 				options.onSkip?.("stale-generation");
 				return;
 			}
-			await task(signal);
+			try {
+				await task(signal);
+			} catch (error) {
+				options?.onError?.(error);
+				throw error;
+			}
 		})();
 		this.#trackPostPromptTask(scheduled);
 	}
@@ -3824,6 +3895,9 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		for (const id of this.#hiddenNextTurnScheduler.unsettledNonterminals()) {
+			this.#settleHiddenDelivery(id, "disposed");
+		}
 		const exitKind = this.#recordSessionExit(options.reason ?? "dispose");
 		this.#evaluateLatencyRolloutAtSessionEnd(exitKind);
 		this.#cancelExitRecorder?.();
@@ -4377,6 +4451,9 @@ export class AgentSession {
 	setComputerToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.#tools.setComputerToolEnabled(enabled);
 	}
+	setSessionSearchToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#tools.setSessionSearchToolEnabled(enabled);
+	}
 
 	/**
 	 * Session-scoped inspect_image mode (`/vision`). `auto` clears the override
@@ -4629,6 +4706,11 @@ export class AgentSession {
 	}
 
 	setGoalModeState(state: GoalModeState | undefined): void {
+		const decision = shouldResetGoalContextHash({ prev: this.#goalModeState, next: state });
+		if (decision.reset) {
+			this.#goalContextHash = undefined;
+			this.#goalHashResetReason = decision.reason;
+		}
 		this.#goalModeState = state;
 	}
 
@@ -4693,26 +4775,38 @@ export class AgentSession {
 
 	#ensureLatencyArmSnapshot(): LatencyArmSnapshotV1 {
 		if (this.#latencyArmSnapshot) return this.#latencyArmSnapshot;
-		const arms = resolveLatencyArmsFromSettings(path => {
+		const live = resolveLatencyArmsFromSettings(path => {
 			try {
 				return this.settings.get(path as Parameters<typeof this.settings.get>[0]);
 			} catch {
 				return false;
 			}
 		});
-		// Register the actually-active set as a combination when ≥2 arms are on so the
-		// stop evaluator can attribute outcomes (unregistered multi-arm state fails closed).
-		const combination = deriveLatencyCombination(arms);
+		const arms = this.#dshAssignment ? applyAssignedDshArms(live, this.#dshAssignment) : live;
+		for (const arm of DSH_ARM_IDS) {
+			if (live[arm] === false) arms[arm] = false;
+		}
+		const dimensions = (this.#dshAssignment?.dimensions ?? []).map(slice => {
+			const treatment = slice.childArms.every(arm => arms[arm] === true);
+			return {
+				...slice,
+				treatment,
+				stopApplied: slice.stopApplied || (slice.assignedTreatment && !treatment),
+			};
+		});
+		const combination = dimensions.length > 0 ? {} : deriveLatencyCombination(arms);
 		this.#latencyArmSnapshot = freezeLatencyArmSnapshot({
 			arms,
 			...combination,
+			dimensions: dimensions.length > 0 ? dimensions : null,
+			backgroundArmId: backgroundArmIdFromArms(arms),
 			codeRevision: (() => {
 				const cwd = this.sessionManager.getCwd();
 				return typeof cwd === "string" && cwd.length > 0
 					? (git.head.resolveSync(cwd)?.commit ?? undefined)
 					: undefined;
 			})(),
-			configHash: sha256Hex(JSON.stringify(arms)),
+			configHash: this.#dshAssignment?.fingerprint ?? sha256Hex(JSON.stringify(arms)),
 		});
 		return this.#latencyArmSnapshot;
 	}
@@ -4731,6 +4825,10 @@ export class AgentSession {
 		this.#firedLatencyArms.add(arm);
 	}
 
+	recordDshGetBranchError(): void {
+		this.#dshGetBranchError = true;
+	}
+
 	/** Arms that actually engaged during this run (treatment receipts). */
 	getFiredLatencyArms(): LatencyArmId[] {
 		return [...this.#firedLatencyArms];
@@ -4739,56 +4837,140 @@ export class AgentSession {
 	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
 	invalidateLatencyArmSnapshot(): void {
 		this.#clearLatencyArmSnapshot();
+		void this.setSessionSearchToolEnabled(this.#ensureLatencyArmSnapshot().arms.dsh_session_search === true);
 	}
 
 	#clearLatencyArmSnapshot(): void {
 		this.#latencyArmSnapshot = undefined;
 	}
 
-	/**
-	 * Ordinary-session quality-stop consumer. At teardown, evaluate the frozen arm
-	 * snapshot against cohort aggregates accrued by completed runs and this
-	 * session's own treatment receipts. Synchronous best-effort: teardown must
-	 * never block or fail on rollout bookkeeping.
-	 */
 	#evaluateLatencyRolloutAtSessionEnd(exitKind: SessionExitData["kind"] | null): void {
 		try {
 			const snapshot = this.#latencyArmSnapshot;
-			if (!snapshot) return; // arms never resolved → nothing to guard
-			const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
-			if (active.length === 0) return;
-			const cohortStore = new LatencyRolloutCohortStore();
-			const key = deriveLatencyCohortKey(snapshot);
-			const treatment = cohortStore.summaryForKey(key);
-			const baseline =
-				key === LATENCY_BASELINE_COHORT_KEY ? undefined : cohortStore.summaryForKey(LATENCY_BASELINE_COHORT_KEY);
-			const cohort = treatment && baseline ? computeLatencyCohortMetrics(treatment, baseline) : undefined;
-			const decision = buildLatencyRolloutDecision({
-				workflowId: this.sessionManager.getSessionId() ?? "session",
-				status: exitKind ?? "unknown",
-				snapshot,
-				observed: {
-					completion: exitKind === "normal",
-					repairCycles: 0,
-					treatmentAttributedP0P1Escapes: 0,
-					costUsd: null,
-					// Ordinary sessions do not track per-run stage time; the persisted
-					// decision records unknown as 0 (cohort aggregation uses observations,
-					// which keep stageTimeMs null and are excluded there).
-					stageTimeMs: 0,
-					spawnedAgents: null,
-				},
-				firedArms: this.getFiredLatencyArms(),
-				cohort,
-			});
-			if (decision.decision.stop && typeof this.settings.override === "function") {
-				for (const arm of decision.disabledArms) {
-					this.settings.override(LATENCY_ARM_SETTINGS[arm] as never, false);
+			if (!snapshot) return;
+			const store = this.#latencyRolloutStore ?? new LatencyRolloutCohortStore();
+			const sessionId = this.sessionManager.getSessionId();
+			const completed = exitKind === "normal";
+			const endedAt = new Date().toISOString();
+			const firedArms = this.getFiredLatencyArms();
+			const slices = snapshot.dimensions?.filter(slice => slice.role !== "excluded") ?? [];
+			if (slices.length > 0) {
+				for (const slice of slices) {
+					const experimentId = DSH_DIMENSION_EXPERIMENT[slice.id];
+					const executionId = this.#dshExecutionIds.get(experimentId);
+					if (!executionId) continue;
+					const eventId = metricsEventId(sessionId, experimentId);
+					const observationOk = store.appendObservation({
+						schemaVersion: 1,
+						kind: "latency_rollout_observation",
+						key: slice.cohortKey ?? deriveLatencyCohortKey(snapshot),
+						status: exitKind ?? "unknown",
+						completed,
+						repairCycles: 0,
+						p0p1Escapes: 0,
+						costUsd: null,
+						stageTimeMs: null,
+						spawnedAgents: null,
+						firedArms,
+						endedAt,
+						event_id: eventId,
+						phase: "metrics",
+						snapshotFingerprint: snapshot.fingerprint,
+						sessionId,
+						experimentId,
+						dimensionId: slice.id,
+						assignmentRestored: this.#dshAssignment !== undefined,
+						bgFingerprint: snapshot.backgroundArmId?.replace(/^bg:/, "") ?? null,
+						sampleUnit: "session",
+						stopApplied: slice.stopApplied,
+						dshGetBranchError: this.#dshGetBranchError,
+						dshGoalInjected: this.#dshGoalInjected,
+						dshAdjacentIdentical: this.#dshAdjacentIdentical,
+						dshHeadlessCount: this.#goalModeState?.goal.headlessContinuationCount ?? null,
+					});
+					if (!observationOk) {
+						store.markControlPlaneDegraded();
+						continue;
+					}
+					const commitOk = store.appendRunIntent({
+						kind: "dsh-run-intent",
+						event_id: intentEventId(sessionId, experimentId, executionId),
+						sessionId,
+						experimentId,
+						executionId,
+						state: "committed",
+						startedAt: endedAt,
+						committedAt: endedAt,
+						metricsEventId: eventId,
+						expiresAt: new Date(Date.parse(endedAt) + 30 * 24 * 60 * 60 * 1000).toISOString(),
+					});
+					if (!commitOk) store.markControlPlaneDegraded();
 				}
-				this.invalidateLatencyArmSnapshot();
+				if (store.controlPlaneDegraded) return;
 			}
+			const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
+			if (active.length === 0 && slices.length === 0) return;
+			const observed = {
+				completion: completed,
+				repairCycles: 0,
+				treatmentAttributedP0P1Escapes: 0,
+				costUsd: null,
+				stageTimeMs: 0,
+				spawnedAgents: null,
+			};
+			const persistStop = (decision: LatencyRolloutDecisionV1): void => {
+				if (!decision.decision.stop) return;
+				const persisted = store.appendDecisionOrAbort(decision);
+				if (persisted.persisted && typeof this.settings.override === "function") {
+					for (const arm of decision.disabledArms) {
+						this.settings.override(LATENCY_ARM_SETTINGS[arm] as never, false);
+					}
+					this.invalidateLatencyArmSnapshot();
+				}
+			};
+			if (slices.length > 0) {
+				const dimMetrics = summarizeDshDimensionMetrics(replayObservations(store.readAll()), Date.parse(endedAt));
+				for (const slice of slices) {
+					const metrics = dimMetrics.get(slice.id);
+					persistStop(
+						buildLatencyRolloutDecision({
+							workflowId: sessionId,
+							status: exitKind ?? "unknown",
+							snapshot,
+							observed,
+							firedArms,
+							targetDimensionId: slice.id,
+							dsh: metrics
+								? {
+										a1GetBranchErrorRate: metrics.a1GetBranchErrorRate,
+										a23ZeroInjectionRate: metrics.a23ZeroInjectionRate,
+										a4CapViolations: metrics.a4CapViolations,
+										nonInferiorityDropPp: metrics.nonInferiorityDropPp,
+										minSampleMet: metrics.minSampleMet,
+									}
+								: undefined,
+						}),
+					);
+				}
+				return;
+			}
+			const key = deriveLatencyCohortKey(snapshot);
+			const treatment = store.summaryForKey(key);
+			const baseline =
+				key === LATENCY_BASELINE_COHORT_KEY ? undefined : store.summaryForKey(LATENCY_BASELINE_COHORT_KEY);
+			const cohort = treatment && baseline ? computeLatencyCohortMetrics(treatment, baseline) : undefined;
+			persistStop(
+				buildLatencyRolloutDecision({
+					workflowId: sessionId,
+					status: exitKind ?? "unknown",
+					snapshot,
+					observed,
+					firedArms,
+					cohort,
+				}),
+			);
 		} catch {
-			// Rollout bookkeeping must never fail session teardown.
+			// Rollout bookkeeping must never fail session teardown except both-fail abort.
 		}
 	}
 
@@ -5022,13 +5204,35 @@ export class AgentSession {
 	}
 
 	#buildGoalModeMessage(): CustomMessage | null {
-		const content = this.#goalRuntime.buildActivePrompt();
-		if (!content) return null;
+		const inner = this.#goalRuntime.buildActivePrompt();
+		if (!inner) return null;
 		const todoContext = this.#buildGoalTodoContext();
+		const content = prompt.render(goalModeContextPrompt, { goalContext: inner, todoContext });
+		const snapshot = this.#ensureLatencyArmSnapshot();
+		if (snapshot.arms.dsh_goal_hash_shadow === true) {
+			const finalHash = hashGoalFinalString(content);
+			const injected = this.#goalContextHash === undefined;
+			const shadow = adjacentShadow(this.#lastGoalHashShadow, {
+				v: 1,
+				sessionId: this.sessionManager.getSessionId(),
+				goalId: this.#goalModeState?.goal.id ?? "",
+				snapshotFingerprint: snapshot.fingerprint,
+				finalHash,
+				injected,
+				resetReason: injected ? this.#goalHashResetReason : "none",
+			});
+			this.sessionManager.appendCustomEntry(DSH_GOAL_HASH_SHADOW_CUSTOM_TYPE, shadow);
+			this.markLatencyArmFired("dsh_goal_hash_shadow");
+			this.#lastGoalHashShadow = shadow;
+			this.#dshGoalInjected = this.#dshGoalInjected === true || injected;
+			this.#dshAdjacentIdentical = shadow.adjacentIdentical;
+			if (injected) this.#goalContextHash = finalHash;
+			if (!injected) return null;
+		}
 		return {
 			role: "custom",
 			customType: "goal-mode-context",
-			content: prompt.render(goalModeContextPrompt, { goalContext: content, todoContext }),
+			content,
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
@@ -5829,7 +6033,13 @@ export class AgentSession {
 		if (this.#queuedMessageDrainScheduled || !this.#canAutoContinueForFollowUp() || !this.agent.hasQueuedMessages()) {
 			return;
 		}
+		const decision = this.#hiddenNextTurnScheduler.submit({
+			kind: "queued-user",
+			generation: this.#promptGeneration,
+		});
+		if (decision.status !== "accepted") return;
 		this.#queuedMessageDrainScheduled = true;
+		this.#acceptedContinuationDeliveryId = decision.deliveryId;
 		this.#scheduleAgentContinue({
 			shouldContinue: () => {
 				this.#queuedMessageDrainScheduled = false;
@@ -5837,9 +6047,11 @@ export class AgentSession {
 			},
 			onSkip: () => {
 				this.#queuedMessageDrainScheduled = false;
+				this.#settleHiddenDelivery(decision.deliveryId, "preflight");
 			},
 			onError: () => {
 				this.#queuedMessageDrainScheduled = false;
+				this.#settleHiddenDelivery(decision.deliveryId, "error");
 			},
 		});
 	}
@@ -5875,37 +6087,134 @@ export class AgentSession {
 		this.#queueHiddenNextTurnMessage(message, true);
 	}
 
-	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
+	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): ScheduleDecision | undefined {
 		this.#pendingNextTurnMessages.push(message);
-		if (!triggerTurn) return;
+		if (!triggerTurn) return undefined;
 		const generation = this.#promptGeneration;
 		if (this.#scheduledHiddenNextTurnGeneration === generation) {
-			return;
+			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "already_settled" });
 		}
+		const snapshot = this.#ensureLatencyArmSnapshot();
+		const modes = this.settings.get("goal.continuationModes") as readonly string[];
+		if (snapshot.arms.dsh_headless_continuation !== true) {
+			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "arm-off" });
+		}
+		if (!modes.includes("headless") || !this.#allowHeadlessGoalContinuation) {
+			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "capability" });
+		}
+		if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
+			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "acp-defer" });
+		}
+		const count = this.#goalModeState?.goal.headlessContinuationCount ?? 0;
+		if (count >= HEADLESS_GOAL_CONTINUATION_CAP) {
+			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "cap" });
+		}
+		const decision = this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation });
+		if (decision.status !== "accepted") return decision;
 		this.#scheduledHiddenNextTurnGeneration = generation;
+		this.#acceptedContinuationDeliveryId = decision.deliveryId;
+		this.markLatencyArmFired("dsh_headless_continuation");
 		this.#schedulePostPromptTask(
 			async () => {
 				if (this.#scheduledHiddenNextTurnGeneration === generation) {
 					this.#scheduledHiddenNextTurnGeneration = undefined;
 				}
-				if (this.#pendingNextTurnMessages.length === 0) {
+				if (this.#pendingNextTurnMessages.length === 0) return;
+				const reservedFrom = this.#goalModeState?.goal.headlessContinuationCount ?? 0;
+				const reserve = async (): Promise<"accepted" | "cap"> => {
+					try {
+						return await this.#goalRuntime.reserveHeadlessContinuation(HEADLESS_GOAL_CONTINUATION_CAP);
+					} catch {
+						this.#hiddenNextTurnScheduler.onError(decision.deliveryId, {
+							status: "error",
+							deliveryId: decision.deliveryId,
+							phase: "post-accept",
+							reason: "persist-failed",
+							retryable: true,
+						});
+						const retry = this.#hiddenNextTurnScheduler.submit({
+							kind: "headless-goal",
+							generation,
+							resumeDeliveryId: decision.deliveryId,
+						});
+						if (retry.status !== "accepted") {
+							this.#settleHiddenDelivery(decision.deliveryId, "error");
+							throw new Error("persist-failed");
+						}
+						try {
+							return await this.#goalRuntime.reserveHeadlessContinuation(HEADLESS_GOAL_CONTINUATION_CAP);
+						} catch {
+							this.#settleHiddenDelivery(decision.deliveryId, "error");
+							throw new Error("persist-failed");
+						}
+					}
+				};
+				let reserved: "accepted" | "cap";
+				try {
+					reserved = await reserve();
+				} catch {
+					return;
+				}
+				if (reserved === "cap") {
+					this.#settleHiddenDelivery(decision.deliveryId, "cap");
 					return;
 				}
 				try {
 					await this.#promptQueuedHiddenNextTurnMessages();
-				} catch {
-					// Leave the hidden next-turn messages queued for the next explicit prompt.
+				} catch (error) {
+					await this.#goalRuntime.rollbackHeadlessContinuation(reservedFrom);
+					const retry = this.#hiddenNextTurnScheduler.submit({
+						kind: "headless-goal",
+						generation,
+						resumeDeliveryId: decision.deliveryId,
+					});
+					if (retry.status !== "accepted") this.#settleHiddenDelivery(decision.deliveryId, "error");
+					else throw error;
 				}
 			},
 			{
 				generation,
-				onSkip: () => {
+				deliveryId: decision.deliveryId,
+				onSkip: reason => {
 					if (this.#scheduledHiddenNextTurnGeneration === generation) {
 						this.#scheduledHiddenNextTurnGeneration = undefined;
 					}
+					this.#settleHiddenDelivery(decision.deliveryId, reason === "aborted" ? "aborted" : "stale-generation");
 				},
+				onError: () => this.#settleHiddenDelivery(decision.deliveryId, "error"),
 			},
 		);
+		return decision;
+	}
+
+	#settleHiddenDelivery(
+		deliveryId: DeliveryId,
+		reason:
+			| "aborted"
+			| "stale-generation"
+			| "preflight"
+			| "acp-defer"
+			| "disposed"
+			| "capability"
+			| "arm-off"
+			| "cap"
+			| "error"
+			| "completed",
+	): void {
+		if (this.#acceptedContinuationDeliveryId === deliveryId) this.#acceptedContinuationDeliveryId = undefined;
+		if (
+			this.#hiddenNextTurnScheduler.finalSettle(
+				deliveryId,
+				reason === "completed" ? "completed" : reason === "error" ? "error" : reason,
+			)
+		) {
+			void this.#emitSessionEvent({
+				type: "agent_end",
+				messages: this.agent.state.messages,
+				isTerminal: true,
+				deliveryId,
+			} as never);
+		}
 	}
 
 	async #promptQueuedHiddenNextTurnMessages(): Promise<void> {
@@ -6077,6 +6386,11 @@ export class AgentSession {
 			if (options?.triggerTurn) {
 				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+					this.#hiddenNextTurnScheduler.submit({
+						kind: "headless-goal",
+						generation: this.#promptGeneration,
+						skip: "acp-defer",
+					});
 					return false;
 				}
 				await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
@@ -6098,6 +6412,11 @@ export class AgentSession {
 		if (options?.triggerTurn) {
 			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+				this.#hiddenNextTurnScheduler.submit({
+					kind: "headless-goal",
+					generation: this.#promptGeneration,
+					skip: "acp-defer",
+				});
 				return false;
 			}
 			await this.#promptAgentInitiatedMessage(normalizedAppMessage);
@@ -8748,14 +9067,14 @@ export class AgentSession {
 			this.#emitOrdinaryCompletionDiagnostic();
 			return false;
 		}
-		this.#ordinaryObligationContinuationCount++;
-		this.#queueHiddenNextTurnMessage(
+		const nextAttempt = this.#ordinaryObligationContinuationCount + 1;
+		const decision = this.#queueHiddenNextTurnMessage(
 			{
 				role: "custom",
 				customType: "ordinary-obligation-continuation",
 				content: prompt.render(ordinaryObligationContinuationPrompt, {
 					obligations: open.map(item => ({ id: item.id, label: item.label ?? item.id })),
-					attempt: this.#ordinaryObligationContinuationCount,
+					attempt: nextAttempt,
 					cap: ORDINARY_OBLIGATION_CONTINUATION_CAP,
 				}),
 				display: false,
@@ -8764,6 +9083,8 @@ export class AgentSession {
 			},
 			true,
 		);
+		if (decision?.status !== "accepted") return false;
+		this.#ordinaryObligationContinuationCount = nextAttempt;
 		return true;
 	}
 

@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { Settings } from "../../src/config/settings";
 import {
 	buildLatencyRolloutDecision,
+	DSH_QUALITY_STOP,
+	declaredDimensionArms,
 	deriveLatencyCombination,
 	emptyLatencyArms,
 	evaluateLatencyQualityStop,
@@ -53,6 +55,10 @@ describe("latency arms defaults", () => {
 			concurrency_declaration: false,
 			concurrency_execution: false,
 			eval_gate_migration: false,
+			dsh_session_search: false,
+			dsh_omit_goal_time: false,
+			dsh_goal_hash_shadow: false,
+			dsh_headless_continuation: false,
 		});
 	});
 
@@ -199,6 +205,99 @@ describe("latency quality stop", () => {
 				spawnedAgentsP95Multiple: 1.5,
 			}),
 		).toEqual({ stop: false, reason: null });
+	});
+
+	it("applies DSH dimension stops only after min sample except A4 cap", () => {
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				dshA1GetBranchErrorRate: 0.2,
+				dshMinSampleMet: false,
+			}),
+		).toEqual({ stop: false, reason: null });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				dshA4CapViolations: 1,
+				dshMinSampleMet: false,
+			}),
+		).toEqual({ stop: true, reason: "dsh_a4_cap" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				dshA1GetBranchErrorRate: DSH_QUALITY_STOP.a1GetBranchErrorRate + 0.01,
+				dshMinSampleMet: true,
+			}),
+		).toEqual({ stop: true, reason: "dsh_a1_get_branch" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				dshA23ZeroInjectionRate: DSH_QUALITY_STOP.a23ZeroInjectionRate + 0.01,
+				dshMinSampleMet: true,
+			}),
+		).toEqual({ stop: true, reason: "dsh_a23_zero_injection" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				dshNonInferiorityDropPp: DSH_QUALITY_STOP.nonInferiorityPp + 1,
+				dshMinSampleMet: true,
+			}),
+		).toEqual({ stop: true, reason: "dsh_non_inferiority" });
+	});
+
+	it("disables only the target DSH dimension on stop", () => {
+		const snapshot = freezeLatencyArmSnapshot({
+			arms: {
+				...emptyLatencyArms(),
+				dsh_session_search: true,
+				dsh_headless_continuation: true,
+			},
+			dimensions: [
+				{
+					id: "dim.a1",
+					childArms: declaredDimensionArms("dim.a1"),
+					assignedTreatment: true,
+					treatment: true,
+					stopApplied: false,
+					role: "treatment",
+					cohortKey: "dsh:dim.a1:t|bg:none",
+					controlKey: "dsh:dim.a1:c|bg:none",
+				},
+				{
+					id: "dim.a4",
+					childArms: declaredDimensionArms("dim.a4"),
+					assignedTreatment: true,
+					treatment: true,
+					stopApplied: false,
+					role: "treatment",
+					cohortKey: "dsh:dim.a4:t|bg:none",
+					controlKey: "dsh:dim.a4:c|bg:none",
+				},
+			],
+		});
+		const decision = buildLatencyRolloutDecision({
+			workflowId: "wf-dsh",
+			status: "completed",
+			snapshot,
+			observed: {
+				completion: true,
+				repairCycles: 0,
+				treatmentAttributedP0P1Escapes: 0,
+				costUsd: null,
+				stageTimeMs: 0,
+				spawnedAgents: null,
+			},
+			firedArms: ["dsh_session_search"],
+			targetDimensionId: "dim.a1",
+			dsh: { a1GetBranchErrorRate: 0.2, minSampleMet: true },
+		});
+		expect(decision.decision).toEqual({ stop: true, reason: "dsh_a1_get_branch" });
+		expect(decision.disabledArms).toEqual(["dsh_session_search"]);
 	});
 
 	it("builds a persisted rollout decision with attribution and disables arms on stop", () => {

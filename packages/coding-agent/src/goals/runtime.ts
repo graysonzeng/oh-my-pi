@@ -15,6 +15,8 @@ export interface GoalRuntimeHost {
 		content: string;
 		deliverAs?: "steer" | "followUp" | "nextTurn";
 	}): Promise<void>;
+	omitGoalTime?(): boolean;
+	markOmitGoalTimeFired?(): void;
 	now?(): number;
 }
 
@@ -76,19 +78,25 @@ export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage
 	);
 }
 
-export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
+export function renderGoalPrompt(
+	kind: GoalPromptKind,
+	goal: Goal,
+	options?: { omitTimeUsedSeconds?: boolean },
+): string {
 	const template =
 		kind === "active"
 			? goalModeActivePrompt
 			: kind === "continuation"
 				? goalContinuationPrompt
 				: goalBudgetLimitPrompt;
+	const omitTime = options?.omitTimeUsedSeconds === true && kind !== "budget-limit";
 	return prompt.render(template, {
 		objective: escapeXmlText(goal.objective),
 		tokensUsed: String(goal.tokensUsed),
 		tokenBudget: budgetValue(goal),
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
+		showTimeUsed: !omitTime,
 	});
 }
 
@@ -375,6 +383,7 @@ export class GoalRuntime {
 			tokenBudget,
 			tokensUsed: 0,
 			timeUsedSeconds: 0,
+			headlessContinuationCount: 0,
 			createdAt: now,
 			updatedAt: now,
 		};
@@ -495,18 +504,51 @@ export class GoalRuntime {
 		});
 	}
 
+	#omitTimeUsedSeconds(): boolean {
+		return this.#host.omitGoalTime?.() === true;
+	}
+
 	buildActivePrompt(): string | undefined {
 		const state = this.#host.getState();
-		return state?.enabled && state.goal && state.goal.status === "active"
-			? renderGoalPrompt("active", state.goal)
-			: undefined;
+		if (!state?.enabled || !state.goal || state.goal.status !== "active") return undefined;
+		const omit = this.#omitTimeUsedSeconds();
+		if (omit) this.#host.markOmitGoalTimeFired?.();
+		return renderGoalPrompt("active", state.goal, { omitTimeUsedSeconds: omit });
 	}
 
 	buildContinuationPrompt(): string | undefined {
 		const state = this.#host.getState();
-		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal)
-			: undefined;
+		if (!state?.enabled || state.goal.status !== "active") return undefined;
+		const omit = this.#omitTimeUsedSeconds();
+		if (omit) this.#host.markOmitGoalTimeFired?.();
+		return renderGoalPrompt("continuation", state.goal, { omitTimeUsedSeconds: omit });
+	}
+
+	async reserveHeadlessContinuation(cap: number): Promise<"accepted" | "cap"> {
+		return await this.#withAccounting(async () => {
+			const state = this.#host.getState();
+			if (!state) return "cap";
+			const count = state.goal.headlessContinuationCount ?? 0;
+			if (count >= cap) return "cap";
+			state.goal.headlessContinuationCount = count + 1;
+			try {
+				await this.#commitState(state, { persist: "goal" });
+			} catch (error) {
+				state.goal.headlessContinuationCount = count;
+				this.#host.setState(state);
+				throw error;
+			}
+			return "accepted";
+		});
+	}
+
+	async rollbackHeadlessContinuation(to: number): Promise<void> {
+		await this.#withAccounting(async () => {
+			const state = this.#host.getState();
+			if (!state) return;
+			state.goal.headlessContinuationCount = Math.max(0, to);
+			await this.#commitState(state, { persist: "goal" });
+		});
 	}
 
 	async #sendBudgetLimitSteer(goal: Goal): Promise<void> {

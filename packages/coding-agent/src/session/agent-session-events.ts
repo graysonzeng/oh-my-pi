@@ -14,6 +14,7 @@ export type AgentSessionEvent =
 	| (Extract<AgentEvent, { type: "agent_end" }> & {
 			/** False when an async delivery will resume the session before its true final settle. */
 			isTerminal?: boolean;
+			deliveryId?: string;
 	  })
 	| {
 			type: "auto_compaction_start";

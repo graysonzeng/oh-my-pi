@@ -1410,6 +1410,7 @@ export async function runRootCommand(
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+	if (isInteractive) sessionOptions.allowHeadlessGoalContinuation = false;
 	sessionOptions.settings = settingsInstance;
 
 	// OTEL: register global OTLP exporters when an endpoint is configured via

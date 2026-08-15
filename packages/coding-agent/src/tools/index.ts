@@ -67,6 +67,7 @@ import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
+import { SessionSearchTool } from "./session-search";
 import { type TodoPhase, TodoTool } from "./todo";
 import { applyWorkflowTransformTools, wrapAgentToolWithWorkflowAliases } from "./workflow-alias-wrap";
 import type { WorkflowAttemptEvidence, WorkflowToolOptimization } from "./workflow-session-fields";
@@ -110,6 +111,7 @@ export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
+export * from "./session-search";
 export * from "./todo";
 export * from "./tts";
 export * from "./vibe";
@@ -334,6 +336,8 @@ export interface ToolSession {
 	getFiredLatencyArms?: () => LatencyArmId[];
 	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
 	invalidateLatencyArmSnapshot?: () => void;
+	/** Record that A1 getBranch threw; consumed as dshGetBranchError at session-end. */
+	recordDshGetBranchError?: () => void;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
@@ -478,6 +482,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 		if (session.settings?.get?.("workflow.enabled" as never) === false) return null;
 		return new WorkflowTool(session, s => createEngineFromSessionSettings(s));
 	},
+	session_search: SessionSearchTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
@@ -652,6 +657,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
 		}
+		if (name === "session_search") return session.getLatencyArmSnapshot?.()?.arms.dsh_session_search === true;
 		return true;
 	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {

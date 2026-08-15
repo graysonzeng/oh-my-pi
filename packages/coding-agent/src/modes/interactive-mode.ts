@@ -2241,6 +2241,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
 			tokensUsed: value.tokensUsed,
 			timeUsedSeconds: value.timeUsedSeconds,
+			headlessContinuationCount:
+				typeof value.headlessContinuationCount === "number" ? value.headlessContinuationCount : 0,
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
 		};

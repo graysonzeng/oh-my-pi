@@ -67,6 +67,7 @@ interface SessionToolsOptions {
 	toolRegistry?: Map<string, AgentTool>;
 	createVibeTools?: () => AgentTool[];
 	createComputerTool?: () => Promise<AgentTool | null>;
+	createSessionSearchTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link SessionTools.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
@@ -167,6 +168,7 @@ export class SessionTools {
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createComputerTool: SessionToolsOptions["createComputerTool"];
+	#createSessionSearchTool: SessionToolsOptions["createSessionSearchTool"];
 	#createInspectImageTool: SessionToolsOptions["createInspectImageTool"];
 	#installedVibeToolNames = new Set<string>();
 	#builtInToolNames: Set<string>;
@@ -197,6 +199,7 @@ export class SessionTools {
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createVibeTools = options.createVibeTools;
 		this.#createComputerTool = options.createComputerTool;
+		this.#createSessionSearchTool = options.createSessionSearchTool;
 		this.#createInspectImageTool = options.createInspectImageTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
@@ -853,6 +856,26 @@ export class SessionTools {
 			await this.applyActiveToolsByName([...active, "computer"]);
 		}
 		logState();
+		return true;
+	}
+	async setSessionSearchToolEnabled(enabled: boolean): Promise<boolean> {
+		const active = this.getEnabledToolNames();
+		if (!enabled) {
+			if (active.includes("session_search")) {
+				await this.applyActiveToolsByName(active.filter(name => name !== "session_search"));
+			}
+			return true;
+		}
+		if (!this.#toolRegistry.has("session_search")) {
+			const tool = await this.#createSessionSearchTool?.();
+			if (tool?.name !== "session_search") return false;
+			const wrapped = this.#wrapRuntimeTool(tool);
+			this.#toolRegistry.set(wrapped.name, wrapped);
+			this.#builtInToolNames.add(wrapped.name);
+		}
+		if (!active.includes("session_search")) {
+			await this.applyActiveToolsByName([...active, "session_search"]);
+		}
 		return true;
 	}
 

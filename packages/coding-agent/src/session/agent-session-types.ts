@@ -24,6 +24,9 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { LatencyArmSnapshotV1 } from "../latency/arms";
+import type { DshAssignmentV1, DshExperimentId } from "../latency/assignment";
+import type { LatencyRolloutCohortStore } from "../latency/rollout-cohort";
 import type { ResolvedModelOptimization } from "../model-optimization";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
@@ -140,6 +143,8 @@ export interface AgentSessionConfig {
 	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Creates the built-in `computer` tool for session-scoped runtime enablement (see {@link AgentSession.setComputerToolEnabled}). */
 	createComputerTool?: () => Promise<AgentTool | null>;
+	/** Creates session_search for session-scoped kill/re-enable after arm invalidation. */
+	createSessionSearchTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
@@ -228,6 +233,12 @@ export interface AgentSessionConfig {
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/** Snapshot frozen before createTools; AgentSession must adopt it. */
+	latencyArmSnapshot?: LatencyArmSnapshotV1;
+	dshAssignment?: DshAssignmentV1;
+	dshExecutionIds?: Map<DshExperimentId, string>;
+	latencyRolloutStore?: LatencyRolloutCohortStore;
+	allowHeadlessGoalContinuation?: boolean;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 }

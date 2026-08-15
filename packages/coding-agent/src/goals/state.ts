@@ -9,6 +9,7 @@ export interface Goal {
 	tokenBudget?: number;
 	tokensUsed: number;
 	timeUsedSeconds: number;
+	headlessContinuationCount?: number;
 	createdAt: number;
 	updatedAt: number;
 }

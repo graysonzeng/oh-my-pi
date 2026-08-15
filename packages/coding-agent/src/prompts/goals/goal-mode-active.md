@@ -9,7 +9,8 @@ Budget:
 - Tokens used: {{tokensUsed}}
 - Token budget: {{tokenBudget}}
 - Tokens remaining: {{remainingTokens}}
-- Time used: {{timeUsedSeconds}} seconds
+{{#if showTimeUsed}}- Time used: {{timeUsedSeconds}} seconds
+{{/if}}
 
 Use the `goal` tool to inspect or complete the active goal:
 - `goal({op:"get"})` returns the current goal and budget state.
