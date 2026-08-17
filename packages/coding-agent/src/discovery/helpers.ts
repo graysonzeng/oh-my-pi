@@ -236,6 +236,8 @@ export interface ParsedAgentFields {
 	blocking?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
+	/** Opt-in code-review shadow cohort. Only `"code"` is recognized. */
+	shadowReview?: "code";
 }
 
 /**
@@ -300,6 +302,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
+	const shadowReview = frontmatter.shadowReview === "code" ? "code" : undefined;
 	return {
 		name,
 		description,
@@ -313,6 +316,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		autoloadSkills,
 		readSummarize,
 		prewalk,
+		shadowReview,
 	};
 }
 

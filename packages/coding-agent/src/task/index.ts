@@ -301,6 +301,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("effort" in params) item.effort = params.effort;
 	if ("isolated" in params) item.isolated = params.isolated;
+	if ("shadowReview" in params) item.shadowReview = params.shadowReview;
 	return [item];
 }
 
@@ -325,6 +326,11 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
 		spawn.isolated = params.isolated;
+	}
+	if (item.shadowReview !== undefined) {
+		spawn.shadowReview = item.shadowReview;
+	} else if ("shadowReview" in params) {
+		spawn.shadowReview = params.shadowReview;
 	}
 	return spawn;
 }
@@ -1576,6 +1582,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+				...(params.shadowReview !== undefined ? { shadowReview: params.shadowReview } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),

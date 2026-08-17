@@ -92,6 +92,8 @@ export interface StructuredSubagentRequest {
 	schemaMode?: StructuredSubagentSchemaMode;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
+	/** Request a code-review shadow cohort (`code`) or force it off. */
+	shadowReview?: "code" | "off";
 	identity?: StructuredSubagentIdentity;
 	index?: number;
 	parentToolCallId?: string;
@@ -416,6 +418,7 @@ function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: request.thinkingLevel ?? policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		shadowReview: request.shadowReview,
 		...(policy.schema.source === "none"
 			? {}
 			: {

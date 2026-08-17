@@ -46,6 +46,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
+import { tryRegisterShadowReviewJob } from "../shadow-mind";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -333,6 +334,8 @@ export interface ExecutorOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
+	/** Request a code-review shadow cohort (`code`) or force it off. */
+	shadowReview?: "code" | "off";
 	/** Schema used to validate the final structured completion. */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
@@ -3067,6 +3070,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			unsubscribe = monitor.attach(session);
 
 			checkAbort();
+			tryRegisterShadowReviewJob({
+				session,
+				agent,
+				cwd: effectiveCwd,
+				spawnShadowReview: options.shadowReview,
+				restrictToolNames,
+				settings: subagentSettings,
+			});
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
 			if (options.autoloadSkills?.length) {
 				for (const skill of options.autoloadSkills) {

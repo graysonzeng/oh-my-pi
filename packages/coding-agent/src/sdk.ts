@@ -512,6 +512,13 @@ export interface CreateAgentSessionOptions {
 	toolNames?: string[];
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
 	restrictToolNames?: boolean;
+	/**
+	 * Isolated child session (Shadow Mind). Skips inline factories, extension
+	 * discovery, MCP, LSP, skills/commands discovery, and preload forwarding.
+	 * Keeps caller `customTools` and `toolNames`. Does not change
+	 * {@link restrictToolNames} semantics for other callers.
+	 */
+	isolatedChild?: boolean;
 
 	/** Output schema for structured completion (subagents). */
 	outputSchema?: unknown;
@@ -1296,6 +1303,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
+	const isolatedChild = options.isolatedChild === true;
 
 	registerSshCleanup();
 	registerEvalCleanup();
@@ -1354,7 +1362,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// session-context build, tool creation, MCP discovery, and extension discovery.
 	const contextFilesPromise = options.contextFiles
 		? Promise.resolve(options.contextFiles)
-		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
+		: isolatedChild
+			? Promise.resolve([])
+			: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
 	contextFilesPromise.catch(() => {});
 	const activeRepoContextPromise = logger.time("resolveActiveRepoContext", async () => {
 		try {
@@ -1371,16 +1381,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	advisorConfigsPromise.catch(() => {});
 	const promptTemplatesPromise = options.promptTemplates
 		? Promise.resolve(options.promptTemplates)
-		: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
+		: isolatedChild
+			? Promise.resolve([])
+			: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
 	promptTemplatesPromise.catch(() => {});
 	const slashCommandsPromise = options.slashCommands
 		? Promise.resolve(options.slashCommands)
-		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
+		: isolatedChild
+			? Promise.resolve([])
+			: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
 	slashCommandsPromise.catch(() => {});
 	const skillsSettings = settings.getGroup("skills");
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
 	const discoveredSkillsPromise =
-		options.skills === undefined
+		options.skills === undefined && !isolatedChild
 			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
 					...skillsSettings,
 					disabledExtensions: disabledExtensionIds,
@@ -1614,6 +1628,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (options.skills !== undefined) {
 		skills = options.skills;
 		skillWarnings = [];
+	} else if (isolatedChild) {
+		skills = [];
+		skillWarnings = [];
 	} else {
 		const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
 		skills = discovered.skills;
@@ -1679,7 +1696,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
-	const enableLsp = !restrictToolNames && (options.enableLsp ?? true);
+	const toolsRestricted = restrictToolNames || isolatedChild;
+	const enableLsp = !toolsRestricted && (options.enableLsp ?? true);
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
 	// Only the first top-level session in a process owns an AsyncJobManager.
 	// Subagents inherit the parent's manager via `AsyncJobManager.instance()`
@@ -1773,11 +1791,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return sessionManager.getAdditionalDirectories();
 			},
 			enableLsp,
-			enableIrc: restrictToolNames ? false : options.enableIrc,
-			restrictToolNames,
+			enableIrc: toolsRestricted ? false : options.enableIrc,
+			restrictToolNames: toolsRestricted,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
-				return restrictToolNames
+				return toolsRestricted
 					? requestedToolNames?.includes("edit") === true
 					: !requestedToolNames || requestedToolNames.includes("edit");
 			},
@@ -1939,7 +1957,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
-		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+		const enableMCP = !toolsRestricted && (options.enableMCP ?? true);
 		let mcpManager: MCPManager | undefined = enableMCP ? options.mcpManager : undefined;
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
@@ -2046,7 +2064,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const builtInToolNames = [...toolRegistry.keys()];
 		let customToolPaths: ToolPathWithSource[] = [];
 		const inlineExtensions: ExtensionFactory[] = [];
-		if (!restrictToolNames) {
+		if (!restrictToolNames && !isolatedChild) {
 			// Add image tools when generation is enabled and either no explicit tool
 			// whitelist was given or it names `generate_image`. Unlike built-in tools
 			// (filtered in `createTools`), custom tools are force-activated via
@@ -2113,9 +2131,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
+		if (restrictToolNames || isolatedChild) {
 			// Allocate a session runtime without evaluating caller-provided extension
-			// instances, paths, or factories.
+			// instances, paths, or factories. isolatedChild also ignores preloaded
+			// extension/custom-tool paths so parent forwarding cannot leak tools.
 			extensionPaths = [];
 			extensionsResult = await loadExtensions([], cwd, eventBus);
 		} else if (options.preloadedExtensions) {
@@ -2165,7 +2184,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
 		// extensions are available for model selection on session resume / fallback.
-		if (!restrictToolNames) {
+		if (!restrictToolNames && !isolatedChild) {
 			const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
 			modelRegistry.syncExtensionSources(activeExtensionSources);
 			for (const sourceId of new Set(activeExtensionSources)) {
@@ -2704,7 +2723,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
 
-		const registeredTools = restrictToolNames ? [] : extensionRunner.getAllRegisteredTools();
+		const registeredTools = toolsRestricted ? [] : extensionRunner.getAllRegisteredTools();
 		const sdkCustomTools = restrictToolNames
 			? []
 			: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
@@ -2725,7 +2744,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		// All built-in tools are active (conditional tools like git/ask return null from factory if disabled)
 		const builtInRegistryToolNames = toolSession.xdev?.builtInNames ?? new Set(toolRegistry.keys());
-		if (!restrictToolNames && !toolRegistry.has("goal") && settings.get("goal.enabled")) {
+		if (!toolsRestricted && !toolRegistry.has("goal") && settings.get("goal.enabled")) {
 			const goalTool = await logger.time("createTools:goal:session", HIDDEN_TOOLS.goal, toolSession);
 			if (goalTool) {
 				toolRegistry.set(goalTool.name, wrapToolWithMetaNotice(goalTool));
@@ -3068,10 +3087,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Restricted callers own the list, so never widen it with registered tools.
 		const alwaysInclude: string[] = restrictToolNames
 			? []
-			: [
-					...sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)),
-					...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
-				];
+			: isolatedChild
+				? sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name))
+				: [
+						...sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)),
+						...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
+					];
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
@@ -3784,7 +3805,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// and the tools; the fire-time re-check in `#onAgentEnd` still handles a
 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
-		if (!restrictToolNames) {
+		if (!restrictToolNames && !isolatedChild) {
 			if (settings.get("autolearn.enabled") && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
 				new AutoLearnController({

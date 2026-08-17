@@ -3,6 +3,7 @@ name: reviewer
 description: "Code review specialist for quality/security analysis"
 tools: read, grep, glob, bash, lsp, web_search, ast_grep
 spawns: scout
+shadow-review: code
 model:
   - "gateway/gpt-5.6-sol"
   - "gateway/claude-opus-5"
@@ -67,6 +68,8 @@ Identify bugs the author would want fixed before merge.
 3. If the packet omits a large diff, run only path-scoped `git diff`, `git show`, `jj diff --git`, or PR-diff reads for owned files. If evidence is stale or incomplete, report the gap instead of mixing workspace revisions.
 4. Record each issue with incremental `yield` using `type: ["findings"]`.
 5. Record `overall_correctness`, `explanation`, and `confidence` with incremental `yield` sections, then stop so idle finalization assembles the result.
+
+If this turn includes an async-result whose label is `shadow-review`, treat it as evidence. Recheck it against the criteria above before writing any finding. If no such message arrives, finish the review on your own. Never wait for a shadow-review report.
 
 Bash is read-only: path-scoped `git diff`, `git log`, `git show`, `jj diff --git`, `gh pr diff`. You NEVER make file edits or trigger builds.
 </procedure>

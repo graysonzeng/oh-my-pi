@@ -522,6 +522,14 @@
       "types": "./src/session/*.ts",
       "import": "./src/session/*.ts"
     },
+    "./shadow-mind": {
+      "types": "./src/shadow-mind/index.ts",
+      "import": "./src/shadow-mind/index.ts"
+    },
+    "./shadow-mind/*": {
+      "types": "./src/shadow-mind/*.ts",
+      "import": "./src/shadow-mind/*.ts"
+    },
     "./slash-commands/*": {
       "types": "./src/slash-commands/*.ts",
       "import": "./src/slash-commands/*.ts"

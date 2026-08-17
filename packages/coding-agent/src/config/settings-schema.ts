@@ -311,6 +311,7 @@ export interface ModelTagsSettings {
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
+const EMPTY_BOOLEAN_RECORD: Record<string, boolean> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
@@ -4845,6 +4846,30 @@ export const SETTINGS_SCHEMA = {
 			label: "Batch Task Calls",
 			description:
 				"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
+		},
+	},
+
+	"task.shadowReview.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Reviewer Shadow Review",
+			description:
+				"When a qualified code-reviewer spawn starts, run four read-only Shadow Mind dimensions in parallel and inject their report as an async-result. Disable to roll back to single-core review. Quality A/B is not yet complete.",
+		},
+	},
+
+	"task.shadowReview.agents": {
+		type: "record",
+		default: EMPTY_BOOLEAN_RECORD,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Shadow Review Per Agent",
+			description:
+				"Per-agent kill switch for shadow review. Set an agent name to false to skip the cohort even when spawn requests shadowReview: code.",
 		},
 	},
 

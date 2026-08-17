@@ -181,4 +181,16 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: "  " })?.prewalk).toBeUndefined();
 		expect(parseAgentFields({ name: "worker", description: "desc" })?.prewalk).toBeUndefined();
 	});
+
+	test("parses shadow-review: code", () => {
+		expect(parseAgentFields({ name: "reviewer", description: "desc", shadowReview: "code" })?.shadowReview).toBe(
+			"code",
+		);
+	});
+
+	test("ignores unknown shadowReview values", () => {
+		expect(
+			parseAgentFields({ name: "reviewer", description: "desc", shadowReview: "design" })?.shadowReview,
+		).toBeUndefined();
+	});
 });

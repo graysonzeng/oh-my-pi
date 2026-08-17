@@ -117,6 +117,7 @@ export const taskItemSchema = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -126,6 +127,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 
@@ -145,6 +147,8 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/** Request a code-review shadow cohort (`code`) or force it off. */
+	shadowReview?: "code" | "off";
 }
 
 export const taskSchema = type({
@@ -154,6 +158,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskSchemaNoIsolation = type({
@@ -162,6 +167,7 @@ const taskSchemaNoIsolation = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskSchemaBatch = type({
@@ -210,6 +216,7 @@ function createTaskSchema(options: {
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				"isolated?": "boolean",
+				"shadowReview?": '"code" | "off"',
 				"+": "delete",
 			});
 			return type.raw({
@@ -225,6 +232,7 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			"shadowReview?": '"code" | "off"',
 			"+": "delete",
 		});
 		return type.raw({
@@ -242,6 +250,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"isolated?": "boolean",
+			"shadowReview?": '"code" | "off"',
 			"+": "delete",
 		});
 	}
@@ -252,6 +261,7 @@ function createTaskSchema(options: {
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		"shadowReview?": '"code" | "off"',
 		"+": "delete",
 	});
 }
@@ -302,6 +312,8 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+	/** Request a code-review shadow cohort (`code`) or force it off. */
+	shadowReview?: "code" | "off";
 }
 
 /**
@@ -373,6 +385,8 @@ export interface AgentDefinition {
 	readSummarize?: boolean;
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;
+	/** Opt-in code-review shadow cohort. Only `"code"` is recognized. */
+	shadowReview?: "code";
 	source: AgentSource;
 	filePath?: string;
 }

@@ -12,9 +12,17 @@ import { type } from "arktype";
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it("accepts {agent, task}", () => {
-		const parsed = taskSchema({ agent: "scout", task: "Map the auth module." });
+	it("accepts agent and task without shadowReview", () => {
+		const parsed = taskSchema({ agent: "reviewer", task: "Review the patch." });
 		expect(parsed instanceof type.errors).toBe(false);
+	});
+
+	it("accepts optional shadowReview", () => {
+		const parsed = taskSchema({ agent: "reviewer", task: "Review the patch.", shadowReview: "code" });
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect(parsed.shadowReview).toBe("code");
+		}
 	});
 
 	it("defaults agent to `task` when omitted", () => {
