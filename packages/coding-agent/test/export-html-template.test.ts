@@ -19,9 +19,9 @@ interface TemplateProbeResult {
 }
 
 const expectedTemplate: TemplateProbeResult = {
-	chars: 378_092,
-	bytes: 378_270,
-	sha256: "ef5b2b2111d9b73510fc75a8ffdd9b97045e7c15408fce099f82530616a11130",
+	chars: 378_110,
+	bytes: 378_288,
+	sha256: "d65abaea88ee84660f215254237edfe04d68343511035b4d3489c4198fc1698a",
 	stableCache: true,
 	assetsRemoved: 0,
 };
@@ -78,6 +78,7 @@ function composeExpectedTemplate(): string {
 async function runProbe(command: string[]): Promise<TemplateProbeResult> {
 	const proc = Bun.spawn(command, {
 		cwd: unrelatedCwd,
+		stdin: "ignore",
 		stderr: "pipe",
 		stdout: "pipe",
 	});
@@ -149,8 +150,9 @@ describe("HTML export template", () => {
 		fs.writeFileSync(staleAssetPath, "stale");
 		const build = Bun.spawn([process.execPath, "run", "gen:bundle"], {
 			cwd: packageDir,
-			stderr: "pipe",
+			stdin: "ignore",
 			stdout: "pipe",
+			stderr: "pipe",
 		});
 		const [buildStdout, buildStderr, buildExitCode] = await Promise.all([
 			new Response(build.stdout).text(),
@@ -162,8 +164,9 @@ describe("HTML export template", () => {
 
 		const proc = Bun.spawn([process.execPath, "pm", "pack", "--dry-run", "--ignore-scripts"], {
 			cwd: packageDir,
-			stderr: "pipe",
+			stdin: "ignore",
 			stdout: "pipe",
+			stderr: "pipe",
 		});
 		const [stdout, stderr, exitCode] = await Promise.all([
 			new Response(proc.stdout).text(),
@@ -195,6 +198,7 @@ describe("HTML export template", () => {
 
 	test("does not retain source asset strings during a static import", async () => {
 		const proc = Bun.spawn([process.execPath, heapProbePath], {
+			stdin: "ignore",
 			stderr: "pipe",
 			stdout: "pipe",
 		});

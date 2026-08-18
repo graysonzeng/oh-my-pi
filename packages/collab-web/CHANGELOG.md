@@ -2,6 +2,12 @@
 
 ## [17.1.9] - 2026-08-07
 
+## [17.2.0] - 2026-07-30
+
+### Fixed
+
+- Fixed an issue where the agent would stop silently without a message by ensuring terminal auto-retry failures are properly surfaced as error notices.
+
 ## [17.1.0] - 2026-07-24
 
 ### Fixed
