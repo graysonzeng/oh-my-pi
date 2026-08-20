@@ -6,19 +6,21 @@ import type { SubmenuOption } from "./settings-schema";
  * sentinel; the rest mirror the wire {@link ServiceTier} values each provider
  * family actually realizes. OpenAI accepts the full set; Anthropic realizes
  * only `priority` (fast mode); Google (Gemini API + Vertex) realizes
- * `flex`/`priority`.
+ * `flex`/`priority`; xAI realizes only `priority`.
  */
 export const SERVICE_TIER_OPENAI_VALUES = ["none", "auto", "default", "flex", "scale", "priority"] as const;
 export const SERVICE_TIER_ANTHROPIC_VALUES = ["none", "priority"] as const;
 export const SERVICE_TIER_GOOGLE_VALUES = ["none", "flex", "priority"] as const;
+export const SERVICE_TIER_XAI_VALUES = ["none", "priority"] as const;
 
 export type ServiceTierOpenAISettingValue = (typeof SERVICE_TIER_OPENAI_VALUES)[number];
 export type ServiceTierAnthropicSettingValue = (typeof SERVICE_TIER_ANTHROPIC_VALUES)[number];
 export type ServiceTierGoogleSettingValue = (typeof SERVICE_TIER_GOOGLE_VALUES)[number];
+export type ServiceTierXaiSettingValue = (typeof SERVICE_TIER_XAI_VALUES)[number];
 
 /** Whether a runtime value names a provider family with an independent service-tier knob. */
 export function isServiceTierFamily(value: unknown): value is ServiceTierFamily {
-	return value === "openai" || value === "anthropic" || value === "google";
+	return value === "openai" || value === "anthropic" || value === "google" || value === "xai";
 }
 
 /** Whether a runtime value is a supported service tier for one provider family. */
@@ -34,6 +36,9 @@ export function isServiceTierForFamily(family: string, tier: unknown): tier is S
 			break;
 		case "google":
 			values = SERVICE_TIER_GOOGLE_VALUES;
+			break;
+		case "xai":
+			values = SERVICE_TIER_XAI_VALUES;
 			break;
 		default:
 			return false;
@@ -83,6 +88,15 @@ export const SERVICE_TIER_GOOGLE_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 	{ value: "priority", label: "Priority", description: "Faster, higher reliability (Gemini API + Vertex)" },
 ];
 
+export const SERVICE_TIER_XAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierXaiSettingValue>> = [
+	{ value: "none", label: "None", description: "Omit service_tier (standard processing)" },
+	{
+		value: "priority",
+		label: "Priority",
+		description: "xAI Priority Processing (premium token rate; billed from the response echo)",
+	},
+];
+
 export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierInheritSettingValue>> = [
 	{ value: "inherit", label: "Inherit", description: "Match the main agent's live per-family tiers" },
 	{ value: "none", label: "None", description: "Standard processing" },
@@ -99,8 +113,13 @@ export function serviceTierSettingToTier(value: string): ServiceTier | undefined
 	return value as ServiceTier;
 }
 
-/** Assemble the live per-family tier map from the three `tier.*` setting values. */
-export function buildServiceTierByFamily(openai: string, anthropic: string, google: string): ServiceTierByFamily {
+/** Assemble the live per-family tier map from the four `tier.*` setting values. */
+export function buildServiceTierByFamily(
+	openai: string,
+	anthropic: string,
+	google: string,
+	xai: string,
+): ServiceTierByFamily {
 	const out: ServiceTierByFamily = {};
 	const o = serviceTierSettingToTier(openai);
 	if (o) out.openai = o;
@@ -108,21 +127,24 @@ export function buildServiceTierByFamily(openai: string, anthropic: string, goog
 	if (a) out.anthropic = a;
 	const g = serviceTierSettingToTier(google);
 	if (g) out.google = g;
+	const x = serviceTierSettingToTier(xai);
+	if (x) out.xai = x;
 	return out;
 }
 
 /**
  * Broadcast a single chosen tier across families, clamped to what each family
  * realizes: OpenAI takes any tier, Anthropic only `priority`, Google only
- * `flex`/`priority`. Used by the subagent/advisor single-value settings and the
- * `omp bench --service-tier` flag, which apply one tier to whatever family the
- * target model belongs to.
+ * `flex`/`priority`, xAI only `priority`. Used by the subagent/advisor
+ * single-value settings and the `omp bench --service-tier` flag, which apply
+ * one tier to whatever family the target model belongs to.
  */
 export function serviceTierForAllFamilies(tier: ServiceTier | undefined): ServiceTierByFamily {
 	if (!tier) return {};
 	const out: ServiceTierByFamily = { openai: tier };
 	if (tier === "priority") out.anthropic = "priority";
 	if (tier === "flex" || tier === "priority") out.google = tier;
+	if (tier === "priority") out.xai = "priority";
 	return out;
 }
 

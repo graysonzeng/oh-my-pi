@@ -33,7 +33,8 @@ import type {
 	WriteResult,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isOpenAIModelId } from "@oh-my-pi/pi-catalog/identity/family";
+import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
+import { isGrokModelId, isOpenAIModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
 import type { Type } from "arktype";
 import type { ZodType, z } from "zod/v4";
@@ -142,7 +143,7 @@ export type CacheRetention = "none" | "short" | "long";
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
 
 /** Provider families that expose an independent service-tier knob. */
-export type ServiceTierFamily = "openai" | "anthropic" | "google";
+export type ServiceTierFamily = "openai" | "anthropic" | "google" | "xai";
 
 /**
  * Per-family service-tier selection. A request consults only the entry for the
@@ -152,7 +153,7 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
  */
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
-type ServiceTierModel = Pick<Model, "provider" | "api" | "id">;
+type ServiceTierModel = Pick<Model, "provider" | "api" | "id"> & { baseUrl?: string };
 
 function isOpenAIServiceTierApi(api: Api | undefined): boolean {
 	return api === "openai-completions" || api === "openai-responses" || api === "openai-codex-responses";
@@ -172,16 +173,34 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 	);
 }
 
+function isGrokPriorityEligibleId(id: string): boolean {
+	if (!isGrokModelId(id)) return false;
+	// Align with catalog XAI_NON_CHAT_PREFIXES: grok-imagine- / grok-stt- / grok-voice-
+	return !/(^|[/.])grok[-.](imagine|stt|voice)\b/i.test(id);
+}
+
+function isXaiServiceTierModel(model: ServiceTierModel): boolean {
+	if (excludesInferredOpenAIServiceTier(model.provider)) return false;
+	if (!isOpenAIServiceTierApi(model.api)) return false;
+	if (!isGrokPriorityEligibleId(model.id)) return false;
+	if (model.provider === "xai" || model.provider === "xai-oauth") return true;
+	if (model.provider === "gateway") return true;
+	if (model.baseUrl && hostMatchesUrl(model.baseUrl, "xai")) return true;
+	return false;
+}
+
 /**
  * Classify a model into the service-tier family whose knob governs it, or
  * `undefined` when the model exposes no serving-priority control.
  *
  * OpenRouter models are classified by id namespace (`anthropic/`, `google/`,
- * `openai/`); Claude on Bedrock/Vertex (api `anthropic-messages`) is the
+ * `openai/`, `x-ai/` Grok text ids); Claude on Bedrock/Vertex (api `anthropic-messages`) is the
  * anthropic family even though its provider is `amazon-bedrock`/`google-vertex`.
  * Custom OpenAI-compatible relays that serve OpenAI model ids are OpenAI family
  * too unless the provider owns a separate tier control (Fireworks) or rejects
- * OpenAI's service-tier field (GitHub Copilot).
+ * OpenAI's service-tier field (GitHub Copilot). xAI-capable Grok text models
+ * (bundled `xai`/`xai-oauth`, gateway Grok on OpenAI-compat APIs, and
+ * `api.x.ai` relays) are the `xai` family.
  */
 export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | undefined {
 	const provider = model.provider;
@@ -190,11 +209,13 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
 		if (id.startsWith("anthropic/")) return "anthropic";
 		if (id.startsWith("google/")) return "google";
 		if (id.startsWith("openai/")) return "openai";
+		if (id.startsWith("x-ai/") && isGrokPriorityEligibleId(model.id)) return "xai";
 		return undefined;
 	}
 	if (provider === "openai" || provider === "openai-codex") return "openai";
 	if (model.api === "anthropic-messages") return "anthropic";
 	if (provider === "google" || provider === "google-vertex") return "google";
+	if (isXaiServiceTierModel(model)) return "xai";
 	if (isOpenAIServiceTierModel(model)) return "openai";
 	return undefined;
 }
@@ -205,7 +226,7 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
  */
 export function resolveModelServiceTier(
 	tiers: ServiceTierByFamily | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: Pick<Model, "provider" | "api" | "id"> & { baseUrl?: string },
 ): ServiceTier | undefined {
 	if (!tiers) return undefined;
 	const family = serviceTierFamily(model);
@@ -224,7 +245,13 @@ export function shouldSendServiceTier(
 	target: Provider | ServiceTierModel | undefined,
 ): boolean {
 	if (!serviceTier) return false;
+	if (typeof target !== "string" && target && serviceTierFamily(target) === "xai") {
+		return serviceTier === "priority";
+	}
 	const provider = typeof target === "string" ? target : target?.provider;
+	if (provider === "xai" || provider === "xai-oauth") {
+		return serviceTier === "priority";
+	}
 	if (provider === "openai" || provider === "openai-codex" || provider === "openrouter") {
 		return serviceTier === "flex" || serviceTier === "scale" || serviceTier === "priority";
 	}
@@ -250,7 +277,7 @@ export function shouldSendServiceTier(
  */
 export function realizesPriorityServiceTier(
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: Pick<Model, "provider" | "api" | "id"> & { baseUrl?: string },
 ): boolean {
 	if (serviceTier !== "priority") return false;
 	if (model.provider === "anthropic") return true;
@@ -276,7 +303,7 @@ export function realizesPriorityServiceTier(
  */
 export function getPriorityPremiumRequests(
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: Pick<Model, "provider" | "api" | "id"> & { baseUrl?: string },
 ): number {
 	if (!realizesPriorityServiceTier(serviceTier, model)) return 0;
 	const provider = model.provider;
@@ -300,7 +327,7 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 	if (typeof value === "object") {
 		const src = value as Record<string, unknown>;
 		const out: ServiceTierByFamily = {};
-		for (const family of ["openai", "anthropic", "google"] as const) {
+		for (const family of ["openai", "anthropic", "google", "xai"] as const) {
 			const tier = src[family];
 			if (tier === "auto" || tier === "default" || tier === "flex" || tier === "scale" || tier === "priority") {
 				out[family] = tier;

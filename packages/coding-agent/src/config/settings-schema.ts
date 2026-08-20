@@ -47,6 +47,8 @@ import {
 	SERVICE_TIER_INHERIT_SETTING_VALUES,
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
+	SERVICE_TIER_XAI_OPTIONS,
+	SERVICE_TIER_XAI_VALUES,
 } from "./service-tier";
 
 /** Unified settings schema - single source of truth for all settings.
@@ -1445,6 +1447,20 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"Processing tier for Gemini (Google AI Studio + Vertex) requests, and Google-family models routed via OpenRouter (none = omit). Sent as the top-level `serviceTier` field.",
 			options: SERVICE_TIER_GOOGLE_OPTIONS,
+		},
+	},
+
+	"tier.xai": {
+		type: "enum",
+		values: SERVICE_TIER_XAI_VALUES,
+		default: "none",
+		ui: {
+			tab: "model",
+			group: "Sampling",
+			label: "Service Tier — xAI",
+			description:
+				'Processing tier for Grok on xAI-capable hosts (`xai`, `xai-oauth`, gateway Grok, and `api.x.ai` OpenAI-compat relays). `priority` sends `service_tier: "priority"` (xAI Priority Processing). Ignored on OpenRouter for `fastModeActive` until forwarding is verified; omitted on other Grok proxies.',
+			options: SERVICE_TIER_XAI_OPTIONS,
 		},
 	},
 

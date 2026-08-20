@@ -8,11 +8,18 @@ import {
 	serviceTierFamily,
 	shouldSendServiceTier,
 } from "@oh-my-pi/pi-ai/types";
+import { applyOpenAIServiceTier } from "../src/providers/openai-shared";
 
-const m = (provider: string, api: Api, id: string): { provider: string; api: Api; id: string } => ({
+const m = (
+	provider: string,
+	api: Api,
+	id: string,
+	baseUrl?: string,
+): { provider: string; api: Api; id: string; baseUrl?: string } => ({
 	provider,
 	api,
 	id,
+	...(baseUrl ? { baseUrl } : {}),
 });
 
 const openai = m("openai", "openai-responses", "gpt-5");
@@ -34,6 +41,18 @@ const customOpenAIAliases = [
 	m("custom-relay", "openai-responses", "o4-mini"),
 	m("custom-relay", "openai-responses", "codex-mini-latest"),
 ];
+const xai = m("xai", "openai-completions", "grok-4.5");
+const xaiOauth = m("xai-oauth", "openai-responses", "grok-4.5");
+const gatewayGrok = m("gateway", "openai-completions", "grok-4.6");
+const orGrok = m("openrouter", "openrouter", "x-ai/grok-4.5");
+const orGrokCompletions = m("openrouter", "openai-completions", "x-ai/grok-4.5");
+const aimlGrok = m("aimlapi", "openai-completions", "x-ai/grok-4-3");
+const grokImagine = m("xai", "openai-completions", "grok-imagine-image");
+const grokStt = m("xai", "openai-completions", "grok-stt-example");
+const grokVoice = m("xai", "openai-completions", "grok-voice-preview");
+const copilotGrok = m("github-copilot", "openai-completions", "grok-4.5");
+const customXaiRelay = m("custom-relay", "openai-completions", "grok-4.5", "https://api.x.ai/v1");
+const customGrokNoXaiHost = m("custom-relay", "openai-completions", "grok-4.5", "https://relay.example/v1");
 
 describe("serviceTierFamily", () => {
 	it("classifies first-party providers by provider/api", () => {
@@ -59,7 +78,22 @@ describe("serviceTierFamily", () => {
 		expect(serviceTierFamily(orOpenAI)).toBe("openai");
 		expect(serviceTierFamily(orGoogle)).toBe("google");
 		expect(serviceTierFamily(orAnthropic)).toBe("anthropic");
+		expect(serviceTierFamily(orGrok)).toBe("xai");
+		expect(serviceTierFamily(orGrokCompletions)).toBe("xai");
 		expect(serviceTierFamily(m("openrouter", "openai-completions", "z-ai/glm-4.7"))).toBeUndefined();
+	});
+
+	it("classifies xAI-capable Grok text models as the xai family", () => {
+		expect(serviceTierFamily(xai)).toBe("xai");
+		expect(serviceTierFamily(xaiOauth)).toBe("xai");
+		expect(serviceTierFamily(gatewayGrok)).toBe("xai");
+		expect(serviceTierFamily(customXaiRelay)).toBe("xai");
+		expect(serviceTierFamily(customGrokNoXaiHost)).toBeUndefined();
+		expect(serviceTierFamily(aimlGrok)).toBeUndefined();
+		expect(serviceTierFamily(grokImagine)).toBeUndefined();
+		expect(serviceTierFamily(grokStt)).toBeUndefined();
+		expect(serviceTierFamily(grokVoice)).toBeUndefined();
+		expect(serviceTierFamily(copilotGrok)).toBeUndefined();
 	});
 });
 
@@ -112,6 +146,24 @@ describe("shouldSendServiceTier", () => {
 		expect(shouldSendServiceTier(undefined, "openai")).toBe(false);
 		expect(shouldSendServiceTier(null, "openai")).toBe(false);
 	});
+
+	it("sends only priority on xAI-capable Grok models", () => {
+		for (const model of [xai, xaiOauth, gatewayGrok, orGrok, orGrokCompletions, customXaiRelay]) {
+			expect(shouldSendServiceTier("priority", model)).toBe(true);
+			expect(shouldSendServiceTier("flex", model)).toBe(false);
+			expect(shouldSendServiceTier("scale", model)).toBe(false);
+			expect(shouldSendServiceTier("default", model)).toBe(false);
+			expect(shouldSendServiceTier("auto", model)).toBe(false);
+		}
+		expect(shouldSendServiceTier("priority", "xai")).toBe(true);
+		expect(shouldSendServiceTier("priority", "xai-oauth")).toBe(true);
+		expect(shouldSendServiceTier("flex", "xai")).toBe(false);
+		expect(shouldSendServiceTier("scale", "xai-oauth")).toBe(false);
+		expect(shouldSendServiceTier("priority", "openrouter")).toBe(true);
+		expect(shouldSendServiceTier("flex", "openrouter")).toBe(true);
+		expect(shouldSendServiceTier("priority", aimlGrok)).toBe(false);
+		expect(shouldSendServiceTier("priority", "gateway")).toBe(false);
+	});
 });
 
 describe("realizesPriorityServiceTier", () => {
@@ -134,6 +186,16 @@ describe("realizesPriorityServiceTier", () => {
 		expect(realizesPriorityServiceTier("priority", orAnthropic)).toBe(false); // OpenRouter Anthropic
 		expect(realizesPriorityServiceTier("flex", openai)).toBe(false);
 		expect(realizesPriorityServiceTier(undefined, openai)).toBe(false);
+		expect(realizesPriorityServiceTier("priority", orGrok)).toBe(false);
+		expect(realizesPriorityServiceTier("priority", orGrokCompletions)).toBe(false);
+		expect(realizesPriorityServiceTier("priority", aimlGrok)).toBe(false);
+	});
+
+	it("realizes priority on first-party and gateway Grok OpenAI-compat paths", () => {
+		expect(realizesPriorityServiceTier("priority", xai)).toBe(true);
+		expect(realizesPriorityServiceTier("priority", xaiOauth)).toBe(true);
+		expect(realizesPriorityServiceTier("priority", gatewayGrok)).toBe(true);
+		expect(realizesPriorityServiceTier("priority", customXaiRelay)).toBe(true);
 	});
 });
 
@@ -153,6 +215,9 @@ describe("getPriorityPremiumRequests", () => {
 		expect(getPriorityPremiumRequests("priority", fireworksOpenAI)).toBe(0); // dedicated provider tier
 		expect(getPriorityPremiumRequests("flex", openai)).toBe(0);
 		expect(getPriorityPremiumRequests(undefined, openai)).toBe(0);
+		expect(getPriorityPremiumRequests("priority", xai)).toBe(0);
+		expect(getPriorityPremiumRequests("priority", xaiOauth)).toBe(0);
+		expect(getPriorityPremiumRequests("priority", orGrok)).toBe(0);
 	});
 });
 
@@ -176,5 +241,22 @@ describe("coerceServiceTierByFamily", () => {
 			google: "flex",
 		});
 		expect(coerceServiceTierByFamily({ openai: "bogus" })).toBeUndefined();
+		expect(coerceServiceTierByFamily({ xai: "priority" })).toEqual({ xai: "priority" });
+	});
+});
+
+describe("applyOpenAIServiceTier", () => {
+	it("writes priority for xAI-capable Grok and omits the field when off", () => {
+		const on: { service_tier?: "flex" | "scale" | "priority" } = {};
+		applyOpenAIServiceTier(on, "priority", xai);
+		expect(on.service_tier).toBe("priority");
+
+		const off: { service_tier?: "flex" | "scale" | "priority" } = {};
+		applyOpenAIServiceTier(off, undefined, xai);
+		expect(off.service_tier).toBeUndefined();
+
+		const flex: { service_tier?: "flex" | "scale" | "priority" } = {};
+		applyOpenAIServiceTier(flex, "flex", xai);
+		expect(flex.service_tier).toBeUndefined();
 	});
 });

@@ -147,4 +147,139 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.toggleFastMode()).toBe(false);
 		expect(session.serviceTierByFamily.anthropic).toBeUndefined();
 	});
+
+	it("enables priority on the xai family for bundled Grok", async () => {
+		const session = await createSessionForModel(
+			buildModel({
+				id: "grok-4.5",
+				name: "Grok 4.5",
+				api: "openai-completions",
+				provider: "xai",
+				baseUrl: "https://api.x.ai/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 64_000,
+			}),
+		);
+		expect(session.setFastMode(true)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({ xai: "priority" });
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.isFastModeActive()).toBe(true);
+	});
+
+	it("enables and realizes priority for gateway Grok on OpenAI-compat APIs", async () => {
+		const session = await createSessionForModel(
+			buildModel({
+				id: "grok-4.6",
+				name: "Grok 4.6",
+				api: "openai-completions",
+				provider: "gateway",
+				baseUrl: "https://gateway.example/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 64_000,
+			}),
+		);
+		expect(session.setFastMode(true)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({ xai: "priority" });
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.isFastModeActive()).toBe(true);
+	});
+
+	it("enables OpenRouter Grok without marking fast mode active", async () => {
+		const session = await createSessionForModel(
+			buildModel({
+				id: "x-ai/grok-4.5",
+				name: "Grok 4.5",
+				api: "openrouter",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 64_000,
+			}),
+		);
+		expect(session.setFastMode(true)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({ xai: "priority" });
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.isFastModeActive()).toBe(false);
+	});
+
+	it("rejects Fast mode on unverified Grok proxies", async () => {
+		const session = await createSessionForModel(
+			buildModel({
+				id: "x-ai/grok-4-3",
+				name: "Grok",
+				api: "openai-completions",
+				provider: "aimlapi",
+				baseUrl: "https://api.aimlapi.com/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 64_000,
+			}),
+		);
+		expect(session.setFastMode(true)).toBe(false);
+	});
+
+	it("rejects Fast mode on grok-imagine and grok-stt SKUs", async () => {
+		const imagine = await createSessionForModel(
+			buildModel({
+				id: "grok-imagine-image",
+				name: "Grok Imagine",
+				api: "openai-completions",
+				provider: "xai",
+				baseUrl: "https://api.x.ai/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 64_000,
+			}),
+		);
+		expect(imagine.setFastMode(true)).toBe(false);
+	});
+
+	it("rejects Fast mode on grok-stt SKUs", async () => {
+		const stt = await createSessionForModel(
+			buildModel({
+				id: "grok-stt-example",
+				name: "Grok STT",
+				api: "openai-completions",
+				provider: "xai",
+				baseUrl: "https://api.x.ai/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 64_000,
+			}),
+		);
+		expect(stt.setFastMode(true)).toBe(false);
+	});
+
+	it("rejects Fast mode on GitHub Copilot Grok", async () => {
+		const session = await createSessionForModel(
+			buildModel({
+				id: "grok-4.5",
+				name: "Grok",
+				api: "openai-completions",
+				provider: "github-copilot",
+				baseUrl: "https://api.githubcopilot.com",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 64_000,
+			}),
+		);
+		expect(session.setFastMode(true)).toBe(false);
+	});
 });

@@ -326,7 +326,7 @@ export function resolveOpenAIRequestSetup(
 export function applyOpenAIServiceTier(
 	params: { service_tier?: ServiceTier | null | undefined },
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: Pick<Model, "provider" | "api" | "id"> & { baseUrl?: string },
 ): void {
 	if (!shouldSendServiceTier(serviceTier, model)) return;
 	if (serviceTier === "flex" || serviceTier === "scale" || serviceTier === "priority") {

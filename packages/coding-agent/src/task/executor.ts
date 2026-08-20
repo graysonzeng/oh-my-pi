@@ -867,12 +867,14 @@ export function createSubagentSettings(
 					baseSettings.get("tier.openai"),
 					baseSettings.get("tier.anthropic"),
 					baseSettings.get("tier.google"),
+					baseSettings.get("tier.xai"),
 				)
 			: (inheritedServiceTier ?? {});
 	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
 	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
 	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
 	snapshot["tier.google"] = subagentTiers.google ?? "none";
+	snapshot["tier.xai"] = subagentTiers.xai ?? "none";
 	return Settings.isolated({
 		...snapshot,
 		// Async jobs and bash auto-backgrounding are inherited from the parent:
