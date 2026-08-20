@@ -26,6 +26,7 @@ describe("generic proxy metadata references", () => {
 		["glm-5.2", "zai", 1_000_000, 131_072],
 		["grok-4.20-0309-reasoning", "xai", 1_000_000, 30_000],
 		["grok-4.5", "xai", 500_000, 500_000],
+		["grok-4.6", "xai", 500_000, 500_000],
 		["deepseek-v4-pro", "deepseek", 1_000_000, 384_000],
 		["kimi-k3", "moonshot", 1_048_576, 131_072],
 		["minimax-m3", "minimax", 1_000_000, 128_000],

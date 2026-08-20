@@ -290,6 +290,33 @@ describe("ThinkingLoopDetector", () => {
 		expect(detail).toContain("back-to-back");
 	});
 
+	test("trips on a 74-character CJK planning sentence repeated four times", () => {
+		const unit =
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积、找本机 Xcode，并核对 CLI 能否在无 widget 时单独构建。";
+		expect(unit.length).toBe(74);
+		expect(feed(unit.repeat(4))).toContain("back-to-back");
+	});
+
+	test("does not empty a mixed CJK planning sentence before the verbatim trip", () => {
+		const unit =
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积、找本机 Xcode，并核对 CLI 能否在无 widget 时单独构建。";
+		expect(feed(unit)).toBeNull();
+		expect(feed(unit.repeat(3))).toBeNull();
+	});
+
+	test("keeps Han tokens so drifted CJK paragraphs cluster as near-duplicates", () => {
+		const variants = [
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积并核对本机工具链是否齐全。",
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积并核对本机工具链是否完整。",
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积并核对本机工具链是否可用。",
+		];
+		const paragraphs: string[] = [];
+		for (let i = 0; i < 8; i++) {
+			paragraphs.push(`**核对工具链 ${i}**\n\n${variants[i % variants.length]}`);
+		}
+		expect(feed(paragraphs.join("\n\n\n"))).toContain("near-identical segments");
+	});
+
 	test("does not trip on genuinely distinct reasoning paragraphs", () => {
 		const detector = new ThinkingLoopDetector();
 		let detail: string | null = null;
@@ -457,6 +484,54 @@ describe("gemini thinking-loop guard (stream wrapper)", () => {
 			clearCustomApis();
 		}
 	});
+
+	test("aborts a grok CJK planning-sentence thinking loop", async () => {
+		registerMockApi();
+		try {
+			const unit =
+				"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积、找本机 Xcode，并核对 CLI 能否在无 widget 时单独构建。";
+			const mock = createMockModel({ provider: "gateway", id: "grok-4.6" });
+			mock.push({ content: [{ type: "thinking", thinking: unit.repeat(4) }] });
+
+			const result = await stream(mock.model, context()).result();
+
+			expect(result.stopReason).toBe("error");
+			expect(result.content).toEqual([]);
+			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+			expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
+			expect(isRetryableError(new Error(result.errorMessage))).toBe(true);
+		} finally {
+			clearCustomApis();
+		}
+	});
+
+	test("aborts a grok CJK planning-sentence loop on assistant text", async () => {
+		const unit =
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积、找本机 Xcode，并核对 CLI 能否在无 widget 时单独构建。";
+		const model = {
+			api: "openai-completions",
+			provider: "gateway",
+			id: "grok-4.6",
+		} as unknown as Model<Api>;
+		const partial = { role: "assistant", content: [], stopReason: "stop" } as unknown as AssistantMessage;
+
+		const guarded = withGeminiThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			const events: AssistantMessageEvent[] = [
+				{ type: "start", partial },
+				{ type: "text_start", contentIndex: 0, partial },
+				{ type: "text_delta", contentIndex: 0, delta: unit.repeat(4), partial },
+				{ type: "done", reason: "stop", message: partial },
+			];
+			for (const event of events) inner.push(event);
+			return inner;
+		});
+
+		const result = await guarded.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+		expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
+	});
 });
 
 describe("withGeminiThinkingLoopGuard (Vertex transport)", () => {
@@ -486,20 +561,21 @@ describe("withGeminiThinkingLoopGuard (Vertex transport)", () => {
 	});
 });
 describe("isLoopGuardedModel", () => {
-	test("guards Gemini and DeepSeek models by default, respects overrides", () => {
+	test("guards Gemini, DeepSeek, and Grok models by default, respects overrides", () => {
 		const gemini = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
 		const deepseek = createMockModel({ provider: "deepseek", id: "deepseek-reasoner" }).model;
+		const grok = createMockModel({ provider: "gateway", id: "grok-4.6" }).model;
 		const other = createMockModel({ provider: "openai", id: "gpt-4o" }).model;
 
 		expect(isLoopGuardedModel(gemini)).toBe(true);
 		expect(isLoopGuardedModel(deepseek)).toBe(true);
+		expect(isLoopGuardedModel(grok)).toBe(true);
 		expect(isLoopGuardedModel(other)).toBe(false);
 
-		// enabled: false disables even for target models
 		expect(isLoopGuardedModel(gemini, { loopGuard: { enabled: false } })).toBe(false);
 		expect(isLoopGuardedModel(deepseek, { loopGuard: { enabled: false } })).toBe(false);
+		expect(isLoopGuardedModel(grok, { loopGuard: { enabled: false } })).toBe(false);
 
-		// force enabled for other models — but disabled overall unless it is Gemini/DeepSeek
 		expect(isLoopGuardedModel(other, { loopGuard: { enabled: true } })).toBe(false);
 	});
 });

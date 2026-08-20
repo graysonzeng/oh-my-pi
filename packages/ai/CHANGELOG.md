@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Extended the thinking-loop guard to Grok model ids (`grok-*` / `x-ai/grok-*`), including `gateway/grok-4.6`, and raised the verbatim detector so a 74-character CJK planning sentence repeated four times aborts instead of filling the 64k output clamp. Han characters are kept as tokens only in segments that contain Han, so English stall calibration is unchanged.
 - Added an explicit standard `/responses` endpoint mode for Codex Responses transports so custom gateways can use WebSockets and fall back to HTTP/SSE on the same URL.
 - Sunk the detached single-flight AWS credential resolution promise: its late rejection (hung `credential_process`, SSO, or IMDS timeout) after every caller aborted was an unhandled rejection that corrupted the host process and made later test files fail; it is now delivered to racing callers via `raceWithSignal` and otherwise swallowed.
 - Fixed Moonshot MFJS tool schemas that combine root object constraints with `anyOf`/`oneOf` by distributing compatible constraints into each object branch.

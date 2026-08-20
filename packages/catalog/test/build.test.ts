@@ -265,6 +265,59 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 	});
 });
 
+describe("openai-completions Grok reasoning-effort allowlist", () => {
+	it("keeps the effort dial for grok-4.6 on the xai host", () => {
+		const compat = buildOpenAICompat(
+			completionsSpec({
+				id: "grok-4.6",
+				provider: "xai",
+				baseUrl: "https://api.x.ai/v1",
+				reasoning: true,
+			}),
+		);
+		expect(compat.supportsReasoningEffort).toBe(true);
+		expect(compat.omitReasoningEffort).toBe(false);
+	});
+
+	it("omits the effort dial for grok-code-fast-1 on the xai host", () => {
+		const compat = buildOpenAICompat(
+			completionsSpec({
+				id: "grok-code-fast-1",
+				provider: "xai",
+				baseUrl: "https://api.x.ai/v1",
+				reasoning: true,
+			}),
+		);
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.omitReasoningEffort).toBe(true);
+	});
+
+	it("omits the effort dial for grok-code-fast-1 on a non-xai gateway host", () => {
+		const compat = buildOpenAICompat(
+			completionsSpec({
+				id: "grok-code-fast-1",
+				provider: "gateway",
+				baseUrl: "https://gateway.example/v1",
+				reasoning: true,
+			}),
+		);
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.omitReasoningEffort).toBe(true);
+	});
+
+	it("does not disable effort for a non-Grok completions model", () => {
+		const compat = buildOpenAICompat(
+			completionsSpec({
+				id: "gpt-4o",
+				provider: "openai",
+				baseUrl: "https://api.openai.com/v1",
+			}),
+		);
+		expect(compat.supportsReasoningEffort).toBe(true);
+		expect(compat.omitReasoningEffort).toBe(false);
+	});
+});
+
 describe("openai-completions wire-quirk compat detection", () => {
 	it("derives wireModelIdMode from provider/host", () => {
 		expect(buildOpenAICompat(completionsSpec({ provider: "firepass" })).wireModelIdMode).toBe("firepass");

@@ -92502,6 +92502,35 @@
 				]
 			}
 		},
+		"grok-4.6": {
+			"id": "grok-4.6",
+			"name": "Grok 4.6",
+			"api": "openai-completions",
+			"provider": "xai",
+			"baseUrl": "https://api.x.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 2,
+				"output": 6,
+				"cacheRead": 0.5,
+				"cacheWrite": 0
+			},
+			"contextWindow": 500000,
+			"maxTokens": 500000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		},
 		"grok-beta": {
 			"id": "grok-beta",
 			"name": "Grok Beta",
@@ -92756,6 +92785,51 @@
 		"grok-4.5": {
 			"id": "grok-4.5",
 			"name": "Grok 4.5",
+			"api": "openai-responses",
+			"provider": "xai-oauth",
+			"baseUrl": "https://api.x.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 500000,
+			"maxTokens": 500000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"minimal": "low"
+				}
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
+			}
+		},
+		"grok-4.6": {
+			"id": "grok-4.6",
+			"name": "Grok 4.6",
 			"api": "openai-responses",
 			"provider": "xai-oauth",
 			"baseUrl": "https://api.x.ai/v1",

@@ -1,12 +1,13 @@
 /**
- * Gemini thinking-loop guard.
+ * Thinking-loop guard (Gemini, DeepSeek, Grok).
  *
  * Gemini models (notably `gemini-3.5-flash` via OpenRouter) occasionally fall
  * into a degenerate reasoning loop: they re-emit the same paragraph intent over
  * and over with cosmetic wording drift ("Confirming Safety", "Verifying
  * Completion", …), burning the entire output budget without ever calling a tool
  * or answering. The runaway is *not* byte-identical, so a cheap verbatim
- * tail-repeat check alone misses it.
+ * tail-repeat check alone misses it. Grok 4.6 additionally collapses onto a
+ * long planning sentence (including CJK) and repeats it verbatim.
  *
  * This guard watches the streamed `thinking` deltas and, on a match, terminates
  * the stream with a synthetic `error` {@link AssistantMessage} that carries
@@ -15,8 +16,9 @@
  * the runaway and re-sample instead of committing garbage transcript.
  *
  * Three failure shapes are detected:
- * 1. **Verbatim tail repetition** — a short unit repeated back-to-back (e.g.
- *    "🌊 🌊 🌊 …"). Caught from a rolling 250-char tail.
+ * 1. **Verbatim tail repetition** — a short-to-medium unit repeated back-to-back
+ *    (e.g. "🌊 🌊 🌊 …" or a 74-character CJK planning sentence). Caught from a
+ *    rolling tail of {@link VERBATIM_TAIL_WINDOW} chars.
  * 2. **Near-duplicate segments** — paragraphs that normalize to the same
  *    word-trigram fingerprint. Caught with a Jaccard window over recent
  *    paragraphs. Thresholds were calibrated on a real loop transcript plus
@@ -29,13 +31,15 @@
  *    anchor-free segments; a segment naming a path/identifier resets the run, so
  *    genuine but vocabulary-repetitive work (per-file templates) is spared.
  *
- * Scope is narrow: guarded Gemini/DeepSeek streams before any tool call. Native
- * thinking is checked first; assistant text can also be checked for providers
- * that surface reasoning as visible prose. On a hit the failed turn is emitted as
- * an empty retryable stream-stall error; result-awaiting callers (`complete`,
- * `completeSimple`) re-sample it a few times and then let a stubborn loop cook
- * through one unguarded pass. Disable detection with `PI_NO_THINKING_LOOP_GUARD=1`.
+ * Scope is narrow: guarded Gemini/DeepSeek/Grok streams before any tool call.
+ * Native thinking is checked first; assistant text can also be checked for
+ * providers that surface reasoning as visible prose. On a hit the failed turn is
+ * emitted as an empty retryable stream-stall error; result-awaiting callers
+ * (`complete`, `completeSimple`) re-sample it a few times and then let a stubborn
+ * loop cook through one unguarded pass. Disable detection with
+ * `PI_NO_THINKING_LOOP_GUARD=1`.
  */
+import { isGrokModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Api, AssistantMessage, Model, StreamOptions } from "../types";
@@ -46,12 +50,12 @@ import { AssistantMessageEventStream } from "./event-stream";
  *  classifiers treat it as a transient (retryable) stop without bespoke rules. */
 export const THINKING_LOOP_ERROR_MARKER = "Thinking loop detected";
 
-/** Rolling tail (chars) inspected for verbatim back-to-back repetition. */
-const VERBATIM_TAIL_WINDOW = 250;
+/** Longest unit length probed for a verbatim repeat. */
+const VERBATIM_MAX_UNIT = 96;
 /** Minimum total repeated chars before a verbatim run counts as a loop. */
 const VERBATIM_MIN_REPEATED_CHARS = 180;
-/** Longest unit length probed for a verbatim repeat. */
-const VERBATIM_MAX_UNIT = 60;
+/** Rolling tail (chars) inspected for verbatim back-to-back repetition. */
+const VERBATIM_TAIL_WINDOW = VERBATIM_MAX_UNIT * 4;
 
 /** Char cap for an unterminated segment; forces a flush so a wall-of-text loop
  *  (no blank lines / headings) still segments. */
@@ -118,16 +122,19 @@ export function isGeminiThinkingModel(model: Model<Api>): boolean {
 }
 
 /**
- * True when `model` should be guarded for thinking/response loops (Gemini & DeepSeek).
+ * True when `model` should be guarded for thinking/response loops
+ * (Gemini, DeepSeek, and Grok).
  *
- * OpenAI-compat transports can serve Gemini or DeepSeek under an arbitrary provider/id.
- * Direct Gemini/DeepSeek transports carry a clearly shaped id/provider, so a string match
- * is sufficient.
+ * OpenAI-compat transports can serve Gemini or DeepSeek under an arbitrary
+ * provider/id. Direct Gemini/DeepSeek transports carry a clearly shaped
+ * id/provider, so a string match is sufficient. Grok is matched on model id
+ * (`grok-*` / `x-ai/grok-*`) so `gateway/grok-4.6` is covered even when the
+ * host is not `xai`.
  */
 export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
 	if (options?.loopGuard?.enabled === false) return false;
 	const isDeepseek = /deepseek/i.test(`${model.provider}/${model.id}`);
-	return isGeminiThinkingModel(model) || isDeepseek;
+	return isGeminiThinkingModel(model) || isDeepseek || isGrokModelId(model.id);
 }
 
 /** @deprecated Use isLoopGuardedModel instead. */
@@ -517,11 +524,21 @@ function detectVerbatimRepetition(text: string): [unit: string, count: number] |
 	return null;
 }
 
-/** Lowercase and tokenize prose plus code/path payloads, dropping pure numbers. */
+/** Lowercase and tokenize prose plus code/path payloads, dropping pure numbers.
+ *  Latin-only segments keep the original `[a-z0-9]` peel so English stall
+ *  calibration is unchanged. Segments that contain Han additionally keep each
+ *  Han character as its own token so CJK planning loops still have a fingerprint. */
 function normalizeSegment(segment: string): string {
-	return segment
-		.toLowerCase()
-		.replace(/`([^`]*)`/g, " $1 ")
+	const lowered = segment.toLowerCase().replace(/`([^`]*)`/g, " $1 ");
+	if (/\p{Script=Han}/u.test(lowered)) {
+		const tokens: string[] = [];
+		for (const match of lowered.matchAll(/[a-z0-9]+|\p{Script=Han}/gu)) {
+			const token = match[0];
+			if (/[a-z]/i.test(token) || /\p{Script=Han}/u.test(token)) tokens.push(token);
+		}
+		return tokens.join(" ").trim();
+	}
+	return lowered
 		.replace(/[^a-z0-9]+/g, " ")
 		.split(/\s+/)
 		.filter(token => /[a-z]/.test(token))

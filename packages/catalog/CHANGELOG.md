@@ -4,11 +4,13 @@
 
 ### Added
 
+- Added support for Grok 4.6 model (`xai` / `xai-oauth`).
 - Added a `codexResponsesEndpoint` compatibility setting for custom Codex Responses gateways that expose standard `/responses` instead of `/codex/responses`.
 - Added a memoized provider-scoped bundled reference index for gateway metadata inheritance.
 
 ### Fixed
 
+- Aligned Chat Completions `supportsReasoningEffort` with the Grok effort allowlist by model id: `grok-4.6` emits `reasoning_effort` on any host, while `grok-code-fast-1` / `grok-build` omit it even on non-xai gateways. Non-Grok completions models keep their previous effort flag.
 - Fixed direct Moonshot Kimi K3 compatibility metadata to omit unsupported sampling parameters without changing Kimi Code or third-party K3 routes.
 - Fixed generic proxy metadata inheritance preferring relay models with larger advertised limits over the model owner's public API metadata, which inflated context and output limits for GLM, Grok, DeepSeek, Kimi, and similar same-id models.
 ## [17.2.0] - 2026-07-30
