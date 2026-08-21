@@ -65,6 +65,17 @@ const ALIBABA_CODING_PLAN_STREAM_IDLE_TIMEOUT_MS = 600_000;
 /** Local OpenAI-compatible backends can spend minutes cold-loading a model before the first SSE event. */
 const LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS = 300_000;
 const MINIMAX_PROVIDER_OR_ID_PATTERN = /minimax/i;
+/** Gateway Grok 4.6 sends cumulative reasoning snapshots on Chat Completions. */
+const GATEWAY_GROK_CUMULATIVE_REASONING_PATTERN = /^grok-4\.6(?:$|[-_.])/i;
+
+function reasoningDeltasMayBeCumulative(provider: string, modelId: string): boolean {
+	return (
+		MINIMAX_PROVIDER_OR_ID_PATTERN.test(provider) ||
+		MINIMAX_PROVIDER_OR_ID_PATTERN.test(modelId) ||
+		(provider === "gateway" && GATEWAY_GROK_CUMULATIVE_REASONING_PATTERN.test(modelId))
+	);
+}
+
 const DSML_HEALING_PROVIDERS = new Set([
 	"ollama",
 	"ollama-cloud",
@@ -647,8 +658,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		stripDeepseekSpecialTokens:
 			isDeepseekModelIdOrName(spec.id) && (provider === "nvidia" || provider === "deepseek"),
 		streamMarkupHealingPattern: detectStreamMarkupHealingPattern(provider, spec.id, baseUrl),
-		reasoningDeltasMayBeCumulative:
-			MINIMAX_PROVIDER_OR_ID_PATTERN.test(provider) || MINIMAX_PROVIDER_OR_ID_PATTERN.test(spec.id),
+		reasoningDeltasMayBeCumulative: reasoningDeltasMayBeCumulative(provider, spec.id),
+
 		emptyLengthFinishIsContextError: provider === "ollama",
 		usesOpenAIToolCallIdLimit: provider === "openai",
 		promptCacheSessionHeader: isGrok ? "x-grok-conv-id" : undefined,
@@ -824,8 +835,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		stripDeepseekSpecialTokens:
 			Boolean(id) && isDeepseekModelIdOrName(id) && (spec.provider === "nvidia" || spec.provider === "deepseek"),
 		streamMarkupHealingPattern: id ? detectStreamMarkupHealingPattern(spec.provider, id, baseUrl) : undefined,
-		reasoningDeltasMayBeCumulative:
-			MINIMAX_PROVIDER_OR_ID_PATTERN.test(spec.provider) || (id ? MINIMAX_PROVIDER_OR_ID_PATTERN.test(id) : false),
+		reasoningDeltasMayBeCumulative: reasoningDeltasMayBeCumulative(spec.provider, id),
 		emptyLengthFinishIsContextError: spec.provider === "ollama",
 		usesOpenAIToolCallIdLimit: spec.provider === "openai",
 		promptCacheSessionHeader: isXaiHost ? "x-grok-conv-id" : undefined,
