@@ -7,4 +7,4 @@ Follow these instructions exactly:
 3. Prefer numbered steps for multi-part work
 4. If uncertain, read files before editing
 
-Think step-by-step for non-trivial tasks. Stay within the user request; do not add unrequested features.
+Stay within the user request; do not add unrequested features.

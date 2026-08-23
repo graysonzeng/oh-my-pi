@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed ambiguous marker-less edits to fail closed instead of inferring replacement text, and repeated empty model responses to try configured cross-model fallbacks before stopping.
+- Fixed thinking-only stops whose `thinkingSignature` is an OpenAI reasoning field name (`reasoning_content`, `reasoning`, or `reasoning_text`) being treated as authenticated output and skipping empty-stop retry.
 
 ## [17.1.9] - 2026-08-07
 

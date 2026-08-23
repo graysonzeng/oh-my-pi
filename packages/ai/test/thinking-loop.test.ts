@@ -229,6 +229,36 @@ function perFileTemplates(): string {
 		.join("\n\n");
 }
 
+/** Observed grok-4.6 orca shape: 17× short sentence, non-adjacent, chunked. */
+function orcaObservedShortSentenceChunks(): string[] {
+	const sentence = "Ensure the test passes with the new logic.";
+	const fillers = [
+		"Next I check the remaining compile warnings in isolation.",
+		"The previous assertion already covered the happy path.",
+		"I still need to confirm the error branch separately.",
+		"Nothing in the fixture depends on wall-clock time.",
+		"The helper returns a cloned copy so later mutations stay local.",
+		"Retrying the same request would hide a flaky network race.",
+		"I am not going to rewrite the public schema for this.",
+		"The snapshot table uses unique-key upserts instead of UPDATE.",
+		"Cluster id in the URL must match the live MCP collect.",
+		"Lua module cache should be cleared before the next hit.",
+		"The DTO parser already proved schema 4 coverage.",
+		"Packet sequence errors on the loopback path are noise.",
+		"The incomplete window still scans remaining events.",
+		"Intl MCP slots continue after a logged miss.",
+		"Left-corner note shows incomplete rather than empty.",
+		"Reload after restart is enough; no extra nginx flag.",
+	];
+	const chunks: string[] = [];
+	for (let i = 0; i < 17; i++) {
+		chunks.push(sentence.slice(0, 12));
+		chunks.push(`${sentence.slice(12)}\n\n`);
+		if (i < 16) chunks.push(`${fillers[i]!}\n\n`);
+	}
+	return chunks;
+}
+
 describe("ThinkingLoopDetector", () => {
 	test("trips on a tight near-duplicate paragraph loop via the trigram path", () => {
 		// High word-trigram overlap: the cluster check claims it before the lexical
@@ -335,6 +365,18 @@ describe("ThinkingLoopDetector", () => {
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("🌊 ".repeat(26))).toBeNull();
 	});
+
+	test("does not trip on the observed grok orca 17x non-adjacent short-sentence shape", () => {
+		const detector = new ThinkingLoopDetector();
+		let detail: string | null = null;
+		for (const chunk of orcaObservedShortSentenceChunks()) {
+			if (detail) break;
+			detail = detector.push(chunk);
+		}
+		detail ??= detector.flush();
+		expect(detail).toBeNull();
+	});
+
 });
 
 describe("thinking-loop guard (stream wrapper)", () => {
@@ -745,6 +787,12 @@ describe("isLoopGuardedModel", () => {
 
 		// enabled: true does not opt unrelated models into the guard.
 		expect(isLoopGuardedModel(other, { loopGuard: { enabled: true } })).toBe(false);
+
+		const grok = createMockModel({ provider: "gateway", id: "grok-4.6" }).model;
+		const namespaced = createMockModel({ provider: "openrouter", id: "x-ai/grok-4.6" }).model;
+		expect(isLoopGuardedModel(grok)).toBe(true);
+		expect(isLoopGuardedModel(namespaced)).toBe(true);
+		expect(isLoopGuardedModel(grok, { loopGuard: { enabled: true } })).toBe(true);
 	});
 });
 

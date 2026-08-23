@@ -46,7 +46,7 @@
  * three guarded attempts and then fail closed. Disable detection with
  * `PI_NO_THINKING_LOOP_GUARD=1`.
  */
-import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
+import { isDeepseekModelIdOrName, isGeminiModelId, isGrokModelId } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Api, AssistantMessage, Model, StreamOptions } from "../types";
@@ -115,20 +115,14 @@ const CONCRETE_ANCHOR =
  * heuristics: Gemini, DeepSeek, or Grok. Exact suffix-cycle detection applies to
  * every enabled model independently of this predicate.
  *
-/**
  * Model identity is derived only from its id; provider and compatibility metadata
- * do not opt opaque aliases into semantic detection.
+ * do not opt opaque aliases into semantic detection. Grok ids classify as family
+ * token `xai`, so this predicate uses the identity helpers rather than
+ * `modelFamilyToken === "grok"`.
  */
 export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
 	if (options?.loopGuard?.enabled === false) return false;
-	switch (modelFamilyToken(model.id)) {
-		case "gemini":
-		case "deepseek":
-		case "grok":
-			return true;
-		default:
-			return false;
-	}
+	return isGeminiModelId(model.id) || isDeepseekModelIdOrName(model.id) || isGrokModelId(model.id);
 }
 
 /** @deprecated Use isLoopGuardedModel instead. */

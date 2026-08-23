@@ -509,14 +509,27 @@ function hasText(content: { text?: unknown }): boolean {
 	return typeof content.text === "string" && content.text.trim().length > 0;
 }
 
+// Must match openai-completions `reasoningFields` order. Field names stored in
+// `thinkingSignature` are replay coordinates, not provider-authenticated
+// signatures (Claude #5881). packages/ai/src/providers/openai-completions.ts
+const OPENAI_REASONING_FIELD_NAMES = ["reasoning_content", "reasoning", "reasoning_text"] as const;
+
+/** True when a thinking signature authenticates the block rather than naming
+ *  the OpenAI-compat reasoning wire field used to stream it. */
+export function isAuthenticatedThinkingSignature(signature: string | undefined): boolean {
+	if (typeof signature !== "string" || signature.trim().length === 0) return false;
+	return !(OPENAI_REASONING_FIELD_NAMES as readonly string[]).includes(signature);
+}
+
 /**
  * A block that is real output from the model.
  *
- * Everything the assistant can emit counts except two: unsigned thinking, which
- * is not provider-authenticated and not actionable, and Anthropic's `fallback`
- * marker, which records that the request was routed elsewhere rather than
- * carrying any output. A native image response often arrives with no text and
- * no tool call at all, so recognising only those would call it nothing.
+ * Everything the assistant can emit counts except two: unsigned thinking
+ * (including OpenAI reasoning *field names* stored in `thinkingSignature`),
+ * which is not provider-authenticated and not actionable, and Anthropic's
+ * `fallback` marker, which records that the request was routed elsewhere
+ * rather than carrying any output. A native image response often arrives with
+ * no text and no tool call at all, so recognising only those would call it nothing.
  */
 function isActionableContent(content: AssistantMessage["content"][number] | undefined): boolean {
 	switch (content?.type) {
@@ -528,7 +541,7 @@ function isActionableContent(content: AssistantMessage["content"][number] | unde
 		case "text":
 			return hasText(content);
 		case "thinking":
-			return typeof content.thinkingSignature === "string" && content.thinkingSignature.trim().length > 0;
+			return isAuthenticatedThinkingSignature(content.thinkingSignature);
 		default:
 			return false;
 	}

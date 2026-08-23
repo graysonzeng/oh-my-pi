@@ -6,6 +6,10 @@
 
 - Added structured field, expected-type, and error-category metadata to tool-schema and argument validation failures, including preflight rejection of non-JSON schema values.
 
+### Fixed
+
+- Fixed the thinking-loop semantic guard ignoring Grok ids because `modelFamilyToken` classifies them as `xai` rather than `grok`.
+
 ## [17.1.9] - 2026-08-07
 
 ### Fixed

@@ -113,6 +113,19 @@ function signedThinkingOnlyStop(): MockResponse {
 	};
 }
 
+function fieldNameThinkingOnlyStop(signature: string): MockResponse {
+	const content: ThinkingContent = {
+		type: "thinking",
+		thinking: "I should inspect the next file.",
+		thinkingSignature: signature,
+	};
+	return {
+		content: [content],
+		stopReason: "stop",
+		usage: { output: 1, cacheRead: 100 },
+	};
+}
+
 async function createHarness(
 	responses: MockResponse[],
 	settingsOverrides: SettingsOverrides = {},
@@ -350,6 +363,25 @@ describe("AgentSession empty stop guard", () => {
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 		expect(session.agent.state.messages.at(-1)?.role).toBe("assistant");
 	});
+
+	it.each(["reasoning_content", "reasoning", "reasoning_text"] as const)(
+		"retries a thinking-only stop whose signature is the OpenAI field name %s",
+		async signature => {
+			const { session, mock } = await createHarness([
+				recordCall(signature, `call-record-${signature}`),
+				fieldNameThinkingOnlyStop(signature),
+				{ content: [`finished after ${signature} retry`], stopReason: "stop" },
+			]);
+
+			await session.prompt(`record ${signature}`);
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(3);
+			expect(assistantText(session.agent.state.messages)).toContain(`finished after ${signature} retry`);
+			expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+		},
+	);
+
 
 	it("removes orphaned tool-use stops even when retry cap is hit", async () => {
 		const { session, mock } = await createHarness([
