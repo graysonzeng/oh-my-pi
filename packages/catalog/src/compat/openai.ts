@@ -14,7 +14,6 @@ import {
 	isAnthropicNamespacedModelId,
 	isClaudeModelId,
 	isDeepseekModelIdOrName,
-	isGeminiModelId,
 	isGlm52ReasoningEffortModelId,
 	isGrokModelId,
 	isGrokReasoningEffortCapable,
@@ -26,7 +25,6 @@ import {
 	isOpenAISamplingRestrictedModelId,
 	isQwen38PlusTemplateEffortModelId,
 	isQwenModelId,
-	modelFamilyToken,
 } from "../identity/family";
 import type {
 	ModelSpec,
@@ -520,11 +518,6 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsPenaltyAndStopParams: !(isGrok && Boolean(spec.reasoning)),
 		reasoningEffortMap: {},
 		supportsUsageInStreaming: !isCerebras,
-		// pi-ai's thinking-loop guard covers Gemini, DeepSeek, and Grok; default
-		// the Gemini flag from the family classifier so OpenAI-compat proxies
-		// serving Gemini are covered. An opaque alias can opt in via
-		// `compat.enableGeminiThinkingLoopGuard`.
-		enableGeminiThinkingLoopGuard: modelFamilyToken(spec.id) === "gemini",
 		// Kimi (including via OpenRouter and Fireworks router-form IDs such as
 		// `accounts/fireworks/routers/kimi-*`) calculates TPM rate limits based on
 		// max_tokens, not actual output. The official Kimi K2 model guidance

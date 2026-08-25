@@ -731,7 +731,6 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
 			| "codexResponsesEndpoint"
-			| "enableGeminiThinkingLoopGuard"
 			| "whenThinking"
 		>
 	> & {
@@ -744,7 +743,6 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		/** The model sits behind Vercel AI Gateway. */
 		isVercelGatewayHost: boolean;
 		dropThinkingWhenReasoningEffort: boolean;
-		enableGeminiThinkingLoopGuard: boolean;
 		/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
 		whenThinking?: ResolvedOpenAICompat;
 	};
