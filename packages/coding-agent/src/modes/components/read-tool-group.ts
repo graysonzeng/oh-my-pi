@@ -885,7 +885,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			return theme.fg("error", theme.status.error);
 		}
 		if (status === "skipped") {
-			return theme.fg("muted", theme.status.skipped);
+			return theme.fg("muted", theme.status.info);
 		}
 		if (status === "aborted") {
 			return theme.fg("error", theme.status.aborted);

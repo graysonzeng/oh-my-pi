@@ -1,4 +1,4 @@
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 
 const reportParams = type({ content: "string" });

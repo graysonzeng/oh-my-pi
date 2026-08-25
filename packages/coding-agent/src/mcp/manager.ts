@@ -687,8 +687,9 @@ export class MCPManager {
 					if (!cached) return;
 					const source = this.#sources.get(name);
 					const reconnect = () => this.reconnectServer(name);
-					allTools.push(
-						...DeferredMCPTool.fromTools(name, cached, () => this.ensureConnected(name), source, reconnect),
+					this.#replaceServerTools(
+						name,
+						DeferredMCPTool.fromTools(name, cached, () => this.ensureConnected(name), source, reconnect),
 					);
 				}),
 			);

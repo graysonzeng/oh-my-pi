@@ -14,6 +14,7 @@ import {
 	isAnthropicNamespacedModelId,
 	isClaudeModelId,
 	isDeepseekModelIdOrName,
+	isGeminiModelId,
 	isGlm52ReasoningEffortModelId,
 	isGrokModelId,
 	isGrokReasoningEffortCapable,
@@ -25,6 +26,7 @@ import {
 	isOpenAISamplingRestrictedModelId,
 	isQwen38PlusTemplateEffortModelId,
 	isQwenModelId,
+	modelFamilyToken,
 } from "../identity/family";
 import type {
 	ModelSpec,

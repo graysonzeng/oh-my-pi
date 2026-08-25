@@ -105,6 +105,7 @@ import {
 	lineNumbersFromSpans,
 	markMarkdownContentType,
 	prependHashlineHeader,
+	prependLineNumbers,
 	prependSuffixResolutionNotice,
 	RANGE_LEADING_CONTEXT_LINES,
 	RANGE_TRAILING_CONTEXT_LINES,
@@ -976,199 +977,6 @@ readonly approval = (args: unknown): ToolTier => {
 		}
 	}
 
-	#buildInMemoryTextResult(
-		text: string,
-		offset: number | undefined,
-		limit: number | undefined,
-		options: {
-			details?: ReadToolDetails;
-			sourcePath?: string;
-			sourceUrl?: string;
-			sourceInternal?: string;
-			entityLabel: string;
-			ignoreResultLimits?: boolean;
-			raw?: boolean;
-			immutable?: boolean;
-		},
-	): AgentToolResult<ReadToolDetails> {
-		const displayMode = resolveFileDisplayMode(this.session, { raw: options.raw, immutable: options.immutable });
-		const details = options.details ?? {};
-		const allLines = text.split("\n");
-		const totalLines = allLines.length;
-		// User-requested 0-indexed range start. Lines BEFORE this are leading
-		// context (added below if offset is explicit).
-		const requestedStart = offset ? Math.max(0, offset - 1) : 0;
-		const ignoreResultLimits = options.ignoreResultLimits ?? false;
-		const requestedEnd = limit !== undefined ? Math.min(requestedStart + limit, allLines.length) : allLines.length;
-		// Expand only on sides the user actually constrained: leading context
-		// when offset>1, trailing context when a finite limit was set. Raw mode
-		// never expands — without line numbers the padding is indistinguishable
-		// from requested content, so `raw:31-31` must return line 31 and nothing
-		// else (verbatim-extraction contract).
-		const rawDisplay = options.raw === true;
-		const expanded = expandRangeWithContext(
-			requestedStart,
-			requestedEnd,
-			allLines.length,
-			!rawDisplay && offset !== undefined && offset > 1,
-			!rawDisplay && limit !== undefined,
-		);
-		const startLine = expanded.startLine;
-		const endLineExpanded = expanded.endLine;
-		const startLineDisplay = startLine + 1;
-
-		const resultBuilder = toolResult(details);
-		if (options.sourcePath) {
-			resultBuilder.sourcePath(options.sourcePath);
-		}
-		if (options.sourceUrl) {
-			resultBuilder.sourceUrl(options.sourceUrl);
-		}
-		if (options.sourceInternal) {
-			resultBuilder.sourceInternal(options.sourceInternal);
-		}
-
-		if (requestedStart >= allLines.length) {
-			const suggestion =
-				allLines.length === 0
-					? `The ${options.entityLabel} is empty.`
-					: `Use :1 to read from the start, or :${allLines.length} to read the last line.`;
-			return resultBuilder
-				.text(
-					`Line ${requestedStart + 1} is beyond end of ${options.entityLabel} (${allLines.length} lines total). ${suggestion}`,
-				)
-				.done();
-		}
-
-		const endLine = endLineExpanded;
-		const selectedContent = allLines.slice(startLine, endLine).join("\n");
-		const userLimitedLines = limit !== undefined ? endLine - startLine : undefined;
-		const truncation = ignoreResultLimits ? noTruncResult(selectedContent) : truncateHead(selectedContent);
-
-		const shouldAddHashLines = displayMode.hashLines;
-		const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
-		const hashContext =
-			shouldAddHashLines && options.sourcePath
-				? recordFullHashlineContext(
-						this.session,
-						options.sourcePath,
-						formatPathRelativeToCwd(options.sourcePath, this.session.cwd),
-						text,
-					)
-				: undefined;
-		let emittedHashlineHeader = false;
-		let seenLines: number[] | undefined;
-		let rawSeenLines: number[] | undefined;
-		const formatText = (content: string, startNum: number): string => {
-			const lineCount = countTextLines(content);
-			details.displayContent = {
-				text: content,
-				startLine: startNum,
-				lineNumbers: Array.from({ length: lineCount }, (_, i) => startNum + i),
-			};
-			if (shouldAddHashLines) seenLines = contiguousLineNumbers(startNum, lineCount);
-			const formatted = formatTextWithMode(content, startNum, shouldAddHashLines, shouldAddLineNumbers);
-			if (!hashContext || emittedHashlineHeader) return formatted;
-			emittedHashlineHeader = true;
-			return prependHashlineHeader(formatted, hashContext);
-		};
-		const formatLineEntries = (entries: readonly LineEntry[], startNum: number): string => {
-			const firstLine = entries.find(entry => entry.kind === "line");
-			details.displayContent = {
-				text: lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS),
-				startLine: firstLine?.kind === "line" ? firstLine.lineNumber : startNum,
-				lineNumbers: entries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
-			};
-			if (shouldAddHashLines) seenLines = lineNumbersFromEntries(entries);
-			const formatted = formatLineEntriesWithMode(entries, shouldAddHashLines, shouldAddLineNumbers);
-			if (!hashContext || emittedHashlineHeader) return formatted;
-			emittedHashlineHeader = true;
-			return prependHashlineHeader(formatted, hashContext);
-		};
-		const buildLineEntries = (endLineDisplay: number): LineEntry[] =>
-			buildLineEntriesWithBlockContext(allLines, [{ startLine: startLineDisplay, endLine: endLineDisplay }], {
-				path: options.sourcePath,
-			});
-
-		let outputText: string;
-		let truncationInfo:
-			| { result: TruncationResult; options: { direction: "head"; startLine?: number; totalFileLines?: number } }
-			| undefined;
-
-		if (truncation.firstLineExceedsLimit) {
-			const firstLine = allLines[startLine] ?? "";
-			const firstLineBytes = Buffer.byteLength(firstLine, "utf-8");
-			const snippet = truncateHeadBytes(firstLine, DEFAULT_MAX_BYTES);
-
-			if (shouldAddHashLines) {
-				outputText = `[Line ${startLineDisplay} is ${formatBytes(
-					firstLineBytes,
-				)}, exceeds ${formatBytes(DEFAULT_MAX_BYTES)} limit. Hashline output requires full lines; cannot emit an editable numbered preview for a truncated line.]`;
-			} else {
-				outputText = formatText(snippet.text, startLineDisplay);
-			}
-
-			if (snippet.text.length === 0) {
-				outputText = `[Line ${startLineDisplay} is ${formatBytes(
-					firstLineBytes,
-				)}, exceeds ${formatBytes(DEFAULT_MAX_BYTES)} limit. Unable to display a valid UTF-8 snippet.]`;
-			}
-
-			details.truncation = truncation;
-			truncationInfo = {
-				result: truncation,
-				options: { direction: "head", startLine: startLineDisplay, totalFileLines: totalLines },
-			};
-		} else if (truncation.truncated) {
-			const outputLines = truncation.outputLines ?? countTextLines(truncation.content);
-			const endLineDisplay = startLineDisplay + Math.max(0, outputLines - 1);
-			if (options.raw === true) {
-				rawSeenLines = contiguousLineNumbers(startLineDisplay, outputLines);
-				outputText = formatText(truncation.content, startLineDisplay);
-			} else {
-				outputText = formatLineEntries(buildLineEntries(endLineDisplay), startLineDisplay);
-			}
-			details.truncation = truncation;
-			truncationInfo = {
-				result: truncation,
-				options: { direction: "head", startLine: startLineDisplay, totalFileLines: totalLines },
-			};
-		} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
-			const remaining = allLines.length - (startLine + userLimitedLines);
-			const nextOffset = startLine + userLimitedLines + 1;
-
-			if (options.raw === true) {
-				rawSeenLines = contiguousLineNumbers(startLineDisplay, userLimitedLines);
-				outputText = formatText(selectedContent, startLineDisplay);
-			} else {
-				outputText = formatLineEntries(buildLineEntries(endLine), startLineDisplay);
-			}
-			outputText += `\n\n[${remaining} more lines in ${options.entityLabel}. Use :${nextOffset} to continue]`;
-		} else {
-			if (options.raw === true) {
-				rawSeenLines = contiguousLineNumbers(startLineDisplay, endLine - startLine);
-				outputText = formatText(truncation.content, startLineDisplay);
-			} else {
-				outputText = formatLineEntries(buildLineEntries(endLine), startLineDisplay);
-			}
-		}
-
-		if (hashContext?.tag && options.sourcePath && seenLines) {
-			recordSeenLines(this.session, options.sourcePath, hashContext.tag, seenLines);
-		}
-		if (options.raw === true && options.sourcePath && options.immutable !== true && rawSeenLines) {
-			recordInMemorySeenLines(this.session, options.sourcePath, text, rawSeenLines);
-		}
-		resultBuilder.text(
-			applySessionToolOutput(this.session, "read", outputText, {
-				path: options.sourcePath,
-			}),
-		);
-		if (truncationInfo) {
-			resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
-		}
-		return resultBuilder.done();
-	}
 	/**
 	 * Render multiple non-contiguous ranges of a local file. ACP bridge takes
 	 * priority when present (editor buffer is source of truth); otherwise ranges
@@ -1409,7 +1217,7 @@ readonly approval = (args: unknown): ToolTier => {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				const built = this.#buildInMemoryMultiRangeResult(entry.output, urlRanges, {
+				const built = buildInMemoryMultiRangeResult(this.session, entry.output, urlRanges, {
 					details: { ...entry.details },
 					sourceUrl: entry.details.finalUrl,
 					entityLabel: "URL output",
@@ -1431,7 +1239,7 @@ readonly approval = (args: unknown): ToolTier => {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				const built = this.#buildInMemoryTextResult(entry.output, urlOffset, urlLimit, {
+				const built = buildInMemoryTextResult(this.session, entry.output, urlOffset, urlLimit, {
 					details: { ...entry.details },
 					sourceUrl: entry.details.finalUrl,
 					entityLabel: "URL output",
@@ -1671,7 +1479,7 @@ readonly approval = (args: unknown): ToolTier => {
 			if (rendered) {
 				if (isMultiRange(parsed) && parsed.kind === "lines") {
 					return attachReadIdentity(
-						this.#buildInMemoryMultiRangeResult(rendered, parsed.ranges, {
+						buildInMemoryMultiRangeResult(this.session, rendered, parsed.ranges, {
 							details: { resolvedPath: absolutePath },
 							sourcePath: absolutePath,
 							entityLabel: "profile summary",
@@ -1681,7 +1489,7 @@ readonly approval = (args: unknown): ToolTier => {
 				}
 				const { offset, limit } = selToOffsetLimit(parsed);
 				return attachReadIdentity(
-					this.#buildInMemoryTextResult(rendered, offset, limit, {
+					buildInMemoryTextResult(this.session, rendered, offset, limit, {
 						details: { resolvedPath: absolutePath },
 						sourcePath: absolutePath,
 						entityLabel: "profile summary",
@@ -1721,7 +1529,7 @@ readonly approval = (args: unknown): ToolTier => {
 			const notebookText = await readEditableNotebookText(absolutePath, resolvedDisplayPath);
 			if (isMultiRange(parsed) && parsed.kind === "lines") {
 				return attachReadIdentity(
-					this.#buildInMemoryMultiRangeResult(notebookText, parsed.ranges, {
+					buildInMemoryMultiRangeResult(this.session, notebookText, parsed.ranges, {
 						details: { resolvedPath: absolutePath },
 						sourcePath: absolutePath,
 						entityLabel: "notebook",
@@ -1731,7 +1539,7 @@ readonly approval = (args: unknown): ToolTier => {
 			}
 			const { offset, limit } = selToOffsetLimit(parsed);
 			return attachReadIdentity(
-				this.#buildInMemoryTextResult(notebookText, offset, limit, {
+				buildInMemoryTextResult(this.session, notebookText, offset, limit, {
 					details: { resolvedPath: absolutePath },
 					sourcePath: absolutePath,
 					entityLabel: "notebook",
@@ -1750,7 +1558,7 @@ readonly approval = (args: unknown): ToolTier => {
 				// because only `truncateHead` was being applied.
 				if (isMultiRange(parsed) && parsed.kind === "lines") {
 					return attachReadIdentity(
-						this.#buildInMemoryMultiRangeResult(renderedContent, parsed.ranges, {
+						buildInMemoryMultiRangeResult(this.session, renderedContent, parsed.ranges, {
 							details: {
 								resolvedPath: absolutePath,
 								contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
@@ -1763,7 +1571,7 @@ readonly approval = (args: unknown): ToolTier => {
 				}
 				const { offset, limit } = selToOffsetLimit(parsed);
 				return attachReadIdentity(
-					this.#buildInMemoryTextResult(renderedContent, offset, limit, {
+					buildInMemoryTextResult(this.session, renderedContent, offset, limit, {
 						details: {
 							resolvedPath: absolutePath,
 							contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,

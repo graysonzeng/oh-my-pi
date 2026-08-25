@@ -47,17 +47,15 @@ export function formatDefaultToolExecution(
 		? options.spinnerFrame !== undefined
 			? "running"
 			: "pending"
-		: presentation === "pending"
-			? "pending"
-			: presentation === "skipped"
-				? "skipped"
-				: presentation === "aborted"
-					? "aborted"
-					: result?.skipped
-						? "info"
-						: result?.isError
-							? "error"
-							: "done";
+		: presentation === "skipped"
+			? "skipped"
+			: presentation === "aborted"
+				? "aborted"
+				: result?.skipped
+					? "info"
+					: presentation === "failed"
+						? "error"
+						: "done";
 	lines.push(
 		renderStatusLine(
 			{

@@ -416,7 +416,7 @@ describe("openai-codex streaming", () => {
 				this.scheduleOpen();
 			}
 
-			send(): void {
+			override send(): void {
 				this.sendJson({
 					type: "response.in_progress",
 					response: { id: "resp_ws_identity", status: "in_progress" },

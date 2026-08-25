@@ -25,7 +25,7 @@ import { formatBytes, shortenPath } from "./render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
-function prependLineNumbers(text: string, startNum: number): string {
+export function prependLineNumbers(text: string, startNum: number): string {
 	const textLines = text.split("\n");
 	return textLines.map((line, i) => `${startNum + i}|${line}`).join("\n");
 }

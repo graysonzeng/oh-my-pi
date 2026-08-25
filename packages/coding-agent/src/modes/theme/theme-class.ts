@@ -417,6 +417,7 @@ export class Theme {
 			warning: this.#symbols["status.warning"],
 			info: this.#symbols["status.info"],
 			pending: this.#symbols["status.pending"],
+			skipped: this.#symbols["status.skipped"],
 			disabled: this.#symbols["status.disabled"],
 			enabled: this.#symbols["status.enabled"],
 			running: this.#symbols["status.running"],

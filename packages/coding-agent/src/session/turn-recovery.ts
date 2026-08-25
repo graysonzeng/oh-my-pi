@@ -1220,8 +1220,6 @@ export class TurnRecovery {
 			message.stopReason === "error" && STREAM_STALL_ERROR_RE.test(errorMessage) && AIError.retriable(id);
 		const transportReset =
 			message.stopReason === "error" &&
-const transportReset =
-			message.stopReason === "error" &&
 			HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) &&
 			AIError.retriable(id) &&
 			!this.#host.abortInProgress() &&

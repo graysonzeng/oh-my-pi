@@ -536,7 +536,9 @@ export class EditTool implements AgentTool<TInput> {
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		if (this.session.workflowWritePolicy) {
-			assertWorkflowPathAllowed(extractApprovalPath(params), this.session.workflowWritePolicy);
+			for (const targetPath of extractApprovalPaths(params, this.mode)) {
+				assertWorkflowPathAllowed(targetPath, this.session.workflowWritePolicy);
+			}
 		}
 		const modeDefinition = this.#getModeDefinition();
 		const record = createEditBlackboxRecorder(this.session, this.mode, params);

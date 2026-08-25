@@ -131,7 +131,7 @@ export const isGeminiModelId = memo((modelId: string): boolean => {
 
 /** Grok family ids across namespace and delimiter forms (`grok-*`, `cursor-grok-*`, `xai/grok-*`). */
 export const isGrokModelId = memo((modelId: string): boolean => {
-	return /(?:^|[./_-])grok(?:[-.]|$)/i.test(modelId);
+	return /(?:^|[/.]|cursor-)grok[-.]/i.test(modelId);
 });
 
 const GROK_EFFORT_CAPABLE_PREFIXES = [
@@ -353,7 +353,6 @@ export const modelFamilyToken = memo((modelId: string): string => {
 	if (parsed.family !== "unknown") return parsed.family;
 	if (isClaudeModelId(modelId) || isAnthropicNamespacedModelId(modelId)) return "anthropic";
 	if (isGeminiModelId(modelId)) return "gemini";
-	if (isGrokModelId(modelId)) return "grok";
 	if (isDeepseekModelIdOrName(modelId)) return "deepseek";
 	if (isOpenAIModelId(modelId)) return "openai";
 	if (isGrokModelId(modelId)) return "xai";

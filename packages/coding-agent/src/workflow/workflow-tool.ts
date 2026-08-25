@@ -1,5 +1,5 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import workflowDescription from "../prompts/tools/workflow.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";

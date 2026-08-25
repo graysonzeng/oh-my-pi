@@ -3000,7 +3000,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
 						)
 					: undefined;
-					: undefined;
 			const resolution = options.strictModelIdentity
 				? await awaitAbortable(
 						(async () => {

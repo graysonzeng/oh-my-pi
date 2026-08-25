@@ -5102,6 +5102,7 @@ await this.#continueAgent();
 			this.#clearInheritedProviderPromptCacheKey();
 			await this.refreshBaseSystemPrompt();
 		}
+	}
 	/** Updates source provenance when a live registry entry is replaced or restored. */
 	setToolBuiltIn(name: string, builtIn: boolean): void {
 		this.#tools.setToolBuiltIn(name, builtIn);

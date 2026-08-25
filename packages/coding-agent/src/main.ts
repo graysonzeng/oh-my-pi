@@ -1660,61 +1660,7 @@ export async function runRootCommand(
 			process.exit(0);
 		}
 
-	if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource)) {
-		const pendingToolWarning = describePendingToolCalls(sessionManager.getBranch());
-		if (pendingToolWarning) {
-			logger.warn("Resumed session has pending tool calls", {
-				sessionId: sessionManager.getSessionId(),
-				sessionFile: sessionManager.getSessionFile(),
-			});
-			if (isInteractive) {
-				notifs.push({ kind: "warn", message: pendingToolWarning });
-			} else {
-				process.stderr.write(`${chalk.yellow(`${pendingToolWarning}\n`)}`);
-			}
-		}
-	}
 
-	await pluginPreloadPromise;
-	if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
-		await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
-	}
-
-	scheduleMarketplaceAutoUpdate({
-		autoUpdate: settingsInstance.get("marketplace.autoUpdate"),
-		resolveActiveProjectRegistryPath,
-		clearPluginRootsCache: clearPluginRootsAndCaches,
-	});
-
-	const sessionOptions = await logger.time(
-		"buildSessionOptions",
-		buildSessionOptions,
-		parsedArgs,
-		scopedModels,
-		sessionManager,
-		modelRegistry,
-		settingsInstance,
-	);
-	sessionOptions.authStorage = authStorage;
-	sessionOptions.modelRegistry = modelRegistry;
-	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
-	if (isInteractive) sessionOptions.allowHeadlessGoalContinuation = false;
-	sessionOptions.settings = settingsInstance;
-
-	// OTEL: register global OTLP exporters when an endpoint is configured via
-	// env, then switch on the agent loop's telemetry hooks so traces, run-level
-	// metrics, and structured logs have source events to export. Content capture
-	// remains governed by OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
-	await logger.time("initTelemetryExport", initTelemetryExport);
-	if (isTelemetryExportEnabled()) {
-		sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
-	}
-
-	// Handle CLI --api-key as runtime override (not persisted)
-	if (parsedArgs.apiKey) {
-		if (!sessionOptions.model && !sessionOptions.modelPattern) {
-			process.stderr.write(
-				`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
 		// Handle --resume (no value): show session picker
 		if (parsedArgs.resume === true && !parsedArgs.fork) {
 			const folderSessions = await logger.time(
@@ -1802,6 +1748,7 @@ export async function runRootCommand(
 		sessionOptions.authStorage = authStorage;
 		sessionOptions.modelRegistry = modelRegistry;
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+		if (isInteractive) sessionOptions.allowHeadlessGoalContinuation = false;
 		sessionOptions.settings = settingsInstance;
 
 		// OTEL: register global OTLP exporters when an endpoint is configured via

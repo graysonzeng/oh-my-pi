@@ -192,6 +192,8 @@ describe("parseAgentFields", () => {
 		expect(
 			parseAgentFields({ name: "reviewer", description: "desc", shadowReview: "design" })?.shadowReview,
 		).toBeUndefined();
+	});
+
 	test("parses advisor from boolean frontmatter and boolean strings", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", advisor: true })?.advisor).toBe(true);
 		expect(parseAgentFields({ name: "worker", description: "desc", advisor: false })?.advisor).toBe(false);

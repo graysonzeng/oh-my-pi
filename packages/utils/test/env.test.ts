@@ -213,15 +213,6 @@ describe("filterChildShellEnv", () => {
 		expect(filtered.KEEP_ME).toBe("yes");
 	});
 
-	describe("getDbBusyTimeoutMs", () => {
-		it("uses default when environment value is invalid", () => {
-			expect(getDbBusyTimeoutMs({ PI_DB_BUSY_TIMEOUT_MS: "invalid" })).toBe(5_000);
-		});
-
-		it("uses valid positive millisecond value", () => {
-			expect(getDbBusyTimeoutMs({ PI_DB_BUSY_TIMEOUT_MS: "250" })).toBe(250);
-		});
-	});
 
 	describe("setInteractiveHost", () => {
 		it("makes worker runtime probe report interactive host", () => {

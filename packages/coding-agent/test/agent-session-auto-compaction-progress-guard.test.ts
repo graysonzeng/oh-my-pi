@@ -456,7 +456,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// (assistant usage 190k) must be the one that fires compaction.
 		session.settings.set("compaction.thresholdTokens", 170000);
 		session.settings.set("compaction.thresholdPercent", -1);
-		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.methodOrder", ["soft"]);
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		// Hold the initial prompt in flight so the pending snapshot stays alive
 		// through the compaction, exactly like a live tool-loop run. The second

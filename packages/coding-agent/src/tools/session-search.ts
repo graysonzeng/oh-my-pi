@@ -1,5 +1,5 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage, AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type } from "arktype";
 import type { LatencyArmSnapshotV1 } from "../latency/arms";
 import sessionSearchDescription from "../prompts/tools/session-search.md" with { type: "text" };
 import type { CompactionEntry, SessionEntry } from "../session/session-entries";

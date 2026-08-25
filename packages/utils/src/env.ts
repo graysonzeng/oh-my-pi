@@ -116,9 +116,9 @@ export function filterChildShellEnv(
 	const localEnv = parseEnvFile(path.join(cwd, ".env.local"));
 	const modeFiles: Record<string, string>[] = [];
 	for (const mode of modes) {
-		modeFiles.push(parseEnvFile(path.join(cwd, `.env.${mode}`));
+		modeFiles.push(parseEnvFile(path.join(cwd, `.env.${mode}`)));
 		// Bun also autoloads `.env.${mode}.local` (e.g. .env.production.local).
-		modeFiles.push(parseEnvFile(path.join(cwd, `.env.${mode}.local`));
+		modeFiles.push(parseEnvFile(path.join(cwd, `.env.${mode}.local`)));
 	}
 	const launchEnv: Record<string, string> = { ...projectEnv };
 	for (const file of modeFiles) Object.assign(launchEnv, file);

@@ -4060,14 +4060,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 				toolRegistry.set(name, liveTool);
 				const isMcpTool = getMCPToolOriginKey(liveTool) !== undefined;
-				session.setExtensionMCPTool(name, isMcpTool);
+				session.setExtensionMCPTool(name, isMcpTool ? liveTool : undefined);
 				session.setMCPManagerTool(name, initialMcpManagerToolNames.has(name));
 				try {
-					await session.activateToolRegistration(
-						name,
-						liveTool,
-						initialRegisteredTools.has(registered),
-						existingTool !== undefined,
+					const activeToolNames = session.getActiveToolNames();
+					await session.setActiveToolPresentation(
+						existingTool === undefined && initialRegisteredTools.has(registered)
+							? [...activeToolNames, name]
+							: activeToolNames,
+						[],
+						false,
 						activationSignal,
 					);
 				} catch (error) {

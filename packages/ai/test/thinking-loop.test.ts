@@ -557,7 +557,7 @@ describe("thinking-loop guard (stream wrapper)", () => {
 		} as unknown as Model<Api>;
 		const partial = { role: "assistant", content: [], stopReason: "stop" } as unknown as AssistantMessage;
 
-		const guarded = withGeminiThinkingLoopGuard(model, undefined, () => {
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
 			const inner = new AssistantMessageEventStream();
 			const events: AssistantMessageEvent[] = [
 				{ type: "start", partial },

@@ -157,6 +157,8 @@ export interface IsolatedRunOptions {
 	buildFailureResult: (err: unknown) => SingleResult;
 	/** Observe the real child result before post-run isolation work. */
 	onSubprocessResult?: (result: SingleResult) => void;
+	/** Takes ownership of cleanup that may complete after the visible task result. */
+	onCleanupDeferred?: (completion: Promise<void>) => void;
 }
 
 async function writeIsolationPatch(
@@ -343,6 +345,12 @@ export interface IsolationMergeOutcome {
 	hadAnyChanges: boolean;
 	/** True iff the root branch actually merged — gates nested-repo patch application. */
 	mergedBranchForNestedPatches: boolean;
+}
+
+export interface IsolationMergeOptions {
+	result: SingleResult;
+	repoRoot: string;
+	mergeMode: "patch" | "branch";
 }
 
 /**

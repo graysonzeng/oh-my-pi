@@ -35,13 +35,6 @@ import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import {
-	type ArchiveMemberContent,
-	archiveFormatFromPath,
-	parseArchivePathCandidates,
-	readArchiveEntries,
-	writeArchive,
-} from "../utils/zip";
 import { assertWorkflowPathAllowed } from "../workflow/tool-policy";
 import { routeWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
