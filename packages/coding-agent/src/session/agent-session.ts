@@ -184,7 +184,6 @@ import {
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import {
-	buildOrdinarySessionObservationJoin,
 	computeLatencyCohortMetrics,
 	deriveLatencyCohortKey,
 	LATENCY_BASELINE_COHORT_KEY,
@@ -5645,28 +5644,6 @@ await this.#continueAgent();
 		this.#latencyArmSnapshot = undefined;
 	}
 
-	#ordinarySessionObservationJoin(endedAt: string) {
-		const toolCalls: Array<{ name: string; arguments?: Record<string, unknown> }> = [];
-		for (const message of this.agent.state.messages) {
-			if (message.role !== "assistant") continue;
-			for (const content of message.content) {
-				if (content.type !== "toolCall") continue;
-				toolCalls.push({ name: content.name, arguments: content.arguments });
-			}
-		}
-		return buildOrdinarySessionObservationJoin({
-			provider: this.model?.provider,
-			model: this.model?.id,
-			profileId: this.#activeModelOptimization.profile?.id,
-			applied: this.#latencyArmSnapshot?.fingerprint ?? null,
-			startedAt: this.sessionManager.getHeader()?.timestamp,
-			endedAt,
-			toolCallCount: this.getSessionStats().toolCalls,
-			toolCalls,
-			fallbackCount: this.#retryFallbackAppliedCount,
-		});
-	}
-
 	#evaluateLatencyRolloutAtSessionEnd(exitKind: SessionExitData["kind"] | null): void {
 		try {
 			const snapshot = this.#latencyArmSnapshot;
@@ -5676,7 +5653,6 @@ await this.#continueAgent();
 			const completed = exitKind === "normal";
 			const endedAt = new Date().toISOString();
 			const firedArms = this.getFiredLatencyArms();
-			const ordinaryJoin = this.#ordinarySessionObservationJoin(endedAt);
 			const slices = snapshot.dimensions?.filter(slice => slice.role !== "excluded") ?? [];
 			if (slices.length > 0) {
 				for (const slice of slices) {
@@ -5711,7 +5687,6 @@ await this.#continueAgent();
 						dshGoalInjected: this.#dshGoalInjected,
 						dshAdjacentIdentical: this.#dshAdjacentIdentical,
 						dshHeadlessCount: this.#goalModeState?.goal.headlessContinuationCount ?? null,
-						...ordinaryJoin,
 					});
 					if (!observationOk) {
 						store.markControlPlaneDegraded();
@@ -5732,27 +5707,6 @@ await this.#continueAgent();
 					if (!commitOk) store.markControlPlaneDegraded();
 				}
 				if (store.controlPlaneDegraded) return;
-			}
-			if (slices.length === 0) {
-				store.appendObservation({
-					schemaVersion: 1,
-					kind: "latency_rollout_observation",
-					key: deriveLatencyCohortKey(snapshot),
-					status: exitKind ?? "unknown",
-					completed,
-					repairCycles: 0,
-					p0p1Escapes: 0,
-					costUsd: null,
-					stageTimeMs: null,
-					spawnedAgents: null,
-					firedArms,
-					endedAt,
-					phase: "metrics",
-					snapshotFingerprint: snapshot.fingerprint,
-					sessionId,
-					sampleUnit: "session",
-					...ordinaryJoin,
-				});
 			}
 			const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
 			if (active.length === 0 && slices.length === 0) return;
@@ -5819,6 +5773,7 @@ await this.#continueAgent();
 			// Rollout bookkeeping must never fail session teardown except both-fail abort.
 		}
 	}
+
 
 	/**
 	 * Rebuild checkpoint/rewind runtime state from the current branch. Handles two
