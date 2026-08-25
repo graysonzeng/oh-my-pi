@@ -184,6 +184,7 @@ import {
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import {
+	buildOrdinarySessionObservationJoin,
 	computeLatencyCohortMetrics,
 	deriveLatencyCohortKey,
 	LATENCY_BASELINE_COHORT_KEY,
@@ -609,6 +610,8 @@ export class AgentSession {
 
 	// Retry state
 	readonly #recovery: TurnRecovery;
+	#retryFallbackAppliedCount = 0;
+
 	#textOutputCommitted = true;
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
@@ -2246,6 +2249,8 @@ recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistory
 	#subscriberEmitGate: Promise<void> = Promise.resolve();
 
 async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
+		if (event.type === "retry_fallback_applied") this.#retryFallbackAppliedCount += 1;
+
 	if (event.type === "auto_compaction_end") {
 		this.#readDedupeArtifacts.clear();
 		this.#goalContextHash = undefined;
@@ -5640,6 +5645,28 @@ await this.#continueAgent();
 		this.#latencyArmSnapshot = undefined;
 	}
 
+	#ordinarySessionObservationJoin(endedAt: string) {
+		const toolCalls: Array<{ name: string; arguments?: Record<string, unknown> }> = [];
+		for (const message of this.agent.state.messages) {
+			if (message.role !== "assistant") continue;
+			for (const content of message.content) {
+				if (content.type !== "toolCall") continue;
+				toolCalls.push({ name: content.name, arguments: content.arguments });
+			}
+		}
+		return buildOrdinarySessionObservationJoin({
+			provider: this.model?.provider,
+			model: this.model?.id,
+			profileId: this.#activeModelOptimization.profile?.id,
+			applied: this.#latencyArmSnapshot?.fingerprint ?? null,
+			startedAt: this.sessionManager.getHeader()?.timestamp,
+			endedAt,
+			toolCallCount: this.getSessionStats().toolCalls,
+			toolCalls,
+			fallbackCount: this.#retryFallbackAppliedCount,
+		});
+	}
+
 	#evaluateLatencyRolloutAtSessionEnd(exitKind: SessionExitData["kind"] | null): void {
 		try {
 			const snapshot = this.#latencyArmSnapshot;
@@ -5649,6 +5676,7 @@ await this.#continueAgent();
 			const completed = exitKind === "normal";
 			const endedAt = new Date().toISOString();
 			const firedArms = this.getFiredLatencyArms();
+			const ordinaryJoin = this.#ordinarySessionObservationJoin(endedAt);
 			const slices = snapshot.dimensions?.filter(slice => slice.role !== "excluded") ?? [];
 			if (slices.length > 0) {
 				for (const slice of slices) {
@@ -5683,6 +5711,7 @@ await this.#continueAgent();
 						dshGoalInjected: this.#dshGoalInjected,
 						dshAdjacentIdentical: this.#dshAdjacentIdentical,
 						dshHeadlessCount: this.#goalModeState?.goal.headlessContinuationCount ?? null,
+						...ordinaryJoin,
 					});
 					if (!observationOk) {
 						store.markControlPlaneDegraded();
@@ -5703,6 +5732,27 @@ await this.#continueAgent();
 					if (!commitOk) store.markControlPlaneDegraded();
 				}
 				if (store.controlPlaneDegraded) return;
+			}
+			if (slices.length === 0) {
+				store.appendObservation({
+					schemaVersion: 1,
+					kind: "latency_rollout_observation",
+					key: deriveLatencyCohortKey(snapshot),
+					status: exitKind ?? "unknown",
+					completed,
+					repairCycles: 0,
+					p0p1Escapes: 0,
+					costUsd: null,
+					stageTimeMs: null,
+					spawnedAgents: null,
+					firedArms,
+					endedAt,
+					phase: "metrics",
+					snapshotFingerprint: snapshot.fingerprint,
+					sessionId,
+					sampleUnit: "session",
+					...ordinaryJoin,
+				});
 			}
 			const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
 			if (active.length === 0 && slices.length === 0) return;
@@ -7012,30 +7062,55 @@ await this.#continueAgent();
 		this.#queueHiddenNextTurnMessage(message, true);
 	}
 
-queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
-	if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
-	const delivered = this.yieldQueue.enqueueWithReceipt<LaunchCompletionEntry>(
-		LAUNCH_COMPLETION_MESSAGE_TYPE,
-		notification,
-	);
-	this.yieldQueue.requestIdleFlush();
-	return delivered;
-}
+	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
+		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
+		const delivered = this.yieldQueue.enqueueWithReceipt<LaunchCompletionEntry>(
+			LAUNCH_COMPLETION_MESSAGE_TYPE,
+			notification,
+		);
+		this.yieldQueue.requestIdleFlush();
+		return delivered;
+	}
 
-#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): ScheduleDecision | undefined {
+	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): ScheduleDecision | undefined {
 		this.#pendingNextTurnMessages.push(message);
 		if (!triggerTurn) return undefined;
 		const generation = this.#promptGeneration;
 		if (this.#scheduledHiddenNextTurnGeneration === generation) {
-			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "already_settled" });
+			return { status: "accepted", deliveryId: "already-scheduled", settleOwner: "hidden-next-turn", attempt: 1 };
 		}
 		const snapshot = this.#ensureLatencyArmSnapshot();
 		const modes = this.settings.get("goal.continuationModes") as readonly string[];
-		if (snapshot.arms.dsh_headless_continuation !== true) {
-			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "arm-off" });
-		}
-		if (!modes.includes("headless") || !this.#allowHeadlessGoalContinuation) {
-			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "capability" });
+		const dshHeadlessEnabled =
+			snapshot.arms.dsh_headless_continuation === true &&
+			modes.includes("headless") &&
+			this.#allowHeadlessGoalContinuation;
+		if (!dshHeadlessEnabled) {
+			this.#scheduledHiddenNextTurnGeneration = generation;
+			this.#schedulePostPromptTask(
+				async () => {
+					if (this.#scheduledHiddenNextTurnGeneration === generation) {
+						this.#scheduledHiddenNextTurnGeneration = undefined;
+					}
+					if (this.#pendingNextTurnMessages.length === 0) {
+						return;
+					}
+					try {
+						await this.#promptQueuedHiddenNextTurnMessages();
+					} catch {
+						// Leave the hidden next-turn messages queued for the next explicit prompt.
+					}
+				},
+				{
+					generation,
+					onSkip: () => {
+						if (this.#scheduledHiddenNextTurnGeneration === generation) {
+							this.#scheduledHiddenNextTurnGeneration = undefined;
+						}
+					},
+				},
+			);
+			return { status: "accepted", deliveryId: "immediate", settleOwner: "hidden-next-turn", attempt: 1 };
 		}
 		if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 			return this.#hiddenNextTurnScheduler.submit({ kind: "headless-goal", generation, skip: "acp-defer" });
@@ -7084,13 +7159,14 @@ queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void>
 						}
 					}
 				};
-				let reserved: "accepted" | "cap";
-				try {
-					reserved = await reserve();
-				} catch {
-					return;
-				}
+				const reserved = await reserve();
 				if (reserved === "cap") {
+					this.#hiddenNextTurnScheduler.onSkip(decision.deliveryId, {
+						status: "skip",
+						deliveryId: decision.deliveryId,
+						phase: "post-accept",
+						reason: "cap",
+					});
 					this.#settleHiddenDelivery(decision.deliveryId, "cap");
 					return;
 				}
