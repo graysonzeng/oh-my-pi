@@ -2900,7 +2900,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const registeredTools = toolsRestricted ? [] : extensionRunner.getAllRegisteredTools();
 		const initialRegisteredTools = new WeakSet(registeredTools);
 		const sdkCustomTools =
-			toolsRestricted && options.allowRestrictedCustomTools !== true
+			restrictToolNames && options.allowRestrictedCustomTools !== true
 				? []
 				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
