@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import { wrapToolWithMetaNotice } from "../../src/tools/output-meta";
 import {
 	applyWorkflowTransformTools,
