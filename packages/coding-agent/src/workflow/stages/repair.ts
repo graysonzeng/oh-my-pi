@@ -113,7 +113,7 @@ export class RepairStage {
 			Array.isArray(modelArtifact.addressedStepIds) && modelArtifact.addressedStepIds.length > 0
 				? modelArtifact.addressedStepIds.filter(id => input.findingIds.includes(id))
 				: [];
-		const artifact = parseWorkflowArtifact(
+		const artifact = parseWorkflowArtifact<ImplementationArtifactV1>(
 			ImplementationArtifactSchema,
 			{
 				...modelArtifact,

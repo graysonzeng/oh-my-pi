@@ -59,7 +59,7 @@ export class CodeReviewStage {
 			signal: input.signal,
 		});
 		const result = await this.#runtime.run<ReviewArtifactV1>(request);
-		const artifact = parseWorkflowArtifact(
+		const artifact = parseWorkflowArtifact<ReviewArtifactV1>(
 			ReviewArtifactSchema,
 			{
 				...result.artifact,

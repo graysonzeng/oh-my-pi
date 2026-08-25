@@ -1,4 +1,4 @@
-import { ZodError, type ZodType } from "zod";
+import { ZodError } from "zod";
 import { WorkflowSchemaError } from "./errors";
 
 /**
@@ -23,9 +23,9 @@ export function coerceIsoDatetime(value: unknown, fallback = new Date().toISOStr
 }
 
 /** Parse model output with Zod; normalize failures to schema_violation for retry/fallback. */
-export function parseWorkflowArtifact<T>(schema: ZodType<T>, data: unknown, label: string): T {
+export function parseWorkflowArtifact<T>(schema: { parse(data: unknown): unknown }, data: unknown, label: string): T {
 	try {
-		return schema.parse(data);
+		return schema.parse(data) as T;
 	} catch (error) {
 		if (error instanceof ZodError) {
 			const summary = error.issues

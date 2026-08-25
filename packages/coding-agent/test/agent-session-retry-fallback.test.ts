@@ -4515,7 +4515,7 @@ describe("AgentSession retry fallback", () => {
 				systemPrompt: runtime.resolved.promptBlock ? ["Test", runtime.resolved.promptBlock] : ["Test"],
 			}),
 		});
-		const now = Date.now();
+		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
 		// The input fits the 8k fallback, while the failed thinking-only assistant

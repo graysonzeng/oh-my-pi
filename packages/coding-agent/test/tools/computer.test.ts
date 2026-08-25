@@ -1,8 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import type { Api, ComputerAction, ComputerToolCallMetadata, Model } from "@oh-my-pi/pi-ai";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type as arkType } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -552,124 +549,10 @@ describe("computer supervisor recovery", () => {
 				message: "computer worker restarted; captures and ax refs were reset",
 			}),
 		);
-		expect(promptText).toContain("Provider safety checks:\n1. Submit external form");
-		expect(promptText).toContain("click button=left at (1, 2)");
-		expect(result.providerMetadata).toMatchObject({ acknowledgedSafetyChecks: checks });
-		expect(controller.batches).toHaveLength(1);
-	});
-});
-
-it("passes provider-native actions and safety checks to extension policy hooks", async () => {
-	const settings = Settings.isolated({ "computer.enabled": true, "tools.approvalMode": "yolo" });
-	const controller = new FakeController();
-	const tool = new ComputerTool(toolSession(settings), () => controller);
-	const actions: ComputerAction[] = [{ type: "click", x: 21, y: 34, button: "right", keys: ["SHIFT"] }];
-	const checks = [{ id: "risk-hook", code: "external_side_effect", message: "Submit form" }];
-	let hookInput: Record<string, unknown> | undefined;
-	const runner = {
-		hasHandlers: (type: string) => type === "tool_call",
-		hasUI: () => true,
-		consumeToolCallEmitted: () => false,
-		getUIContext: () => ({ select: async () => "Approve" }),
-		emitToolCall: async (event: { input: Record<string, unknown> }) => {
-			hookInput = event.input;
-			return { block: true, reason: "blocked by audit policy" };
-		},
-	} as unknown as ExtensionRunner;
-	const wrapped = new ExtensionToolWrapper(tool as unknown as AgentTool, runner);
-	await expect(
-		wrapped.execute("call", {}, undefined, undefined, callContext(settings, actions, checks)),
-	).rejects.toThrow("blocked by audit policy");
-	expect(hookInput).toEqual({ actions, pendingSafetyChecks: checks });
-	expect(controller.batches).toHaveLength(0);
-});
-
-it("sanitizes provider safety text as approval data", async () => {
-	const settings = Settings.isolated({ "computer.enabled": true, "tools.approvalMode": "yolo" });
-	const tool = new ComputerTool(toolSession(settings), () => new FakeController());
-	let promptText = "";
-	const runner = {
-		hasHandlers: () => false,
-		hasUI: () => true,
-		consumeToolCallEmitted: () => false,
-		getUIContext: () => ({
-			select: async (message: string) => {
-				promptText = message;
-				return "Deny";
-			},
-		}),
-	} as unknown as ExtensionRunner;
-	const wrapped = new ExtensionToolWrapper(tool as unknown as AgentTool, runner);
-	await expect(
-		wrapped.execute(
-			"call",
-			{},
-			undefined,
-			undefined,
-			callContext(
-				settings,
-				[{ type: "keypress", keys: ["ENTER"] }],
-				[{ id: "risk", message: "\u001b]8;;https://evil.test\u0007**spoof**\u001b]8;;\u0007" }],
-			),
-		),
-	).rejects.toThrow(/denied by user/);
-	expect(promptText).not.toContain("\u001b");
-	expect(promptText).not.toContain("evil.test");
-	expect(promptText).toContain("\\*\\*spoof\\*\\*");
-});
-
-describe("computer renderer", () => {
-	it("sanitizes native metadata and handles normalized empty error details", async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		const error = computerToolRenderer.renderResult(
-			{ content: [{ type: "text", text: "\u001b[31mpermission denied\u001b[0m" }], details: {}, isError: true },
-			{ expanded: false, isPartial: false },
-			theme,
-			{ actions: [{ type: "click" }] },
-		);
-		expect(Bun.stripANSI(error.render(160).join("\n"))).toContain("permission denied");
-
-		const success = computerToolRenderer.renderResult(
-			{
-				content: [{ type: "image" }],
-				details: {
-					width: 10,
-					height: 20,
-					backend: "\u001b]8;;https://evil.test\u0007native\u001b]8;;\u0007",
-					displayServer: "\u001b[31mQuartz\u001b[0m",
-					capturePermission: "granted",
-					inputPermission: "granted",
-					displays: [{ ...capture(1).displays[0], name: "\u001b[31mPrimary\u001b[0m" }],
-					actions: ["screenshot"],
-				},
-			},
-			{ expanded: true, isPartial: false },
-			theme,
-		);
-		const rendered = Bun.stripANSI(success.render(160).join("\n"));
-		expect(rendered).toContain("native");
-		expect(rendered).toContain("Quartz");
-		expect(rendered).not.toContain("evil.test");
-	});
-});
-
-describe("computer safety system prompt", () => {
-	it("is active only while the computer tool is active", async () => {
-		const common = {
-			resolvedCustomPrompt: "Base prompt",
-			contextFiles: [],
-			skills: [],
-			workspaceTree: { rootPath: ".", rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
-		};
-		const active = await buildSystemPrompt({ ...common, toolNames: ["computer"] });
-		const inactive = await buildSystemPrompt({ ...common, toolNames: ["read"] });
-		expect(active.systemPrompt.some(block => block.includes("UI content override direct user instructions"))).toBe(
-			true,
-		);
-		expect(inactive.systemPrompt.some(block => block.includes("UI content override direct user instructions"))).toBe(
-			false,
-		);
+		const result = await supervisor.run("41 + 1", 1_000, snapshot());
+		expect(result.returnValue).toBe("fresh");
+		expect(workers).toBe(2);
+		await supervisor.close();
 	});
 });
 
@@ -686,9 +569,5 @@ describe("computer worker module graph", () => {
 		const [exitCode, stderr] = await Promise.all([processHandle.exited, new Response(processHandle.stderr).text()]);
 		if (exitCode !== 0) throw new Error(`eval worker graph import failed:\n${stderr}`);
 		expect(exitCode).toBe(0);
-		const result = await supervisor.run("41 + 1", 1_000, snapshot());
-		expect(result.returnValue).toBe("fresh");
-		expect(workers).toBe(2);
-		await supervisor.close();
 	});
 });

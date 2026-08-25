@@ -76,7 +76,7 @@ export class PlanReviewStage {
 		const result = await this.#runtime.run<PlanReviewArtifactV2 | ReviewArtifactV1>(request);
 		if (input.legacyV1) {
 			const modelArtifact = result.artifact as Partial<ReviewArtifactV1>;
-			const artifact = parseWorkflowArtifact(
+			const artifact = parseWorkflowArtifact<ReviewArtifactV1>(
 				ReviewArtifactSchema,
 				{
 					...modelArtifact,
@@ -114,7 +114,7 @@ export class PlanReviewStage {
 		}
 		const modelArtifact = result.artifact as Partial<PlanReviewArtifactV2>;
 		const reviewKind = input.reviewKind ?? modelArtifact.reviewKind ?? "initial";
-		const artifact = parseWorkflowArtifact(
+		const artifact = parseWorkflowArtifact<PlanReviewArtifactV2>(
 			PlanReviewArtifactV2StageSchema,
 			{
 				...modelArtifact,

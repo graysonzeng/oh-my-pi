@@ -57,7 +57,7 @@ export class PlanStage {
 			signal: input.signal,
 		});
 		const result = await this.#runtime.run<PlanArtifactV1>(request);
-		const artifact = parseWorkflowArtifact(
+		const artifact = parseWorkflowArtifact<PlanArtifactV1>(
 			PlanArtifactSchema,
 			{
 				...result.artifact,

@@ -78,7 +78,7 @@ export class ImplementStage {
 				hint: "Isolation write stages must return patchPath or branchName from the runtime adapter",
 			});
 		}
-		const artifact = parseWorkflowArtifact(
+		const artifact = parseWorkflowArtifact<ImplementationArtifactV1>(
 			ImplementationArtifactSchema,
 			{
 				...modelArtifact,
