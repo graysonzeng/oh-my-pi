@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
@@ -7,20 +8,21 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
-	getDefault,
-	getEnumValues,
 	onAppendOnlyModeChanged,
+	onCodeModeChanged,
+	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
 	type SettingPath,
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
-import * as fileLock from "../src/config/file-lock";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 function context(): Context {
@@ -125,6 +127,25 @@ describe("Settings", () => {
 			expect(await Bun.file(getConfigPath()).exists()).toBe(true);
 			expect(await Bun.file(yamlConfigPath).exists()).toBe(false);
 			expect((await readSettings()).setupVersion).toBe(1);
+		});
+
+		it("writes mapping headers without trailing whitespace and preserves multiline values", async () => {
+			const multiline = ["first line", "scalar line ending in colon: ", "third line "].join("\n");
+			const custom = {
+				"quoted:key": { nested: [{ value: multiline }] },
+				emptyObject: {},
+				emptyArray: [],
+				emptyString: "",
+			};
+			await writeSettings({ custom, theme: { dark: "anthracite" } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.set("theme.dark", "titanium");
+			await settings.flush();
+
+			const content = await Bun.file(getConfigPath()).text();
+			expect(content).not.toMatch(/: +$/m);
+			expect(YAML.parse(content)).toEqual({ custom, theme: { dark: "titanium" } });
 		});
 	});
 
@@ -297,9 +318,9 @@ describe("Settings", () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const canonicalConfigPath = await fs.promises.realpath(getConfigPath());
-			const rename = fs.promises.rename.bind(fs.promises);
+			const rename = fsp.rename.bind(fsp);
 			let injected = false;
-			vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+			vi.spyOn(fsp, "rename").mockImplementation(async (source, target) => {
 				if (!injected && String(source).endsWith(".tmp") && String(target) === canonicalConfigPath) {
 					injected = true;
 					throw new FsCodeError("EPERM", "injected Windows replacement failure");
@@ -391,8 +412,17 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("defaults", () => {
-		it("keeps eight inline images live by default", async () => {
+	describe("live persisted reload", () => {
+		it("rejects malformed live configs without moving them aside or replacing effective settings", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await writeSettings({
+				setupVersion: 1,
+				modelRoles: { global_role: "openai/global" },
+			});
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ modelRoles: { project_role: "openai/project" } }, null, 2),
+			);
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
 		});
@@ -448,6 +478,125 @@ describe("Settings", () => {
 				"minimax",
 			]);
 		});
+
+		it("retries when a persisted setting changes while files are being read", async () => {
+			await writeSettings({ setupVersion: 1 });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const loadCapability = discovery.loadCapability;
+			const projectLoadStarted = Promise.withResolvers<void>();
+			const releaseProjectLoad = Promise.withResolvers<void>();
+			let pauseProjectLoad = true;
+			vi.spyOn(discovery, "loadCapability").mockImplementation(async (id, options) => {
+				if (pauseProjectLoad) {
+					pauseProjectLoad = false;
+					projectLoadStarted.resolve();
+					await releaseProjectLoad.promise;
+				}
+				return await loadCapability(id, options);
+			});
+
+			const reload = settings.reloadFromDisk();
+			await projectLoadStarted.promise;
+			settings.set("setupVersion", 2);
+			releaseProjectLoad.resolve();
+			await reload;
+			await settings.flush();
+
+			expect(settings.get("setupVersion")).toBe(2);
+			expect((await readSettings()).setupVersion).toBe(2);
+		});
+
+		it("preserves runtime overrides and only signals semantic model-role changes", async () => {
+			await writeSettings({ modelRoles: { default: "openai/original" } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.overrideModelRoles({ runtime: "openai/runtime" });
+			let signalCount = 0;
+			const unsubscribe = onModelRolesChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadFromDisk();
+				expect(signalCount).toBe(0);
+				expect(settings.getModelRole("runtime")).toBe("openai/runtime");
+
+				await writeSettings({ modelRoles: { default: "openai/updated" } });
+				await settings.reloadFromDisk();
+
+				expect(signalCount).toBe(1);
+				expect(settings.getModelRole("default")).toBe("openai/updated");
+				expect(settings.getModelRole("runtime")).toBe("openai/runtime");
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("signals Code Mode partition inputs picked up from disk", async () => {
+			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } }, eval: { js: true } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			let signalCount = 0;
+			const unsubscribe = onCodeModeChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadFromDisk();
+				expect(signalCount).toBe(0);
+
+				await writeSettings({ providers: { "openai-codex": { codeMode: "on" } }, eval: { js: true } });
+				await settings.reloadFromDisk();
+
+				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				expect(signalCount).toBe(1);
+
+				// A single reload that changes several partition inputs signals once.
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+				});
+				await settings.reloadFromDisk();
+
+				expect(settings.get("eval.js")).toBe(false);
+				expect(settings.get("providers.openai-codex.codeModeDirectTools")).toEqual(["bash"]);
+				expect(signalCount).toBe(2);
+
+				// `edit.mode` renames the direct edit tool on the wire.
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+					edit: { mode: "apply_patch" },
+				});
+				await settings.reloadFromDisk();
+
+				expect(settings.get("edit.mode")).toBe("apply_patch");
+				expect(signalCount).toBe(3);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("signals Code Mode partition inputs supplied by the destination project", async () => {
+			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const otherProject = tempDir.join("code-mode-project");
+			await Bun.write(
+				path.join(getProjectAgentDir(otherProject), "config.yml"),
+				YAML.stringify({ providers: { "openai-codex": { codeMode: "on" } } }, null, 2),
+			);
+			let signalCount = 0;
+			const unsubscribe = onCodeModeChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadForCwd(otherProject);
+
+				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				expect(signalCount).toBe(1);
+			} finally {
+				unsubscribe();
+			}
+		});
 	});
 
 	describe("get()", () => {
@@ -463,7 +612,6 @@ describe("Settings", () => {
 			expect(isolated.get("setupVersion")).toBe(0);
 			expect(isolated.get("shellPath")).toBe("");
 			expect(isolated.get("enabledModels")).toEqual([]);
-			expect(isolated.get("tui.maxInlineImages")).toBe(getDefault("tui.maxInlineImages"));
 		});
 
 		it("invalidates cached resolved values after set, override, and clearOverride", () => {
@@ -568,7 +716,7 @@ describe("Settings", () => {
 			});
 
 			try {
-				expect(() => isolated.set("provider.appendOnlyContext", "on")).not.toThrow();
+				isolated.set("provider.appendOnlyContext", "on");
 				expect(received).toEqual(["on"]);
 			} finally {
 				unsubscribeThrower();
@@ -927,7 +1075,80 @@ describe("Settings", () => {
 		});
 	});
 
+	describe("compaction method migration", () => {
+		it("defaults to server, snapcompact, handoff, shake, then soft compaction", () => {
+			expect(Settings.isolated().get("compaction.methodOrder")).toEqual([
+				"remote",
+				"snapcompact",
+				"handoff",
+				"shake",
+				"soft",
+			]);
+		});
+
+		it("migrates a local-only legacy strategy to soft compaction", async () => {
+			await writeSettings({ compaction: { strategy: "context-full", remoteEnabled: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("compaction.methodOrder")).toEqual(["soft"]);
+		});
+	});
 	describe("migrations", () => {
+		it("consolidates legacy Exa suite toggles onto exa.enabled", async () => {
+			await writeSettings({
+				exa: {
+					enabled: true,
+					enableSearch: false,
+					enableResearcher: true,
+					enableWebsets: true,
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("exa.enabled")).toBe(false);
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).exa).toEqual({ enabled: false });
+		});
+
+		it("migrates quoted dotted Exa toggles and removes obsolete suite settings", async () => {
+			await Bun.write(
+				getConfigPath(),
+				`"exa.enabled": true\n"exa.enableSearch": false\n"exa.enableResearcher": true\n"exa.enableWebsets": true\n`,
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("exa.enabled")).toBe(false);
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).exa).toEqual({ enabled: false });
+		});
+
+		it("removes the legacy Exa block when it contains only retired suite toggles", async () => {
+			await writeSettings({ exa: { enableResearcher: true, enableWebsets: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("exa.enabled")).toBe(true);
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).exa).toBeUndefined();
+		});
+
+		it("removes the retired computer backend setting", async () => {
+			await writeSettings({ computer: { backend: "auto", enabled: true }, "computer.backend": "native" });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("computer.enabled")).toBe(true);
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).computer).toEqual({ enabled: true });
+		});
+
 		it("maps removed atom edit mode settings to hashline", async () => {
 			await writeSettings({
 				edit: {
@@ -1025,6 +1246,50 @@ describe("Settings", () => {
 			// (`false !== "default"`), so an un-coerced boolean `false` would read as ON.
 			expect(settings.get("task.eager")).toBe("default");
 			expect(settings.get("todo.eager")).toBe("default");
+		});
+
+		it("migrates legacy features.unexpectedStopDetection=true to smart", async () => {
+			await writeSettings({ features: { unexpectedStopDetection: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// `true` reproduced the previous small-model-classified guard, now "smart".
+			expect(settings.get("features.unexpectedStopDetection")).toBe("smart");
+		});
+
+		it("maps legacy features.unexpectedStopDetection=false to none", async () => {
+			await writeSettings({ features: { unexpectedStopDetection: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("features.unexpectedStopDetection")).toBe("none");
+		});
+
+		it("resolves unconfigured features.unexpectedStopDetection to the mechanical default", async () => {
+			await writeSettings({});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("features.unexpectedStopDetection")).toBe("mechanical");
+		});
+
+		it("normalizes a quoted-dotted legacy unexpected-stop boolean", async () => {
+			await Bun.write(getConfigPath(), '"features.unexpectedStopDetection": true\n');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("features.unexpectedStopDetection")).toBe("smart");
+		});
+
+		it("keeps an explicit unexpected-stop mode over a legacy dotted boolean", async () => {
+			await Bun.write(
+				getConfigPath(),
+				'"features.unexpectedStopDetection": false\nfeatures:\n  unexpectedStopDetection: smart\n',
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("features.unexpectedStopDetection")).toBe("smart");
 		});
 
 		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {

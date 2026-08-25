@@ -230,6 +230,19 @@ describe("parseCommandArgs + substituteArgs integration", () => {
 		const template2 = "Implement: $ARGUMENTS";
 		expect(substituteArgs(template1, args)).toBe(substituteArgs(template2, args));
 	});
+	test("should not recursively expand $@ or $ARGUMENTS present inside user positional arguments", () => {
+		const args = ["check $@ and $ARGUMENTS", "extra"];
+		const template = "Instruction: $1";
+		const result = substituteArgs(template, args);
+		expect(result).toBe("Instruction: check $@ and $ARGUMENTS");
+	});
+
+	test("should not recursively expand positional placeholders $1, $2 inside positional argument values", () => {
+		const args = ["value with $2", "nested"];
+		const template = "Result: $1";
+		const result = substituteArgs(template, args);
+		expect(result).toBe("Result: value with $2");
+	});
 });
 
 // ============================================================================
@@ -376,5 +389,23 @@ describe("renderYieldSchema", () => {
 		const rendered = await renderSubagentPrompt(undefined);
 		expect(rendered).not.toContain("result: {");
 		expect(rendered).not.toContain("Your terminal `yield` MUST use exactly this shape");
+	});
+});
+
+describe("subagent peer roster prompt", () => {
+	const templatePath = path.resolve(import.meta.dir, "../src/prompts/system/subagent-system-prompt.md");
+
+	test("documents parked archaeology and revival when a live roster is present", async () => {
+		const templateSource = await fs.readFile(templatePath, "utf-8");
+		const rendered = prompt.render(templateSource, {
+			agent: "test-agent",
+			ircSelfId: "Child",
+			ircPeers: "- `LiveWorker` — task (sub, running)\n1 parked peer(s) omitted.",
+		});
+		expect(rendered).toContain("LiveWorker");
+		expect(rendered).toContain('status:"parked"');
+		expect(rendered).toContain("history://");
+		expect(rendered).toContain("agent://");
+		expect(rendered).toContain("never parked names");
 	});
 });

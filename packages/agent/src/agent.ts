@@ -24,7 +24,6 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
-import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -38,6 +37,7 @@ import {
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { isProviderRefusalMessage } from "./replay-policy";
+import { Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
 import type {
 	AgentBeforeModelCall,
 	AgentContext,
@@ -372,7 +372,7 @@ export class Agent {
 		pendingToolCalls: new Set<string>(),
 		error: undefined,
 	};
-
+	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -436,6 +436,8 @@ export class Agent {
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
+	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
+	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -467,6 +469,7 @@ export class Agent {
 		if (opts.initialState?.messages) this.#state.messages = opts.initialState.messages.slice();
 		if (opts.initialState?.pendingToolCalls)
 			this.#state.pendingToolCalls = new Set(opts.initialState.pendingToolCalls);
+		this.#syncTokenizer(this.#state.model);
 		this.#convertToLlm = opts.convertToLlm || defaultConvertToLlm;
 		this.#transformContext = opts.transformContext;
 		this.#steeringMode = opts.steeringMode || "one-at-a-time";
@@ -729,9 +732,27 @@ export class Agent {
 	set maxRetryDelayMs(value: number | undefined) {
 		this.#maxRetryDelayMs = value;
 	}
-
 	get state(): AgentState {
 		return this.#state;
+	}
+
+	/**
+	 * Tokenizer for the active model. The instance is replaced whenever the
+	 * active model's encoding changes (see {@link setModel}), so callers must
+	 * not cache it across model switches.
+	 */
+	get tokenizer(): Tokenizer {
+		return this.#tokenizer;
+	}
+
+	/**
+	 * Swap the tokenizer only when the encoding actually changes, so the warm
+	 * per-message memo survives same-encoding model switches.
+	 */
+	#syncTokenizer(model: Model | null | undefined): void {
+		if (tokenizerEncodingForModel(model) !== this.#tokenizer.encoding) {
+			this.#tokenizer = new Tokenizer(model);
+		}
 	}
 
 	get appendOnlyContext(): AppendOnlyContextManager | undefined {
@@ -781,14 +802,13 @@ export class Agent {
 		const messages = normalizeMessagesForProvider(llmMessages, model);
 		const tools = ownedDialect
 			? []
-			: (normalizeTools(
-					this.#toolsForModel(model),
-					this.#intentTracing,
-					preferredDialect(model.id),
-					typeof this.#pruneToolDescriptions === "function"
-						? this.#pruneToolDescriptions()
-						: this.#pruneToolDescriptions,
-				) ?? []);
+			: (normalizeTools(this.#toolsForModel(model), {
+					injectIntent: this.#intentTracing,
+					pruneDescriptions:
+						typeof this.#pruneToolDescriptions === "function"
+							? this.#pruneToolDescriptions()
+							: this.#pruneToolDescriptions,
+				}) ?? []);
 		let context: Context = { systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
 		return context;
@@ -797,6 +817,40 @@ export class Agent {
 	subscribe(fn: (e: AgentEvent) => void): () => void {
 		this.#listeners.add(fn);
 		return () => this.#listeners.delete(fn);
+	}
+
+	/** Register an independently removable hook that runs before queued messages are consumed. */
+	addBeforeQueuedMessageDequeueHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
+		const registration = (signal?: AbortSignal) => hook(signal);
+		this.#beforeQueuedMessageDequeueHooks.add(registration);
+		return () => this.#beforeQueuedMessageDequeueHooks.delete(registration);
+	}
+
+	/** Register an independently removable hook that runs immediately before each model call. */
+	addBeforeModelCallHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
+		const registration = (signal?: AbortSignal) => hook(signal);
+		this.#beforeModelCallHooks.add(registration);
+		return () => this.#beforeModelCallHooks.delete(registration);
+	}
+
+	async #runBeforeModelCallHooks(signal?: AbortSignal): Promise<void> {
+		for (const hook of this.#beforeModelCallHooks) await hook(signal);
+	}
+
+	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {
+		for (const hook of this.#beforeQueuedMessageDequeueHooks) await hook(signal);
+	}
+
+	async #dequeueSteeringMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
+		if (signal?.aborted || this.#steeringQueue.length === 0) return [];
+		await this.#runBeforeQueuedMessageDequeueHooks(signal);
+		return signal?.aborted ? [] : this.#dequeueSteeringMessages();
+	}
+
+	async #dequeueFollowUpMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
+		if (signal?.aborted || this.#followUpQueue.length === 0) return [];
+		await this.#runBeforeQueuedMessageDequeueHooks(signal);
+		return signal?.aborted ? [] : this.#dequeueFollowUpMessages();
 	}
 
 	setProviderResponseInterceptor(fn: SimpleStreamOptions["onResponse"] | undefined): void {
@@ -881,8 +935,9 @@ export class Agent {
 		this.#state.systemPrompt = typeof v === "string" ? [v] : v;
 	}
 
-	setModel(m: Model) {
-		this.#state.model = m;
+	setModel(model: Model) {
+		this.#state.model = model;
+		this.#syncTokenizer(model);
 	}
 
 	setThinkingLevel(l: Effort | undefined) {
@@ -1174,48 +1229,90 @@ export class Agent {
 	/**
 	 * Continue from current context (used for retries and resuming queued messages).
 	 */
-	async continue() {
+	#continuationDequeueSignal(signal?: AbortSignal): AbortSignal | undefined {
+		const signals: AbortSignal[] = [];
+		if (this.#abortController) signals.push(this.#abortController.signal);
+		if (signal) signals.push(signal);
+		if (this.#deadline !== undefined) {
+			const delay = this.#deadline - Date.now();
+			if (delay <= 0) {
+				const controller = new AbortController();
+				controller.abort(new DOMException("Deadline exceeded", "TimeoutError"));
+				signals.push(controller.signal);
+			} else {
+				signals.push(AbortSignal.timeout(delay));
+			}
+		}
+		if (signals.length === 0) return undefined;
+		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+	}
+
+	async continue(signal?: AbortSignal) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
 
-		const messages = this.#state.messages;
-		if (messages.length === 0) {
-			// An empty transcript has nothing to resume, but a queued steer/follow-up
-			// must still be delivered as the opening turn — mirroring the assistant-tail
-			// branch below. Throwing here leaves the message undeliverable, and idle-drain
-			// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
-			// microtask because hasQueuedMessages() never clears, spinning an unbounded
-			// allocation loop until OOM (issue #6344).
-			const queuedSteering = this.#dequeueSteeringMessages();
-			if (queuedSteering.length > 0) {
-				await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true });
-				return;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#runningPrompt = promise;
+		this.#resolveRunningPrompt = resolve;
+		const continuationAbortController = new AbortController();
+		this.#abortController = continuationAbortController;
+		this.#state.isStreaming = true;
+		this.#state.streamMessage = null;
+		this.#state.error = undefined;
+
+		try {
+			const dequeueSignal = this.#continuationDequeueSignal(signal);
+			const messages = this.#state.messages;
+			if (messages.length === 0) {
+				// An empty transcript has nothing to resume, but a queued steer/follow-up
+				// must still be delivered as the opening turn — mirroring the assistant-tail
+				// branch below. Throwing here leaves the message undeliverable, and idle-drain
+				// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
+				// microtask because hasQueuedMessages() never clears, spinning an unbounded
+				// allocation loop until OOM (issue #6344).
+				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
+				if (queuedSteering.length > 0) {
+					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
+					return;
+				}
+				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+				if (queuedFollowUp.length > 0) {
+					await this.#runLoop(queuedFollowUp, undefined, signal, true);
+					return;
+				}
+				throw new Error("No messages to continue from");
 			}
-			const queuedFollowUp = this.#dequeueFollowUpMessages();
-			if (queuedFollowUp.length > 0) {
-				await this.#runLoop(queuedFollowUp);
-				return;
+			if (messages[messages.length - 1].role === "assistant") {
+				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
+				if (queuedSteering.length > 0) {
+					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
+					return;
+				}
+
+				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+				if (queuedFollowUp.length > 0) {
+					await this.#runLoop(queuedFollowUp, undefined, signal, true);
+					return;
+				}
+
+				throw new Error("Cannot continue from message role: assistant");
 			}
-			throw new Error("No messages to continue from");
+
+			await this.#runLoop(undefined, undefined, signal, true);
+		} finally {
+			resolve();
+			if (this.#abortController === continuationAbortController) {
+				this.#state.isStreaming = false;
+				this.#state.streamMessage = null;
+				this.#state.pendingToolCalls.clear();
+				this.#abortController = undefined;
+				if (this.#runningPrompt === promise) {
+					this.#runningPrompt = undefined;
+					this.#resolveRunningPrompt = undefined;
+				}
+			}
 		}
-		if (messages[messages.length - 1].role === "assistant") {
-			const queuedSteering = this.#dequeueSteeringMessages();
-			if (queuedSteering.length > 0) {
-				await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true });
-				return;
-			}
-
-			const queuedFollowUp = this.#dequeueFollowUpMessages();
-			if (queuedFollowUp.length > 0) {
-				await this.#runLoop(queuedFollowUp);
-				return;
-			}
-
-			throw new Error("Cannot continue from message role: assistant");
-		}
-
-		await this.#runLoop(undefined);
 	}
 
 	/**
@@ -1223,17 +1320,29 @@ export class Agent {
 	 * If messages are provided, starts a new conversation turn with those messages.
 	 * Otherwise, continues from existing context.
 	 */
-	async #runLoop(messages?: AgentMessage[], options?: AgentPromptOptions & { skipInitialSteeringPoll?: boolean }) {
+	async #runLoop(
+		messages?: AgentMessage[],
+		options?: AgentPromptOptions & { skipInitialSteeringPoll?: boolean },
+		continuationSignal?: AbortSignal,
+		runStateClaimed = false,
+	) {
 		const model = this.#state.model;
 		if (!model) throw new Error("No model configured");
 
 		let skipInitialSteeringPoll = options?.skipInitialSteeringPoll === true;
 		using _ = new EventLoopKeepalive();
-		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#runningPrompt = promise;
-		this.#resolveRunningPrompt = resolve;
-
-		this.#abortController = new AbortController();
+		if (!runStateClaimed) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#runningPrompt = promise;
+			this.#resolveRunningPrompt = resolve;
+			this.#abortController = new AbortController();
+		}
+		const resolveRun = this.#resolveRunningPrompt;
+		const loopAbortController = this.#abortController;
+		if (!loopAbortController) throw new Error("Agent run state was not initialized");
+		const loopSignal = continuationSignal
+			? AbortSignal.any([loopAbortController.signal, continuationSignal])
+			: loopAbortController.signal;
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
@@ -1353,7 +1462,8 @@ export class Agent {
 			onSseEvent: this.#onSseEvent,
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
-			syncContextBeforeModelCall: async context => {
+			syncContextBeforeModelCall: async (context, signal) => {
+				await this.#runBeforeModelCallHooks(signal);
 				if (this.#listeners.size > 0) {
 					await Bun.sleep(0);
 				}
@@ -1400,29 +1510,37 @@ export class Agent {
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
-			getSteeringMessages: async () => {
+			getSteeringMessages: async signal => {
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
-				return this.#dequeueSteeringMessages();
+				return this.#dequeueSteeringMessagesAfterHooks(signal);
 			},
 			hasSteeringMessages: () => {
 				if (this.#steeringQueue.length === 0) {
 					return { queued: false };
 				}
-				for (const message of this.#steeringQueue) {
+				const messageCount = this.#steeringMode === "one-at-a-time" ? 1 : this.#steeringQueue.length;
+				let hasAgentSteering = false;
+				for (let i = 0; i < messageCount; i++) {
+					const message = this.#steeringQueue[i];
 					const role = "role" in message ? message.role : undefined;
 					const attribution = "attribution" in message ? message.attribution : undefined;
-					if (role === "user" && attribution !== "agent") {
+					if (attribution === "user") {
 						return { queued: true, source: "user" };
 					}
+					if (role !== "user") continue;
+					if (attribution !== "agent") {
+						return { queued: true, source: "user" };
+					}
+					hasAgentSteering = true;
 				}
-				return { queued: true, source: "system" };
+				return { queued: true, source: hasAgentSteering ? "agent" : "system" };
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,
-			getFollowUpMessages: async () => this.#dequeueFollowUpMessages(),
+			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			telemetry: this.#telemetry,
@@ -1434,8 +1552,8 @@ export class Agent {
 
 		try {
 			const stream = messages
-				? agentLoop(messages, context, config, this.#abortController.signal, this.streamFn)
-				: agentLoopContinue(context, config, this.#abortController.signal, this.streamFn);
+				? agentLoop(messages, context, config, loopSignal, this.streamFn)
+				: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
 			for await (const event of stream) {
 				if (event.type === "turn_start") turnOpen = true;
@@ -1502,15 +1620,15 @@ export class Agent {
 				if (!onlyEmpty) {
 					this.appendMessage(partial);
 				} else {
-					if (this.#abortController?.signal.aborted) {
+					if (loopSignal.aborted) {
 						throw new Error("Request was aborted");
 					}
 				}
 			}
 		} catch (err) {
-			const stoppedForAbort = this.#abortController?.signal.aborted === true;
+			const stoppedForAbort = loopSignal.aborted;
 			const errorMessage = stoppedForAbort
-				? abortReasonText(this.#abortController?.signal)
+				? abortReasonText(loopSignal)
 				: err instanceof Error
 					? err.message
 					: String(err);
@@ -1612,13 +1730,15 @@ export class Agent {
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {
-			this.#state.isStreaming = false;
-			this.#state.streamMessage = null;
-			this.#state.pendingToolCalls.clear();
-			this.#abortController = undefined;
-			this.#resolveRunningPrompt?.();
-			this.#runningPrompt = undefined;
-			this.#resolveRunningPrompt = undefined;
+			resolveRun?.();
+			if (this.#abortController === loopAbortController) {
+				this.#state.isStreaming = false;
+				this.#state.streamMessage = null;
+				this.#state.pendingToolCalls.clear();
+				this.#abortController = undefined;
+				this.#runningPrompt = undefined;
+				this.#resolveRunningPrompt = undefined;
+			}
 		}
 	}
 

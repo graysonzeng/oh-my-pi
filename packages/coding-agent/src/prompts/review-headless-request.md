@@ -1,6 +1,6 @@
 ## Code Review Request
 
-### Mode
+Mode: headless review request.
 
 Headless review request
 
@@ -12,7 +12,5 @@ Create **1 reviewer task**, or **2 parallel tasks** only when the packet contain
 Only when one owned scope changes a critical contract boundary—cross-module/public API, persisted schema, authentication/authorization, protocol, compatibility migration, or externally consumed configuration—use `effort: "hi"` for that one task; the reviewer agent caps this at `xhigh`.
 
 {{#if focus}}
-### Focus
-
-{{focus}}
+Focus: {{focus}}
 {{/if}}

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { REQUIRED_CHECKPOINT_SUMMARY_HEADINGS } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type CompactionSettings,
@@ -8,9 +8,9 @@ import {
 	compact,
 	compactionContextTokens,
 	DEFAULT_COMPACTION_SETTINGS,
-	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	hasContextTokenUsage,
 	prepareCompaction,
 	resolveThresholdTokens,
 	shouldCompact,
@@ -31,6 +31,8 @@ import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-l
 import { migrateSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
 import { mockFetch } from "./helpers/fetch-mock";
 import { e2eApiKey } from "./utilities";
+
+const tokenizer = new Tokenizer();
 
 // ============================================================================
 // Test fixtures
@@ -192,6 +194,19 @@ describe("Token calculation", () => {
 		const usage = createMockUsage(0, 0, 0, 0);
 		expect(calculateContextTokens(usage)).toBe(0);
 	});
+
+	it("prefers positive provider context occupancy without accepting an explicit zero", () => {
+		const usage = { ...createMockUsage(0, 0, 0, 0), contextTokens: 120_000 };
+		expect(calculateContextTokens(usage)).toBe(120_000);
+		expect(hasContextTokenUsage(usage)).toBe(true);
+		expect(hasContextTokenUsage({ ...usage, contextTokens: 0 })).toBe(false);
+	});
+
+	it("preserves total-only provider context without accepting response-only totals", () => {
+		const responseOnly = createMockUsage(0, 29, 0, 0);
+		expect(hasContextTokenUsage(responseOnly)).toBe(false);
+		expect(hasContextTokenUsage({ ...responseOnly, totalTokens: 120_000 })).toBe(true);
+	});
 });
 
 describe("getLastAssistantUsage", () => {
@@ -204,7 +219,6 @@ describe("getLastAssistantUsage", () => {
 		];
 
 		const usage = getLastAssistantUsage(entries);
-		expect(usage).not.toBeNull();
 		expect(usage!.input).toBe(200);
 	});
 
@@ -222,7 +236,6 @@ describe("getLastAssistantUsage", () => {
 		];
 
 		const usage = getLastAssistantUsage(entries);
-		expect(usage).not.toBeNull();
 		expect(usage!.input).toBe(100);
 	});
 
@@ -365,7 +378,7 @@ describe("compactionContextTokens", () => {
 	});
 });
 
-describe("estimateTokens excludeEncryptedReasoning (compaction floor)", () => {
+describe("Tokenizer.countMessage excludeEncryptedReasoning (compaction floor)", () => {
 	it("drops encrypted reasoning from the floor estimate but counts it by default", () => {
 		const blob = "blob ".repeat(8_000); // large opaque encrypted-reasoning payload
 		const msg: AssistantMessage = {
@@ -381,8 +394,8 @@ describe("estimateTokens excludeEncryptedReasoning (compaction floor)", () => {
 			provider: "openai",
 			model: "gpt-5.5",
 		};
-		const withBlob = estimateTokens(msg);
-		const flooredEstimate = estimateTokens(msg, { excludeEncryptedReasoning: true });
+		const withBlob = tokenizer.countMessage(msg);
+		const flooredEstimate = tokenizer.countMessage(msg, { excludeEncryptedReasoning: true });
 		// Default counts the blob (providers bill it on replay); the floor excludes it,
 		// so a thinking-heavy turn can't falsely trip compaction on local byte size.
 		expect(withBlob).toBeGreaterThan(flooredEstimate + 1_000);
@@ -401,7 +414,7 @@ describe("estimateTokens excludeEncryptedReasoning (compaction floor)", () => {
 		// Even with the floor option, tool-result content is fully counted — that is
 		// exactly what a before_provider_request compressor (e.g. Headroom) shrinks,
 		// so the floor must still see its real size.
-		expect(estimateTokens(toolMsg, { excludeEncryptedReasoning: true })).toBeGreaterThan(1_000);
+		expect(tokenizer.countMessage(toolMsg, { excludeEncryptedReasoning: true })).toBeGreaterThan(1_000);
 	});
 });
 
@@ -522,7 +535,6 @@ describe("remote compaction setting", () => {
 			remoteEnabled: false,
 			remoteEndpoint: "https://compaction.example.test/summarize",
 		});
-		expect(preparation).toBeDefined();
 		if (!preparation) {
 			throw new Error("Expected compaction preparation");
 		}
@@ -600,7 +612,6 @@ describe("remote compaction setting", () => {
 			keepRecentTokens: 1000,
 			remoteEnabled: true,
 		});
-		expect(preparation).toBeDefined();
 		if (!preparation) {
 			throw new Error("Expected compaction preparation");
 		}
@@ -940,7 +951,6 @@ describe("remote compaction setting", () => {
 			})
 			.join("\n");
 
-		expect(promptText).toContain("Previous snapcompact archive source text:");
 		expect(promptText).toContain("Archived snapcompact source");
 		expect(result.preserveData).toEqual({ otherState: "keep-me" });
 	});
@@ -1132,7 +1142,7 @@ describe("findCutPoint", () => {
 
 		// 20 entries, last assistant has 10000 tokens
 		// keepRecentTokens = 2500: keep entries where diff < 2500
-		const result = findCutPoint(entries, 0, entries.length, 2500);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, 2500);
 
 		// Should cut at a valid cut point (user or assistant message)
 		expect(entries[result.firstKeptEntryIndex].type).toBe("message");
@@ -1142,7 +1152,7 @@ describe("findCutPoint", () => {
 
 	it("should return startIndex if no valid cut points in range", () => {
 		const entries: SessionEntry[] = [createMessageEntry(createAssistantMessage("a"))];
-		const result = findCutPoint(entries, 0, entries.length, 1000);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, 1000);
 		expect(result.firstKeptEntryIndex).toBe(0);
 	});
 
@@ -1154,7 +1164,7 @@ describe("findCutPoint", () => {
 			createMessageEntry(createAssistantMessage("b", createMockUsage(0, 50, 1000, 0))),
 		];
 
-		const result = findCutPoint(entries, 0, entries.length, 50000);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, 50000);
 		expect(result.firstKeptEntryIndex).toBe(0);
 	});
 
@@ -1170,7 +1180,7 @@ describe("findCutPoint", () => {
 		];
 
 		// With keepRecentTokens = 3000, should cut somewhere in Turn 2
-		const result = findCutPoint(entries, 0, entries.length, 3000);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, 3000);
 
 		// If cut at assistant message (not user), should indicate split turn
 		const cutEntry = entries[result.firstKeptEntryIndex] as SessionMessageEntry;
@@ -1383,7 +1393,7 @@ describe("buildSessionContext", () => {
 describe("Large session fixture", () => {
 	it("should find cut point in large session", async () => {
 		const entries = await loadLargeSessionEntries();
-		const result = findCutPoint(entries, 0, entries.length, DEFAULT_COMPACTION_SETTINGS.keepRecentTokens);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, DEFAULT_COMPACTION_SETTINGS.keepRecentTokens);
 
 		// Cut point should be at a message entry (user or assistant)
 		expect(entries[result.firstKeptEntryIndex].type).toBe("message");
@@ -1403,7 +1413,6 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("LLM summarization", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 
 		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
-		expect(preparation).toBeDefined();
 
 		const compactionResult = await compact(preparation!, model, e2eApiKey("ANTHROPIC_API_KEY")!);
 

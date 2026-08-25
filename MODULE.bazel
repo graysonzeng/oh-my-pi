@@ -121,6 +121,17 @@ register_toolchains(
     "@zig_sdk//libc_aware/toolchain:linux_arm64_musl",
 )
 
+# --- Host tools (crate_universe splicing / lockfile generation) ----------------
+# Must be nightly: cargo's rustc target probe inherits user-level RUSTFLAGS
+# (~/.cargo/config.toml commonly carries -Z flags on this repo's nightly
+# toolchain), and a stable host rustc rejects them. Match rust.toolchain.
+rust_host_tools = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
+rust_host_tools.host_tools(
+    name = "rust_host_tools_nightly",
+    version = "nightly/2026-04-29",
+)
+use_repo(rust_host_tools, "rust_host_tools_nightly")
+
 # --- Third-party crates (crate_universe over the cargo workspace) --------------
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.render_config(
@@ -131,6 +142,9 @@ crate.render_config(
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
+    # Nightly host tools (see the rust_host_tools extension above): the
+    # splice's rustc probe must accept user-level -Z RUSTFLAGS.
+    host_tools = "@rust_host_tools_nightly",
     # Exactly the shipped addon triples: crate BUILD files get
     # target_compatible_with selects over this set (defaults omit darwin-x64
     # and musl), and features/deps resolve per-triple from Cargo.lock.
@@ -145,18 +159,25 @@ crate.from_cargo(
     ],
     # The root manifest covers all workspace members, including the vendored
     # brush fork (members so their sources render hermetically; the
-    # [patch.crates-io] entries redirect brush-builtins' registry dep to them).
+    # [patch.crates-io] entry redirects brush-core's registry dep to it).
     manifests = ["//:Cargo.toml"],
 )
 
 # audiopus_sys builds its vendored opus via the `cmake` crate: give the build
-# script a PATH that resolves cmake/make (runner image, GH runners, dev hosts)
-# and the policy override its old CMakeLists needs under CMake 4.x. The cmake
+# script a PATH that resolves cmake/make (runner image, GH runners, NixOS, and
+# other dev hosts) and the policy override its old CMakeLists needs under CMake
+# 4.x. The patch pins CMAKE_INSTALL_LIBDIR=lib because the crate always links
+# from <prefix>/lib while CMake uses lib64 on some aarch64 systems. The cmake
 # crate picks up CC/CFLAGS from the Bazel cc toolchain on its own.
 crate.annotation(
     crate = "audiopus_sys",
+    patches = ["//bazel/patches:audiopus-sys-libdir.patch"],
+    patch_args = ["-p1"],
     build_script_env = {
         "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
+        # Release artifacts must use the vendored Opus rather than a host
+        # pkg-config result whose library may not exist on the target system.
+        "OPUS_NO_PKG": "1",
         # msvc cross only (cmake-rs reads VAR_<triple> before VAR; the key is
         # inert for every other target): without a generator override cmake-rs
         # insists on a Visual Studio generator for msvc targets, which cannot
@@ -174,7 +195,7 @@ crate.annotation(
         # the UBSan runtime. Opus shipped without sanitizers under
         # cargo-zigbuild too.
         "CFLAGS": "-fno-sanitize=undefined",
-        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
     },
 )
 
@@ -190,16 +211,6 @@ crate.annotation(
 crate.annotation(
     crate = "tree-sitter-just",
     build_script_env = {"CFLAGS": "-UNDEBUG"},
-)
-
-# `generate-bindings` is enabled for darwin so miniaudio's Rust bindings match
-# its CoreAudio C layout. Build scripts execute for the host, however, so a
-# macOS-hosted Linux cross-build also sees that feature. Use Cargo's TARGET to
-# keep bindgen darwin-only and select pregenerated bindings for other targets.
-crate.annotation(
-    crate = "maudio-sys",
-    patches = ["//bazel/patches:maudio-sys-target-bindings.patch"],
-    patch_args = ["-p1"],
 )
 
 use_repo(crate, "crates")

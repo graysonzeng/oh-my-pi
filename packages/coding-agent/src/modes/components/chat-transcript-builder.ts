@@ -18,6 +18,7 @@ import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
+import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
@@ -33,6 +34,7 @@ import {
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
+	buildLaunchCompletionBlock,
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
 	splitAssistantMessageToolTimeline,
@@ -61,6 +63,8 @@ import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user
 export interface ChatTranscriptBuilderDeps {
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
+	/** Whether the active registry entry came from a built-in factory. */
+	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
@@ -93,7 +97,9 @@ export class ChatTranscriptBuilder {
 	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
 	#expanded = false;
 
-	constructor(private readonly deps: ChatTranscriptBuilderDeps) {}
+	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
+		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
+	}
 
 	/** Whether the transcript currently holds any rendered rows. */
 	get isEmpty(): boolean {
@@ -159,7 +165,7 @@ export class ChatTranscriptBuilder {
 		const previous = this.#waitingPoll;
 		if (!previous) return;
 		this.#waitingPoll = null;
-		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.container.isBlockUncommitted(previous)) {
+		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.container.canRemoveBlock(previous)) {
 			this.container.removeChild(previous);
 		}
 		previous.seal();
@@ -174,7 +180,7 @@ export class ChatTranscriptBuilder {
 		}
 		if (previous.canBeDisplacedBy(nextToolName)) {
 			this.#todoSnapshot = null;
-			if (this.container.isBlockUncommitted(previous)) {
+			if (this.container.canRemoveBlock(previous)) {
 				this.container.removeChild(previous);
 			}
 			previous.seal();
@@ -321,6 +327,7 @@ export class ChatTranscriptBuilder {
 			proseOnlyThinking,
 		);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
+		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
 		this.#trackExpandable(assistantComponent);
 		this.container.addChild(assistantComponent);
 
@@ -353,6 +360,7 @@ export class ChatTranscriptBuilder {
 				proseOnlyThinking,
 			);
 			component.setImagesVisible(settings.get("terminal.showImages"));
+			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
 			this.#trackExpandable(component);
 			this.container.addChild(component);
 		};
@@ -389,12 +397,12 @@ export class ChatTranscriptBuilder {
 				content.name,
 				content.arguments,
 				{
+					useBuiltInRenderer: this.deps.isBuiltInTool?.(content.name) ?? true,
 					// Stable ids and Kitty placeholder cells keep images anchored
 					// while the transcript viewport scrolls and reflows.
 					showImages: settings.get("terminal.showImages"),
 					editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 					editAllowFuzzy: settings.get("edit.fuzzyMatch"),
-					liveRegion: this.container,
 				},
 				this.deps.getTool?.(content.name),
 				this.deps.ui,
@@ -457,11 +465,11 @@ export class ChatTranscriptBuilder {
 			this.#todoSnapshot = pending;
 		}
 	}
-
 	#appendCustomMessage(message: Extract<AgentMessage, { role: "custom" | "hookMessage" }>): void {
 		if (!message.display) return;
 		if (message.customType === "async-result") {
-			this.container.addChild(buildAsyncResultBlock(message));
+			const component = buildAsyncResultBlock(message);
+			this.container.addChild(component);
 			return;
 		}
 		if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
@@ -492,6 +500,10 @@ export class ChatTranscriptBuilder {
 		if (message.customType === "advisor") {
 			const details = (message as CustomMessage<AdvisorMessageDetails>).details;
 			this.container.addChild(createAdvisorMessageCard(details, () => this.#expanded, theme));
+			return;
+		}
+		if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {
+			this.container.addChild(buildLaunchCompletionBlock(message));
 			return;
 		}
 		if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {

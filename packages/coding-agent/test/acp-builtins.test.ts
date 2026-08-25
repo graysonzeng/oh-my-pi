@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
@@ -240,6 +241,24 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("toggles extended context with explicit controls and reports state", async () => {
+		const { output, runtime } = createRuntime();
+
+		expect(await executeAcpBuiltinSlashCommand("/extended-context off", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context on", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context status", runtime)).toEqual({ consumed: true });
+		expect(output).toEqual([
+			"Extended context disabled.",
+			"Extended context enabled.",
+			"Extended context disabled.",
+			"Extended context is off.",
+		]);
 	});
 
 	it("forces a tool and returns remaining prompt text", async () => {
@@ -532,7 +551,6 @@ describe("ACP builtin slash commands", () => {
 			"/btw hi",
 			"/new",
 			"/drop",
-			"/handoff",
 			"/fork",
 		];
 		for (const cmd of removedCommands) {
@@ -761,6 +779,13 @@ describe("wave 3 commands", () => {
 		expect(output[0]).toContain("TUI editor");
 	});
 
+	it("/todo expand: returns HUD-only usage message in ACP mode", async () => {
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/todo expand", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("interactive HUD");
+	});
+
 	it("/todo unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/todo foobar", runtime);
@@ -816,6 +841,28 @@ describe("wave 3 commands", () => {
 		const result = await executeAcpBuiltinSlashCommand("/memory unknownverb", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Usage: /memory");
+	});
+
+	it("/memory stats: tells the user memory is off instead of naming a nonexistent 'off backend'", async () => {
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/memory stats", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toBe("Memory backend is off — there is nothing to show.");
+	});
+
+	it("/memory diagnose: tells the user memory is off instead of naming a nonexistent 'off backend'", async () => {
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/memory diagnose", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toBe("Memory backend is off — there is nothing to show.");
+	});
+
+	it("/memory stats: still names the backend when a real backend simply has no stats hook", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.settings.set("memory.backend" as never, "local" as never);
+		const result = await executeAcpBuiltinSlashCommand("/memory stats", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toBe("Memory stats is not available for the local backend.");
 	});
 
 	// /todo start fuzzy match
@@ -1063,8 +1110,7 @@ describe("wave 5 — adapters and polish", () => {
 			// Without this assertion, the command could succeed via a side-effect-free
 			// path that prints the success message without writing the host config.
 			expect(spy).toHaveBeenCalledTimes(1);
-			const [configPath, name, hostConfig] = spy.mock.calls[0]!;
-			expect(typeof configPath).toBe("string");
+			const [, name, hostConfig] = spy.mock.calls[0]!;
 			expect(name).toBe("foo");
 			expect(hostConfig).toMatchObject({ host: "x", username: "y" });
 		} finally {
@@ -1128,7 +1174,7 @@ describe("wave 5 — adapters and polish", () => {
 			contextWindow: 200_000,
 		};
 		(session as unknown as Record<string, unknown>).skills = [];
-		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] } };
+		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] }, tokenizer: new Tokenizer() };
 		(session as unknown as Record<string, unknown>).systemPrompt = ["You are a helpful assistant."];
 		session.messages = [
 			{ role: "user", content: "Hello, how are you?" },

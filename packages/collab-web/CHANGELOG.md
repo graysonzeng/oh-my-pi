@@ -2,6 +2,24 @@
 
 ## [17.1.9] - 2026-08-07
 
+## [17.3.8] - 2026-08-19
+
+### Fixed
+
+- The ask tool card now renders the note the user attached to their answer; previously it was dropped from HTML exports and the collab guest view.
+
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Updated the Markdown parsing implementation to use @oh-my-pi/pi-utils.
+
+## [17.2.2] - 2026-07-31
+
+### Fixed
+
+- Fixed an issue where the guest UI could incorrectly appear idle (such as the loading spinner disappearing) while the host agent was still running after a reconnection, and ensured tool cards are properly cleared if a connection drop occurs.
+
 ## [17.2.0] - 2026-07-30
 
 ### Fixed

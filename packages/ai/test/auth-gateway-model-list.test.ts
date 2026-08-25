@@ -32,6 +32,10 @@ test("model listing exposes one provider-qualified route per upstream model", as
 					owned_by: "anthropic",
 					api: "mock",
 					supported_endpoint_types: [],
+					display_name: "shared-model",
+					context_length: 200_000,
+					max_output_tokens: 32_768,
+					input_modalities: ["text"],
 				},
 				{
 					id: "devin/shared-model",
@@ -39,6 +43,10 @@ test("model listing exposes one provider-qualified route per upstream model", as
 					owned_by: "devin",
 					api: "mock",
 					supported_endpoint_types: [],
+					display_name: "shared-model",
+					context_length: 200_000,
+					max_output_tokens: 32_768,
+					input_modalities: ["text"],
 				},
 			],
 		});

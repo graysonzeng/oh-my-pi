@@ -1,8 +1,18 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
+import {
+	type BlobDestinationId,
+	type BlobDestinationMetadata,
+	BUILTIN_BLOB_DESTINATIONS,
+} from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import {
+	COMPACTION_METHOD_CHOICES,
+	type CompactionMethod,
+	DEFAULT_COMPACTION_METHOD_ORDER,
+} from "../session/compaction-methods";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -37,7 +47,12 @@ import {
 	TTS_LOCAL_VOICE_VALUES,
 } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
-import { SEARCH_PROVIDER_CHOICES, type SearchProviderId } from "../web/search/types";
+import {
+	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
+	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
+	SEARCH_PROVIDER_CHOICES,
+	type SearchProviderId,
+} from "../web/search/types";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -72,6 +87,67 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export type ModelRoleStorage = "global" | "project";
+
+const BUILTIN_BLOB_DESTINATION_METADATA: readonly BlobDestinationMetadata<BlobDestinationId>[] =
+	Object.values(BUILTIN_BLOB_DESTINATIONS);
+
+const BLOB_BACKEND_CHOICES = BUILTIN_BLOB_DESTINATION_METADATA.filter(
+	destination =>
+		destination.id === "provider-files" ||
+		(destination.directImage && destination.status !== "incompatible" && destination.status !== "defunct"),
+).map(destination => ({
+	value: destination.id,
+	label: destination.label,
+	description: destination.reason ?? destination.family,
+}));
+
+/** Composer shape id; extensions may register additional values at runtime. */
+export type ComposerShape = string;
+
+/** Built-in composer choices and their shared settings/setup copy. */
+export const BUILTIN_COMPOSER_SHAPES = [
+	{
+		value: "box",
+		label: "Rounded Box (Default)",
+		description: "Status line embedded in top border, compact 2-line prompt",
+	},
+	{
+		value: "claude",
+		label: "Claude Code",
+		description: "Full-width horizontal rules above and below, status line at bottom",
+	},
+	{
+		value: "pi",
+		label: "Pi",
+		description: "Framed horizontal rules with status line at bottom",
+	},
+	{
+		value: "borderless",
+		label: "Borderless",
+		description: "Clean prompt glyph with status line at bottom, no box borders",
+	},
+	{
+		value: "rule",
+		label: "Top Rule Dock",
+		description: "Single top rule with status docked onto it and below",
+	},
+	{
+		value: "field",
+		label: "Compact Field",
+		description: "Filled one-row field with accent end caps",
+	},
+	{
+		value: "rail",
+		label: "Accent Rail",
+		description: "Filled one-row field anchored by a single accent rail",
+	},
+] as const;
+
+/** Built-in composer ids used by tests and non-runtime consumers. */
+export const COMPOSER_SHAPE_VALUES = BUILTIN_COMPOSER_SHAPES.map(shape => shape.value);
+
+export type ContextLineMode = "off" | "percentage" | "annotated" | "embedded";
+export const CONTEXT_LINE_MODE_VALUES = ["off", "percentage", "annotated", "embedded"] as const;
 
 export type SettingTab =
 	| "appearance"
@@ -122,8 +198,8 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  * Ungrouped settings render first, before any section heading.
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
-	appearance: ["Theme", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision", "Model"],
+appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
+model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision", "Model"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -149,6 +225,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Output Limits",
 		"Execution",
 		"Discovery & MCP",
+		"Extensions",
 		"Developer",
 	],
 	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
@@ -195,6 +272,12 @@ interface UiBase {
 	group?: string;
 	label: string;
 	description: string;
+	/**
+	 * Risk note. Marks the settings row with a warning glyph and renders above
+	 * the description in warning styling. For settings that can get the user
+	 * rate-limited, flagged, or banned — not for merely advanced options.
+	 */
+	warning?: string;
 	/** Condition function name - setting only shown when true */
 	condition?: string;
 }
@@ -383,6 +466,8 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 ];
 
+const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
+
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// General settings (no UI)
@@ -464,17 +549,6 @@ export const SETTINGS_SCHEMA = {
 				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
 		},
 	},
-	"advisor.subagents": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "model",
-			group: "Advisor",
-			label: "Advisor for Subagents",
-			description: "Also enable the advisor on spawned task/eval subagents.",
-			condition: "advisorEnabled",
-		},
-	},
 	"advisor.syncBacklog": {
 		type: "enum",
 		values: ["off", "1", "3", "5"] as const,
@@ -535,6 +609,31 @@ export const SETTINGS_SCHEMA = {
 			label: "Max In-Flight Requests",
 			description:
 				'Maximum concurrent LLM requests per provider id (for example "openai" or "anthropic"), shared across local OMP processes with this config root. Omitted providers are unlimited.',
+		},
+	},
+
+	"providers.openai-codex.codeMode": {
+		type: "enum",
+		values: ["off", "on", "auto"] as const,
+		default: "off",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Code Mode",
+			description:
+				"Route Codex code_mode_only models (GPT-5.6) through the eval tool as a programmatic execution surface: the direct tool surface collapses to eval/ask/todo and every other session tool is invoked from eval cells. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
+		},
+	},
+
+	"providers.openai-codex.codeModeDirectTools": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Code Mode Direct Tools",
+			description:
+				"Extra tool names to keep directly callable alongside eval/ask/todo when Codex Code Mode is active.",
 		},
 	},
 
@@ -628,6 +727,18 @@ export const SETTINGS_SCHEMA = {
 			description: "Use blue instead of green for diff additions",
 		},
 	},
+	// Composer
+	"composer.shape": {
+		type: "string",
+		default: "box",
+		ui: {
+			tab: "appearance",
+			group: "Composer",
+			label: "Composer Shape",
+			description: "Visual layout of the input editor and status line",
+			options: "runtime",
+		},
+	},
 
 	// Status line
 	"statusLine.preset": {
@@ -668,6 +779,36 @@ export const SETTINGS_SCHEMA = {
 				{ value: "block", label: "Block", description: "Solid blocks" },
 				{ value: "none", label: "None", description: "Space only" },
 				{ value: "ascii", label: "ASCII", description: "Greater-than signs" },
+			],
+		},
+	},
+
+	"statusLine.contextLine": {
+		type: "enum",
+		values: CONTEXT_LINE_MODE_VALUES,
+		default: "embedded",
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Context-Reactive Line",
+			description: "How the line between the left and right segments reflects context usage (box composer only)",
+			options: [
+				{ value: "off", label: "Off", description: "Solid accent line, no context feedback" },
+				{
+					value: "percentage",
+					label: "Percentage",
+					description: "Used portion in accent color, remainder dimmed",
+				},
+				{
+					value: "annotated",
+					label: "Annotated",
+					description: "Percentage plus ticks at the speculative and auto-compaction boundaries",
+				},
+				{
+					value: "embedded",
+					label: "Embedded",
+					description: "Annotated line with the context percentage and window embedded in the gauge",
+				},
 			],
 		},
 	},
@@ -875,6 +1016,110 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"images.urls.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Serve Images as URLs",
+			description:
+				"Publish outgoing images through the configured backend chain and send URL-fetching providers short URLs instead of inline base64. Falls back to inline automatically when every backend or a provider fetch fails",
+		},
+	},
+
+	"images.urls.backends": {
+		type: "array",
+		default: ["provider-files", "tailscale", "cloudflared", "litterbox"] as BlobDestinationId[],
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL Backends",
+			description: "Ordered destinations tried when publishing images for provider access",
+			options: BLOB_BACKEND_CHOICES,
+			ordered: true,
+		},
+	},
+
+	"images.urls.options": {
+		type: "record",
+		default: {} as Partial<Record<BlobDestinationId, Record<string, unknown>>>,
+	},
+
+	"images.urls.credentials": {
+		type: "record",
+		default: {} as Partial<Record<BlobDestinationId, Record<string, string>>>,
+		credential: true,
+	},
+
+	"images.urls.command": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image Upload Command",
+			description:
+				"Argv template for the command backend; {file} is the image path, {mime}/{ext} optional. The last URL printed on stdout is used (e.g. pasta -b -f {file})",
+		},
+	},
+
+	"images.urls.publicBaseUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL Public Base",
+			description: "Externally reachable base URL fronting the blob server (required for ssh, optional for direct)",
+		},
+	},
+
+	"images.urls.ttlHours": {
+		type: "number",
+		default: 72,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL Lifetime (hours)",
+			description:
+				"Serving window for locally hosted image URLs, measured from the last time a conversation sent them; resuming a conversation re-arms the window at the same link. 0 keeps links alive while the broker runs",
+		},
+	},
+
+	"images.urls.bindHost": {
+		type: "string",
+		default: "127.0.0.1",
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL Bind Host",
+			description: "Host the blob server binds to; loopback for tunnels, 0.0.0.0 for direct serving",
+		},
+	},
+
+	"images.urls.sshTarget": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL SSH Target",
+			description: "user@host destination for the ssh reverse forward",
+		},
+	},
+
+	"images.urls.sshRemotePort": {
+		type: "number",
+		default: 8787,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL SSH Remote Port",
+			description: "Remote listen port of the ssh reverse forward that your web server proxies to",
+		},
+	},
+
 	"tui.maxInlineImageColumns": {
 		type: "number",
 		default: 100,
@@ -894,6 +1139,34 @@ export const SETTINGS_SCHEMA = {
 		default: 8,
 		description:
 			"Maximum number of inline images kept as live terminal graphics (default 8). Older images fall back to a text placeholder via a full redraw once the limit is exceeded. Set to 0 to keep every image (no limit).",
+	},
+	"tui.resizeScrollback": {
+		type: "enum",
+		values: ["append", "rebuild", "preserve"] as const,
+		default: "rebuild",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Resize Scrollback",
+			description: "How a settled terminal resize refreshes transcript rows retained in terminal scrollback",
+			options: [
+				{
+					value: "append",
+					label: "Append",
+					description: "Replay the transcript at the new width below retained history",
+				},
+				{
+					value: "rebuild",
+					label: "Rebuild",
+					description: "Erase all terminal scrollback, then replay one current-width transcript",
+				},
+				{
+					value: "preserve",
+					label: "Preserve",
+					description: "Repaint only the viewport and keep history wrapped at its old width",
+				},
+			],
+		},
 	},
 
 	"terminal.showProgress": {
@@ -976,17 +1249,6 @@ export const SETTINGS_SCHEMA = {
 			description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
 		},
 	},
-	"tui.scrollbackRebuild": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "appearance",
-			group: "Display",
-			label: "Rewrite Scrollback",
-			description:
-				"Erase and replay terminal scrollback when a block's final form replaces its live preview. When off (default), stale preview copies remain in history and the final content is appended below.",
-		},
-	},
 
 	"display.shimmer": {
 		type: "enum",
@@ -1016,6 +1278,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.hideToolActivity": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Hide Tool Activity",
+			description: "Hide model-initiated tool calls and results from the transcript",
+		},
+	},
+
 	"display.showTokenUsage": {
 		type: "boolean",
 		default: false,
@@ -1034,7 +1307,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "appearance",
 			group: "Display",
 			label: "Cache Miss Marker",
-			description: "Show a divider above an assistant turn whose request lost (missed) the prompt cache",
+			description: "Show a divider after an assistant turn whose request lost (missed) the prompt cache",
 		},
 	},
 
@@ -1123,6 +1396,19 @@ export const SETTINGS_SCHEMA = {
 			label: "Omit Thinking summaries",
 			description:
 				"Instruct upstream providers to completely omit thinking summaries from responses (where supported)",
+		},
+	},
+
+	externalThinking: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "External Thinking",
+			description: "Private scratchpad; not shown to user. Disables supported GPT, Claude, and Gemini reasoning",
+			warning:
+				"At your own risk: providers have flagged this request shape as abuse, up to account-level enforcement",
 		},
 	},
 
@@ -1523,7 +1809,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Retry & Fallback",
 			label: "Max Retry Delay",
 			description:
-				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows).",
+				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling — to let the session auto-resume through provider-stated quota resets.",
 		},
 	},
 	"retry.modelFallback": {
@@ -1731,7 +2017,7 @@ export const SETTINGS_SCHEMA = {
 
 	autocompleteMaxVisible: {
 		type: "number",
-		default: 5,
+		default: 10,
 		ui: {
 			tab: "interaction",
 			group: "Input",
@@ -1745,6 +2031,42 @@ export const SETTINGS_SCHEMA = {
 				{ value: "15", label: "15 items" },
 				{ value: "20", label: "20 items" },
 			],
+		},
+	},
+
+	"spelling.typoDetection": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Typo Detection (macOS)",
+			description: "Mark misspelled prompt words with the active macOS dictionaries",
+			condition: "macOS",
+		},
+	},
+
+	"spelling.autocomplete": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Word Autocomplete (macOS)",
+			description: "Show macOS dictionary word completions as inline hints accepted with Tab",
+			condition: "macOS",
+		},
+	},
+
+	"spelling.autocorrect": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Autocorrect (macOS)",
+			description: "Apply confident macOS spelling corrections after completed words",
+			condition: "macOS",
 		},
 	},
 
@@ -1820,6 +2142,21 @@ export const SETTINGS_SCHEMA = {
 			group: "Startup & Updates",
 			label: "Check for Updates",
 			description: "Check for omp updates on startup",
+		},
+	},
+	"update.channel": {
+		type: "enum",
+		values: ["stable", "canary"] as const,
+		default: "stable",
+		ui: {
+			tab: "interaction",
+			group: "Startup & Updates",
+			label: "Update Channel",
+			description: "Update channel used by omp update and the startup update check",
+			options: [
+				{ value: "stable", label: "Stable" },
+				{ value: "canary", label: "Canary" },
+			],
 		},
 	},
 
@@ -2139,6 +2476,21 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Premium long-context tiers (OpenAI GPT-5.6 bills 2x input / 1.5x output
+	// above 272K input tokens). Off caps affected models at the threshold so
+	// compaction kicks in before any request crosses into premium billing.
+	extendedContext: {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "General",
+			label: "Extended Context",
+			description:
+				"Use premium long-context windows on models that bill extra past a threshold (e.g. GPT-5.6 1M charges 2x input above 272K); off caps them at the standard-pricing window",
+		},
+	},
+
 	// Compaction
 	"compaction.enabled": {
 		type: "boolean",
@@ -2162,39 +2514,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"compaction.strategy": {
-		type: "enum",
-		values: ["context-full", "handoff", "shake", "snapcompact", "off"] as const,
-		default: "snapcompact",
+	"compaction.methodOrder": {
+		type: "array",
+		default: [...DEFAULT_COMPACTION_METHOD_ORDER],
 		ui: {
 			tab: "context",
 			group: "Compaction",
-			label: "Compaction Strategy",
+			label: "Compaction Method Order",
 			description:
-				"Choose in-place context-full maintenance, auto-handoff, surgical shake (drop heavy content), snapcompact (archive history as dense images), or disable auto maintenance (off)",
-			options: [
-				{
-					value: "context-full",
-					label: "Context-full",
-					description: "Summarize in-place and keep the current session",
-				},
-				{ value: "handoff", label: "Handoff", description: "Generate handoff and continue in a new session" },
-				{
-					value: "shake",
-					label: "Shake",
-					description: "Drop heavy content (tool results + large blocks) in place; recover via artifact",
-				},
-				{
-					value: "snapcompact",
-					label: "Snapcompact",
-					description: "Archive history onto dense bitmap images the model reads back; no LLM call",
-				},
-				{
-					value: "off",
-					label: "Off",
-					description: "Disable automatic context maintenance (same behavior as Auto-compact off)",
-				},
-			],
+				"Preferred fallback order for automatic context maintenance; unavailable or failed methods advance to the next choice",
+			options: COMPACTION_METHOD_CHOICES,
+			ordered: true,
 		},
 	},
 
@@ -2260,17 +2590,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"compaction.remoteEnabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "context",
-			group: "Compaction",
-			label: "Remote Compaction",
-			description: "Use remote compaction endpoints when available instead of local summarization",
-		},
-	},
-
 	"compaction.remoteStreamingV2Enabled": {
 		type: "boolean",
 		default: true,
@@ -2279,6 +2598,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Compaction",
 			label: "Remote Compaction V2",
 			description: "Use Responses streaming compaction for compatible remote compaction models",
+		},
+	},
+
+	"compaction.asyncEnabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Async Compaction",
+			description:
+				"Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed",
 		},
 	},
 
@@ -3249,6 +3580,27 @@ export const SETTINGS_SCHEMA = {
 			description: "Reject edits anchored on lines a prior read/search never displayed in full",
 		},
 	},
+	"edit.blackbox.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "files",
+			group: "Editing",
+			label: "Record Parse Regressions",
+			description: "Append full before/after source when an edit introduces an AST parse failure",
+		},
+	},
+	"edit.autoRepair.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "files",
+			group: "Editing",
+			label: "Auto-Repair Parse Regressions",
+			description:
+				"When an edit breaks a file's AST parse, ask the smol model to fix the broken region (validated by re-parse; falls back to a warning)",
+		},
+	},
 
 	readLineNumbers: {
 		type: "boolean",
@@ -3404,6 +3756,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"lsp.shared": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "files",
+			group: "LSP",
+			label: "Shared Language Servers",
+			description:
+				"Share one language server per project across omp instances via the daemon broker (falls back to private servers when unavailable)",
+		},
+	},
+
 	"lsp.formatOnWrite": {
 		type: "boolean",
 		default: false,
@@ -3461,7 +3825,7 @@ export const SETTINGS_SCHEMA = {
 
 	"bash.autoBackground.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "shell",
 			group: "Bash",
@@ -3597,6 +3961,22 @@ export const SETTINGS_SCHEMA = {
 			label: "Julia Eval Backend",
 			description: "Allow the eval tool to dispatch Julia cells to the persistent Julia kernel",
 		},
+	},
+
+	"eval.autoBackground.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Eval Auto-Background",
+			description: "Automatically background long-running eval cells and deliver the result later",
+		},
+	},
+
+	"eval.autoBackground.thresholdMs": {
+		type: "number",
+		default: 60_000,
 	},
 
 	// Runtime knobs (consumed by eval backends and the /python slash command)
@@ -3919,23 +4299,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Computer",
-			description: "Enable native host-desktop screenshots and input for OpenAI computer use",
-		},
-	},
-
-	"computer.backend": {
-		type: "enum",
-		values: ["auto", "native"] as const,
-		default: "auto",
-		ui: {
-			tab: "tools",
-			group: "Computer",
-			label: "Computer Backend",
-			description: "Select automatic or explicit platform-native desktop capture and input",
-			options: [
-				{ value: "auto", label: "Auto" },
-				{ value: "native", label: "Native" },
-			],
+			description: "Enable the scriptable host-desktop control tool (screenshots, input, accessibility)",
 		},
 	},
 
@@ -3952,7 +4316,7 @@ export const SETTINGS_SCHEMA = {
 
 	"computer.maxWidth": {
 		type: "number",
-		default: 1920,
+		default: 3840,
 		ui: {
 			tab: "tools",
 			group: "Computer",
@@ -3963,7 +4327,7 @@ export const SETTINGS_SCHEMA = {
 
 	"computer.maxHeight": {
 		type: "number",
-		default: 1200,
+		default: 2400,
 		ui: {
 			tab: "tools",
 			group: "Computer",
@@ -4084,6 +4448,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"security.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Security",
+			description:
+				"Enable OMP-native security scan planning, execution, and the read-only security:// resource namespace",
+		},
+	},
+
 	"ask.enabled": {
 		type: "boolean",
 		default: true,
@@ -4115,6 +4491,29 @@ export const SETTINGS_SCHEMA = {
 			label: "Browser CDP URL",
 			description:
 				"Default HTTP CDP discovery endpoint (for example http://127.0.0.1:9222) to attach to instead of launching a browser. Explicit app.cdp_url or app.path on the tool call take precedence.",
+		},
+	},
+
+	"browser.relay": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser Relay",
+			description:
+				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser tool needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
+		},
+	},
+
+	"browser.relayUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser Relay URL",
+			description: "omp browser relay endpoint (default http://127.0.0.1:9224).",
 		},
 	},
 
@@ -4264,7 +4663,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "xd:// Tools",
 			description:
-				"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Disable to expose every enabled tool top-level.",
+				"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions without a granted write tool skip mounting and expose every tool top-level. Disable to expose every enabled tool top-level.",
 		},
 	},
 
@@ -5095,9 +5494,13 @@ export const SETTINGS_SCHEMA = {
 
 	"task.agentModelOverrides": {
 		type: "record",
-		default: {} as Record<string, string>,
+		default: DEFAULT_AGENT_MODEL_OVERRIDES,
 	},
 	"task.agentPrewalk": {
+		type: "record",
+		default: {} as Record<string, string>,
+	},
+	"task.agentAdvisor": {
 		type: "record",
 		default: {} as Record<string, string>,
 	},
@@ -5109,7 +5512,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Generic Task Prewalk",
 			description:
-				"Arm prewalk for the bundled generic `task` subagent: it starts on its resolved model, plans and begins the implementation, then hands off to the 'smol' role at its first edit/write. Per-agent overrides (task.agentPrewalk, toggled with P in /agents) and user agent `prewalk` frontmatter apply regardless of this toggle.",
+				"Arm prewalk for the bundled generic `task` subagent: it starts on its resolved model, plans and begins the implementation, then hands off to the 'smol' role at its first edit/write. Per-agent overrides (task.agentPrewalk, configured from the /agents hub) and user agent `prewalk` frontmatter apply regardless of this toggle.",
 		},
 	},
 
@@ -5275,6 +5678,23 @@ export const SETTINGS_SCHEMA = {
 			options: SEARCH_PROVIDER_CHOICES,
 		},
 	},
+	"providers.webSearchTimeoutSeconds": {
+		type: "number",
+		default: DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Web Search Timeout",
+			description: `Hard timeout for each provider's search transport before web_search advances to the next fallback, in seconds (maximum ${MAX_WEB_SEARCH_TIMEOUT_SECONDS})`,
+			options: [
+				{ value: "30", label: "30 seconds" },
+				{ value: "60", label: "1 minute" },
+				{ value: "120", label: "2 minutes" },
+				{ value: "180", label: "3 minutes" },
+				{ value: "300", label: "5 minutes" },
+			],
+		},
+	},
 	"providers.webSearchGeminiModel": {
 		type: "string",
 		default: undefined,
@@ -5360,13 +5780,14 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.tts": {
 		type: "enum",
-		values: ["auto", "local", "xai"] as const,
+		values: ["auto", "local", "xai", "deepinfra"] as const,
 		default: "auto",
 		ui: {
 			tab: "providers",
 			group: "Services",
 			label: "Text-to-Speech Provider",
-			description: "Backend for the tts tool: local on-device neural TTS (Kokoro-82M) or xAI Grok Voice",
+			description:
+				"Backend for the tts tool: local on-device neural TTS (Kokoro-82M), xAI Grok Voice, or DeepInfra speech",
 			options: [
 				{
 					value: "auto",
@@ -5378,6 +5799,11 @@ export const SETTINGS_SCHEMA = {
 					value: "xai",
 					label: "xAI Grok Voice",
 					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
+				},
+				{
+					value: "deepinfra",
+					label: "DeepInfra Speech",
+					description: "Requires DEEPINFRA_API_KEY; MP3 or WAV",
 				},
 			],
 		},
@@ -5542,14 +5968,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 	"features.unexpectedStopDetection": {
-		type: "boolean",
-		default: false,
+		type: "enum",
+		values: ["none", "mechanical", "smart"] as const,
+		default: "mechanical",
 		ui: {
 			tab: "interaction",
 			group: "Agent",
-			label: "Detect unexpected stops",
+			label: "Unexpected Stops",
 			description:
-				"Use a small model to detect when the assistant says it will continue but stops without tool calls; automatically prompt it to continue.",
+				"Automatically recover when the assistant stops without a visible message. Smart also classifies text-only stops with a small model.",
+			options: [
+				{ value: "none", label: "None", description: "Disabled" },
+				{
+					value: "mechanical",
+					label: "Mechanical",
+					description: "Retry stops with no visible assistant message; tool calls are excluded (default)",
+				},
+				{
+					value: "smart",
+					label: "Smart",
+					description: "Mechanical + small-model classification of text-only stops",
+				},
+			],
 		},
 	},
 	"providers.unexpectedStopModel": {
@@ -5561,8 +6001,8 @@ export const SETTINGS_SCHEMA = {
 			group: "Tiny Model",
 			label: "Unexpected Stop Model",
 			description:
-				"Classifier for unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.",
-			condition: "unexpectedStopDetection",
+				"Classifier for Smart unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.",
+			condition: "unexpectedStopSmart",
 			options: TINY_MEMORY_MODEL_OPTIONS,
 		},
 	},
@@ -5597,6 +6037,39 @@ export const SETTINGS_SCHEMA = {
 				{ value: "auto", label: "Auto", description: "Use model/provider default websocket behavior" },
 				{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },
 				{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
+			],
+		},
+	},
+
+	"providers.cacheRetention": {
+		type: "enum",
+		values: ["auto", "short", "long", "none"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Prompt Cache Retention",
+			description:
+				"Prompt-cache retention forwarded to providers that support it (Anthropic, Bedrock, OpenRouter, OpenAI)",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description:
+						"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+				},
+				{
+					value: "short",
+					label: "Short (5m)",
+					description:
+						"Cheapest cache writes; Anthropic keeps the entry warm with bounded keep-alive refreshes while idle",
+				},
+				{
+					value: "long",
+					label: "Long (1h)",
+					description: "1h TTL where the provider supports it; pricier writes, no keep-alive refresh requests",
+				},
+				{ value: "none", label: "Off", description: "Disable prompt caching and cache-affinity routing" },
 			],
 		},
 	},
@@ -5695,7 +6168,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Codex Auto-Redeem Saved Resets",
 			description:
-				"When a turn is blocked by the Codex weekly limit on the active account and no other account is available, run the conservative saved-reset check. unset asks before spending the first eligible reset, yes spends eligible resets without prompting, and no disables the check entirely. Requires retries enabled.",
+				"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend, yes spends without prompting, and no disables both checks.",
 			options: [
 				{
 					value: "unset",
@@ -5715,7 +6188,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Codex Auto-Redeem Min Block",
 			description:
-				"Only auto-redeem when the natural weekly reset is at least this many minutes away (don't spend a ~30-day credit to save a short wait).",
+				"Only auto-redeem when the natural unblock — the latest reset among the exhausted 5h/weekly windows — is at least this many minutes away (don't spend a scarce credit to save a short wait). Raise it (e.g. 360) to ignore 5h-only blocks.",
 		},
 	},
 	"codexResets.keepCredits": {
@@ -5725,7 +6198,19 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Codex Auto-Redeem Reserve",
-			description: "Never auto-spend below this many saved resets (0 = the last credit may be spent automatically).",
+			description:
+				"Never auto-spend below this many saved resets (0 = the last credit may be spent automatically). Credits about to expire are exempt — a reserved credit that expires preserves nothing.",
+		},
+	},
+	"codexResets.salvageHorizonHours": {
+		type: "number",
+		default: 12,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Reset Salvage Horizon",
+			description:
+				"Spend a saved Codex reset automatically when it would otherwise expire within this many hours and either chat window (5h or weekly) has meaningful usage to restore (0 disables expiry salvage).",
 		},
 	},
 	"provider.appendOnlyContext": {
@@ -5750,17 +6235,11 @@ export const SETTINGS_SCHEMA = {
 	"exa.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "providers", group: "Services", label: "Exa", description: "Master toggle for all Exa search tools" },
-	},
-
-	"exa.enableSearch": {
-		type: "boolean",
-		default: true,
 		ui: {
 			tab: "providers",
 			group: "Services",
-			label: "Exa Search",
-			description: "Enable Exa basic search, deep search, code search, and crawl tools",
+			label: "Exa",
+			description: "Enable the Exa web search provider",
 		},
 	},
 
@@ -5772,28 +6251,6 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Exa Search Delay",
 			description: "Minimum delay between Exa web search requests in milliseconds; set 0 to disable pacing",
-		},
-	},
-
-	"exa.enableResearcher": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Exa Researcher",
-			description: "Enable the Exa researcher tool for AI-powered deep research",
-		},
-	},
-
-	"exa.enableWebsets": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Exa Websets",
-			description: "Enable Exa webset management and enrichment tools",
 		},
 	},
 
@@ -5841,6 +6298,11 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 	},
 
+	"searxng.safesearch": {
+		type: "number",
+		default: undefined,
+	},
+
 	"commit.mapReduceEnabled": { type: "boolean", default: true },
 
 	"commit.mapReduceMinFiles": { type: "number", default: 4 },
@@ -5852,6 +6314,18 @@ export const SETTINGS_SCHEMA = {
 	"commit.mapReduceMaxConcurrency": { type: "number", default: 5 },
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
+
+	"extensionHandlers.toolCallTimeoutMs": {
+		type: "number",
+		default: 30_000,
+		ui: {
+			tab: "tools",
+			group: "Extensions",
+			label: "Tool Call Handler Timeout (ms)",
+			description:
+				"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
+		},
+	},
 
 	"dev.autoqa": {
 		type: "boolean",
@@ -6027,15 +6501,15 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	methodOrder: CompactionMethod[];
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number | undefined;
 	keepRecentTokens: number;
 	midTurnEnabled: boolean;
+	asyncEnabled: boolean;
 	handoffSaveToDisk: boolean;
 	autoContinue: boolean;
-	remoteEnabled: boolean;
 	remoteEndpoint: string | undefined;
 	remoteStreamingV2Enabled: boolean;
 	v2RetainedMessageBudget: number;
@@ -6136,10 +6610,7 @@ export interface TtsrSettings {
 
 export interface ExaSettings {
 	enabled: boolean;
-	enableSearch: boolean;
 	searchDelayMs: number;
-	enableResearcher: boolean;
-	enableWebsets: boolean;
 }
 
 export interface StatusLineSettings {
@@ -6190,6 +6661,7 @@ export interface CodexResetsSettings {
 	autoRedeem: CodexAutoRedeemMode;
 	minBlockedMinutes: number;
 	keepCredits: number;
+	salvageHorizonHours: number;
 }
 
 export interface GcSettings {

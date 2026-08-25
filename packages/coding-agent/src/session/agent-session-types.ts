@@ -39,6 +39,7 @@ import type { ResolvedModelOptimization } from "../model-optimization";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
+import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -47,6 +48,12 @@ export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
 /** Options controlling session disposal. */
 export interface AgentSessionDisposeOptions {
 	mnemopiConsolidateTimeoutMs?: number;
+	/**
+	 * Deadline for the settle/drain wait before the terminal memory release
+	 * (default 5s). The bounded-teardown paths (signal handlers, tests) may
+	 * shorten it; late event handlers are still finalized after they settle.
+	 */
+	drainTimeoutMs?: number;
 	/**
 	 * Postmortem reason that triggered this dispose (signal/fatal teardown
 	 * paths). When set, the persisted `session_exit` diagnostic records it
@@ -95,6 +102,14 @@ export interface UsageFallbackConfirmation {
 	remainingPercent: number | undefined;
 }
 
+/**
+ * Confirms whether a reserve-triggered model fallback may proceed.
+ *
+ * Interactive callers use the confirmation details to present the pending
+ * route change; aborting `signal` cancels that pending confirmation.
+ */
+export type UsageFallbackConfirmer = (confirmation: UsageFallbackConfirmation, signal: AbortSignal) => Promise<boolean>;
+
 /** Identifies a retry fallback chain already entered during startup model resolution. */
 export interface InitialRetryFallbackState {
 	/** Role whose configured primary was unavailable. */
@@ -110,8 +125,12 @@ export interface InitialRetryFallbackState {
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
+	/** Shared with the provider stream wrapper: current Codex Code Mode tool exposure snapshot for turn metadata. */
+	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
+	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag). */
@@ -153,6 +172,8 @@ export interface AgentSessionConfig {
 	createComputerTool?: () => Promise<AgentTool | null>;
 	/** Creates session_search for session-scoped kill/re-enable after arm invalidation. */
 	createSessionSearchTool?: () => Promise<AgentTool | null>;
+	/** Creates the private `think` scratchpad tool for runtime setting changes. */
+	createThinkTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
@@ -163,10 +184,14 @@ export interface AgentSessionConfig {
 	createVibeTools?: () => AgentTool[];
 	/** Names whose current registry entry is the built-in implementation. */
 	builtInToolNames?: Iterable<string>;
+	/** MCP names whose initial registry entries came from the manager snapshot. */
+	mcpManagerToolNames?: Iterable<string>;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the write transport when runtime xdev mounts first need it. */
 	ensureWriteRegistered?: () => Promise<boolean>;
+	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
+	ensureGoalRegistered?: () => Promise<boolean>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
@@ -175,10 +200,10 @@ export interface AgentSessionConfig {
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */
 	advisorStreamFn?: StreamFn;
-	/** Advisor spend already recorded for the session being opened, restored on resume. */
-	initialAdvisorCosts?: ReadonlyMap<string, number>;
 	/** Prefer websocket transport for OpenAI Codex requests when supported. */
 	preferWebsockets?: boolean;
+	/** Codex saved-reset coordinator; defaults to the process-wide singleton so concurrent sessions can't double-spend. Inject a fresh one in tests. */
+	codexResetCoordinator?: CodexAutoRedeemCoordinator;
 	/** Provider payload hook used by the active session request path. */
 	onPayload?: SimpleStreamOptions["onPayload"];
 	/** Provider response hook used by the active session request path. */
@@ -190,7 +215,10 @@ export interface AgentSessionConfig {
 	/** Current session message-to-LLM conversion pipeline. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
-	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	rebuildSystemPrompt?: (
+		toolNames: string[],
+		tools: Map<string, AgentTool>,
+	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	/** Re-resolve ordinary-session model optimization for the active model. */
 	reconcileModelOptimization?: (model: Model) => Promise<ResolvedModelOptimization>;
 	/** Apply or clear SDK-owned runtime adapters after resolution. */
@@ -240,7 +268,7 @@ export interface AgentSessionConfig {
 	/**
 	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs, against the
 	 * advisor-scoped tool session. The advisor's ordinary instance follows the
-	 * configured `edit.mode` and rejects the frame's `old_text`/`new_text` pairs.
+	 * configured `edit.mode` and rejects the frame's `old_string`/`new_string` args.
 	 */
 	advisorCreateEditTool?(): AgentTool | undefined;
 	/**
@@ -302,6 +330,16 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 }
 
+/** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
+ *  before it reached the agent (an abort or usage preflight denial raced turn
+ *  setup), so it was never persisted to the session. */
+export interface DroppedPrompt {
+	/** The prompt exactly as typed, before template/command expansion. */
+	text: string;
+	/** Image attachments submitted with the prompt. */
+	images?: ImageContent[];
+}
+
 /** Options for AgentSession.followUp(). */
 export interface FollowUpOptions {
 	/** Enqueue as a hidden developer message instead of a user follow-up. */
@@ -322,7 +360,6 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
-	onSwitchCancelled?: () => void;
 }
 
 /** Result from cycleModel(). */
@@ -399,6 +436,12 @@ export interface FreshSessionResult {
 	previousSessionId: string;
 	sessionId: string;
 	closedProviderSessions: number;
+}
+
+/** Outcome of an in-place `/clear` conversation-context reset. */
+export interface ResetSessionContextResult {
+	/** Number of live messages dropped from the model's context. */
+	droppedCount: number;
 }
 
 /** Queued user content restored to the editor. */

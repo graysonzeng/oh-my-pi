@@ -54,6 +54,27 @@ export function mcpOAuthCredentialProfile(credentialId: string): string | undefi
 }
 
 /**
+ * Server URL embedded in a managed MCP OAuth credential id, or `undefined`
+ * for legacy random ids (`mcp_oauth_<rand>`) minted before URL-keyed ids.
+ *
+ * Inverse of {@link mcpOAuthCredentialId}. Mirrors {@link mcpOAuthCredentialProfile}:
+ * the URL contains `:` and `/`, so for profile-scoped ids the URL is everything
+ * after the profile segment; for legacy url-keyed ids (`mcp_oauth:<url>`) it is
+ * everything after the prefix. Lets the auth-broker — which never sees the MCP
+ * config — recover the server URL for the RFC 8707 fallback resource on refresh.
+ */
+export function mcpOAuthServerUrlFromCredentialId(credentialId: string): string | undefined {
+	if (credentialId.startsWith(MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX)) {
+		const separator = credentialId.indexOf(":", MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX.length);
+		return separator === -1 ? undefined : credentialId.slice(separator + 1) || undefined;
+	}
+	if (credentialId.startsWith(MCP_OAUTH_URL_CREDENTIAL_PREFIX)) {
+		return credentialId.slice(MCP_OAUTH_URL_CREDENTIAL_PREFIX.length) || undefined;
+	}
+	return undefined;
+}
+
+/**
  * Stored MCP OAuth credential. Refresh material is embedded so token refresh
  * works without any `auth` block persisted in (possibly shared) config files.
  */
@@ -489,11 +510,21 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		}
 
 		const data = (await response.json()) as {
-			access_token: string;
+			access_token?: string;
 			refresh_token?: string;
 			expires_in?: number;
 			token_type?: string;
+			error?: string;
+			error_description?: string;
 		};
+
+		// Some providers (e.g. the Slack Web API) signal failure with HTTP 200 and
+		// an `{ ok: false, error }` body. Accepting such a response would store an
+		// empty access token and only surface `invalid_token` on a later request.
+		if (typeof data.access_token !== "string" || data.access_token.length === 0) {
+			const providerError = data.error_description ?? data.error;
+			throw new Error(`Token exchange returned no access token${providerError ? `: ${providerError}` : ""}`);
+		}
 
 		// Calculate expiry timestamp
 		const expiresIn = data.expires_in ?? 3600; // Default to 1 hour

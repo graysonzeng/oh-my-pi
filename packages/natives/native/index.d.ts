@@ -28,20 +28,108 @@ export declare class AudioPlayback {
   stop(): void
 }
 
-/** Persistent, serialized native desktop capture/input session. */
+/** Persistent, serialized native desktop capture/input/accessibility session. */
 export declare class DesktopSession {
   constructor(options?: DesktopSessionOptions | undefined | null)
-  /** Current backend capability and permission state. */
   get capabilities(): DesktopCapabilities
-  /** Capture a fresh PNG composite of the selected display(s). */
-  capture(): Promise<DesktopCapture>
+  listDisplays(): Promise<Array<DesktopDisplay>>
+  listWindows(): Promise<Array<DesktopWindow>>
+  capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
+  click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
+  moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
+  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<undefined>
+  scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<undefined>
+  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<undefined>
+  keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<undefined>
+  raiseWindow(windowId: string): Promise<undefined>
+  axSnapshot(target: string, opts?: AxSnapshotOptions | undefined | null): Promise<AxSnapshot>
+  axQuery(target: string, query: AxQuery): Promise<Array<AxNode>>
   /**
-   * Execute a validated action batch in order, then return a fresh
-   * screenshot.
+   * Accessibility hit-test at global logical desktop coordinates; needs no
+   * prior capture.
    */
-  execute(actions: Array<DesktopAction>): Promise<DesktopCapture>
-  /** Close the worker and native platform connections. Idempotent and bounded. */
+  axElementAt(target: string, x: number, y: number): Promise<AxNode | undefined | null>
+  axFocused(): Promise<AxNode | undefined | null>
+  axNode(reference: string): Promise<AxNode>
+  axAttributes(reference: string): Promise<Array<[string, string]>>
+  axChildren(reference: string): Promise<Array<AxNode>>
+  axParent(reference: string): Promise<AxNode | undefined | null>
+  axPerform(reference: string, action: string): Promise<undefined>
+  axSetValue(reference: string, value: string): Promise<undefined>
+  axFocus(reference: string): Promise<undefined>
+  axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<undefined>
   close(): Promise<undefined>
+}
+
+/**
+ * Incrementally ingests old/new text and computes an exact line diff on a
+ * worker thread once both sides finish.
+ *
+ * Complete lines are observable during ingestion. Only equal leading lines
+ * are declared stable before EOF; future input can change Myers alignment
+ * after the first mismatch.
+ */
+export declare class DiffStream {
+  /** Create an empty two-sided stream. */
+  constructor()
+  /** Append a JavaScript text chunk to one side. */
+  push(side: DiffSide, chunk: string): DiffStreamProgress
+  /** Append a UTF-8 subprocess/file chunk without a JS string conversion. */
+  pushBytes(side: DiffSide, chunk: Uint8Array): DiffStreamProgress
+  /** Mark one side complete; an unfinished final line then becomes visible. */
+  finishSide(side: DiffSide): DiffStreamProgress
+  /** Mark one side too large and complete without further ingestion. */
+  markTooLarge(side: DiffSide): DiffStreamProgress
+  /** Current ingestion state. */
+  progress(): DiffStreamProgress
+  /** Complete display lines from `from`, excluding newline terminators. */
+  lines(side: DiffSide, from: number, limit?: number | undefined | null): Array<string>
+  /** Snapshot all ingested text for one side. */
+  text(side: DiffSide): string
+  /**
+   * Read a filesystem path directly into one side on the native worker pool.
+   *
+   * JavaScript can poll [`DiffStream::progress`] and [`DiffStream::lines`]
+   * while this promise is pending; file bytes never need to cross into JS
+   * and back into the differ.
+   */
+  openFile(side: DiffSide, path: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<DiffStreamProgress>
+  /** Compute exact Myers runs and unified hunks off the JavaScript thread. */
+  finish(context?: number | undefined | null): Promise<DiffStreamResult>
+}
+
+/**
+ * Process-owned cross-platform advisory lock.
+ *
+ * `tryAcquire()` is non-blocking; its returned handle reports whether it won
+ * through `acquired`. Ownership ends on `release()`, garbage collection, or
+ * process exit; `release()` is idempotent.
+ */
+export declare class FileLock {
+  /** Try to acquire `path` without blocking. */
+  static tryAcquire(path: string): FileLock
+  /** Whether this handle owns the requested lock. */
+  get acquired(): boolean
+  /** Release this handle's ownership without affecting a successor. */
+  release(): void
+}
+
+/**
+ * Stateful incremental syntax highlighter for streamed code.
+ *
+ * Carries syntect parser state across [`HighlightStream::push`] calls so
+ * chunked highlighting of a growing buffer is byte-identical to highlighting
+ * the concatenated text in one call. Feed newline-terminated complete lines;
+ * only the final push may omit the trailing newline. An unresolved language
+ * echoes input unchanged.
+ */
+export declare class HighlightStream {
+  /** Create a stream for `lang`; an unknown language yields a passthrough. */
+  constructor(lang: string | undefined | null, colors: HighlightColors)
+  /** Whether the language resolved to a grammar; `false` means passthrough. */
+  get supported(): boolean
+  /** Highlight the next chunk and advance parser state. */
+  push(chunk: string): string
 }
 
 /** WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio. */
@@ -202,6 +290,48 @@ export declare class Shell {
 }
 
 /**
+ * Dedicated writer thread for one terminal fd.
+ *
+ * Constructed by the TUI's `ProcessTerminal` around stdout. The fd is
+ * `dup(2)`'d at construction and closed on drop, so later manipulation of the
+ * original descriptor does not affect the pump.
+ */
+export declare class TtyWriter {
+  /**
+   * Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
+   * when the descriptor cannot be duplicated.
+   */
+  constructor(fd: number)
+  /**
+   * Enqueue terminal output; never blocks. Returns the total bytes now
+   * pending (including this chunk).
+   *
+   * Reads the JS string as UTF-16 through the thread's scratch arena and
+   * transcodes it with `xutf` straight into the shared back buffer, so a
+   * warm writer costs no per-call heap allocation.
+   */
+  write(data: string): number
+  /** Bytes accepted but not yet written to the terminal. */
+  pending(): number
+  /** True once a write failed (dead PTY); queued output has been dropped. */
+  get dead(): boolean
+  /**
+   * Block the calling thread until the queue drains, the writer dies, or
+   * `timeout_ms` elapses. Returns true when fully drained. Exit paths only.
+   */
+  flushSync(timeoutMs: number): boolean
+  /**
+   * Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
+   *
+   * A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
+   * cannot be joined without freezing the caller: when the bounded flush
+   * times out the thread is detached instead and its dup'd fd is leaked —
+   * closing it under a blocked write would race kernel fd reuse.
+   */
+  stop(flushTimeoutMs: number): void
+}
+
+/**
  * Install the bounded Tokio runtime napi-rs adopts for async exports and the
  * bounded Rayon global pool used by native parallel iterators.
  *
@@ -246,7 +376,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV17_2_0(): void
+export declare function __piNativesV18_0_5(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -487,6 +617,42 @@ export interface AstReplaceResult {
   parseErrors?: Array<string>
 }
 
+export interface AxNode {
+  ref: string
+  role: string
+  nativeRole: string
+  title?: string
+  value?: string
+  description?: string
+  enabled: boolean
+  focused: boolean
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  actions?: Array<string>
+  childCount: number
+}
+
+export interface AxQuery {
+  role?: string
+  title?: string
+  value?: string
+  limit?: number
+}
+
+export interface AxSnapshot {
+  text: string
+  nodeCount: number
+  truncated: boolean
+}
+
+export interface AxSnapshotOptions {
+  maxDepth?: number
+  maxNodes?: number
+  all?: boolean
+}
+
 export interface BlockRange {
   /** 1-indexed inclusive first line of the resolved block. */
   startLine: number
@@ -512,6 +678,11 @@ export interface BlockRangeOptions {
   path?: string
   /** 1-indexed source line the block must begin on. */
   line: number
+}
+
+export interface CaptureCaps {
+  maxWidth?: number
+  maxHeight?: number
 }
 
 /** Clipboard image payload encoded as PNG bytes. */
@@ -556,69 +727,47 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
  * Count tokens in `input`.
  *
  * `input` may be a single string or an array of strings; an array returns
- * the sum across all elements (encoded in parallel via rayon when the global
- * pool is available). Always returns a single token total — use this for any
+ * the sum across all elements (counted in parallel when the global rayon pool
+ * is available). Always returns a single token total — use this for any
  * aggregate budget question without paying a per-element napi crossing.
  *
- * Uses ordinary encoding (no special-token handling), which is the right
- * choice for measuring user/model content rather than wire-protocol tokens.
- * Defaults to `o200k_base`; pass `Cl100kBase` for older `OpenAI` models.
+ * Measures user/model content, not wire-protocol tokens: BPE encodings
+ * use ordinary encoding (no special-token handling) and the Claude
+ * encodings count message content without the fixed per-message frame.
+ * Defaults to `o200k_base`; pass a `Claude*` encoding for exact Claude
+ * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM.
  */
-export declare function countTokens(input: string | Array<string>, encoding?: Encoding | undefined | null): number
+export declare function countTokens(input: string | string[], encoding?: Encoding | undefined | null): number
 
-/**
- * One `OpenAI` GA computer action.
- *
- * This is an optional-field carrier because napi-rs object generation cannot
- * emit TypeScript discriminated unions. Native validation enforces the exact
- * fields required and allowed by each `type` before any input is emitted.
- */
-export interface DesktopAction {
-  type: string
-  x?: number
-  y?: number
-  button?: string
-  path?: Array<DesktopPoint>
-  keys?: Array<string>
-  scroll_x?: number
-  scroll_y?: number
-  text?: string
-}
-
-/** Native desktop backend and permission state. */
 export interface DesktopCapabilities {
-  /**
-   * Concrete selected backend: `quartz`, `x11`, `wayland`, `win32`, or
-   * `unavailable`.
-   */
   backend: string
-  /** OS display-server endpoint or subsystem label. */
   displayServer?: string
-  /** Whether screen capture is currently usable. */
   capture: boolean
-  /** Whether native input is currently usable. */
   input: boolean
-  /** `granted`, `denied`, `unknown`, or `unavailable`. */
+  ax: boolean
+  backgroundWindowInput: boolean
+  deliveryModes: Array<string>
   capturePermission: string
-  /** `granted`, `denied`, `unknown`, or `unavailable`. */
   inputPermission: string
-  /** Number of selected displays observed by the most recent successful probe. */
+  axPermission: string
   displayCount: number
 }
 
-/**
- * A PNG composite and the exact geometry needed to map its pixels back to the
- * global logical desktop.
- */
 export interface DesktopCapture {
   data: Uint8Array
   width: number
   height: number
+  /** Pre-scaling capture width in native pixels; equals `width` when unscaled. */
+  sourceWidth: number
+  /**
+   * Pre-scaling capture height in native pixels; equals `height` when
+   * unscaled.
+   */
+  sourceHeight: number
+  target: string
   displays: Array<DesktopDisplay>
   backend: string
   displayServer?: string
-  capturePermission: string
-  inputPermission: string
 }
 
 /**
@@ -640,25 +789,36 @@ export interface DesktopDisplay {
   isPrimary: boolean
 }
 
-/** One point in a drag path, in pixels of the preceding screenshot. */
 export interface DesktopPoint {
   x: number
   y: number
 }
 
-/** Options for a persistent native desktop session. */
 export interface DesktopSessionOptions {
-  /**
-   * Backend preference. `auto` and `native` both prohibit non-native
-   * fallback.
-   */
-  backend?: string
-  /** `all` or a monitor id returned in `DesktopDisplay.id`. */
   display?: string
-  /** Maximum composite screenshot width in pixels. */
-  maxWidth?: number
-  /** Maximum composite screenshot height in pixels. */
-  maxHeight?: number
+}
+
+/** One capturable top-level window in global logical desktop coordinates. */
+export interface DesktopWindow {
+  /**
+   * Backend-defined opaque window id, valid as a capture target while the
+   * window lives. Numeric on X11/Win32/macOS; a composite AT-SPI string on
+   * Wayland (e.g. `atspi::1.31:/org/a11y/atspi/accessible/1`). Never parse
+   * it.
+   */
+  id: string
+  /** Window title; may be empty for untitled windows. */
+  title: string
+  /** Owning application name. */
+  app: string
+  /** Owning process id when the platform exposes it. */
+  pid?: number
+  x: number
+  y: number
+  width: number
+  height: number
+  /** Whether the window currently holds input focus. */
+  focused: boolean
 }
 
 /**
@@ -732,6 +892,44 @@ export interface DiffRun {
   removed: boolean
 }
 
+/** One side of a streamed line diff. */
+export declare enum DiffSide {
+  /** Original/base text. */
+  Old = 'Old',
+  /** Updated/target text. */
+  New = 'New'
+}
+
+/** Observable ingestion state for [`DiffStream`]. */
+export interface DiffStreamProgress {
+  /** Complete old-side lines available for rendering. */
+  oldLines: number
+  /** Complete new-side lines available for rendering. */
+  newLines: number
+  /** Leading complete lines proven equal on both sides. */
+  stableCommonLines: number
+  /** Whether old-side ingestion has finished. */
+  oldDone: boolean
+  /** Whether new-side ingestion has finished. */
+  newDone: boolean
+  /** Whether either side contains a NUL byte/code unit. */
+  binary: boolean
+  /** Whether either native file exceeded its caller-provided size limit. */
+  tooLarge: boolean
+}
+
+/** Exact line-diff output produced when a [`DiffStream`] finishes. */
+export interface DiffStreamResult {
+  /** Line-token Myers runs used to align the complete files. */
+  runs: Array<DiffRun>
+  /** Unified hunks for the requested context. */
+  hunks: Array<PatchHunk>
+  /** Whether the old text ends in a newline. */
+  oldEndsNewline: boolean
+  /** Whether the new text ends in a newline. */
+  newEndsNewline: boolean
+}
+
 /**
  * Word diff with jsdiff `diffWords(oldText, newText)` semantics (default
  * options).
@@ -792,7 +990,23 @@ export declare enum Encoding {
   /** GPT-4o / o1 / GPT-5 (default). */
   O200kBase = 'O200kBase',
   /** GPT-3.5 / GPT-4 / older. */
-  Cl100kBase = 'Cl100kBase'
+  Cl100kBase = 'Cl100kBase',
+  /** Claude 3 … Opus 4.6 (ctok v3 reconstruction). */
+  ClaudeV3 = 'ClaudeV3',
+  /** Claude Opus 4.7–4.9 (ctok v4.7 reconstruction). */
+  ClaudeV47 = 'ClaudeV47',
+  /** Claude Opus 5+ (ctok v5 reconstruction). */
+  ClaudeV5 = 'ClaudeV5',
+  /** Claude Sonnet/Fable 5+ (live-measured non-opus v5 frame). */
+  ClaudeV5Sonnet = 'ClaudeV5Sonnet',
+  /** Qwen 3.5 / 3.6 / 3.8 (248k vocabulary). */
+  Qwen3 = 'Qwen3',
+  /** `DeepSeek` V3 … V4 (identical base BPE). */
+  DeepSeekV3 = 'DeepSeekV3',
+  /** Kimi K2 … K3. */
+  KimiK2 = 'KimiK2',
+  /** GLM-5.x exact; GLM-4.x near-exact. */
+  Glm5 = 'Glm5'
 }
 
 /**
@@ -1321,6 +1535,31 @@ export declare enum MacOSAppearance {
 }
 
 /**
+ * Return the autocorrection macOS chooses for one completed-word range.
+ *
+ * Returns `null` when no confident correction exists or the service is
+ * unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
+ */
+export declare function macOSAutocorrectWord(text: string, start: number, length: number): Promise<string | null>
+
+/**
+ * Find every misspelled word using the active macOS dictionaries.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the check runs on the dedicated spelling thread.
+ */
+export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
+
+/**
+ * Return macOS dictionary completions for one partial-word range.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
+ */
+export declare function macOSCompleteWord(text: string, start: number, length: number): Promise<Array<string>>
+
+/**
  * Options for starting a macOS power assertion.
  *
  * Each boolean maps to a `caffeinate(8)` flag and a corresponding `IOKit`
@@ -1343,6 +1582,17 @@ export interface MacOSPowerAssertionOptions {
   /** `caffeinate -d`: prevent the display from idle-sleeping. */
   display?: boolean
 }
+
+/** Whether the host can use Apple's native spelling service. */
+export declare function macOSSpellCheckerAvailable(): boolean
+
+/**
+ * Return macOS replacement guesses for one misspelled-word range.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
+ */
+export declare function macOSSpellingGuesses(text: string, start: number, length: number): Promise<Array<string>>
 
 /** A single match in the content. */
 export interface Match {
@@ -1472,6 +1722,26 @@ export interface MinimizerResult {
  */
 export declare function mmrRerankIndices(contents: Array<string>, scores: Float64Array, lambdaParam: number, topK: number): Uint32Array
 
+/**
+ * Named-node chain containing `options.line`, innermost-first, excluding the
+ * whole-file root.
+ *
+ * Single-line nodes beginning on the line (attributes, decorators) come
+ * first, followed by every enclosing construct. ERROR/MISSING recovery nodes
+ * are skipped. Returns `null` when the language is unrecognized, the line is
+ * out of range / blank, or the source fails to parse entirely.
+ */
+export declare function nodeChainAt(options: BlockRangeOptions): Array<NodeSpan> | null
+
+export interface NodeSpan {
+  /** 1-indexed inclusive first line of the node. */
+  startLine: number
+  /** 1-indexed inclusive last content line of the node. */
+  endLine: number
+  /** Tree-sitter grammar node kind (e.g. `attribute_item`, `function_item`). */
+  kind: string
+}
+
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
   /** Primary codepoint associated with the key. */
@@ -1515,6 +1785,39 @@ export interface PatchHunk {
    * `\ No newline at end of file` markers where applicable.
    */
   lines: Array<string>
+}
+
+/** Markdown and inspection metadata produced from a PDF document. */
+export interface PdfMarkdownResult {
+  /** Extracted document content in Markdown format. */
+  markdown: string
+  /** Document title from PDF metadata, when present. */
+  title?: string
+  /** Total number of pages in the document. */
+  pageCount: number
+  /** One-indexed page numbers whose content requires OCR. */
+  pagesNeedingOcr: Array<number>
+  /** Whether the document contains text encoding problems. */
+  hasEncodingIssues: boolean
+}
+
+/**
+ * Convert an in-memory PDF to Markdown and return its inspection metadata.
+ *
+ * Conversion copies the typed array before dispatch so JavaScript mutation
+ * cannot race the native worker.
+ *
+ * # Errors
+ * Returns an error prefixed with `PDF conversion failed:` when the PDF cannot
+ * be parsed or converted.
+ */
+export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
+
+export interface PointerOptions {
+  button?: string
+  count?: number
+  modifiers?: Array<string>
+  deliveryMode?: string
 }
 
 /** Current state of a process reference. */
@@ -1600,6 +1903,18 @@ export interface PtyStartOptions {
    */
   shell?: string
 }
+
+/**
+ * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
+ *
+ * Conversion runs on the native blocking pool so parsing and rendering do not
+ * stall the JavaScript event loop.
+ *
+ * # Errors
+ * Returns an error for invalid SVG data, zero/oversized limits, allocation
+ * failure, or PNG encoding failure.
+ */
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>
 
 /**
  * Read an image from the system clipboard.
@@ -1820,6 +2135,14 @@ export interface SnapcompactRenderOptions {
  */
 export declare function snapcompactSupportedChars(font: string, chars: string): string
 
+/** A misspelled span measured in JavaScript/UTF-16 code units. */
+export interface SpellingRange {
+  /** Inclusive UTF-16 start offset. */
+  start: number
+  /** UTF-16 length of the misspelled span. */
+  length: number
+}
+
 /**
  * Unified-diff hunks with jsdiff
  * `structuredPatch(_, _, oldText, newText, _, _, { context }).hunks`
@@ -1921,6 +2244,9 @@ export interface VectorTopK {
  * Tabs count as a fixed-width cell.
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
+
+/** Warm syntax grammars and scope matchers on the native worker pool. */
+export declare function warmHighlighter(): Promise<undefined>
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {

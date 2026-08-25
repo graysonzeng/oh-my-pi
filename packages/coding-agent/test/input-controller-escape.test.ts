@@ -105,6 +105,8 @@ function createContext(): {
 	const hasActiveBtw = vi.fn(() => false);
 	const handleOmfgEscape = vi.fn(() => true);
 	const hasActiveOmfg = vi.fn(() => false);
+	const handleCleanseEscape = vi.fn(() => true);
+	const hasActiveCleanse = vi.fn(() => false);
 	const updatePendingMessagesDisplay = vi.fn();
 	const prompt = vi.fn();
 	const startPendingSubmission = vi.fn(
@@ -158,11 +160,14 @@ function createContext(): {
 			queuedMessageCount: 0,
 			messages: [],
 			extensionRunner: undefined,
+			customCommands: [],
+			promptTemplates: [],
 			abort,
 			abortBash,
 			abortEval,
 			clearQueue,
 			getQueuedMessages,
+			maybeStartTitleGeneration: vi.fn(),
 			prompt,
 			subscribe: vi.fn((listener: (event: { type: string }) => void) => {
 				sessionListeners.push(listener);
@@ -188,6 +193,9 @@ function createContext(): {
 			getKeys: () => [],
 		} as unknown as InteractiveModeContext["keybindings"],
 		compactionQueuedMessages: [],
+		mcpTestEscapeHandlers: new Set(),
+		skillCommands: new Map(),
+		fileSlashCommands: new Set<string>(),
 		isBashMode: false,
 		isPythonMode: false,
 		optimisticUserMessageSignature: undefined,
@@ -213,6 +221,8 @@ function createContext(): {
 		hasActiveBtw,
 		handleOmfgEscape,
 		hasActiveOmfg,
+		handleCleanseEscape,
+		hasActiveCleanse,
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
@@ -367,6 +377,37 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
 	});
 
+	it("aborts a streaming loop iteration without pausing the loop", () => {
+		const { ctx, editor, spies } = createContext();
+		const pauseLoop = vi.fn();
+		ctx.loopModeEnabled = true;
+		ctx.pauseLoop = pauseLoop;
+		mutableSessionState(ctx).isStreaming = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(pauseLoop).not.toHaveBeenCalled();
+		expect(spies.cancelPendingSubmission).not.toHaveBeenCalled();
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+	});
+
+	it("pauses an idle loop and cancels its pending submission", () => {
+		const { ctx, editor, spies } = createContext();
+		const pauseLoop = vi.fn();
+		ctx.loopModeEnabled = true;
+		ctx.pauseLoop = pauseLoop;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(pauseLoop).toHaveBeenCalledTimes(1);
+		expect(spies.cancelPendingSubmission).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
 	it("aborts active handoff generation before default Esc handling", () => {
 		const { ctx, editor, spies } = createContext();
 		(ctx.viewSession as { isGeneratingHandoff: boolean }).isGeneratingHandoff = true;
@@ -404,6 +445,33 @@ describe("InputController escape behavior", () => {
 
 		expect(spies.abortEval).toHaveBeenCalledTimes(1);
 		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("keeps every overlapping /mcp test cancellable and consumes ownership on dispatch", () => {
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		const firstTestEscapeHandler = vi.fn();
+		const latestTestEscapeHandler = vi.fn();
+		ctx.mcpTestEscapeHandlers.add(firstTestEscapeHandler);
+		ctx.mcpTestEscapeHandlers.add(latestTestEscapeHandler);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(firstTestEscapeHandler).toHaveBeenCalledTimes(1);
+		expect(latestTestEscapeHandler).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+		// One press consumes the ownership: the next Esc must reach the stream
+		// abort below instead of being swallowed by stale registrations.
+		expect(ctx.mcpTestEscapeHandlers.size).toBe(0);
+
+		editor.onEscape?.();
+
+		expect(firstTestEscapeHandler).toHaveBeenCalledTimes(1);
+		expect(latestTestEscapeHandler).toHaveBeenCalledTimes(1);
+		expect(spies.abort).toHaveBeenCalledTimes(1);
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
 	});
 
 	it("dismisses an active /btw panel before aborting the main stream", () => {
@@ -612,7 +680,7 @@ describe("InputController escape behavior", () => {
 		expect(ctx.unfocusSession).toHaveBeenCalledTimes(1);
 		expect(ctx.focusParentSession).not.toHaveBeenCalled();
 	});
-	it("opens the tree selector and clears the display on default double-Esc", () => {
+	it("opens the tree selector and forces a viewport repaint on default double-Esc", () => {
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
 
@@ -622,10 +690,14 @@ describe("InputController escape behavior", () => {
 
 		expect(ctx.showTreeSelector).toHaveBeenCalledTimes(1);
 		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
-		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+		// Never `resetDisplay()`: that replays the whole transcript and wedges
+		// double-Esc on long sessions (invisible selector behind a multi-second
+		// scrollback replay).
+		expect(spies.requestRender).toHaveBeenCalledWith(true);
+		expect(spies.resetDisplay).not.toHaveBeenCalled();
 	});
 
-	it("opens the message selector and clears the display when double-Esc is configured for branch", () => {
+	it("opens the message selector and forces a viewport repaint when double-Esc is configured for branch", () => {
 		Settings.instance.override("doubleEscapeAction", "branch");
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
@@ -636,7 +708,8 @@ describe("InputController escape behavior", () => {
 
 		expect(ctx.showUserMessageSelector).toHaveBeenCalledTimes(1);
 		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
-		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+		expect(spies.requestRender).toHaveBeenCalledWith(true);
+		expect(spies.resetDisplay).not.toHaveBeenCalled();
 	});
 	it("preserves typed editor text on Esc without opening selectors or aborting", () => {
 		const { ctx, editor, spies } = createContext();
