@@ -9,6 +9,7 @@ import { WorkflowStore } from "./sqlite-store";
 import type { WorkflowAvailabilityReport, WorkflowStatus, WorkflowStatusReportV1 } from "./types";
 
 const workflowSchema = type({
+	"+": "reject",
 	op: type("'start' | 'status' | 'resume' | 'cancel'").describe("workflow operation"),
 	"request?": type("string").describe("start: user request / objective"),
 	"constraints?": type("string").describe("start: optional constraints"),
