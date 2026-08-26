@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import { PROVIDER_HEALTH_BREAKER_ERROR_SUMMARY, type ProviderHealthBreaker } from "../latency/provider-health-breaker";
 import type { ToolSession } from "../tools";
 import { AVAILABILITY_PROBE_TIMEOUT_MS } from "./availability-adapter";
 import {
+	type AvailabilityCandidate,
 	type AvailabilityRoleSpec,
 	availabilityProbeDedupeKey,
 	buildAvailabilityCandidates,
@@ -56,6 +58,8 @@ export interface RunAvailabilityPreflightOptions {
 	invocationId?: string;
 	/** Optional wall clock (ms since epoch) for tests. */
 	nowMs?: () => number;
+	/** Engine-scoped breaker. Omitted when the latency arm is off (fail-open). */
+	providerHealthBreaker?: ProviderHealthBreaker;
 }
 
 /**
@@ -104,8 +108,15 @@ export async function runAvailabilityPreflight(
 	const maxConcurrency = options.maxConcurrency ?? DEFAULT_AVAILABILITY_MAX_CONCURRENCY;
 
 	// Group candidates by physical probe key (first member is the live probe representative).
+	// Open breaker profiles skip the physical probe and emit a stable unavailable row.
+	const breaker = options.providerHealthBreaker;
+	const skippedProfiles: WorkflowAvailabilityProfileResult[] = [];
 	const groups = new Map<string, typeof candidates>();
 	for (const candidate of candidates) {
+		if (breaker?.isOpen(candidate.profile.id)) {
+			skippedProfiles.push(openBreakerRow(candidate));
+			continue;
+		}
 		const key = availabilityProbeDedupeKey(candidate.profile, authScope);
 		const group = groups.get(key);
 		if (group) group.push(candidate);
@@ -202,7 +213,7 @@ export async function runAvailabilityPreflight(
 	for (const spec of missing) {
 		profiles.push(missingProfileRow(spec));
 	}
-
+	for (const row of skippedProfiles) profiles.push(row);
 	// Re-sort expanded rows for stable report order (group expansion can re-order roles).
 	const profileIndex = new Map(registrationOrder.map((id, i) => [id, i]));
 	const roleOrder = new Map(
@@ -225,6 +236,8 @@ export async function runAvailabilityPreflight(
 	const physicalResults = [...probeByKey.values()];
 	const usage = aggregateUsage(physicalResults.map(result => result.usage));
 	const reportedCostUsd = aggregateReportedCost(physicalResults);
+	if (breaker) breaker.observeProfiles(profiles);
+
 	return {
 		workflowId: options.workflowId,
 		invocationId,
@@ -384,6 +397,20 @@ function aggregateReportedCost(results: WorkflowAvailabilityProbeResult[]): numb
 		total += result.reportedCostUsd;
 	}
 	return total;
+}
+
+function openBreakerRow(candidate: AvailabilityCandidate): WorkflowAvailabilityProfileResult {
+	return {
+		profileId: candidate.profile.id,
+		role: candidate.role,
+		requirement: candidate.requirement,
+		status: "unavailable",
+		runtime: "embedded",
+		usageKind: "diagnostic",
+		errorKind: "provider_transient",
+		errorSummary: PROVIDER_HEALTH_BREAKER_ERROR_SUMMARY,
+		latencyMs: 0,
+	};
 }
 
 /** Report row when a role is in scope but no ModelProfile is registered for it. */

@@ -100,6 +100,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
+import { countRecentToolResultErrors } from "../auto-thinking/classifier";
 import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
@@ -184,6 +185,7 @@ import {
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import {
+	buildOrdinarySessionObservationJoin,
 	computeLatencyCohortMetrics,
 	deriveLatencyCohortKey,
 	LATENCY_BASELINE_COHORT_KEY,
@@ -1199,6 +1201,14 @@ export class AgentSession {
 			emit: event => this.#emit(event),
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
+			agentKind: () => this.#agentKind,
+			recentToolFailureCount: window => countRecentToolResultErrors(this.agent.state.messages, window),
+			contextUsagePercent: () => {
+				const percent = this.getContextUsage()?.percent;
+				return typeof percent === "number" && Number.isFinite(percent) ? percent : undefined;
+			},
+			isLatencyArmEnabled: arm => this.isLatencyArmEnabled(arm),
+			markLatencyArmFired: arm => this.markLatencyArmFired(arm),
 		};
 		this.#models = new ModelControls(modelControlsHost, {
 			scopedModels: config.scopedModels,
@@ -1360,12 +1370,12 @@ export class AgentSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-this.#beginInFlight();
-try {
-	await this.#promptAgent(messages.length === 1 ? first : messages);
-} finally {
-	this.#endInFlight();
-}
+				this.#beginInFlight();
+				try {
+					await this.#promptAgent(messages.length === 1 ? first : messages);
+				} finally {
+					this.#endInFlight();
+				}
 			},
 			scheduleIdleFlush: run => {
 				const keepalive = new EventLoopKeepalive();
@@ -1709,12 +1719,12 @@ try {
 				this.#planReferenceSent = false;
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
-resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
-rebaseAfterCompaction: () => {
-	this.#readDedupeArtifacts.clear();
-	this.#stats.rebaseAfterCompaction();
-},
-recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
+			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
+			rebaseAfterCompaction: () => {
+				this.#readDedupeArtifacts.clear();
+				this.#stats.rebaseAfterCompaction();
+			},
+			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
@@ -2247,14 +2257,14 @@ recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistory
 	 */
 	#subscriberEmitGate: Promise<void> = Promise.resolve();
 
-async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
+	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
 		if (event.type === "retry_fallback_applied") this.#retryFallbackAppliedCount += 1;
 
-	if (event.type === "auto_compaction_end") {
-		this.#readDedupeArtifacts.clear();
-		this.#goalContextHash = undefined;
-		this.#goalHashResetReason = "compaction";
-	}
+		if (event.type === "auto_compaction_end") {
+			this.#readDedupeArtifacts.clear();
+			this.#goalContextHash = undefined;
+			this.#goalHashResetReason = "compaction";
+		}
 		if (event.type === "message_update") {
 			this.#emit(event);
 			void this.#queueExtensionEvent(event);
@@ -3024,18 +3034,18 @@ async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: 
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
-const emitAgentEndNotification = async (options?: { willContinue?: boolean; deliveryId?: DeliveryId }) => {
-	this.#emitRunState("idle");
-	const deliveryId = options?.deliveryId ?? this.#acceptedContinuationDeliveryId;
-	const willContinue = options?.willContinue === true && Boolean(deliveryId);
-	if (willContinue && deliveryId) this.#hiddenNextTurnScheduler.markNonterminal(deliveryId);
-	await this.#emitSessionEvent({
-		...event,
-		isTerminal: !willContinue,
-		...(deliveryId ? { deliveryId } : {}),
-	});
-	if (!willContinue && deliveryId) this.#hiddenNextTurnScheduler.finalSettle(deliveryId, "completed");
-	void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
+			const emitAgentEndNotification = async (options?: { willContinue?: boolean; deliveryId?: DeliveryId }) => {
+				this.#emitRunState("idle");
+				const deliveryId = options?.deliveryId ?? this.#acceptedContinuationDeliveryId;
+				const willContinue = options?.willContinue === true && Boolean(deliveryId);
+				if (willContinue && deliveryId) this.#hiddenNextTurnScheduler.markNonterminal(deliveryId);
+				await this.#emitSessionEvent({
+					...event,
+					isTerminal: !willContinue,
+					...(deliveryId ? { deliveryId } : {}),
+				});
+				if (!willContinue && deliveryId) this.#hiddenNextTurnScheduler.finalSettle(deliveryId, "completed");
+				void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
 					logger.error("Agent end extension notification failed", { err });
 				});
 			};
@@ -3482,20 +3492,20 @@ const emitAgentEndNotification = async (options?: { willContinue?: boolean; deli
 						this.#skipAgentContinue("post-restore-unavailable", options);
 						return;
 					}
-if (reverted) {
-	await this.#maintenance.runPrePromptCompactionIfNeeded([]);
-	if (signal.aborted || this.#isDisposed) {
-		this.#skipAgentContinue("post-restore-unavailable", options);
-		return;
-	}
-}
-if (this.settings.get("retry.usageAwareFallback")) {
-	if (!(await this.#runQueuedUsageAwarePreflight(signal))) {
-		this.#skipAgentContinue("session-unavailable", options);
-		return;
-	}
-}
-await this.#continueAgent();
+					if (reverted) {
+						await this.#maintenance.runPrePromptCompactionIfNeeded([]);
+						if (signal.aborted || this.#isDisposed) {
+							this.#skipAgentContinue("post-restore-unavailable", options);
+							return;
+						}
+					}
+					if (this.settings.get("retry.usageAwareFallback")) {
+						if (!(await this.#runQueuedUsageAwarePreflight(signal))) {
+							this.#skipAgentContinue("session-unavailable", options);
+							return;
+						}
+					}
+					await this.#continueAgent();
 				} catch (error) {
 					logger.warn("agent.continue failed after scheduling", {
 						error: error instanceof Error ? error.message : String(error),
@@ -5644,6 +5654,27 @@ await this.#continueAgent();
 		this.#latencyArmSnapshot = undefined;
 	}
 
+	#ordinarySessionObservationJoin(endedAt: string) {
+		const toolCalls: Array<{ name: string; arguments?: Record<string, unknown> }> = [];
+		for (const message of this.agent.state.messages) {
+			if (message.role !== "assistant") continue;
+			for (const content of message.content) {
+				if (content.type !== "toolCall") continue;
+				toolCalls.push({ name: content.name, arguments: content.arguments });
+			}
+		}
+		return buildOrdinarySessionObservationJoin({
+			provider: this.model?.provider,
+			model: this.model?.id,
+			profileId: this.#activeModelOptimization.profile?.id,
+			armFingerprint: this.#latencyArmSnapshot?.fingerprint ?? null,
+			startedAt: this.sessionManager.getHeader()?.timestamp,
+			endedAt,
+			toolCallCount: this.getSessionStats().toolCalls,
+			toolCalls,
+			fallbackCount: this.#retryFallbackAppliedCount,
+		});
+	}
 	#evaluateLatencyRolloutAtSessionEnd(exitKind: SessionExitData["kind"] | null): void {
 		try {
 			const snapshot = this.#latencyArmSnapshot;
@@ -5653,6 +5684,7 @@ await this.#continueAgent();
 			const completed = exitKind === "normal";
 			const endedAt = new Date().toISOString();
 			const firedArms = this.getFiredLatencyArms();
+			const ordinaryJoin = this.#ordinarySessionObservationJoin(endedAt);
 			const slices = snapshot.dimensions?.filter(slice => slice.role !== "excluded") ?? [];
 			if (slices.length > 0) {
 				for (const slice of slices) {
@@ -5687,6 +5719,7 @@ await this.#continueAgent();
 						dshGoalInjected: this.#dshGoalInjected,
 						dshAdjacentIdentical: this.#dshAdjacentIdentical,
 						dshHeadlessCount: this.#goalModeState?.goal.headlessContinuationCount ?? null,
+						...ordinaryJoin,
 					});
 					if (!observationOk) {
 						store.markControlPlaneDegraded();
@@ -5707,6 +5740,27 @@ await this.#continueAgent();
 					if (!commitOk) store.markControlPlaneDegraded();
 				}
 				if (store.controlPlaneDegraded) return;
+			}
+			if (slices.length === 0) {
+				store.appendObservation({
+					schemaVersion: 1,
+					kind: "latency_rollout_observation",
+					key: deriveLatencyCohortKey(snapshot),
+					status: exitKind ?? "unknown",
+					completed,
+					repairCycles: 0,
+					p0p1Escapes: 0,
+					costUsd: null,
+					stageTimeMs: null,
+					spawnedAgents: null,
+					firedArms,
+					endedAt,
+					phase: "metrics",
+					snapshotFingerprint: snapshot.fingerprint,
+					sessionId,
+					sampleUnit: "session",
+					...ordinaryJoin,
+				});
 			}
 			const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
 			if (active.length === 0 && slices.length === 0) return;
@@ -5773,7 +5827,6 @@ await this.#continueAgent();
 			// Rollout bookkeeping must never fail session teardown except both-fail abort.
 		}
 	}
-
 
 	/**
 	 * Rebuild checkpoint/rewind runtime state from the current branch. Handles two

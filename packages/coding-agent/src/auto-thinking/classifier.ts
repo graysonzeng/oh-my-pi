@@ -21,6 +21,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import adaptiveThinkingContextPrompt from "../prompts/system/auto-thinking-adaptive-context.md" with { type: "text" };
 import difficultySystemPrompt from "../prompts/system/auto-thinking-difficulty.md" with { type: "text" };
 import difficultyLocalPrompt from "../prompts/system/auto-thinking-difficulty-local.md" with { type: "text" };
 import { clampAutoThinkingEffort } from "../thinking";
@@ -86,6 +87,83 @@ export interface ClassifyDifficultyDeps {
 	sessionId?: string;
 	signal?: AbortSignal;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	/** Present only when the adaptive-thinking-context arm is on. */
+	adaptiveContext?: AdaptiveThinkingContextSignals;
+}
+
+/** Window of recent tool-result messages used to count classifier failure signals. */
+export const ADAPTIVE_THINKING_TOOL_RESULT_WINDOW = 8;
+
+export type AdaptiveThinkingAgentRole = "main" | "sub";
+
+/**
+ * Bounded operational signals for the existing auto-thinking classifier call.
+ * Ordinary sessions omit `deadlineRemainingMs`; never invent a deadline.
+ */
+export interface AdaptiveThinkingContextSignals {
+	agentRole: AdaptiveThinkingAgentRole;
+	recentToolFailures: number;
+	contextUsagePercent?: number;
+	deadlineRemainingMs?: number;
+}
+
+/** Count `isError` among the most recent `window` tool-result messages. */
+export function countRecentToolResultErrors(
+	messages: ReadonlyArray<{ role: string; isError?: boolean }>,
+	window: number = ADAPTIVE_THINKING_TOOL_RESULT_WINDOW,
+): number {
+	const bound = Math.min(ADAPTIVE_THINKING_TOOL_RESULT_WINDOW, Math.max(0, Math.trunc(window)));
+	let seen = 0;
+	let failures = 0;
+	for (let i = messages.length - 1; i >= 0 && seen < bound; i--) {
+		const message = messages[i];
+		if (message?.role !== "toolResult") continue;
+		seen++;
+		if (message.isError) failures++;
+	}
+	return failures;
+}
+
+/** Normalize caller-supplied signals; drop free-form fields and invented deadlines. */
+export function normalizeAdaptiveThinkingContextSignals(
+	signals: AdaptiveThinkingContextSignals,
+): AdaptiveThinkingContextSignals {
+	const contextUsage =
+		typeof signals.contextUsagePercent === "number" && Number.isFinite(signals.contextUsagePercent)
+			? signals.contextUsagePercent
+			: undefined;
+	const deadline =
+		typeof signals.deadlineRemainingMs === "number" && Number.isFinite(signals.deadlineRemainingMs)
+			? signals.deadlineRemainingMs
+			: undefined;
+	const failures =
+		typeof signals.recentToolFailures === "number" && Number.isFinite(signals.recentToolFailures)
+			? signals.recentToolFailures
+			: 0;
+	return {
+		agentRole: signals.agentRole === "sub" ? "sub" : "main",
+		recentToolFailures: Math.min(ADAPTIVE_THINKING_TOOL_RESULT_WINDOW, Math.max(0, Math.trunc(failures))),
+		...(contextUsage !== undefined
+			? { contextUsagePercent: Math.min(100, Math.max(0, Math.trunc(contextUsage))) }
+			: {}),
+		...(deadline !== undefined && deadline >= 0 ? { deadlineRemainingMs: Math.trunc(deadline) } : {}),
+	};
+}
+
+function wrapAdaptiveThinkingClassifierInput(
+	preprocessedPrompt: string,
+	signals: AdaptiveThinkingContextSignals,
+): string {
+	const normalized = normalizeAdaptiveThinkingContextSignals(signals);
+	return prompt.render(adaptiveThinkingContextPrompt, {
+		agentRole: normalized.agentRole,
+		recentToolFailures: normalized.recentToolFailures,
+		hasContextUsage: normalized.contextUsagePercent !== undefined,
+		contextUsagePercent: normalized.contextUsagePercent,
+		hasDeadline: normalized.deadlineRemainingMs !== undefined,
+		deadlineRemainingMs: normalized.deadlineRemainingMs,
+		prompt: preprocessedPrompt,
+	});
 }
 
 /**
@@ -100,12 +178,14 @@ export async function classifyDifficulty(
 ): Promise<Effort | undefined> {
 	const backend = deps.settings.get("providers.autoThinkingModel");
 	const input = preprocessTinyMessage(promptText);
+	const wrapped =
+		deps.adaptiveContext !== undefined ? wrapAdaptiveThinkingClassifierInput(input, deps.adaptiveContext) : input;
 	const online = backend === ONLINE_AUTO_THINKING_MODEL_KEY;
 	// The 3-bucket local classifier cannot select `max`, so its ceiling stays at
 	// XHigh whatever the setting says — otherwise a sparse ladder would snap its
 	// `hard` bucket up to a tier it never chose.
 	const ceiling = online ? autoEffortCeiling(deps) : Effort.XHigh;
-	const effort = online ? await classifyOnline(input, deps, ceiling) : await classifyLocal(input, backend, deps);
+	const effort = online ? await classifyOnline(wrapped, deps, ceiling) : await classifyLocal(wrapped, backend, deps);
 	// The ceiling goes into the clamp itself: capping the request alone is not
 	// enough, because a sparse ladder snaps an excluded request back up.
 	return clampAutoThinkingEffort(deps.model, effort, ceiling);

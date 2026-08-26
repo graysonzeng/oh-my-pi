@@ -20,6 +20,8 @@ export const BACKGROUND_LATENCY_ARM_IDS = [
 	"concurrency_declaration",
 	"concurrency_execution",
 	"eval_gate_migration",
+	"provider_health_breaker",
+	"adaptive_thinking_context",
 ] as const;
 
 export const DSH_ARM_IDS = [
@@ -67,6 +69,8 @@ export const LATENCY_ARM_SETTINGS = {
 	concurrency_declaration: "latency.arms.concurrencyDeclaration",
 	concurrency_execution: "latency.arms.concurrencyExecution",
 	eval_gate_migration: "latency.arms.evalGateMigration",
+	provider_health_breaker: "latency.arms.providerHealthBreaker",
+	adaptive_thinking_context: "latency.arms.adaptiveThinkingContext",
 	dsh_session_search: "latency.arms.dshSessionSearch",
 	dsh_omit_goal_time: "latency.arms.dshOmitGoalTime",
 	dsh_goal_hash_shadow: "latency.arms.dshGoalHashShadow",
@@ -106,6 +110,8 @@ export function emptyLatencyArms(): Record<LatencyArmId, boolean> {
 		concurrency_declaration: false,
 		concurrency_execution: false,
 		eval_gate_migration: false,
+		provider_health_breaker: false,
+		adaptive_thinking_context: false,
 		dsh_session_search: false,
 		dsh_omit_goal_time: false,
 		dsh_goal_hash_shadow: false,

@@ -578,6 +578,14 @@ describe("agentLoop with AgentMessage", () => {
 		const toolEnd = events.find(e => e.type === "tool_execution_end") as any;
 		expect(toolStart).toBeDefined();
 		expect(toolEnd).toBeDefined();
+		expect(toolEnd.result.details.errorMetadata).toEqual({
+			errorCategory: "validation",
+			fieldPath: "$",
+			expectedType: "valid JSON object",
+			retryable: false,
+			retryGuidance: "Correct the argument at $ to match valid JSON object before making a new call.",
+			sideEffectStatus: "none",
+		});
 
 		// Start args must not include __rawJson
 		expect(toolStart.args).toBeDefined();
@@ -2300,11 +2308,6 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolEnds.length).toBe(2);
 		expect(toolEnds[0].isError).toBe(false);
 		expect(toolEnds[1].isError).toBe(true);
-		expect(toolEnds[1].result.details).toEqual({
-			__synthetic: true,
-			source: "interrupt_skipped",
-			executed: false,
-		});
 		const skippedContent = toolEnds[1].result.content[0];
 		expect(skippedContent?.type).toBe("text");
 		if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");
@@ -2557,11 +2560,10 @@ describe("agentLoop with AgentMessage", () => {
 			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
 		);
 		expect(toolEnd?.result.details).toEqual({
-			__interrupted: true,
-			source: "interrupt_skipped",
-			execution: "started",
+			__synthetic: true,
+			source: "started_aborted_user",
+			executed: true,
 		});
-		expect(toolEnd?.result.details).not.toHaveProperty("executed");
 	});
 
 	it("keeps a completed error result instead of clobbering it into skipped when a steer aborts the signal (#4752)", async () => {

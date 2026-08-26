@@ -85,6 +85,87 @@ import {
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	evidenceFidelity?: CompactionEvidenceFidelityReceiptV1;
+}
+
+export type CompactionEvidenceKind = "file_paths" | "artifact_references" | "unresolved_failures";
+
+export interface CompactionEvidenceFidelityReceiptV1 {
+	schemaVersion: 1;
+	status: "pass" | "fail" | "unavailable";
+	summarySha256: string;
+	evidenceSha256: string;
+	checked: Record<CompactionEvidenceKind, number>;
+	missing: Record<CompactionEvidenceKind, string[]>;
+	unavailableKinds: CompactionEvidenceKind[];
+}
+
+export interface CompactionEvidenceFidelityInput {
+	summary: string;
+	filePaths: readonly string[];
+	artifactReferences: readonly string[];
+	/** Omit when the caller cannot prove which historical failures remain unresolved. */
+	unresolvedFailureAnchors?: readonly string[];
+}
+
+function uniqueEvidence(values: readonly string[]): string[] {
+	return [...new Set(values.map(value => value.trim()).filter(Boolean))];
+}
+
+function sha256(value: string): string {
+	return new Bun.CryptoHasher("sha256").update(value).digest("hex");
+}
+
+/** Deterministic, fail-open verifier; callers persist the receipt instead of blocking compaction. */
+export function validateCompactionEvidenceFidelity(
+	input: CompactionEvidenceFidelityInput,
+): CompactionEvidenceFidelityReceiptV1 {
+	const evidence = {
+		file_paths: uniqueEvidence(input.filePaths),
+		artifact_references: uniqueEvidence(input.artifactReferences),
+		unresolved_failures: uniqueEvidence(input.unresolvedFailureAnchors ?? []),
+	};
+	const missing = {
+		file_paths: evidence.file_paths.filter(value => !input.summary.includes(value)),
+		artifact_references: evidence.artifact_references.filter(value => !input.summary.includes(value)),
+		unresolved_failures: evidence.unresolved_failures.filter(value => !input.summary.includes(value)),
+	};
+	const unavailableKinds: CompactionEvidenceKind[] =
+		input.unresolvedFailureAnchors === undefined ? ["unresolved_failures"] : [];
+	const hasMissing = Object.values(missing).some(values => values.length > 0);
+	return {
+		schemaVersion: 1,
+		status: hasMissing ? "fail" : unavailableKinds.length > 0 ? "unavailable" : "pass",
+		summarySha256: sha256(input.summary),
+		evidenceSha256: sha256(JSON.stringify(evidence)),
+		checked: {
+			file_paths: evidence.file_paths.length,
+			artifact_references: evidence.artifact_references.length,
+			unresolved_failures: evidence.unresolved_failures.length,
+		},
+		missing,
+		unavailableKinds,
+	};
+}
+
+const ARTIFACT_REFERENCE_PATTERN = /\bartifact:\/\/[A-Za-z0-9._/-]+/g;
+
+function messageTextForEvidence(message: AgentMessage): string {
+	if (!("content" in message)) return "";
+	if (typeof message.content === "string") return message.content;
+	if (!Array.isArray(message.content)) return "";
+	const text: string[] = [];
+	for (const block of message.content) {
+		if (block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block) {
+			if (typeof block.text === "string") text.push(block.text);
+		}
+	}
+	return text.join("\n");
+}
+
+function collectArtifactReferences(messages: readonly AgentMessage[], previousSummary?: string): string[] {
+	const source = [...messages.map(messageTextForEvidence), previousSummary ?? ""].join("\n");
+	return uniqueEvidence(source.match(ARTIFACT_REFERENCE_PATTERN) ?? []);
 }
 
 /**
@@ -1849,6 +1930,17 @@ export async function compact(
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	const evidenceFidelity = validateCompactionEvidenceFidelity({
+		summary,
+		filePaths: [...readFiles, ...modifiedFiles],
+		artifactReferences: collectArtifactReferences(
+			[...messagesToSummarize, ...turnPrefixMessages],
+			previousSummaryForCompaction,
+		),
+		// Determining whether a historical failure is still unresolved needs task-state semantics.
+		// Leave this unavailable rather than treating every historical error as current.
+		unresolvedFailureAnchors: undefined,
+	});
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no ID - session may need migration");
@@ -1867,7 +1959,7 @@ export async function compact(
 		shortSummary,
 		firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
+		details: { readFiles, modifiedFiles, evidenceFidelity } as CompactionDetails,
 		preserveData: finalPreserveData,
 	};
 }

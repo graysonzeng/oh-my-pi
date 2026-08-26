@@ -11,6 +11,7 @@ import {
 	EventStream,
 	isApiKeyResolver,
 	type Model,
+	preflightToolWireSchema,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
 	streamSimple,
@@ -85,6 +86,7 @@ import type {
 	SteeringInterruptSource,
 	SteeringQueueState,
 	StreamFn,
+	ToolErrorMetadata,
 } from "./types";
 import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, isSoftToolRequirement } from "./types";
 import { yieldIfDue } from "./utils/yield";
@@ -882,10 +884,12 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		if (pruneDescriptions) {
 			let parameters = stripSchemaDescriptions(toolWireSchema(t)) as TSchema;
 			if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode, false) as TSchema;
+			preflightToolWireSchema(t.name, parameters as Record<string, unknown>);
 			return { ...t, parameters, description: "" };
 		}
 		let parameters = toolWireSchema(t) as TSchema;
 		if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode) as TSchema;
+		preflightToolWireSchema(t.name, parameters as Record<string, unknown>);
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
@@ -2127,9 +2131,78 @@ interface PreparedToolCall {
 	/** Validated (possibly hook-revised) execution args; raw args when validation failed. */
 	args: Record<string, unknown>;
 	validationErrorMessage?: string;
+	validationErrorMetadata?: ToolErrorMetadata;
 	blocked?: boolean;
 	blockReason?: string;
 	prepareError?: unknown;
+}
+
+function validationFailureMetadata(error: unknown, toolFound: boolean): ToolErrorMetadata {
+	if (!toolFound) {
+		return {
+			errorCategory: "not_found",
+			fieldPath: "$.name",
+			expectedType: "active tool name",
+			retryable: false,
+			retryGuidance: "Choose a tool name present in the active tool catalog before making a new call.",
+			sideEffectStatus: "none",
+		};
+	}
+	const fieldPath = error instanceof AIError.ValidationError ? error.fieldPath : null;
+	const expectedType = error instanceof AIError.ValidationError ? error.expectedType : null;
+	return {
+		errorCategory: "validation",
+		fieldPath,
+		expectedType,
+		retryable: false,
+		retryGuidance: fieldPath
+			? `Correct the argument at ${fieldPath}${expectedType ? ` to match ${expectedType}` : ""} before making a new call.`
+			: "Change the invalid arguments before making a new call.",
+		sideEffectStatus: "none",
+	};
+}
+
+const TOOL_ERROR_CATEGORIES = new Set<ToolErrorMetadata["errorCategory"]>([
+	"validation",
+	"permission",
+	"not_found",
+	"conflict",
+	"transient_provider",
+	"timeout",
+	"partial_side_effect",
+	"verification_failed",
+]);
+const TOOL_SIDE_EFFECT_STATUSES = new Set<ToolErrorMetadata["sideEffectStatus"]>([
+	"none",
+	"possible",
+	"partial",
+	"completed",
+	"unknown",
+]);
+
+function structuredToolErrorMetadata(error: unknown): ToolErrorMetadata | undefined {
+	if (!error || typeof error !== "object" || !("context" in error)) return undefined;
+	const context = error.context;
+	if (!context || typeof context !== "object") return undefined;
+	const candidate = context as Partial<ToolErrorMetadata>;
+	if (
+		!candidate.errorCategory ||
+		!TOOL_ERROR_CATEGORIES.has(candidate.errorCategory) ||
+		typeof candidate.retryable !== "boolean" ||
+		typeof candidate.retryGuidance !== "string" ||
+		!candidate.sideEffectStatus ||
+		!TOOL_SIDE_EFFECT_STATUSES.has(candidate.sideEffectStatus)
+	) {
+		return undefined;
+	}
+	return {
+		errorCategory: candidate.errorCategory,
+		fieldPath: typeof candidate.fieldPath === "string" ? candidate.fieldPath : null,
+		expectedType: typeof candidate.expectedType === "string" ? candidate.expectedType : null,
+		retryable: candidate.retryable,
+		retryGuidance: candidate.retryGuidance,
+		sideEffectStatus: candidate.sideEffectStatus,
+	};
 }
 
 /**
@@ -2214,6 +2287,7 @@ async function prepareToolCallDispatch(
 				entry.args = "__parseError" in args ? { __parseError: args.__parseError } : args;
 				entry.validationErrorMessage =
 					validationError instanceof Error ? validationError.message : String(validationError);
+				entry.validationErrorMetadata = validationFailureMetadata(validationError, tool !== undefined);
 				return undefined;
 			}
 		};
@@ -2346,6 +2420,7 @@ async function executeToolCalls(
 			toolResultMessage: undefined as ToolResultMessage | undefined,
 			resultEmitted: false,
 			validationErrorMessage: prepared.validationErrorMessage,
+			validationErrorMetadata: prepared.validationErrorMetadata,
 			blocked: prepared.blocked === true,
 			blockReason: prepared.blockReason,
 			prepareError: prepared.prepareError,
@@ -2541,7 +2616,11 @@ async function executeToolCalls(
 				record,
 				{
 					content: [{ type: "text" as const, text: record.validationErrorMessage }],
-					details: { isError: true, error: record.validationErrorMessage },
+					details: {
+						isError: true,
+						error: record.validationErrorMessage,
+						errorMetadata: record.validationErrorMetadata,
+					},
 				},
 				true,
 			);
@@ -2645,9 +2724,10 @@ async function executeToolCalls(
 				if (coerced.malformed || result.isError) isError = true;
 			} catch (e) {
 				caughtError = e;
+				const errorMetadata = structuredToolErrorMetadata(e);
 				result = {
 					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-					details: {},
+					details: errorMetadata ? { errorMetadata } : {},
 				};
 				isError = true;
 			}
@@ -2682,9 +2762,10 @@ async function executeToolCalls(
 					}
 				} catch (e) {
 					caughtError = e;
+					const errorMetadata = structuredToolErrorMetadata(e);
 					result = {
 						content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-						details: {},
+						details: errorMetadata ? { errorMetadata } : {},
 					};
 					isError = true;
 				}

@@ -414,19 +414,15 @@ describe("sloppy v8", () => {
 		);
 	});
 
-	test("applies marker-less desired text over its closest near-match block", () => {
+	test("fails closed on a closest near-match block", () => {
 		const content = "    if (!entryRow)\n      throw invalid();\n";
-		const notes: string[] = [];
 
-		expect(applySloppy(content, "§\n    if (entryRow)\n      throw invalid();", { path: "i.ts", notes })).toBe(
-			"    if (entryRow)\n      throw invalid();\n",
-		);
-		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+		expect(() =>
+			applySloppy(content, "§\n    if (entryRow)\n      throw invalid();", { path: "i.ts", notes: [] }),
+		).toThrow(/needs »/);
 	});
 
-	test("applies a marker-less desired import line over its near-match", () => {
-		// Regression: a stated desired line (one token added) bounced with a
-		// fill-in "needs »" payload instead of replacing the existing line.
+	test("fails closed on a marker-less import near-match", () => {
 		const content = [
 			'import { parseMCPToolName } from "../mcp";',
 			'import type { ToolRenderer } from "./renderers";',
@@ -434,19 +430,9 @@ describe("sloppy v8", () => {
 			"run();",
 			"",
 		].join("\n");
-		const notes: string[] = [];
 		const input = '§\nimport type { ToolActivitySummary, ToolRenderer } from "./renderers";';
 
-		expect(applySloppy(content, input, { path: "xdev.ts", notes })).toBe(
-			[
-				'import { parseMCPToolName } from "../mcp";',
-				'import type { ToolActivitySummary, ToolRenderer } from "./renderers";',
-				"",
-				"run();",
-				"",
-			].join("\n"),
-		);
-		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+		expect(() => applySloppy(content, input, { path: "xdev.ts", notes: [] })).toThrow(/needs »/);
 	});
 
 	test("keeps the fail-closed error when no block resembles the stated text", () => {
@@ -2012,15 +1998,11 @@ describe("sloppy v8", () => {
 		expect(() => variant.apply(content, input, context)).toThrow(new RegExp(`needs ${esc(M.put)}`));
 	});
 
-	test("applies an omitted-separator block over its unique same-shape window", () => {
+	test("rejects an omitted separator even when a same-shape window exists", () => {
 		const content = "const value = oldValue;\nconst value = oldValue;\n";
 		const input = `${M.open}\nconst value = oldValue;\nconst value = newValue;`;
-		const notes: string[] = [];
 
-		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
-			"const value = oldValue;\nconst value = newValue;\n",
-		);
-		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+		expect(() => variant.apply(content, input, context)).toThrow(new RegExp(`needs ${esc(M.put)}`));
 	});
 
 	test("treats empty double selection markers as an insertion point", () => {

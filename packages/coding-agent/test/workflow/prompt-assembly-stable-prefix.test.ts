@@ -10,6 +10,7 @@ import {
 	assemblePrompt,
 	cacheMetricsFromReceipt,
 	extractProviderCacheMetrics,
+	lintPromptSections,
 	PROMPT_ASSEMBLY_RECEIPT_KIND,
 	type PromptSection,
 	sectionByteBoundaries,
@@ -51,6 +52,74 @@ function prepareBase(overrides: Partial<WorkflowAgentRequest> = {}): WorkflowAge
 		...overrides,
 	};
 }
+
+describe("prompt section preflight", () => {
+	it("rejects duplicate section ids", () => {
+		const sections = withAssignment("Do task A", [
+			{ id: "assignment", content: "conflicting duplicate", stable: false },
+		]);
+
+		expect(lintPromptSections(sections).map(issue => issue.code)).toContain("duplicate_section");
+		expect(() => assemblePrompt({ sections })).toThrow(/duplicate_section/);
+	});
+
+	it("rejects dynamic sections mislabeled as stable", () => {
+		const sections: PromptSection[] = [{ id: "assignment", content: "Do task A", stable: true }];
+
+		expect(lintPromptSections(sections)).toContainEqual(
+			expect.objectContaining({ code: "stability_mismatch", sectionId: "assignment" }),
+		);
+	});
+
+	it("rejects unresolved Handlebars in stable instructions without inspecting dynamic content", () => {
+		const stableTemplate: PromptSection = {
+			id: "role_policy",
+			content: "Implement {{missing_policy}}",
+			stable: true,
+		};
+		const dynamicTemplate: PromptSection = {
+			id: "assignment",
+			content: "Repair the literal {{user_template}} fixture",
+			stable: false,
+		};
+
+		expect(lintPromptSections([stableTemplate]).map(issue => issue.code)).toContain("unresolved_handlebars");
+		expect(lintPromptSections([dynamicTemplate])).toEqual([]);
+	});
+
+	it("rejects contradictory RFC 2119 obligations in one stable paragraph", () => {
+		const sections: PromptSection[] = [
+			{
+				id: "role_policy",
+				content: "The agent MUST retain receipts. The agent MUST NOT retain receipts.",
+				stable: true,
+			},
+		];
+
+		expect(lintPromptSections(sections)).toContainEqual(
+			expect.objectContaining({ code: "contradictory_rfc2119", sectionId: "role_policy" }),
+		);
+	});
+
+	it("records source, hash, authority, stability, bytes, and token estimate per section", () => {
+		const sections = withAssignment("Do task A");
+		sections[0] = { ...sections[0], source: "fixture/system.md", authority: "system" };
+		const assembled = assemblePrompt({ sections });
+		const metadata = assembled.receipt.sections.find(section => section.id === "system_static");
+
+		expect(metadata).toEqual(
+			expect.objectContaining({
+				id: "system_static",
+				source: "fixture/system.md",
+				authority: "system",
+				stability: "stable",
+				bytes: Buffer.byteLength(STABLE_SECTIONS[0]?.content ?? "", "utf-8"),
+				tokenEstimate: Math.ceil(Buffer.byteLength(STABLE_SECTIONS[0]?.content ?? "", "utf-8") / 4),
+			}),
+		);
+		expect(metadata?.sha256).toMatch(/^[a-f0-9]{64}$/);
+	});
+});
 
 describe("P2 stable prefix hash consistency", () => {
 	it("same profile/role sections + different assignment → same stableSha256, different dynamicSha256", () => {

@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added default-off provider-health and adaptive-thinking latency arms plus ordinary-session work metrics linked to rollout outcomes.
+
+### Fixed
+
+- Fixed ambiguous marker-less edits to fail closed instead of inferring replacement text, and repeated empty model responses to try configured cross-model fallbacks before stopping.
+
 ## [17.1.9] - 2026-08-07
 
 ### Breaking Changes

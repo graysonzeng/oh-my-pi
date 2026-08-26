@@ -17,6 +17,7 @@ import {
 	validateConcurrencyDeclaration,
 } from "../latency/concurrency-declaration";
 import { parseWorkflowMechanicalClass } from "../latency/mechanical-class";
+import { ProviderHealthBreaker } from "../latency/provider-health-breaker";
 import {
 	computeLatencyCohortMetrics,
 	deriveLatencyCohortKey,
@@ -321,6 +322,10 @@ export interface WorkflowEngineOptions {
 	latencyCohortStore?: LatencyRolloutCohortStore;
 	/** When true (default if store was created by engine), dispose() closes SQLite. */
 	ownsStore?: boolean;
+	/** Injected clock for the engine-scoped provider-health breaker. */
+	nowMs?: () => number;
+	/** Optional process-local breaker (tests); default is a new engine-scoped instance. */
+	providerHealthBreaker?: ProviderHealthBreaker;
 }
 
 export interface WorkflowStartResult {
@@ -374,6 +379,7 @@ export class WorkflowEngine {
 	/** Workflows whose latency rollout decision is already persisted (terminal evaluated once). */
 	readonly #latencyRolloutPersisted = new Set<string>();
 	#preflightUnavailableReasons: Record<string, string> = {};
+	readonly #providerHealthBreaker: ProviderHealthBreaker;
 
 	// In-memory artifact cache for the current process (also persisted to store)
 	#plan: PlanArtifactV1 | undefined;
@@ -413,6 +419,8 @@ export class WorkflowEngine {
 		this.#ownsStore = options.ownsStore ?? options.store === undefined;
 		this.#store = options.store ?? new WorkflowStore();
 		this.#latencyCohortStore = options.latencyCohortStore ?? new LatencyRolloutCohortStore();
+		this.#providerHealthBreaker =
+			options.providerHealthBreaker ?? new ProviderHealthBreaker({ nowMs: options.nowMs });
 		const mergedConfig = { ...getDefaultConfig(), ...options.config };
 		const normalizedProfiles = Object.fromEntries(
 			Object.entries(mergedConfig.profiles).map(([key, profile]) => {
@@ -1223,6 +1231,9 @@ export class WorkflowEngine {
 			singleStep: options.singleStep,
 			session: options.session,
 			signal: options.signal,
+			providerHealthBreaker: isLatencyArmEnabled(options.session, "provider_health_breaker")
+				? this.#providerHealthBreaker
+				: undefined,
 		});
 		this.#preflightUnavailableReasons = {};
 		for (const row of report.profiles) {

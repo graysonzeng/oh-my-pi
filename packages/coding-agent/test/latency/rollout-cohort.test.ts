@@ -4,12 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { emptyLatencyArms, freezeLatencyArmSnapshot } from "../../src/latency/arms";
 import {
+	buildOrdinarySessionObservationJoin,
 	computeLatencyCohortMetrics,
 	deriveLatencyCohortKey,
 	LATENCY_BASELINE_COHORT_KEY,
 	LATENCY_ROLLOUT_OBSERVATION_KIND,
 	LatencyRolloutCohortStore,
 	type LatencyRolloutObservationV1,
+	parseCohortFileRecords,
 	percentile,
 	summarizeDshDimensionMetrics,
 	summarizeLatencyCohort,
@@ -32,6 +34,78 @@ function observation(overrides: Partial<LatencyRolloutObservationV1>): LatencyRo
 		...overrides,
 	};
 }
+
+describe("ordinary session observation join", () => {
+	it("joins decision identity, explicit unknown verifier, and repeated work metrics", () => {
+		const join = buildOrdinarySessionObservationJoin({
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			profileId: "claude-normal",
+			armFingerprint: "arm-fingerprint",
+			startedAt: "2026-08-26T00:00:00.000Z",
+			endedAt: "2026-08-26T00:00:10.000Z",
+			toolCallCount: 6,
+			toolCalls: [
+				{ name: "read", arguments: { path: "a.ts" } },
+				{ name: "read", arguments: { path: "a.ts" } },
+				{ name: "read", arguments: { path: "b.ts" } },
+				{ name: "grep", arguments: { pattern: "x", path: "src" } },
+				{ name: "grep", arguments: { pattern: "x", path: "src" } },
+				{ name: "edit", arguments: { path: "a.ts" } },
+			],
+			fallbackCount: 1,
+		});
+
+		expect(join.ordinaryAttribution).toMatchObject({
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			profileId: "claude-normal",
+			armFingerprint: "arm-fingerprint",
+		});
+		expect(join.ordinaryAttribution?.fingerprint).toHaveLength(64);
+		expect(join.verifier).toEqual({ source: "unknown", status: "unknown" });
+		expect(join.workMetrics).toEqual({
+			wallClockMs: 10_000,
+			toolCallCount: 6,
+			repeatedReadCount: 1,
+			repeatedGrepCount: 1,
+			fallbackCount: 1,
+			userCorrectionCount: null,
+		});
+		const again = buildOrdinarySessionObservationJoin({
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			profileId: "claude-normal",
+			armFingerprint: "arm-fingerprint",
+			endedAt: "2026-08-27T00:00:00.000Z",
+		});
+		expect(again.ordinaryAttribution?.fingerprint).toBe(join.ordinaryAttribution?.fingerprint);
+	});
+
+	it("keeps missing outcome and counters explicit instead of inferring success or zero", () => {
+		const join = buildOrdinarySessionObservationJoin({ endedAt: "2026-08-26T00:00:00.000Z" });
+
+		expect(join.ordinaryAttribution).toBeNull();
+		expect(join.verifier).toEqual({ source: "unknown", status: "unknown" });
+		expect(join.workMetrics).toEqual({
+			wallClockMs: null,
+			toolCallCount: null,
+			repeatedReadCount: null,
+			repeatedGrepCount: null,
+			fallbackCount: null,
+			userCorrectionCount: null,
+		});
+	});
+
+	it("parses old JSONL observations without ordinary join fields", () => {
+		const parsed = parseCohortFileRecords(`${JSON.stringify(observation({}))}\n`);
+
+		expect(parsed.observations).toHaveLength(1);
+		expect(parsed.observations[0]?.ordinaryAttribution).toBeUndefined();
+		expect(parsed.observations[0]?.verifier).toBeUndefined();
+		expect(parsed.observations[0]?.workMetrics).toBeUndefined();
+	});
+});
 
 describe("deriveLatencyCohortKey", () => {
 	it("maps no arms to baseline, one arm to its id, and many to the registered combination", () => {

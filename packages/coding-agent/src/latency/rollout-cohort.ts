@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	BACKGROUND_LATENCY_ARM_IDS,
 	buildLatencyRolloutDecision,
@@ -45,6 +46,55 @@ export const DSH_DECISION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export type DshObservationPhase = "metrics";
 
+export type OrdinaryVerifierSource = "session_stop" | "extension" | "unknown";
+export type OrdinaryVerifierStatus = "passed" | "failed" | "unknown";
+
+/** Stable ordinary model/profile/arm decision identity. Missing sides remain null. */
+export interface OrdinaryDecisionAttributionV1 {
+	provider: string | null;
+	model: string | null;
+	profileId: string | null;
+	armFingerprint: string | null;
+	fingerprint: string;
+}
+
+/** Explicit verifier outcome; unknown is distinct from success. */
+export interface OrdinaryVerifierOutcomeV1 {
+	source: OrdinaryVerifierSource;
+	status: OrdinaryVerifierStatus;
+}
+
+/** Observable work metrics. Missing counters remain null rather than reading as zero. */
+export interface OrdinaryWorkMetricsV1 {
+	wallClockMs: number | null;
+	toolCallCount: number | null;
+	repeatedReadCount: number | null;
+	repeatedGrepCount: number | null;
+	fallbackCount: number | null;
+	userCorrectionCount: number | null;
+}
+
+export interface OrdinarySessionObservationInput {
+	provider?: string | null;
+	model?: string | null;
+	profileId?: string | null;
+	armFingerprint?: string | null;
+	startedAt?: string | null;
+	endedAt: string;
+	toolCallCount?: number | null;
+	toolCalls?: readonly { name: string; arguments?: Record<string, unknown> }[];
+	fallbackCount?: number | null;
+	userCorrectionCount?: number | null;
+	verifierSource?: OrdinaryVerifierSource;
+	verifierStatus?: OrdinaryVerifierStatus;
+}
+
+export interface OrdinarySessionObservationJoinV1 {
+	ordinaryAttribution: OrdinaryDecisionAttributionV1 | null;
+	verifier: OrdinaryVerifierOutcomeV1;
+	workMetrics: OrdinaryWorkMetricsV1;
+}
+
 /**
  * One completed run (workflow terminal or ordinary-session teardown) recorded
  * for cohort aggregation. Fields are null when the run did not track them;
@@ -80,6 +130,78 @@ export interface LatencyRolloutObservationV1 {
 	dshGoalInjected?: boolean | null;
 	dshAdjacentIdentical?: boolean | null;
 	dshHeadlessCount?: number | null;
+	/** Ordinary model/profile/arm decision identity. Optional for old JSONL. */
+	ordinaryAttribution?: OrdinaryDecisionAttributionV1 | null;
+	/** Explicit final verifier state. Optional for old JSONL. */
+	verifier?: OrdinaryVerifierOutcomeV1 | null;
+	/** Observable ordinary-session work metrics. Optional for old JSONL. */
+	workMetrics?: OrdinaryWorkMetricsV1 | null;
+}
+
+function nullableString(value: string | null | undefined): string | null {
+	return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function nullableCount(value: number | null | undefined): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function ordinaryWallClockMs(startedAt: string | null | undefined, endedAt: string): number | null {
+	if (!startedAt) return null;
+	const started = Date.parse(startedAt);
+	const ended = Date.parse(endedAt);
+	return Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? ended - started : null;
+}
+
+function countRepeatedCalls(
+	toolCalls: OrdinarySessionObservationInput["toolCalls"],
+	toolName: "read" | "grep",
+): number | null {
+	if (!toolCalls) return null;
+	const seen = new Set<string>();
+	let repeated = 0;
+	for (const call of toolCalls) {
+		if (call.name !== toolName) continue;
+		const fingerprint = stableStringifyJson(call.arguments ?? {});
+		if (seen.has(fingerprint)) repeated += 1;
+		else seen.add(fingerprint);
+	}
+	return repeated;
+}
+
+/** Joinable ordinary-session receipt fragment for latency cohort observations. */
+export function buildOrdinarySessionObservationJoin(
+	input: OrdinarySessionObservationInput,
+): OrdinarySessionObservationJoinV1 {
+	const provider = nullableString(input.provider);
+	const model = nullableString(input.model);
+	const profileId = nullableString(input.profileId);
+	const armFingerprint = nullableString(input.armFingerprint);
+	const attributionPayload = { provider, model, profileId, armFingerprint };
+	const ordinaryAttribution =
+		provider || model || profileId || armFingerprint
+			? {
+					...attributionPayload,
+					fingerprint: createHash("sha256").update(stableStringifyJson(attributionPayload)).digest("hex"),
+				}
+			: null;
+	const toolCallCount = nullableCount(input.toolCallCount) ?? (input.toolCalls ? input.toolCalls.length : null);
+
+	return {
+		ordinaryAttribution,
+		verifier: {
+			source: input.verifierSource ?? "unknown",
+			status: input.verifierStatus ?? "unknown",
+		},
+		workMetrics: {
+			wallClockMs: ordinaryWallClockMs(input.startedAt, input.endedAt),
+			toolCallCount,
+			repeatedReadCount: countRepeatedCalls(input.toolCalls, "read"),
+			repeatedGrepCount: countRepeatedCalls(input.toolCalls, "grep"),
+			fallbackCount: nullableCount(input.fallbackCount),
+			userCorrectionCount: nullableCount(input.userCorrectionCount),
+		},
+	};
 }
 
 export interface DshArmAssignmentRecordV1 {

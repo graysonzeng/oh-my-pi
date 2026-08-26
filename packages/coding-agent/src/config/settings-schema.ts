@@ -198,8 +198,8 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  * Ungrouped settings render first, before any section heading.
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
-appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
-model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision", "Model"],
+	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision", "Model"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -5081,6 +5081,28 @@ export const SETTINGS_SCHEMA = {
 			label: "Eval Gate Native Migration",
 			description:
 				"When enabled and EvalGateParityReceiptV1 is proven, migrate eligible eval gates to native workflow/task owners with optional independent overlap. Default off until a real native cutover plus parity/cancel-resume live proof exists (bridge control is always retained).",
+		},
+	},
+	"latency.arms.providerHealthBreaker": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Provider Health Breaker",
+			description:
+				"When enabled, skip physical availability probes for workflow profiles that recently failed twice with retryable provider errors (rate_limit, timeout, provider_transient) and treat them as unavailable for 60 seconds. Fail-open when off. Default off until the paired quality matrix passes.",
+		},
+	},
+	"latency.arms.adaptiveThinkingContext": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Adaptive Auto-Thinking Context",
+			description:
+				"When enabled, the existing auto-thinking classifier call receives a bounded trusted envelope (agent role, error count among the 8 most recent tool results, observable context usage percent). No extra model call. Ordinary sessions never invent a deadline. Default off until the paired quality matrix passes.",
 		},
 	},
 	"latency.arms.dshSessionSearch": {

@@ -43,8 +43,12 @@ describe("latency arms defaults", () => {
 		expect(settings.get("latency.arms.concurrencyDeclaration")).toBe(false);
 		expect(settings.get("latency.arms.concurrencyExecution")).toBe(false);
 		expect(settings.get("latency.arms.evalGateMigration")).toBe(false);
+		expect(settings.get("latency.arms.providerHealthBreaker")).toBe(false);
+		expect(settings.get("latency.arms.adaptiveThinkingContext")).toBe(false);
 		expect(LATENCY_ARM_IDS).toContain("context_optimization");
 		expect(LATENCY_ARM_SETTINGS.context_optimization).toBe("modelOptimization.enabled");
+		expect(LATENCY_ARM_IDS).toContain("provider_health_breaker");
+		expect(LATENCY_ARM_SETTINGS.provider_health_breaker).toBe("latency.arms.providerHealthBreaker");
 		expect(emptyLatencyArms()).toEqual({
 			context_optimization: false,
 			read_dedupe: false,
@@ -55,6 +59,8 @@ describe("latency arms defaults", () => {
 			concurrency_declaration: false,
 			concurrency_execution: false,
 			eval_gate_migration: false,
+			provider_health_breaker: false,
+			adaptive_thinking_context: false,
 			dsh_session_search: false,
 			dsh_omit_goal_time: false,
 			dsh_goal_hash_shadow: false,

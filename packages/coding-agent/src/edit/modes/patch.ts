@@ -1905,6 +1905,12 @@ export async function executePatchSingle(
 		if (unchanged) {
 			throw new ToolError(`edit appeared successful but file content did not change on disk: ${path}`, {
 				path: resolvedPath,
+				errorCategory: "verification_failed",
+				fieldPath: "$.input",
+				expectedType: "an edit that changes the target bytes",
+				retryable: false,
+				retryGuidance: "Re-read the target and submit a changed patch anchored to the current content.",
+				sideEffectStatus: "none",
 			});
 		}
 	}

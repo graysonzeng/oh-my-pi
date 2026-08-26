@@ -45,6 +45,8 @@ oh-my-pi 已经具备较成熟的 Prompt 分层、工具调度、模型能力识
 - 不要把当前 3% 离线质量门禁当成生产实时熔断器。
 - typed trust、跨 turn DAG、学习型 router 等研究方向不能挤掉已知真实缺陷。
 
+本轮实施前复核进一步收紧边界：P0/P1 的真实 failure replay、receipt join、tool/schema preflight 和 compaction fidelity 均有现成扩展点；P2 中 lazy presentation 已存在完整 `xd://tools`/skill catalog 与 paired benchmark，不能重建，只复用 verifier。provider health 与运行态 auto-thinking 信号尚缺，必须分别置于独立、默认关闭的 latency arm。relevance packing 和 memory gate 没有本地 precision/freshness 证据，继续禁用。
+
 ## 3. 当前实现基础
 
 | 维度 | 当前基础 | 主要代码位置 |
@@ -358,11 +360,11 @@ workflow 已有对应 assembly；普通会话应复用现有 append-only context
 
 ### P2：自适应选择
 
-1. provider health/circuit breaker。
-2. 基于现有 essential/discoverable/xdev 的按需工具发现。
-3. 扩展现有 auto-thinking/mechanical classification。
-4. lost-middle 数据支持后再启用 relevance packing。
-5. 测量 Mnemopi precision/freshness 后再决定 memory gate。
+1. provider health/circuit breaker：复用 availability report 和现有 unavailable-profile 路由；独立 arm 默认关闭，至少完成 30 个同模型/provider/task-class 的冻结配对任务且质量回退不超过 3pp 后才可推广。
+2. 基于现有 essential/discoverable/xdev 的按需工具发现：现有 `presentation` benchmark 已测 schema bytes、first-pass、`xd://tools` 展开和 allowlist；本轮只运行 verifier，不新增 catalog 或协议。
+3. 扩展现有 auto-thinking/mechanical classification：在同一次分类调用中提供可观测的角色、最近工具失败和上下文使用率；deadline 只有调用方持有真实值时才传入，禁止伪造。独立 arm 默认关闭；workflow mechanical classification 保持不变。
+4. relevance packing 仅在冻结 lost-middle case 上证明事实/文件/symbol recall 非劣且端到端质量回退不超过 3pp 后启用；当前无该数据，保持关闭。
+5. memory gate 仅在 Mnemopi precision/freshness 有标注集、分 task class 报告和可复现阈值后决定；当前无该数据，不改生产策略。
 
 ### P3：仅实验
 
@@ -370,7 +372,7 @@ workflow 已有对应 assembly；普通会话应复用现有 append-only context
 2. 跨 turn 工具 DAG。
 3. contextual bandit 或自动策略学习。
 
-P3 只有在 P0-P2 积累足够 outcome 数据后才有可靠训练和验证基础。
+P3 只允许 shadow，且必须同时满足以下本地数据门槛：至少 100 条非 mock、已完成、verifier 为明确 pass/fail 的 outcome；覆盖至少 2 个 provider/model 路由和 3 个 task class，任一参与比较的 route × task-class 分层不少于 30 条；unknown/missing verifier 不高于 5%；每条样本带 route/arm fingerprint、质量结果、wall-clock 和 cost（不可观测时显式 `null`）。此外，相关 P0-P2 单变量 arm 必须先完成至少 30 个冻结配对任务并满足不超过 3pp 的质量回退门禁。该门槛只允许记录 shadow 建议，不允许改变生产路由、工具调度或 Prompt。
 
 ## 8. 实验与指标
 

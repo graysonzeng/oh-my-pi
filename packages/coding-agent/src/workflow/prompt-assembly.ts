@@ -24,12 +24,41 @@ export type PromptSectionId =
 	| "handoff"
 	| "history";
 
+export type PromptAuthority = "system" | "developer" | "user" | "tool" | "unknown";
+
+export interface PromptSectionReceiptV1 {
+	id: PromptSectionId;
+	source: string | null;
+	sha256: string;
+	authority: PromptAuthority;
+	stability: "stable" | "dynamic";
+	bytes: number;
+	/** Coarse UTF-8 byte estimate for comparisons only; provider usage remains authoritative. */
+	tokenEstimate: number;
+}
+
+export type PromptLintCode =
+	| "duplicate_section"
+	| "stability_mismatch"
+	| "unresolved_handlebars"
+	| "contradictory_rfc2119";
+
+export interface PromptLintIssue {
+	code: PromptLintCode;
+	sectionId: PromptSectionId;
+	message: string;
+}
+
 export interface PromptSection {
 	id: PromptSectionId;
 	/** Content included in the assembled prompt. */
 	content: string;
 	/** When true, participates in stable prefix hash. */
 	stable: boolean;
+	/** Origin identifier persisted in receipts; null when a caller cannot identify it. */
+	source?: string;
+	/** Trust boundary for the section content. */
+	authority?: PromptAuthority;
 }
 
 /**
@@ -44,6 +73,7 @@ export interface PromptAssemblyReceiptV1 {
 	schemaVersion: typeof PROMPT_ASSEMBLY_RECEIPT_VERSION;
 	kind: typeof PROMPT_ASSEMBLY_RECEIPT_KIND;
 	sectionOrder: PromptSectionId[];
+	sections: PromptSectionReceiptV1[];
 	stableSha256: string;
 	dynamicSha256: string;
 	stableBytes: number;
@@ -106,8 +136,87 @@ export const DYNAMIC_SECTION_ORDER: readonly PromptSectionId[] = [
 const STABLE_ORDER = STABLE_SECTION_ORDER;
 const DYNAMIC_ORDER = DYNAMIC_SECTION_ORDER;
 
+const STABLE_SECTION_IDS = new Set<PromptSectionId>(STABLE_SECTION_ORDER);
+const UNRESOLVED_HANDLEBARS_PATTERN = /{{{?[^{}]+}?}}/;
+const RFC2119_REQUIREMENT_PATTERN = /\b(MUST|SHOULD|MAY)(\s+NOT)?\s+([^\n.!?;]+)/gi;
+
+/**
+ * Deterministic preflight for assembled prompt sections.
+ *
+ * Content-level checks apply only to stable instructions. Dynamic assignment/history
+ * may legitimately quote templates or contradictory text from the user/repository.
+ */
+export function lintPromptSections(sections: readonly PromptSection[]): PromptLintIssue[] {
+	const issues: PromptLintIssue[] = [];
+	const seen = new Set<PromptSectionId>();
+	for (const section of sections) {
+		if (seen.has(section.id)) {
+			issues.push({
+				code: "duplicate_section",
+				sectionId: section.id,
+				message: `Prompt section "${section.id}" appears more than once`,
+			});
+		}
+		seen.add(section.id);
+
+		const expectedStable = STABLE_SECTION_IDS.has(section.id);
+		if (section.stable !== expectedStable) {
+			issues.push({
+				code: "stability_mismatch",
+				sectionId: section.id,
+				message: `Prompt section "${section.id}" must be ${expectedStable ? "stable" : "dynamic"}`,
+			});
+		}
+
+		if (!expectedStable || !section.content) continue;
+		if (UNRESOLVED_HANDLEBARS_PATTERN.test(section.content)) {
+			issues.push({
+				code: "unresolved_handlebars",
+				sectionId: section.id,
+				message: `Stable prompt section "${section.id}" contains an unresolved Handlebars token`,
+			});
+		}
+
+		for (const paragraph of section.content.split(/\n\s*\n/)) {
+			const requirements = new Map<string, Set<boolean>>();
+			for (const match of paragraph.matchAll(RFC2119_REQUIREMENT_PATTERN)) {
+				const modal = match[1]?.toUpperCase();
+				const target = match[3]?.trim().replace(/\s+/g, " ").toLowerCase();
+				if (!modal || !target) continue;
+				const key = `${modal}:${target}`;
+				const polarities = requirements.get(key) ?? new Set<boolean>();
+				polarities.add(Boolean(match[2]));
+				requirements.set(key, polarities);
+			}
+			if ([...requirements.values()].some(polarities => polarities.size > 1)) {
+				issues.push({
+					code: "contradictory_rfc2119",
+					sectionId: section.id,
+					message: `Stable prompt section "${section.id}" contains contradictory RFC 2119 requirements`,
+				});
+				break;
+			}
+		}
+	}
+	return issues;
+}
+
+function buildSectionReceipt(section: PromptSection): PromptSectionReceiptV1 {
+	const bytes = Buffer.byteLength(section.content, "utf-8");
+	return {
+		id: section.id,
+		source: section.source ?? null,
+		sha256: sha256Hex(section.content),
+		authority: section.authority ?? "unknown",
+		stability: section.stable ? "stable" : "dynamic",
+		bytes,
+		tokenEstimate: Math.ceil(bytes / 4),
+	};
+}
+
 function buildReceiptFields(
 	sectionOrder: PromptSectionId[],
+	sectionReceipts: PromptSectionReceiptV1[],
 	stablePrefix: string,
 	dynamicSuffix: string,
 	text: string,
@@ -117,6 +226,7 @@ function buildReceiptFields(
 		schemaVersion: PROMPT_ASSEMBLY_RECEIPT_VERSION,
 		kind: PROMPT_ASSEMBLY_RECEIPT_KIND,
 		sectionOrder,
+		sections: sectionReceipts,
 		stableSha256: sha256Hex(stablePrefix),
 		dynamicSha256: sha256Hex(dynamicSuffix),
 		stableBytes: Buffer.byteLength(stablePrefix, "utf-8"),
@@ -140,6 +250,12 @@ function buildReceiptFields(
  * Dynamic: assignment → repo-map → handoff → history.
  */
 export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
+	const lintIssues = lintPromptSections(input.sections);
+	if (lintIssues.length > 0) {
+		throw new Error(
+			`Prompt assembly preflight failed:\n${lintIssues.map(issue => `- ${issue.code}: ${issue.message}`).join("\n")}`,
+		);
+	}
 	const byId = new Map(input.sections.map(s => [s.id, s]));
 	const stableParts: string[] = [];
 	const dynamicParts: string[] = [];
@@ -161,9 +277,14 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 	const stablePrefix = stableParts.join("\n\n");
 	const dynamicSuffix = dynamicParts.join("\n\n");
 	const text = [stablePrefix, dynamicSuffix].filter(Boolean).join("\n\n");
+	const sectionReceipts: PromptSectionReceiptV1[] = [];
+	for (const id of sectionOrder) {
+		const section = byId.get(id);
+		if (section) sectionReceipts.push(buildSectionReceipt(section));
+	}
 
 	const cacheObservable = input.cacheObservable === true;
-	const receipt = buildReceiptFields(sectionOrder, stablePrefix, dynamicSuffix, text, {
+	const receipt = buildReceiptFields(sectionOrder, sectionReceipts, stablePrefix, dynamicSuffix, text, {
 		cacheObservable,
 		cacheReadTokens: cacheObservable ? (input.cacheReadTokens ?? null) : null,
 		cacheWriteTokens: cacheObservable ? (input.cacheWriteTokens ?? null) : null,

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added structured field, expected-type, and error-category metadata to tool-schema and argument validation failures, including preflight rejection of non-JSON schema values.
+
 ## [17.1.9] - 2026-08-07
 
 ### Fixed

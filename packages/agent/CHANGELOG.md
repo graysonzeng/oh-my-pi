@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Preserved verified file evidence through compaction and distinguished never-started tool skips from interrupted in-flight executions in tool receipts.
+
 ## [17.1.9] - 2026-08-07
 
 ### Added

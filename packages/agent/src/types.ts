@@ -723,6 +723,28 @@ export interface AgentState {
 	error?: string;
 }
 
+export type ToolErrorCategory =
+	| "validation"
+	| "permission"
+	| "not_found"
+	| "conflict"
+	| "transient_provider"
+	| "timeout"
+	| "partial_side_effect"
+	| "verification_failed";
+
+export type ToolSideEffectStatus = "none" | "possible" | "partial" | "completed" | "unknown";
+
+/** Machine-readable recovery contract attached to tool failures. */
+export interface ToolErrorMetadata {
+	errorCategory: ToolErrorCategory;
+	fieldPath: string | null;
+	expectedType: string | null;
+	retryable: boolean;
+	retryGuidance: string;
+	sideEffectStatus: ToolSideEffectStatus;
+}
+
 export interface AgentToolResult<T = any, _TInput = unknown> {
 	// Content blocks supporting text and images
 	content: (TextContent | ImageContent)[];

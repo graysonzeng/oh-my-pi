@@ -6,6 +6,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	classifyDifficulty,
+	countRecentToolResultErrors,
 	parseDifficultyBucket,
 	parseDifficultyLevel,
 } from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
@@ -452,5 +453,102 @@ describe("auto thinking classifier helpers", () => {
 			expect(parseThinkingLevel(selector)).toBeUndefined();
 			expect(parseConfiguredThinkingLevel(selector)).toBeUndefined();
 		}
+	});
+
+	it("does not wrap classifier input when adaptive context is omitted", async () => {
+		let classifierPrompt = "";
+		const fixture = createLocalClassifierFixture("qwen2.5-1.5b");
+		const complete = vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_modelKey, promptText) => {
+			classifierPrompt = promptText;
+			return "trivial";
+		});
+
+		await classifyDifficulty("rename a helper", fixture);
+
+		expect(complete).toHaveBeenCalledTimes(1);
+		expect(classifierPrompt).toContain("rename a helper");
+		expect(classifierPrompt).not.toContain("agent_role:");
+		expect(classifierPrompt).not.toContain("<user-request>");
+	});
+
+	it("sends normalized role, failure, and context signals on the local path", async () => {
+		let classifierPrompt = "";
+		const fixture = createLocalClassifierFixture("qwen2.5-1.5b");
+		const complete = vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_modelKey, promptText) => {
+			classifierPrompt = promptText;
+			return "moderate";
+		});
+
+		await classifyDifficulty("fix the parser", {
+			...fixture,
+			adaptiveContext: {
+				agentRole: "sub",
+				recentToolFailures: 2,
+				contextUsagePercent: 41.7,
+			},
+		});
+
+		expect(complete).toHaveBeenCalledTimes(1);
+		expect(classifierPrompt).toContain("agent_role: sub");
+		expect(classifierPrompt).toContain("recent_tool_failures: 2");
+		expect(classifierPrompt).toContain("context_usage_percent: 41");
+		expect(classifierPrompt).toContain("<user-request>\nfix the parser\n</user-request>");
+		expect(classifierPrompt).not.toContain("deadline_remaining_ms");
+	});
+
+	it("sends the same normalized envelope on the online path", async () => {
+		const fixture = createOnlineFixture(buildLadderModel("mock-xhigh", XHIGH_LADDER), "high");
+		await classifyDifficulty("untangle this race", {
+			...fixture.deps,
+			adaptiveContext: {
+				agentRole: "main",
+				recentToolFailures: 1,
+				contextUsagePercent: 12,
+				deadlineRemainingMs: 1500,
+			},
+		});
+
+		expect(fixture.completeSimpleMock).toHaveBeenCalledTimes(1);
+		const request = fixture.completeSimpleMock.mock.calls[0]?.[1] as {
+			messages: Array<{ content: string }>;
+		};
+		const content = request.messages[0]?.content ?? "";
+		expect(content).toContain("agent_role: main");
+		expect(content).toContain("recent_tool_failures: 1");
+		expect(content).toContain("context_usage_percent: 12");
+		expect(content).toContain("deadline_remaining_ms: 1500");
+		expect(content).toContain("<user-request>\nuntangle this race\n</user-request>");
+	});
+
+	it("clamps more than 8 tool-result errors and omits unsourced deadlines", async () => {
+		const results = Array.from({ length: 12 }, (_, index) => ({
+			role: "toolResult" as const,
+			isError: true,
+			index,
+		}));
+		expect(countRecentToolResultErrors([...results, { role: "user" }, { role: "toolResult", isError: true }])).toBe(
+			8,
+		);
+
+		let classifierPrompt = "";
+		const fixture = createLocalClassifierFixture("qwen2.5-1.5b");
+		vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_modelKey, promptText) => {
+			classifierPrompt = promptText;
+			return "hard";
+		});
+
+		await classifyDifficulty("debug the remaining failures", {
+			...fixture,
+			adaptiveContext: {
+				agentRole: "main",
+				recentToolFailures: 99,
+				contextUsagePercent: Number.NaN,
+				deadlineRemainingMs: -1,
+			},
+		});
+
+		expect(classifierPrompt).toContain("recent_tool_failures: 8");
+		expect(classifierPrompt).toContain("context_usage_percent: unknown");
+		expect(classifierPrompt).not.toContain("deadline_remaining_ms");
 	});
 });

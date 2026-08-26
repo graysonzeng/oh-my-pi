@@ -724,10 +724,11 @@ export class TurnRecovery {
 				0,
 				outputTokens - (assistantMessage.usage.reasoningTokens ?? 0),
 			);
+			const billedDroppedContent = outputTokensExcludingKnownReasoning > 0 && assistantMessage.content.length === 0;
 			let finalError: string;
 			if (providerEmptyOutput) {
 				finalError = "Assistant returned no final output after retry cap; try switching models";
-			} else if (outputTokensExcludingKnownReasoning > 0 && assistantMessage.content.length === 0) {
+			} else if (billedDroppedContent) {
 				// Billed non-reasoning output on a truly zero-block stop means content was
 				// generated and then dropped downstream (a filter/refusal flattened to
 				// `finish_reason: "stop"` by a proxy, or a lossy API translation) — the
@@ -747,6 +748,24 @@ export class TurnRecovery {
 				provider: assistantMessage.provider,
 				outputTokens,
 			});
+			const retrySettings = this.#host.settings.getGroup("retry");
+			const currentModel = this.#host.model();
+			const currentSelector = currentModel
+				? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
+				: undefined;
+			let switchedModel = false;
+			if (!billedDroppedContent && retrySettings.enabled && retrySettings.modelFallback && currentSelector) {
+				this.noteRetryFallbackCooldown(currentSelector, undefined, finalError);
+				switchedModel = await this.#tryRetryModelFallback(currentSelector, assistantMessage);
+			}
+			if (switchedModel) {
+				this.#clearPendingRetryErrors();
+				this.#retryAttempt = 0;
+				this.#emptyStopRetryCount = 0;
+				await this.#dropAssistantTurnDurably(assistantMessage);
+				this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+				return "continue";
+			}
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,

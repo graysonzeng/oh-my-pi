@@ -1,3 +1,7 @@
+import type { ToolErrorMetadata } from "@oh-my-pi/pi-agent-core";
+
+export type ToolErrorContext = Record<string, unknown> & Partial<ToolErrorMetadata>;
+
 /**
  * Standardized error types for tool execution.
  *
@@ -12,7 +16,7 @@
 export class ToolError extends Error {
 	constructor(
 		message: string,
-		readonly context?: Record<string, unknown>,
+		readonly context?: ToolErrorContext,
 	) {
 		super(message);
 		this.name = "ToolError";
