@@ -754,7 +754,7 @@ export class TurnRecovery {
 				? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 				: undefined;
 			let switchedModel = false;
-			if (!billedDroppedContent && retrySettings.enabled && retrySettings.modelFallback && currentSelector) {
+			if (retrySettings.enabled && retrySettings.modelFallback && currentSelector) {
 				this.noteRetryFallbackCooldown(currentSelector, undefined, finalError);
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, assistantMessage);
 			}

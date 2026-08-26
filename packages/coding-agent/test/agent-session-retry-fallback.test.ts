@@ -5502,7 +5502,7 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
-	it("does not treat billed dropped-content empty stops as fallback-eligible", async () => {
+	it("falls back after capped billed dropped-content empty stops", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
@@ -5511,15 +5511,20 @@ describe("AgentSession retry fallback", () => {
 		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
 		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
 		const requestedModels: string[] = [];
-		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
 		const mock = createMockModel();
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (model, context, options) => {
-				requestedModels.push(`${model.provider}/${model.id}`);
-				mock.push({ content: [], stopReason: "stop", usage: { output: 1, cacheRead: 0 } });
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				if (selector === primarySelector) {
+					mock.push({ content: [], stopReason: "stop", usage: { output: 1, cacheRead: 0 } });
+				} else if (selector === fallbackSelector) {
+					mock.push({ content: ["Recovered after billed empty-stop fallback."] });
+				} else {
+					throw new Error(`Unexpected model requested: ${selector}`);
+				}
 				return mock.stream(model, context, options);
 			},
 		});
@@ -5531,18 +5536,22 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", primarySelector);
 		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
-		session.subscribe(event => {
-			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
-			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 
 		await session.prompt("Answer the question");
 		await session.waitForIdle();
 
-		expect(requestedModels).toEqual([primarySelector, primarySelector, primarySelector, primarySelector]);
-		expect(fallbackEvents).toHaveLength(0);
-		expect(retryEndEvents.at(-1)?.finalError).toContain("provider billed 1 output token");
-		expect(session.model?.id).toBe(primaryModel.id);
+		expect(requestedModels).toEqual([
+			primarySelector,
+			primarySelector,
+			primarySelector,
+			primarySelector,
+			fallbackSelector,
+		]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(getLastAssistantMessage(session).content).toEqual([
+			{ type: "text", text: "Recovered after billed empty-stop fallback." },
+		]);
 	});
 });

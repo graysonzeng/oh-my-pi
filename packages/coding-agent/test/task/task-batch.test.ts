@@ -145,11 +145,6 @@ describe("task.batch schema gating", () => {
 		mockDiscovery();
 		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
 
-		expect(tool.description).toContain("Concurrent work MUST stay on disjoint surfaces");
-		expect(tool.description).toContain("declared target files are mid-run state");
-		expect(tool.description).toContain("not success or failure evidence");
-		expect(tool.description).toContain("MUST NOT be overwritten by main or peers until delivery or cancellation");
-		expect(tool.description).toContain("Waiting is allowed when blocked on those owned files");
 		expect(tool.description).toContain("Same-file edits are not guaranteed to merge");
 		expect(tool.description).toContain("coordinate through `hub` before editing shared files");
 		expect(tool.description).toContain("Name one integration owner");

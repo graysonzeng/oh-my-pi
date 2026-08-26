@@ -593,6 +593,66 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolStart.args.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
 	});
 
+	it("surfaces structured ToolError metadata from a thrown tool failure", async () => {
+		const toolSchema = type({ value: "string" });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute() {
+				const error = new Error("edit verification failed") as Error & {
+					context: {
+						errorCategory: "verification_failed";
+						fieldPath: string;
+						expectedType: string;
+						retryable: boolean;
+						retryGuidance: string;
+						sideEffectStatus: "none";
+					};
+				};
+				error.context = {
+					errorCategory: "verification_failed",
+					fieldPath: "$.input",
+					expectedType: "changed file bytes",
+					retryable: false,
+					retryGuidance: "Re-read the target before making a new call.",
+					sideEffectStatus: "none",
+				};
+				throw error;
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("run echo")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd).toBeDefined();
+		if (toolEnd?.type !== "tool_execution_end") throw new Error("expected tool_execution_end");
+		expect(toolEnd.isError).toBe(true);
+		expect(toolEnd.result.details.errorMetadata).toEqual({
+			errorCategory: "verification_failed",
+			fieldPath: "$.input",
+			expectedType: "changed file bytes",
+			retryable: false,
+			retryGuidance: "Re-read the target before making a new call.",
+			sideEffectStatus: "none",
+		});
+	});
+
 	it("runs completed tool calls after a transient stream_read_error", async () => {
 		const executedParams: Array<{ value: string }> = [];
 		const toolSchema = type({ value: "string" });

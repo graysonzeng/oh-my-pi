@@ -8,6 +8,7 @@
  * snapshot (success rate, p95 latency) is a separate 20-sample live-probe
  * window and never invents TTFT.
  */
+import { percentile } from "./rollout-cohort";
 
 export const PROVIDER_HEALTH_BREAKER_ARM = "provider_health_breaker" as const;
 export const PROVIDER_HEALTH_BREAKER_FAILURE_THRESHOLD = 2;
@@ -53,13 +54,6 @@ interface BreakerEntry {
 
 export function isProviderHealthRetryableErrorKind(kind: string | undefined): kind is ProviderHealthRetryableErrorKind {
 	return kind !== undefined && RETRYABLE_KINDS.has(kind);
-}
-
-function percentile95(values: readonly number[]): number | null {
-	if (values.length === 0) return null;
-	const sorted = [...values].sort((a, b) => a - b);
-	const rank = Math.ceil(0.95 * sorted.length);
-	return sorted[Math.max(0, rank - 1)]!;
 }
 
 export class ProviderHealthBreaker {
@@ -145,7 +139,13 @@ export class ProviderHealthBreaker {
 			unavailableCount,
 			indeterminateCount,
 			successRate: samples.length === 0 ? null : availableCount / samples.length,
-			p95LatencyMs: percentile95(latencies),
+			p95LatencyMs:
+				latencies.length === 0
+					? null
+					: (percentile(
+							[...latencies].sort((a, b) => a - b),
+							95,
+						) ?? null),
 		};
 	}
 
