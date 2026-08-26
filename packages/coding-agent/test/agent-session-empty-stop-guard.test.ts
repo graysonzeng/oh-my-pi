@@ -382,7 +382,6 @@ describe("AgentSession empty stop guard", () => {
 		},
 	);
 
-
 	it("removes orphaned tool-use stops even when retry cap is hit", async () => {
 		const { session, mock } = await createHarness([
 			recordCall("gamma", "call-record-gamma"),

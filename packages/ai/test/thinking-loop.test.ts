@@ -376,7 +376,6 @@ describe("ThinkingLoopDetector", () => {
 		detail ??= detector.flush();
 		expect(detail).toBeNull();
 	});
-
 });
 
 describe("thinking-loop guard (stream wrapper)", () => {

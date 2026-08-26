@@ -358,17 +358,13 @@ describe("isEmptyAssistantStop", () => {
 
 	it("retries unsigned thinking-only stops", () => {
 		expect(
-			isEmptyAssistantStop(
-				stopAssistant([{ type: "thinking", thinking: "I should inspect the next file." }]),
-			),
+			isEmptyAssistantStop(stopAssistant([{ type: "thinking", thinking: "I should inspect the next file." }])),
 		).toBe(true);
 	});
 
 	it("accepts a provider-authenticated thinking signature as output", () => {
 		expect(
-			isEmptyAssistantStop(
-				stopAssistant([{ type: "thinking", thinking: "", thinkingSignature: "sig_anthropic" }]),
-			),
+			isEmptyAssistantStop(stopAssistant([{ type: "thinking", thinking: "", thinkingSignature: "sig_anthropic" }])),
 		).toBe(false);
 	});
 

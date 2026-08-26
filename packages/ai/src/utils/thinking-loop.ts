@@ -63,8 +63,9 @@ const EXACT_TAIL_WINDOW = 4096;
 const EXACT_MAX_UNIT = 1024;
 /** New characters between scans. Large deltas are scanned immediately. */
 const EXACT_CHECK_STRIDE = 128;
-/** Short cycles need four repeats covering at least this many characters. */
-const EXACT_SHORT_MAX_UNIT = 60;
+/** Short cycles (≤96, covering the observed 74-character CJK planning sentence)
+ *  need four repeats covering at least this many characters. */
+const EXACT_SHORT_MAX_UNIT = 96;
 const EXACT_SHORT_MIN_REPEATED_CHARS = 180;
 /** Long cycles need at least three repeats covering at least this many chars. */
 const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
@@ -518,8 +519,8 @@ function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMes
 /**
  * Detect an exact cycle at the text suffix. A Z-array over the reversed tail
  * finds every possible suffix period in linear time without substring churn.
- * Short cycles retain the original 180-character/four-repeat sensitivity; long
- * cycles require at least three repeats and 1024 repeated characters.
+ * Short cycles (≤96) retain the original 180-character/four-repeat sensitivity;
+ * long cycles require at least three repeats and 1024 repeated characters.
  */
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	if (text.length < EXACT_SHORT_MIN_REPEATED_CHARS) return null;
