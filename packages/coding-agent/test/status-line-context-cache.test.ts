@@ -15,6 +15,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import type { ContextUsage } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme, setSymbolPreset, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -235,6 +236,27 @@ describe("StatusLineComponent context breakdown", () => {
 		expect(border1.content.length).toBeGreaterThan(0);
 		expect(border2.content.length).toBeGreaterThan(0);
 		expect(usageCalls()).toBe(1);
+	});
+
+	it("keeps context usage in a capsule by default instead of embedding it in the gauge", () => {
+		expect(SETTINGS_SCHEMA["statusLine.contextLine"].default).toBe("annotated");
+
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 213_000, contextWindow: 500_000, percent: 42.6 },
+		});
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi", "context_pct", "cost"],
+			rightSegments: ["session_name"],
+			separator: "powerline-thin",
+		});
+
+		const plain = comp.getTopBorder(120).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+		expect(plain).toContain("42.6%/500K");
+		expect(plain).not.toMatch(/(?:^|[^0-9.])42%(?:[^0-9/]|$)/);
+		expect(plain).not.toMatch(/(?:^|[^0-9.])43%(?:[^0-9/]|$)/);
 	});
 
 	it("renders the anchored percent against the (sub-)budget window in the context segment", () => {

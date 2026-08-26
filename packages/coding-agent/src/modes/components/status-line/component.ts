@@ -2069,7 +2069,7 @@ export class StatusLineComponent implements Component {
 			: undefined;
 		const usedColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("borderAccent");
 		const horizontal = theme.boxRound.horizontal;
-		const mode = effectiveSettings.contextLine ?? "embedded";
+		const mode = effectiveSettings.contextLine ?? "annotated";
 		const pct = ctx.contextPercent;
 		if (mode === "off" || pct === null || pct === undefined) {
 			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
