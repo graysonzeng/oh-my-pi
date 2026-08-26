@@ -1182,7 +1182,7 @@ function parseOperations(input: string, content: string): Operation[] {
 				);
 				desired.desiredState = true;
 				const desiredPattern = parsePattern(desired.patternText, operations.length + 1);
-				let located: Candidate[] | undefined;
+				let located: Candidate[];
 				try {
 					located = locate(content, desiredPattern, desired, operations.length + 1, "");
 				} catch (ambiguity) {
@@ -1201,21 +1201,9 @@ function parseOperations(input: string, content: string): Operation[] {
 					operations.push(collapse);
 					return;
 				}
-				const matched = located?.[0];
-				const matchedText = matched === undefined ? undefined : content.slice(matched.matchStart, matched.matchEnd);
-				const matchedNormalized = matchedText === undefined ? "" : normalizeText(matchedText).text;
-				let neighborsDuplicate = false;
-				if (matched !== undefined && matchedNormalized.length >= 8) {
-					const before = normalizeText(content.slice(0, matched.matchStart)).text;
-					const after = normalizeText(content.slice(matched.matchEnd)).text;
-					for (let overlap = matchedNormalized.length; overlap >= 8 && !neighborsDuplicate; overlap--) {
-						neighborsDuplicate =
-							before.endsWith(matchedNormalized.slice(0, overlap)) ||
-							after.startsWith(matchedNormalized.slice(-overlap));
-					}
-				}
-				if (neighborsDuplicate) {
-					desired.recoveryNote = `Note: operation ${operations.length + 1} stated desired text without markers; the closest matching block was replaced with it. Mark changes explicitly with ${SELECT_OPEN}old${SELECT_DIVIDER}new${SELECT_CLOSE}.`;
+				const matched = located[0];
+				if (matched !== undefined && hasAdjacentRepeatedLineBlock(content, matched)) {
+					desired.recoveryNote = `Note: operation ${operations.length + 1} stated desired text with an adjacent repeated whole-line block; the duplicate block was collapsed.`;
 					operations.push(desired);
 					return;
 				}
@@ -1397,6 +1385,58 @@ function normalizeText(source: string): NormalizedText {
 		index = next;
 	}
 	return { text, starts, ends };
+}
+
+/** Only exact, line-aligned prefix/suffix blocks justify marker-less deduplication. */
+function hasAdjacentRepeatedLineBlock(content: string, candidate: Candidate): boolean {
+	const lineStart = content.lastIndexOf("\n", Math.max(0, candidate.matchStart - 1)) + 1;
+	const newline = content.indexOf("\n", candidate.matchEnd);
+	const lineEnd = newline === -1 ? content.length : newline;
+	if (
+		!/^[ \t]*$/u.test(content.slice(lineStart, candidate.matchStart)) ||
+		!/^[ \t]*$/u.test(content.slice(candidate.matchEnd, lineEnd))
+	) {
+		return false;
+	}
+
+	const matchedText = content.slice(candidate.matchStart, candidate.matchEnd);
+	let beforeStart = lineStart - 1;
+	const beforeEnd = beforeStart;
+	for (
+		let prefixEnd = matchedText.indexOf("\n");
+		prefixEnd !== -1;
+		prefixEnd = matchedText.indexOf("\n", prefixEnd + 1)
+	) {
+		if (beforeStart < 0) break;
+		const previousDelimiter = content.lastIndexOf("\n", beforeStart - 1);
+		beforeStart = previousDelimiter + 1;
+		const repeatedBefore = normalizeText(content.slice(beforeStart, beforeEnd)).text;
+		if (
+			repeatedBefore !== "" &&
+			repeatedBefore === normalizeText(matchedText.slice(0, prefixEnd)).text &&
+			normalizeText(matchedText.slice(prefixEnd + 1)).text !== ""
+		) {
+			return true;
+		}
+		if (beforeStart === 0) break;
+	}
+
+	if (newline === -1) return false;
+	const afterStart = newline + 1;
+	let afterCursor = afterStart;
+	let suffixStart = matchedText.length;
+	while (true) {
+		const separator = matchedText.lastIndexOf("\n", suffixStart - 1);
+		if (separator === -1 || normalizeText(matchedText.slice(0, separator)).text === "") return false;
+		suffixStart = separator + 1;
+		const followingNewline = content.indexOf("\n", afterCursor);
+		const afterEnd = followingNewline === -1 ? content.length : followingNewline;
+		const repeatedAfter = normalizeText(content.slice(afterStart, afterEnd)).text;
+		if (repeatedAfter !== "" && repeatedAfter === normalizeText(matchedText.slice(suffixStart)).text) return true;
+		if (followingNewline === -1) return false;
+		afterCursor = followingNewline + 1;
+		suffixStart = separator;
+	}
 }
 
 function patternGapAt(source: string, offset: number): string | undefined {

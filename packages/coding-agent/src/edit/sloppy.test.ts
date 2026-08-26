@@ -2219,6 +2219,27 @@ describe("executeSloppy multi-file", () => {
 			await dir.remove();
 		}
 	});
+
+	test("writes nothing when marker-less desired text only overlaps a unique neighbor", async () => {
+		const { dir, session } = await setup();
+		const fixtures = ["hello world\nhello world extra\n", "hello world extra\nworld extra\n"];
+		try {
+			for (const content of fixtures) {
+				await Bun.write(dir.join("a.ts"), content);
+				await expect(
+					executeSloppy({
+						session,
+						sections: [{ path: "a.ts", body: `${M.open}\nhello world extra` }],
+						writethrough,
+						beginDeferredDiagnosticsForPath: deferred,
+					}),
+				).rejects.toThrow(/needs »/);
+				expect(await Bun.file(dir.join("a.ts")).text()).toBe(content);
+			}
+		} finally {
+			await dir.remove();
+		}
+	});
 });
 
 describe("computeSloppySectionDiff", () => {

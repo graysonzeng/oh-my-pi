@@ -3037,7 +3037,7 @@ export class AgentSession {
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean; deliveryId?: DeliveryId }) => {
 				this.#emitRunState("idle");
 				const deliveryId = options?.deliveryId ?? this.#acceptedContinuationDeliveryId;
-				const willContinue = options?.willContinue === true && Boolean(deliveryId);
+				const willContinue = options?.willContinue === true;
 				if (willContinue && deliveryId) this.#hiddenNextTurnScheduler.markNonterminal(deliveryId);
 				await this.#emitSessionEvent({
 					...event,
