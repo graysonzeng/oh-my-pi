@@ -12,6 +12,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"grep",
 	"lsp",
 	"inspect_image",
+	"consult",
 	"browser",
 	"computer",
 	"checkpoint",

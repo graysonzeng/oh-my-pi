@@ -199,7 +199,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision", "Model"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Consult", "Prewalk", "Vision", "Model"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -580,6 +580,101 @@ export const SETTINGS_SCHEMA = {
 				{ value: "5", label: "5 turns" },
 			],
 			condition: "advisorEnabled",
+		},
+	},
+	"consult.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Enable Consult Tool",
+			description:
+				"Let the main agent call a stronger model mid-turn for strategic guidance. Independent of the turn-by-turn advisor.",
+		},
+	},
+	"consult.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult Model",
+			description:
+				"Optional model pattern for consult. Empty uses modelRoles.advisor, then the slow chain. Never inherits the primary model.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.allowSameModel": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Allow Same Model",
+			description: "Allow consult when the resolved advisor model is the same as the primary model.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.maxUsesPerTurn": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Max Consults Per Turn",
+			description: "Successful plus failed consult executes in the current primary turn.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.maxUsesPerSession": {
+		type: "number",
+		default: 12,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Max Consults Per Session",
+			description: "Cumulative consult executes in this session.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.timeoutMs": {
+		type: "number",
+		default: 60_000,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult Timeout",
+			description: "Per-request timeout for the consult oneshot, in milliseconds. Set to 0 to disable.",
+			condition: "consultEnabled",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "30000", label: "30 seconds" },
+				{ value: "60000", label: "1 minute" },
+				{ value: "120000", label: "2 minutes" },
+			],
+		},
+	},
+	"consult.maxTokens": {
+		type: "number",
+		default: 2048,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult Max Output Tokens",
+			description: "Hard output token budget passed to the consult oneshot.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.maxFocusChars": {
+		type: "number",
+		default: 2000,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult Focus Limit",
+			description: "Maximum characters for the optional focus argument.",
+			condition: "consultEnabled",
 		},
 	},
 	shellPath: { type: "string", default: undefined },

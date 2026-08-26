@@ -521,6 +521,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply vision mode: ${err}`);
 				});
 				break;
+			case "consult.enabled":
+				void this.ctx.session.applyConsultEnabledChange().catch(err => {
+					this.ctx.showError(`Failed to apply consult: ${err}`);
+				});
+				break;
 			case "externalThinking":
 				void this.ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
 					this.ctx.showError(`Failed to apply external thinking: ${err}`);

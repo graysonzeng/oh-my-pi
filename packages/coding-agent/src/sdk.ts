@@ -1931,6 +1931,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
 			getInspectImageModeOverride: () => session?.getInspectImageModeOverride(),
+			getConsultModelOverride: () => session?.getConsultModelOverride(),
+			snapshotConsultContext: () => ({
+				systemPrompt: [...(agent?.state.systemPrompt ?? [])],
+				messages: [...(agent?.state.messages ?? [])],
+			}),
+			getSecretObfuscator: () => session?.obfuscator,
+			consultUsage: { turn: 0, session: 0 },
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
@@ -3941,6 +3948,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createInspectImageTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.inspect_image(toolSession)) ?? null,
+			createConsultTool: restrictToolNames
+				? undefined
+				: async () => (await BUILTIN_TOOLS.consult(toolSession)) ?? null,
+			consultUsage: toolSession.consultUsage,
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)

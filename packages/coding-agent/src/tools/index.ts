@@ -1,5 +1,11 @@
 import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
-import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentMessage,
+	AgentOptions,
+	AgentTelemetryConfig,
+	AgentTool,
+	AgentToolContext,
+} from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
@@ -24,6 +30,7 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
@@ -51,6 +58,8 @@ import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ComputerTool } from "./computer";
+import { ConsultTool } from "./consult";
+import type { ConsultUsage } from "./consult-state";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -68,8 +77,8 @@ import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
-import { SessionSearchTool } from "./session-search";
 import { SecurityScanTool } from "./security-scan";
+import { SessionSearchTool } from "./session-search";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
 import { applyWorkflowTransformTools, wrapAgentToolWithWorkflowAliases } from "./workflow-alias-wrap";
@@ -94,6 +103,8 @@ export * from "./browser";
 export * from "./checkpoint";
 export * from "./computer";
 export * from "./computer/supervisor";
+export * from "./consult";
+export * from "./consult-state";
 export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
@@ -115,8 +126,8 @@ export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
-export * from "./session-search";
 export * from "./security-scan";
+export * from "./session-search";
 export * from "./think";
 export * from "./todo";
 export * from "./tts";
@@ -321,6 +332,14 @@ export interface ToolSession {
 	getActiveModel?: () => Model | undefined;
 	/** Session-scoped inspect_image mode override set by `/vision`; wins over the persisted setting. */
 	getInspectImageModeOverride?: () => InspectImageMode | undefined;
+	/** Session-scoped `/consult <model>` override; wins over `consult.model`. */
+	getConsultModelOverride?: () => string | undefined;
+	/** Live system prompt + messages for consult oneshot input. */
+	snapshotConsultContext?: () => { systemPrompt: string[]; messages: AgentMessage[] };
+	/** Session secret obfuscator for cross-model consult redaction. */
+	getSecretObfuscator?: () => SecretObfuscator | undefined;
+	/** Per-session consult quota counters; turn is reset on primary turn_start. */
+	consultUsage?: ConsultUsage;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
@@ -498,6 +517,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	grep: s => new GrepTool(s),
 	lsp: LspTool.createIf,
 	inspect_image: s => new InspectImageTool(s),
+	consult: s => new ConsultTool(s),
 	browser: s => new BrowserTool(s),
 	computer: s => new ComputerTool(s),
 	checkpoint: CheckpointTool.createIf,
@@ -685,6 +705,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "inspect_image") return isInspectImageToolActive(session);
+		if (name === "consult") return session.settings.get("consult.enabled") && (session.taskDepth ?? 0) === 0;
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "security_scan") return session.settings.get("security.enabled");
 		if (name === "think") return externalThinkingActive;

@@ -5,6 +5,7 @@
 ### Added
 
 - Added default-off provider-health and adaptive-thinking latency arms plus ordinary-session work metrics linked to rollout outcomes.
+- Added the `consult` tool: a default-off mid-turn oneshot to a stronger model for strategic guidance, with pinned system/project constraints, execute-time model/credential revalidation, fail-closed secret redaction, and a hard `consult.maxTokens` output budget.
 
 ### Fixed
 

@@ -98,7 +98,7 @@ built-in defaults  <-  global config  <-  project config  <-  CLI overlays  <-  
 
 From highest to lowest:
 
-1. **Runtime overrides** — dedicated CLI flags and feature env vars applied in memory for the current process: `--model`, `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--no-pty`, `--api-key`, and protocol-mode defaults. Never persisted.
+1. **Runtime overrides** — dedicated CLI flags and feature env vars applied in memory for the current process: `--model`, `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--consult`, `--consult-model`, `--no-pty`, `--api-key`, and protocol-mode defaults. Never persisted.
 2. **CLI config overlays** — each `--config <file>`; later overlay files override earlier ones.
 3. **Project settings** — `<cwd>/.omp/settings.json` then `<cwd>/.omp/config.yml` (and contributions from other discovery providers at project level).
 4. **Global settings** — `~/.omp/agent/config.yml`.
@@ -379,6 +379,22 @@ See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATC
 | `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
 | `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
 | `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
+
+### Consult
+
+Consult is a mid-turn tool that asks a stronger model for strategic guidance. It is independent of the turn-by-turn advisor. Enable it with `consult.enabled`, `/consult on`, `--consult`, or `--consult-model`.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `consult.enabled` | boolean | `false` | Expose the `consult` tool on top-level sessions. Subagents never receive it. |
+| `consult.model` | string | unset | Optional model pattern. Empty uses `modelRoles.advisor`, then the slow chain. Never inherits the primary model. |
+| `consult.allowSameModel` | boolean | `false` | Allow consult when the resolved model is the same as the primary. |
+| `consult.maxUsesPerTurn` | number | `2` | Successful plus failed consult executes in the current primary turn. |
+| `consult.maxUsesPerSession` | number | `12` | Cumulative consult executes in this session. |
+| `consult.timeoutMs` | number | `60000` | Per-request timeout in milliseconds. `0` disables. |
+| `consult.maxTokens` | number | `2048` | Hard output token budget passed to the consult oneshot. |
+| `consult.maxFocusChars` | number | `2000` | Maximum characters for the optional `focus` argument. |
+
 
 ### Thinking
 

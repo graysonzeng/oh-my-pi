@@ -104,7 +104,7 @@ import { countRecentToolResultErrors } from "../auto-thinking/classifier";
 import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -254,6 +254,8 @@ import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
+import { resolveConsultSelection } from "../tools/consult-model";
+import { type ConsultDetails, type ConsultUsage, resetConsultTurn } from "../tools/consult-state";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	buildResolveReminderMessage,
@@ -588,6 +590,9 @@ export class AgentSession {
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
+	/** Session-scoped `/consult <model>` override; undefined = follow `consult.model`. */
+	#consultModelOverride: string | undefined;
+	consultUsage: ConsultUsage = { turn: 0, session: 0 };
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
@@ -1094,6 +1099,7 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.#hiddenNextTurnScheduler = new HiddenNextTurnScheduler(this.sessionManager.getSessionId());
 		this.settings = config.settings;
+		this.consultUsage = config.consultUsage ?? this.consultUsage;
 		this.#latencyArmSnapshot = config.latencyArmSnapshot;
 		this.#dshAssignment = config.dshAssignment;
 		if (config.dshExecutionIds) this.#dshExecutionIds = config.dshExecutionIds;
@@ -1453,6 +1459,10 @@ export class AgentSession {
 			setInspectImageModeOverride: mode => {
 				this.#inspectImageModeOverride = mode;
 			},
+			getConsultModelOverride: () => this.#consultModelOverride,
+			setConsultModelOverride: pattern => {
+				this.#consultModelOverride = pattern;
+			},
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -1462,6 +1472,7 @@ export class AgentSession {
 			createSessionSearchTool: config.createSessionSearchTool,
 			createThinkTool: config.createThinkTool,
 			createInspectImageTool: config.createInspectImageTool,
+			createConsultTool: config.createConsultTool,
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -2812,6 +2823,7 @@ export class AgentSession {
 
 		if (event.type === "turn_start") {
 			this.#advisors.onPrimaryTurnStart();
+			resetConsultTurn(this);
 			const usage = this.getSessionStats().tokens;
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
 				input: usage.input,
@@ -5281,6 +5293,56 @@ export class AgentSession {
 	 */
 	applyInspectImageModeChange(): Promise<boolean> {
 		return this.#tools.reconcileInspectImageTool();
+	}
+	setConsultToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#tools.setConsultToolEnabled(enabled);
+	}
+
+	setConsultModelOverride(pattern: string | undefined): Promise<boolean> {
+		return this.#tools.setConsultModelOverride(pattern);
+	}
+
+	getConsultModelOverride(): string | undefined {
+		return this.#consultModelOverride;
+	}
+
+	applyConsultEnabledChange(): Promise<boolean> {
+		return this.#tools.setConsultToolEnabled(this.settings.get("consult.enabled") === true);
+	}
+
+	async consultState(): Promise<{
+		enabled: boolean;
+		active: boolean;
+		model?: string;
+		error?: string;
+		sameModel?: boolean;
+		credentials: boolean;
+		turn: number;
+		session: number;
+		last?: ConsultDetails;
+		override?: string;
+	}> {
+		const enabled = this.settings.get("consult.enabled") === true;
+		const active = this.getEnabledToolNames().includes("consult");
+		const resolved = await resolveConsultSelection({
+			settings: this.settings,
+			modelRegistry: this.#modelRegistry,
+			getConsultModelOverride: () => this.#consultModelOverride,
+			getActiveModel: () => this.model,
+			getSessionId: () => this.sessionId,
+		});
+		return {
+			enabled,
+			active,
+			model: resolved.model ? formatModelString(resolved.model) : undefined,
+			error: resolved.ok ? undefined : resolved.error,
+			sameModel: resolved.sameModel,
+			credentials: resolved.ok || resolved.error !== "no_credentials",
+			turn: this.consultUsage.turn,
+			session: this.consultUsage.session,
+			last: this.consultUsage.last,
+			override: this.#consultModelOverride,
+		};
 	}
 
 	/** Cancels the local rollout-memory startup owned by this session. */

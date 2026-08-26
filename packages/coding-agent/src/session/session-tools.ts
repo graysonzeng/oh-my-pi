@@ -63,6 +63,8 @@ export interface SessionToolsHost {
 	/** Session-scoped `/vision` override; undefined means "follow the persisted setting". */
 	getInspectImageModeOverride(): InspectImageMode | undefined;
 	setInspectImageModeOverride(mode: InspectImageMode | undefined): void;
+	getConsultModelOverride(): string | undefined;
+	setConsultModelOverride(pattern: string | undefined): void;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
 }
@@ -77,6 +79,7 @@ interface SessionToolsOptions {
 	createThinkTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link SessionTools.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
+	createConsultTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
@@ -197,6 +200,7 @@ export class SessionTools {
 	#createSessionSearchTool: SessionToolsOptions["createSessionSearchTool"];
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
 	#createInspectImageTool: SessionToolsOptions["createInspectImageTool"];
+	#createConsultTool: SessionToolsOptions["createConsultTool"];
 	#installedVibeToolNames = new Set<string>();
 	#builtInToolNames: Set<string>;
 	#rpcHostToolNames = new Set<string>();
@@ -265,6 +269,7 @@ export class SessionTools {
 		this.#createSessionSearchTool = options.createSessionSearchTool;
 		this.#createThinkTool = options.createThinkTool;
 		this.#createInspectImageTool = options.createInspectImageTool;
+		this.#createConsultTool = options.createConsultTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
 		if (options.mcpManagerToolNames === undefined) {
@@ -1520,6 +1525,45 @@ export class SessionTools {
 			return applied;
 		});
 	}
+	setConsultToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.runToolRegistryMutation(() => this.#setConsultToolActive(enabled));
+	}
+
+	async #setConsultToolActive(enabled: boolean): Promise<boolean> {
+		const active = this.getEnabledToolNames();
+		if (!enabled) {
+			if (active.includes("consult")) {
+				await this.#applyActiveToolsByName(active.filter(name => name !== "consult"));
+			}
+			return true;
+		}
+		if (!this.#toolRegistry.has("consult")) {
+			const tool = await this.#createConsultTool?.();
+			if (tool?.name !== "consult") {
+				logger.warn("consult tool could not be created", {
+					model: this.#host.model()?.id,
+				});
+				return false;
+			}
+			const wrapped = this.#wrapRuntimeTool(tool);
+			this.#toolRegistry.set(wrapped.name, wrapped);
+			this.#builtInToolNames.add(wrapped.name);
+		}
+		if (!active.includes("consult")) {
+			await this.#applyActiveToolsByName([...active, "consult"]);
+		}
+		return true;
+	}
+
+	setConsultModelOverride(pattern: string | undefined): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			this.#host.setConsultModelOverride(pattern);
+			if (pattern !== undefined) {
+				this.#host.settings.override("consult.enabled", true);
+			}
+			return this.#setConsultToolActive(this.#host.settings.get("consult.enabled") === true);
+		});
+	}
 
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	refreshBaseSystemPrompt(): Promise<void> {
@@ -1721,7 +1765,9 @@ export class SessionTools {
 		const managerTools = deduplicateMCPToolsByName(mcpTools).map(customTool => {
 			const wrapped = wrapToolWithMetaNotice(CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool);
 			const activationWrapped = this.#wrapMcpInstructionActivation?.(wrapped) ?? wrapped;
-			return (extensionRunner ? new ExtensionToolWrapper(activationWrapped, extensionRunner) : activationWrapped) as AgentTool;
+			return (
+				extensionRunner ? new ExtensionToolWrapper(activationWrapped, extensionRunner) : activationWrapped
+			) as AgentTool;
 		});
 		const managerToolSet = new Set(managerTools);
 		const reconciledTools = deduplicateMCPToolsByName([...this.#extensionMcpTools.values(), ...managerTools]);

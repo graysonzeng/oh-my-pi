@@ -38,6 +38,7 @@ import type { LatencyRolloutCohortStore } from "../latency/rollout-cohort";
 import type { ResolvedModelOptimization } from "../model-optimization";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConsultUsage } from "../tools/consult-state";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SessionManager } from "./session-manager";
@@ -176,6 +177,10 @@ export interface AgentSessionConfig {
 	createThinkTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
+	/** Creates the built-in `consult` tool for session-scoped runtime enablement. */
+	createConsultTool?: () => Promise<AgentTool | null>;
+	/** Shared consult quota counters owned by ToolSession. */
+	consultUsage?: ConsultUsage;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings. */

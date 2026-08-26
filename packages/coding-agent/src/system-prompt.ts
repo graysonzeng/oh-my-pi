@@ -27,6 +27,7 @@ import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
+import consultInstructionsPrompt from "./prompts/system/consult-instructions.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -1027,6 +1028,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const systemPrompt = [rendered];
 	if (toolNames.includes("computer")) {
 		systemPrompt.push(computerSafetyPrompt.trim());
+	}
+	if (toolNames.includes("consult")) {
+		systemPrompt.push(consultInstructionsPrompt.trim());
 	}
 	// Custom prompt templates already render context files and append text; the
 	// project footer still carries environment, cwd, workspace, and dir-context.

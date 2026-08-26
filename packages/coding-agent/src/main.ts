@@ -1503,6 +1503,13 @@ export async function runRootCommand(
 		if (parsedArgs.advisor) {
 			settingsInstance.override("advisor.enabled", true);
 		}
+		if (parsedArgs.consult) {
+			settingsInstance.override("consult.enabled", true);
+		}
+		if (parsedArgs.consultModel) {
+			settingsInstance.override("consult.enabled", true);
+			settingsInstance.override("consult.model", parsedArgs.consultModel);
+		}
 		// Apply --external-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.externalThinking) {
 			settingsInstance.override("externalThinking", true);
@@ -1659,7 +1666,6 @@ export async function runRootCommand(
 			stopStartupWatchdog();
 			process.exit(0);
 		}
-
 
 		// Handle --resume (no value): show session picker
 		if (parsedArgs.resume === true && !parsedArgs.fork) {

@@ -163,6 +163,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},
+	"--consult-model": (result, value) => {
+		result.consultModel = value;
+		result.consult = true;
+	},
 	"--system-prompt": (result, value) => {
 		result.systemPrompt = value;
 	},
@@ -303,6 +307,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-pty",
 	"--hide-thinking",
 	"--advisor",
+	"--consult",
 	"--external-thinking",
 	"--prewalk",
 	"--no-prewalk",

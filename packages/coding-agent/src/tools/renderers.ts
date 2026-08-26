@@ -17,6 +17,7 @@ import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
 import { browserToolRenderer } from "./browser/render";
 import { computerToolRenderer } from "./computer-renderer";
+import { consultToolRenderer } from "./consult-renderer";
 import { debugToolRenderer } from "./debug";
 import { evalToolRenderer } from "./eval-render";
 import { githubToolRenderer } from "./gh-renderer";
@@ -110,6 +111,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	grep: grepToolRenderer as ToolRenderer,
 	lsp: lspToolRenderer as ToolRenderer,
 	inspect_image: inspectImageToolRenderer as ToolRenderer,
+	consult: consultToolRenderer as ToolRenderer,
 	// Lazy getter: `hubToolRenderer` lives in a module whose deps (messaging →
 	// persisted-agents → vibe/runtime → task/executor → sdk) close an import
 	// cycle back here, so reading it at init order-dependently hits its
