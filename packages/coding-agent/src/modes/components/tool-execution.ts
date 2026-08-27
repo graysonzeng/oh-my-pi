@@ -1107,13 +1107,14 @@ export class ToolExecutionComponent extends Container {
 		// gets the neutral pending tint rather than the error tint (#7199).
 		const benignSkip = this.#isBenignSkip();
 		const presentation = this.#result ? classifyToolPresentation(this.#result) : undefined;
-		const stateBgKey = this.#isPartial || benignSkip
-			? "toolPendingBg"
-			: presentation === "aborted"
-				? "toolErrorBg"
-				: this.#result?.isError
+		const stateBgKey =
+			this.#isPartial || benignSkip
+				? "toolPendingBg"
+				: presentation === "aborted"
 					? "toolErrorBg"
-					: "toolSuccessBg";
+					: this.#result?.isError
+						? "toolErrorBg"
+						: "toolSuccessBg";
 		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
 
 		// A benign skip is a synthetic placeholder for a call that never executed,

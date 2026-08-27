@@ -2498,7 +2498,6 @@ providers:
 			throw new Error(`Unexpected URL: ${url}`);
 		};
 
-
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		const model = registry.find("gateway", "gpt-5.6-sol");

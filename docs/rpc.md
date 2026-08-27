@@ -306,6 +306,12 @@ actual computed values: `enabled` reports the session setting, and `active`
 reports the resulting active state, including any provider-level Fireworks
 priority setting:
 
+xAI-capable Grok text models (`xai`, `xai-oauth`, gateway Grok on OpenAI-compat
+APIs, and `api.x.ai` relays) use family `xai`. Enable still fails with the same
+error string when the current model has no family. OpenRouter `x-ai/grok-*` can
+succeed with `{ enabled: true, active: false }` until upstream forwarding is
+verified.
+
 For direct Anthropic, an explicit enable also re-arms a provider attempt after
 the sticky rejection fallback, even when fast mode was already enabled.
 

@@ -10,7 +10,29 @@
 ### Fixed
 
 - Fixed marker-less edits to fail closed on fuzzy or partial-line neighbor overlaps while retaining exact adjacent whole-line duplicate collapse, and repeated empty model responses to try configured cross-model fallbacks before stopping.
+- Fixed `consult` remaining registered on nested clones such as `/tan` that inherit the parent tool list at `taskDepth` 0.
 - Fixed thinking-only stops whose `thinkingSignature` is an OpenAI reasoning field name (`reasoning_content`, `reasoning`, or `reasoning_text`) being treated as authenticated output and skipping empty-stop retry.
+- Added DSH Context Quality Scheme A on the existing latency arm/ledger/cohort owner: explicit-false A1/A23/A4 dimensions, compacted `session_search`, adjacent goal-hash shadow, first-class hidden-next-turn scheduling, tagged JSONL intents keyed by execution, durable-before-evaluate stops, and bootNonce-bound operator-ack. Control is explicit false. Snapshot freezes before `createTools`. A2/A3 stay atomic (xor fail-closed). Commit is one AgentSession lifecycle, not each public `agent_end`.
+- Added reviewer Shadow Mind code-review cohort (four read-only dimensions) owned by the existing `AsyncJobManager` + `async-result` path. Kill switches: `task.shadowReview.enabled` (default true) and `task.shadowReview.agents`. Quality A/B (§6.2) is **not complete**; do not treat default-on as a quality proof.
+- Added independent `xai` service-tier family (`tier.xai`: none \| priority) so `/fast` and `set_fast_mode` work on xAI-capable Grok text models without merging into OpenAI or inventing a Fireworks-style provider knob. OpenRouter Grok can enable without marking `fastModeActive` until forwarding is verified.
+
+### Changed
+- Reviewer delegation now preflights an exact mandatory late reviewer with useful read-only repository work, reuses the checked agent over IRC after verification, and avoids duplicate final reviews during fallback.
+- Review orchestration now defaults routine reviewers to medium effort, caps agent-level escalation at `xhigh`, pins one shared diff evidence snapshot, and bounds parallel fan-out to disjoint file/contract scopes.
+- Canonical `skill://<name>` full-text reads now stub a second identical view; unknown skills stay fail-closed with a `rule://` hint and no SKILL.md scan; `adaptive-delivery` is routed as a rule.
+- Review/Gate `task` spawns now cap at 20 minutes without raising a stricter or unlimited `task.maxRuntimeMs`, and workflow live quality treats missing or non-`completed` `completionKind` as non-PASS.
+- Grok model-optimization overlay no longer repeats the profile-injected step-by-step sentence. `task` tool prompt no longer restates schema-exposed `effort` / `schemaMode` enum literals.
+
+### Fixed
+
+- Fixed the default status line swallowing the context-usage capsule into a thin gauge (`statusLine.contextLine` is `annotated` again, so `42.6%/500K` stays a chip instead of `5%`/`500K` ticks on the border).
+- Fixed idle `hub wait` loops: empty waits and still-running window expiry now tell the caller that results auto-deliver and not to poll.
+- Fixed missing live `completionKind` being rewritten as ordinary `completed`, and profile fallback swallowing the failed execution so worst-kind aggregation only saw the successful retry.
+- Fixed caller abort / terminate / shutdown being labeled `completed`, and HUD/todo auto-complete treating `budget_stop` as a normal finish.
+- Fixed canonical `skill://` attestation accepting query/fragment URLs and hashing pre-renderer resource bytes instead of the model-visible text.
+- Fixed ambiguous marker-less edits to fail closed instead of inferring replacement text, and capped empty stops — including billed dropped-content stops — to try configured cross-model fallbacks before stopping.
+- Fixed thinking-only empty stops whose `thinkingSignature` is an OpenAI reasoning field name (`reasoning_content`, `reasoning`, `reasoning_text`) being treated as authenticated terminal content. Those stops now retry like unsigned thinking; Claude-style non-field-name signatures stay terminal.
+- Fixed Codex WebSocket 1006 interruptions after unexecuted tool calls to auto-retry only when every emitted call has an exact synthetic `executed: false` result, preserving the failed turn to avoid duplicate side effects.
 
 ## [17.1.9] - 2026-08-07
 

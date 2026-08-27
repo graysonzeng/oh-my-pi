@@ -1649,7 +1649,6 @@ export class EventController {
 					// leave its full card unsettled). When args are not yet tracked,
 					// hold the completion until the start/streamed block creates the
 					// correct component — exactly-once settle, never a silent drop.
-					const group = this.#getReadGroup();
 					const args = this.#readToolCallArgs.get(event.toolCallId);
 					if (args && readArgsCollapseIntoGroup(args)) {
 						const group = this.#getReadGroup();
