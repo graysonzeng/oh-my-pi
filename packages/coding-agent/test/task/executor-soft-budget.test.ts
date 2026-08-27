@@ -267,6 +267,7 @@ describe("runSubprocess soft request budget", () => {
 		// The forced yield finalizes as a normal completion, not an abort.
 		expect(result.aborted).toBe(false);
 		expect(result.exitCode).toBe(0);
+		expect(result.completionKind).toBe("budget_stop");
 		expect(result.abortReason).toBeUndefined();
 		expect(JSON.parse(result.output)).toEqual({ report: "partial findings" });
 		// The agent stays a live, adopted peer.

@@ -2498,7 +2498,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	/**
 	 * Restricted attested identity for canonical `skill://<name>` full-text views
 	 * so `#dedupeOrdinaryReadResult` can stub a second identical read. Ranged,
-	 * raw, query, and `rule://` views stay fail-open.
+	 * raw, query, fragment, and `rule://` views stay fail-open. Digest is the
+	 * model-visible `originalText` fallback in `#dedupeOrdinaryReadResult`, not
+	 * pre-renderer `resource.content`.
 	 */
 	#attestCanonicalSkillFullText(
 		scheme: string,
@@ -2509,6 +2511,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): void {
 		if (scheme !== "skill") return;
 		if (!resource.immutable) return;
+		if (urlMeta.search || urlMeta.hash) return;
 		const skillName = urlMeta.rawHost || urlMeta.hostname;
 		if (!skillName) return;
 		const urlPath = urlMeta.pathname;
@@ -2519,7 +2522,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		details.canonicalSource = `skill://${skillName}`;
 		details.branchOrWorktreeScope = readBranchOrWorktreeScope(this.session.cwd);
 		details.providerViewIdentity = `skill-immutable:${skillName}`;
-		details.contentOrRevisionIdentity = new Bun.CryptoHasher("sha256").update(resource.content).digest("hex");
 		details.outputMode = resource.contentType === "text/markdown" ? "converted" : "raw";
 	}
 

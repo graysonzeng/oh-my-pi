@@ -2288,8 +2288,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * without requiring the agent to issue a follow-up `todo`. A todo `block`ed
 	 * while waiting on a detached subagent is included: that subagent completing
 	 * is exactly the unblock signal, and blocked todos are excluded from the stop
-	 * reminder, so leaving it blocked would strand it silently. Failed and aborted
-	 * subagents are intentionally NOT auto-completed — those stay open so the user
+	 * reminder, so leaving it blocked would strand it silently. Failed, aborted,
+	 * and non-ordinary completions (`budget_stop` / `timeout` / `hard_abort`)
+	 * are intentionally NOT auto-completed — those stay open so the user
 	 * (or the next agent turn) can decide what to do.
 	 *
 	 * Idempotent: only flips open tasks, never re-touches completed ones.
@@ -2299,6 +2300,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		for (const session of this.#observerRegistry.getSessions()) {
 			if (session.kind !== "subagent") continue;
 			if (session.status !== "completed") continue;
+			if (session.completionKind && session.completionKind !== "completed") continue;
 			const candidate =
 				session.description?.trim() || session.progress?.description?.trim() || session.label?.trim();
 			if (candidate) completedDescs.push(candidate);

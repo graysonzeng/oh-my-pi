@@ -148,6 +148,78 @@ describe("WorkflowEngine profile fallback", () => {
 		expect(result.routingAudit.some(a => String(a.reason).includes("fallback") || a.profileId)).toBe(true);
 	});
 
+	it("persists the timed-out planner execution when fallback later completes", async () => {
+		const profiles = Object.values(DEFAULT_MODEL_PROFILES);
+		const router = new ModelRouter(profiles);
+		let planCalls = 0;
+		const session = fakeSession({ cwd: artifactDir });
+		const engine = new WorkflowEngine({
+			store,
+			router,
+			session,
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			adapter: new RuntimeAdapter(async request => {
+				if (request.agent === "designer" || request.agent === "planner") {
+					planCalls += 1;
+					if (planCalls === 1) {
+						throw new WorkflowTimeoutError("planner timed out");
+					}
+					const resolvedModel = attestRuntimeIdentity(request);
+					return {
+						result: {
+							id: "raw-plan",
+							structuredOutput: { status: "valid", data: planArtifact() },
+							resolvedModel,
+							completionKind: "completed",
+						},
+					};
+				}
+				if (String(request.assignment).includes("Review the plan")) {
+					const resolvedModel = attestRuntimeIdentity(request);
+					return {
+						result: {
+							id: "raw-pr",
+							structuredOutput: { status: "valid", data: reviewArtifact("approved", "plan") },
+							resolvedModel,
+							completionKind: "completed",
+						},
+					};
+				}
+				if (String(request.assignment).includes("Implement")) {
+					const patchPath = await materializeSamplePatch(artifactDir);
+					return {
+						result: {
+							id: "raw-impl",
+							structuredOutput: { status: "valid", data: implArtifact({ patchPath }) },
+							patchPath,
+							branchName: "wf/impl",
+							completionKind: "completed",
+						},
+					};
+				}
+				return {
+					result: {
+						id: "raw-cr",
+						structuredOutput: { status: "valid", data: reviewArtifact("approved", "implementation") },
+						completionKind: "completed",
+					},
+				};
+			}),
+		});
+
+		const id = await engine.startWorkflow({ request: "fallback timeout evidence" });
+		const result = await engine.run(id);
+		expect(result.state.status).toBe("completed");
+		expect(planCalls).toBe(2);
+		const report = await engine.getStatusReport(id);
+		const kinds = report?.modelAttempts.flatMap(attempt =>
+			attempt.executions.map(execution => execution.completionKind),
+		);
+		expect(kinds).toContain("timeout");
+		expect(kinds).toContain("completed");
+	});
+
 	it("retries planning with fallback profile after authentication errors", async () => {
 		const profiles = Object.values(DEFAULT_MODEL_PROFILES);
 		const router = new ModelRouter(profiles);

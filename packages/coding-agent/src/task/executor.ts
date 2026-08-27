@@ -968,16 +968,24 @@ export type AbortReason = "signal" | "shutdown" | "terminate" | "timeout" | "bud
 /**
  * Map monitor flags onto terminal provenance. Timeout and grace hard-abort
  * outrank a still-true budgetStopRequested; a successful forced yield is
- * budget_stop even when the run looks completed.
+ * budget_stop even when the run looks completed. Other caller abort /
+ * terminate / shutdown is hard_abort, not completed.
  */
-export function resolveSubagentCompletionKind(monitor: {
-	runtimeLimitExceeded(): boolean;
-	budgetLimitExceeded(): boolean;
-	budgetStopRequested(): boolean;
-}): SubagentCompletionKind {
+export function resolveSubagentCompletionKind(
+	monitor: {
+		runtimeLimitExceeded(): boolean;
+		budgetLimitExceeded(): boolean;
+		budgetStopRequested(): boolean;
+		abortKind?(): AbortReason | undefined;
+	},
+	options?: { aborted?: boolean },
+): SubagentCompletionKind {
 	if (monitor.runtimeLimitExceeded()) return "timeout";
 	if (monitor.budgetLimitExceeded()) return "hard_abort";
 	if (monitor.budgetStopRequested()) return "budget_stop";
+	const abortKind = monitor.abortKind?.();
+	if (abortKind === "signal" || abortKind === "shutdown" || abortKind === "terminate") return "hard_abort";
+	if (options?.aborted) return "hard_abort";
 	return "completed";
 }
 
@@ -2333,7 +2341,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						: monitor.resolveAbortReasonText()
 		: undefined;
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
-	const completionKind = resolveSubagentCompletionKind(monitor);
+	const completionKind = resolveSubagentCompletionKind(monitor, { aborted: wasAborted });
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected

@@ -431,6 +431,7 @@ export class WorkflowEngine {
 	#authorResponsesArtifactRef: StageHandoffArtifactRef | undefined;
 	#planCycles = 0;
 	#lastRouteProfileId: string | undefined;
+	#activeWorkflowId: string | undefined;
 	#lastScopeMetrics: ScopeMetricsV1 | undefined;
 
 	constructor(options: WorkflowEngineOptions = {}) {
@@ -1274,6 +1275,7 @@ export class WorkflowEngine {
 	}
 
 	async #executeCurrentStage(workflowId: string, state: WorkflowState, session: ToolSession): Promise<void> {
+		this.#activeWorkflowId = workflowId;
 		const signal = this.#controller?.signal;
 		const policy = this.#parsePolicy(state.policyJson);
 		const request = this.#parseRequest(state.requestJson);
@@ -3349,6 +3351,13 @@ export class WorkflowEngine {
 				const kindOk =
 					this.#isRetryableProviderError(error) || (typeof kind === "string" && retryableKinds.includes(kind));
 				if (attempt < maxAttempts - 1 && kindOk) {
+					if (this.#activeWorkflowId) {
+						try {
+							await this.#persistAbortCompletionKind(this.#activeWorkflowId, error);
+						} catch {
+							// Evidence persist must not block a retryable profile fallback.
+						}
+					}
 					unavailable.add(route.profileId);
 					unavailableReasons[route.profileId] = `${kind || "runtime_error"}:${
 						error instanceof Error ? error.message : String(error)

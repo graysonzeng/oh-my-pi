@@ -185,8 +185,15 @@ describe("RuntimeAdapter", () => {
 		});
 	});
 
-	it("defaults successful structured output to completed provenance", async () => {
+	it("does not invent completed provenance when the runner omits completionKind", async () => {
 		const result = await new RuntimeAdapter(async () => okResult({ ok: true })).run(baseRequest());
+		expect(result.completionKind).toBeUndefined();
+	});
+
+	it("forwards an explicit completed completionKind from the runner", async () => {
+		const result = await new RuntimeAdapter(async () => okResult({ ok: true }, { completionKind: "completed" })).run(
+			baseRequest(),
+		);
 		expect(result.completionKind).toBe("completed");
 	});
 

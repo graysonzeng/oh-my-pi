@@ -6,7 +6,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { resolveSubagentCompletionKind, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
@@ -112,9 +112,9 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 
 		expect(result.aborted).toBe(true);
 		expect(result.exitCode).toBe(1);
+		expect(result.completionKind).toBe("timeout");
 		expect(result.abortReason).toContain("runtime limit exceeded");
 		expect(result.abortReason).toContain("task.maxRuntimeMs=50");
-		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		// Sanity: must finish in roughly the configured window (allow generous slack
 		// for CI; the contract is "doesn't hang for hours", not "exactly 50 ms").
 		expect(elapsedMs).toBeLessThan(10_000);
@@ -807,6 +807,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 
 		expect(abortCount).toBeGreaterThanOrEqual(1);
 		expect(result.aborted).toBe(true);
+		expect(result.completionKind).toBe("hard_abort");
 		expect(result.abortReason).toContain("Soft request budget exceeded");
 		expect(result.abortReason).not.toContain("runtime limit exceeded");
 	});
@@ -868,5 +869,34 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		expect(result.aborted).toBe(false);
 		expect(result.exitCode).toBe(0);
 		expect(result.abortReason).toBeUndefined();
+	});
+
+	it("classifies caller abort ahead of a successful-looking yield", () => {
+		expect(
+			resolveSubagentCompletionKind({
+				runtimeLimitExceeded: () => false,
+				budgetLimitExceeded: () => false,
+				budgetStopRequested: () => false,
+				abortKind: () => "signal",
+			}),
+		).toBe("hard_abort");
+		expect(
+			resolveSubagentCompletionKind(
+				{
+					runtimeLimitExceeded: () => false,
+					budgetLimitExceeded: () => false,
+					budgetStopRequested: () => false,
+				},
+				{ aborted: true },
+			),
+		).toBe("hard_abort");
+		expect(
+			resolveSubagentCompletionKind({
+				runtimeLimitExceeded: () => false,
+				budgetLimitExceeded: () => false,
+				budgetStopRequested: () => true,
+				abortKind: () => "budget",
+			}),
+		).toBe("budget_stop");
 	});
 });

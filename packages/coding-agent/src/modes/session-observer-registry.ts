@@ -1,4 +1,4 @@
-import type { AgentProgress, SubagentLifecyclePayload, SubagentProgressPayload } from "../task";
+import type { AgentProgress, SubagentCompletionKind, SubagentLifecyclePayload, SubagentProgressPayload } from "../task";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task";
 import type { EventBus } from "../utils/event-bus";
 
@@ -9,6 +9,8 @@ export interface ObservableSession {
 	agent?: string;
 	description?: string;
 	status: "active" | "completed" | "failed" | "aborted";
+	/** Terminal provenance; omit while `status` is `active`. */
+	completionKind?: SubagentCompletionKind;
 	sessionFile?: string;
 	parentToolCallId?: string;
 	/**
@@ -164,6 +166,8 @@ export class SessionObserverRegistry {
 					existing.detached = payload.detached ?? existing.detached;
 					if (payload.description) existing.description = payload.description;
 					if (payload.sessionFile) existing.sessionFile = payload.sessionFile;
+					if (payload.completionKind) existing.completionKind = payload.completionKind;
+					else if (status === "active") existing.completionKind = undefined;
 				} else {
 					this.#sessions.set(payload.id, {
 						id: payload.id,
@@ -172,6 +176,7 @@ export class SessionObserverRegistry {
 						agent: payload.agent,
 						description: payload.description,
 						status,
+						completionKind: payload.completionKind,
 						sessionFile: payload.sessionFile,
 						parentToolCallId: payload.parentToolCallId,
 						detached: payload.detached,

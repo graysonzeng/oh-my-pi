@@ -184,6 +184,80 @@ describe("task spawn routing", () => {
 		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(1_200_000);
 	});
 
+	it("keeps a stricter reviewer maxRuntimeMs below the 20-minute ceiling", async () => {
+		const reviewer: AgentDefinition = {
+			name: "reviewer",
+			description: "Reviewer",
+			systemPrompt: "Review.",
+			source: "bundled",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [reviewer],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxRuntimeMs": 300_000 } }));
+		const result = await tool.execute("tc-review-stricter", {
+			agent: "reviewer",
+			name: "Reviewer",
+			task: "Review the change.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBeTruthy();
+		await manager.getJob(jobId!)!.promise;
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(300_000);
+	});
+
+	it("leaves reviewer runtime unlimited when task.maxRuntimeMs is 0", async () => {
+		const reviewer: AgentDefinition = {
+			name: "reviewer",
+			description: "Reviewer",
+			systemPrompt: "Review.",
+			source: "bundled",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [reviewer],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxRuntimeMs": 0 } }));
+		const result = await tool.execute("tc-review-unlimited", {
+			agent: "reviewer",
+			name: "Reviewer",
+			task: "Review the change.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBeTruthy();
+		await manager.getJob(jobId!)!.promise;
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(0);
+	});
+
+	it("surfaces budget_stop on the parent-facing task summary", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
+			makeResult("YieldedScout", { completionKind: "budget_stop", aborted: false, exitCode: 0 }),
+		);
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false } }));
+		const result = await tool.execute("tc-budget-stop-summary", {
+			agent: "task",
+			name: "YieldedScout",
+			task: "Do the thing.",
+		} as TaskParams);
+		const text = getFirstText(result);
+		expect(text).toContain('completionKind="budget_stop"');
+		expect(text).toContain('status="budget_stop"');
+		expect(text).not.toMatch(/status="completed"/);
+	});
+
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],

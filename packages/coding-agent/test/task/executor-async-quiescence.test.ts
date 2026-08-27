@@ -294,6 +294,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 
 		expect(result.exitCode).toBe(1);
 		expect(result.aborted).toBe(true);
+		expect(result.completionKind).toBe("hard_abort");
 		expect(result.error).toMatch(/cancelled while parked|cancel/i);
 	});
 

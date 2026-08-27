@@ -47,7 +47,6 @@ import {
 	recoverHarmonyToolCall,
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
-import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
@@ -1547,7 +1546,6 @@ async function prepareProviderCall(
 	const llmMessages = await config.convertToLlm(messages);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect: Dialect | undefined = config.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
-	const exampleDialect = ownedDialect ?? preferredDialect(model.id);
 	// Owned/in-band dialects carry the catalog in the prompt as text and send no
 	// native `tools`, so description pruning only applies to native tool calling.
 	const pruneRequested =

@@ -62,8 +62,12 @@ const REVIEW_GATE_AGENTS: Record<string, true> = {
 };
 
 function resolveTaskMaxRuntimeMs(session: ToolSession, agent: string | undefined): number {
-	if (agent && REVIEW_GATE_AGENTS[agent]) return REVIEW_GATE_MAX_RUNTIME_MS;
-	return session.settings.get("task.maxRuntimeMs");
+	const configured = session.settings.get("task.maxRuntimeMs");
+	if (!agent || !REVIEW_GATE_AGENTS[agent]) return configured;
+	// 0 remains unlimited (same public contract as other agents). A stricter
+	// non-zero user cap still wins over the 20-minute reviewer ceiling.
+	if (configured === 0) return 0;
+	return Math.min(configured, REVIEW_GATE_MAX_RUNTIME_MS);
 }
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -120,6 +124,7 @@ export type {
 	AgentDefinition,
 	AgentProgress,
 	SingleResult,
+	SubagentCompletionKind,
 	SubagentEventPayload,
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,

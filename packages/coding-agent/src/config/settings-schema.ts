@@ -5518,7 +5518,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Max Subagent Runtime",
 			description:
-				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a runtime-limit reason. Default 1 hour is a proposed acceptance target pending p95 baseline.",
+				"Hard wall-clock limit per subagent (ms). 0 disables it. Review/Gate agents (`reviewer`, `subagent-sol`, `sol-xhigh-reviewer`, `security-reviewer`) additionally cap at 20 minutes: a stricter non-zero value still wins, and 0 stays unlimited. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a runtime-limit reason. Default 1 hour is a proposed acceptance target pending p95 baseline.",
 			options: [
 				{ value: "0", label: "Unlimited" },
 				{ value: "300000", label: "5 minutes" },

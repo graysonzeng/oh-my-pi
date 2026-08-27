@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import * as isolationRunner from "../../src/task/isolation-runner";
+import * as structuredSubagent from "../../src/task/structured-subagent";
 import { applyWorkflowTransformTools } from "../../src/tools/workflow-alias-wrap";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import {
@@ -975,6 +976,64 @@ describe("AC6 default-path budget + multi-runtime + real AgentTool transform", (
 		expect(adapter).toBeInstanceOf(RuntimeAdapter);
 	});
 
+	it("productionRunner forwards SingleResult.completionKind onto the adapter result", async () => {
+		const spy = vi.spyOn(structuredSubagent, "runStructuredSubagent").mockResolvedValue({
+			result: {
+				index: 0,
+				id: "raw_plan",
+				agent: "task",
+				agentSource: "bundled",
+				task: "implement",
+				exitCode: 0,
+				output: "",
+				stderr: "",
+				truncated: false,
+				durationMs: 1,
+				tokens: 0,
+				requests: 1,
+				completionKind: "budget_stop",
+			},
+			policy: {
+				discovery: { agents: [], projectAgentsDir: null },
+				agentName: "task",
+				agent: { name: "task", description: "t", systemPrompt: "t", source: "bundled" },
+				effectiveAgent: { name: "task", description: "t", systemPrompt: "t", source: "bundled" },
+				schema: { schema: {}, source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
+				planMode: false,
+				isIsolated: false,
+				mergeMode: "patch",
+				applyChanges: false,
+				enableLsp: false,
+				enableIrc: false,
+			},
+			mergeSummary: "",
+			changesApplied: null,
+			artifactsDir: "/tmp",
+			temporaryArtifacts: false,
+		} as never);
+		try {
+			const adapter = createDefaultRuntimeAdapter();
+			await expect(
+				adapter.run({
+					workflowId: "wf_prod",
+					attemptId: "att_prod",
+					role: "implementer",
+					profile: DEFAULT_MODEL_PROFILES.grok_implementer,
+					assignment: "implement",
+					context: "ctx",
+					outputSchema: {},
+					isolation: { requested: false, merge: "patch", apply: false },
+					session: fakeSession(),
+				}),
+			).rejects.toMatchObject({
+				kind: "budget_exhausted",
+				details: { completionKind: "budget_stop" },
+			});
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
 	it("default adapter merges ordered captured patches through one patch merge", async () => {
 		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "wf-p012-captured-"));
 		try {
@@ -1286,5 +1345,44 @@ describe("benchmark quality gate completionKind", () => {
 		const gate = evaluateBenchmarkQualityGate(scorecard);
 		expect(gate.passed).toBe(false);
 		expect(gate.reasons.some(reason => reason.includes("completionKind=budget_stop"))).toBe(true);
+	});
+
+	it("fails live paired code-review and Design-Gate cases when completionKind is missing", async () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const paired = suite.cases.filter(
+			c => c.id === "permission-readonly-review" || c.id === "schema-repair-boundary",
+		);
+		expect(paired).toHaveLength(2);
+		const results = await runBenchmarkSuite({
+			suite: { ...suite, cases: paired },
+			runtime: async () => ({
+				passed: true,
+				qualityScore: 100,
+				scopeStatus: "adhered",
+				durationMs: 1,
+				runtimeProvenance: {
+					source: "runtime_observed",
+					provider: "p",
+					model: "m",
+					checkpoint: null,
+					api: null,
+					adapter: null,
+					parser: null,
+				},
+			}),
+			minRepetitions: 1,
+			liveQualityUnknown: false,
+			provider: "p",
+			model: "m",
+		});
+		const scorecard = buildScorecard({ ...suite, cases: paired }, results, {
+			liveQualityUnknown: false,
+			acceptanceMinRepetitions: 1,
+		});
+		const gate = evaluateBenchmarkQualityGate(scorecard);
+		expect(gate.passed).toBe(false);
+		expect(gate.reasons.some(reason => reason.includes("permission-readonly-review"))).toBe(true);
+		expect(gate.reasons.some(reason => reason.includes("schema-repair-boundary"))).toBe(true);
+		expect(gate.reasons.some(reason => reason.includes("missing completionKind"))).toBe(true);
 	});
 });

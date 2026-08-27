@@ -577,7 +577,7 @@ export class RuntimeAdapter implements RuntimePort {
 				identityReceipt,
 				modelFamily: identityReceipt.modelFamily ?? undefined,
 				resolvedToolPolicyId: prepared.resolvedToolPolicyId,
-				completionKind: body.completionKind ?? "completed",
+				completionKind: body.completionKind,
 			};
 		} catch (error) {
 			throw this.#normalizeError(error);
@@ -639,6 +639,7 @@ export class RuntimeAdapter implements RuntimePort {
 			identityReceipt,
 			modelFamily: identityReceipt.modelFamily ?? undefined,
 			resolvedToolPolicyId: prepared.resolvedToolPolicyId,
+			completionKind: body.completionKind,
 			schemaRepairReceipt: receipt,
 		};
 	}

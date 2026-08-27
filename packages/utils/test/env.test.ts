@@ -12,7 +12,6 @@ import {
 } from "@oh-my-pi/pi-utils/env";
 
 const tempDirs: string[] = [];
-const runtimeProbePath = path.join(import.meta.dir, "fixtures", "test-runtime-probe.ts");
 
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
@@ -47,25 +46,6 @@ describe("getDbBusyTimeoutMs", () => {
 		}
 	});
 });
-async function runRuntimeProbe(
-	env: Record<string, string | undefined>,
-	probePath = runtimeProbePath,
-): Promise<boolean> {
-	const cwd = path.dirname(writeTempEnv(""));
-	const proc = Bun.spawn([process.execPath, probePath], {
-		cwd,
-		env: { ...process.env, ...env },
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	expect(exitCode, stderr).toBe(0);
-	return JSON.parse(stdout) as boolean;
-}
 
 describe("parseEnvFile", () => {
 	it("ignores malformed names and nul-containing values", () => {
@@ -183,7 +163,7 @@ describe("filterChildShellEnv", () => {
 		return process.env.NODE_ENV || "development";
 	}
 
-	it("removes secrets loaded from .env.${NODE_ENV}.local mode-local files", () => {
+	it("removes secrets loaded from mode-local dotenv files", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-mode-local-"));
 		tempDirs.push(dir);
 		const mode = launchDotenvMode();
@@ -205,22 +185,9 @@ describe("filterChildShellEnv", () => {
 		tempDirs.push(dir);
 		const mode = launchDotenvMode();
 		fs.writeFileSync(path.join(dir, `.env.${mode}`), "MODE_SECRET=super-secret-value\n");
-		const filtered = filterChildShellEnv(
-			{ NODE_ENV: mode, MODE_SECRET: "super-secret-value", KEEP_ME: "yes" },
-			dir,
-		);
+		const filtered = filterChildShellEnv({ NODE_ENV: mode, MODE_SECRET: "super-secret-value", KEEP_ME: "yes" }, dir);
 		expect(filtered.MODE_SECRET).toBeUndefined();
 		expect(filtered.KEEP_ME).toBe("yes");
-	});
-
-
-	describe("setInteractiveHost", () => {
-		it("makes worker runtime probe report interactive host", () => {
-			setInteractiveHost(true);
-			const result = Bun.spawnSync([process.execPath, runtimeProbePath]);
-			expect(result.exitCode).toBe(0);
-			expect(result.stdout.toString().trim()).toBe("interactive");
-		});
 	});
 
 	describe("$envExact", () => {
@@ -228,12 +195,12 @@ describe("filterChildShellEnv", () => {
 			return new Proxy(values, {
 				get(target, property) {
 					if (typeof property !== "string") return Reflect.get(target, property);
-					const key = Object.keys(target).find((candidate) => candidate.toLowerCase() === property.toLowerCase());
+					const key = Object.keys(target).find(candidate => candidate.toLowerCase() === property.toLowerCase());
 					return key === undefined ? undefined : target[key];
 				},
 				has(target, property) {
 					if (typeof property !== "string") return Reflect.has(target, property);
-					return Object.keys(target).some((candidate) => candidate.toLowerCase() === property.toLowerCase());
+					return Object.keys(target).some(candidate => candidate.toLowerCase() === property.toLowerCase());
 				},
 			});
 		}

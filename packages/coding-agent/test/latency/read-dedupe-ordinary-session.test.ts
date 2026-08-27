@@ -5,6 +5,7 @@ import type { AfterToolCallContext } from "@oh-my-pi/pi-agent-core";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { resetActiveRulesForTests, setActiveRules } from "../../src/capability/rule";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { resetActiveSkillsForTests, setActiveSkills } from "../../src/extensibility/skills";
@@ -361,6 +362,131 @@ describe("canonical skill full-text read dedupe", () => {
 			await session.agent.afterToolCall!(readCtx("skill-range-1", firstExec, args));
 			const secondExec = await readTool.execute("skill-range-2", args);
 			const secondAfter = await session.agent.afterToolCall!(readCtx("skill-range-2", secondExec, args));
+			expect(textFromResult(secondAfter ?? secondExec)).not.toMatch(/\[context ref: artifact:\/\//);
+		} finally {
+			await session.dispose();
+			resetActiveSkillsForTests();
+		}
+	});
+
+	it("does not attest query, fragment, raw, or rule views", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "skill-ineligible-"));
+		const skillDir = path.join(workDir, "engineering-flow");
+		await fs.mkdir(skillDir);
+		await fs.writeFile(
+			path.join(skillDir, "SKILL.md"),
+			"---\nname: engineering-flow\ndescription: test\n---\n\nfull skill body\n",
+		);
+		setActiveSkills([
+			{
+				name: "engineering-flow",
+				description: "test",
+				filePath: path.join(skillDir, "SKILL.md"),
+				baseDir: skillDir,
+				source: "test",
+			},
+		]);
+		setActiveRules([
+			{
+				name: "adaptive-delivery",
+				path: path.join(workDir, "adaptive-delivery.md"),
+				content: "rule body",
+				_source: {
+					provider: "test",
+					providerName: "test",
+					path: path.join(workDir, "adaptive-delivery.md"),
+					level: "project",
+				},
+			},
+		]);
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			for (const pathArg of [
+				"skill://engineering-flow?q=once",
+				"skill://engineering-flow#frag",
+				"skill://engineering-flow:raw",
+				"rule://adaptive-delivery",
+			]) {
+				const exec = await readTool.execute(`ineligible-${pathArg}`, { path: pathArg });
+				expect(exec.details?.providerViewIdentity).toBeUndefined();
+				expect(exec.details?.contentOrRevisionIdentity).toBeUndefined();
+			}
+		} finally {
+			await session.dispose();
+			resetActiveSkillsForTests();
+			resetActiveRulesForTests();
+		}
+	});
+
+	it("re-injects skill full text after the retained map is cleared", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "skill-reset-"));
+		const skillDir = path.join(workDir, "engineering-flow");
+		await fs.mkdir(skillDir);
+		const body = `# engineering-flow\n${"load once. ".repeat(80)}`;
+		await fs.writeFile(
+			path.join(skillDir, "SKILL.md"),
+			`---\nname: engineering-flow\ndescription: test\n---\n\n${body}\n`,
+		);
+		setActiveSkills([
+			{
+				name: "engineering-flow",
+				description: "test",
+				filePath: path.join(skillDir, "SKILL.md"),
+				baseDir: skillDir,
+				source: "test",
+			},
+		]);
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const args = { path: "skill://engineering-flow" };
+			const firstExec = await readTool.execute("skill-reset-1", args);
+			await session.agent.afterToolCall!(readCtx("skill-reset-1", firstExec, args));
+			const currentModel = session.model;
+			if (!currentModel) throw new Error("expected an active model");
+			await session.setModelTemporary({ ...currentModel, id: `${currentModel.id}-switched` });
+			const secondExec = await readTool.execute("skill-reset-2", args);
+			const secondAfter = await session.agent.afterToolCall!(readCtx("skill-reset-2", secondExec, args));
+			expect(textFromResult(secondAfter ?? secondExec)).toContain("load once.");
+			expect(textFromResult(secondAfter ?? secondExec)).not.toMatch(/^\[context ref: artifact:\/\//);
+		} finally {
+			await session.dispose();
+			resetActiveSkillsForTests();
+		}
+	});
+
+	it("re-injects when skill body hash changes between reads", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "skill-hash-"));
+		const skillDir = path.join(workDir, "engineering-flow");
+		await fs.mkdir(skillDir);
+		const skillFile = path.join(skillDir, "SKILL.md");
+		await fs.writeFile(skillFile, "---\nname: engineering-flow\ndescription: test\n---\n\nfirst body\n");
+		setActiveSkills([
+			{
+				name: "engineering-flow",
+				description: "test",
+				filePath: skillFile,
+				baseDir: skillDir,
+				source: "test",
+			},
+		]);
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const args = { path: "skill://engineering-flow" };
+			const firstExec = await readTool.execute("skill-hash-1", args);
+			await session.agent.afterToolCall!(readCtx("skill-hash-1", firstExec, args));
+			await fs.writeFile(skillFile, "---\nname: engineering-flow\ndescription: test\n---\n\nmutated body\n");
+			const secondExec = await readTool.execute("skill-hash-2", args);
+			const secondAfter = await session.agent.afterToolCall!(readCtx("skill-hash-2", secondExec, args));
+			expect(textFromResult(secondAfter ?? secondExec)).toContain("mutated body");
 			expect(textFromResult(secondAfter ?? secondExec)).not.toMatch(/\[context ref: artifact:\/\//);
 		} finally {
 			await session.dispose();

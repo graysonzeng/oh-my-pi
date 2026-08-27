@@ -355,7 +355,6 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
-
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
@@ -378,5 +377,36 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hud).toContain("BurstAgent5: Burst job 5");
 		expect(rebuildHud).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not auto-complete a todo when status is completed but completionKind is budget_stop", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		mode.todoPhases = [{ name: "Work", tasks: [{ content: "Review the change", status: "in_progress" }] }];
+		vi.useFakeTimers();
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("BudgetStopReviewer", 0, "Review the change", true),
+			status: "completed",
+			completionKind: "budget_stop",
+		});
+		await Promise.resolve();
+		vi.runAllTimers();
+		await Promise.resolve();
+		expect(mode.todoPhases[0]?.tasks[0]?.status).toBe("in_progress");
+	});
+});
+
+describe("SessionObserverRegistry completionKind", () => {
+	it("stores budget_stop instead of treating the lifecycle as ordinary completed", () => {
+		const registry = new SessionObserverRegistry();
+		const eventBus = new EventBus();
+		registry.subscribeToEventBus(eventBus);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("ForcedYield", 1, "Forced yield", true),
+			status: "completed",
+			completionKind: "budget_stop",
+		});
+		const observed = registry.getSession("ForcedYield");
+		expect(observed?.status).toBe("completed");
+		expect(observed?.completionKind).toBe("budget_stop");
 	});
 });
