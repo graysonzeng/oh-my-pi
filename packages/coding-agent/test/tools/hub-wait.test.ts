@@ -94,6 +94,22 @@ describe("hub unified wait", () => {
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("## Completed (1)");
 	});
+	test("wait window expiry while jobs run tells the caller not to poll", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const job = registerHangingJob(manager, "sleep forever");
+		const result = await new HubTool(makeSession(manager)).execute("call_window", {
+			op: "wait",
+			ids: [job.id],
+			timeoutMs: 40,
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("## Still Running");
+		expect(text).toContain("Results auto-deliver; do not poll");
+		expect(result.useless).toBe(true);
+		manager.cancel(job.id);
+	});
 
 	test("bare wait with no jobs and no running peers returns immediately", async () => {
 		const registry = AgentRegistry.global();

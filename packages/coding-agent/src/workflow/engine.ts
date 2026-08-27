@@ -57,6 +57,7 @@ import {
 	WorkflowCancelledError,
 	WorkflowError,
 	WorkflowPolicyError,
+	WorkflowTimeoutError,
 } from "./errors";
 import { FindingTracker } from "./finding-tracker";
 import { assertStrictRuntimeIdentity } from "./identity-receipt";
@@ -130,6 +131,7 @@ import type {
 	VerifierPort,
 	WorkflowAvailabilityPort,
 	WorkflowAvailabilityReport,
+	WorkflowCompletionKind,
 	WorkflowConfiguredIdentityEvidenceV1,
 	WorkflowConfiguredStageRouteEvidenceV1,
 	WorkflowEvidenceStatus,
@@ -292,7 +294,23 @@ function modelExecutionEvidence(value: unknown): WorkflowModelExecutionEvidenceV
 		effortSupported: evidenceBoolean(record.effortSupported),
 		modelFamily: evidenceString(record.modelFamily),
 		toolPolicyId: evidenceString(record.toolPolicyId) ?? evidenceString(record.resolvedToolPolicyId),
+		completionKind: evidenceCompletionKind(record.completionKind),
 	};
+}
+
+function completionKindFromError(error: unknown): WorkflowCompletionKind | null {
+	if (!(error instanceof WorkflowError)) return null;
+	const fromDetails = evidenceCompletionKind(evidenceRecord(error.details)?.completionKind);
+	if (fromDetails) return fromDetails;
+	if (error instanceof BudgetExhaustedError) return "budget_stop";
+	if (error instanceof WorkflowTimeoutError) return "timeout";
+	if (error instanceof WorkflowCancelledError) return "hard_abort";
+	return null;
+}
+function evidenceCompletionKind(value: unknown): WorkflowCompletionKind | null {
+	return value === "completed" || value === "budget_stop" || value === "timeout" || value === "hard_abort"
+		? value
+		: null;
 }
 
 function modelStageRole(stage: string): Readonly<{ stage: WorkflowModelBackedStage; role: WorkflowRole }> | null {
@@ -950,6 +968,7 @@ export class WorkflowEngine {
 					try {
 						await this.#executeCurrentStage(workflowId, state, session);
 					} catch (error) {
+						await this.#persistAbortCompletionKind(workflowId, error);
 						if (error instanceof WorkflowCancelledError || this.#controller.signal.aborted) {
 							await this.#persistCancellation(workflowId, "cancelled during stage");
 							break;
@@ -1284,6 +1303,7 @@ export class WorkflowEngine {
 					identityReceipt,
 					modelFamily,
 					resolvedToolPolicyId,
+					completionKind,
 				} = await this.#withProfileFallback("planner", {}, async profile => {
 					this.#plannerProfileId = profile.id;
 					this.#plannerVendor = profile.vendor;
@@ -1371,6 +1391,7 @@ export class WorkflowEngine {
 					identityReceipt,
 					modelFamily,
 					resolvedToolPolicyId,
+					completionKind,
 				});
 				const next = getNextStage("planning", "approved");
 				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "plan ready", fresh.version);
@@ -1554,6 +1575,7 @@ export class WorkflowEngine {
 					identityReceipt,
 					modelFamily,
 					resolvedToolPolicyId,
+					completionKind,
 				} = reviewResult;
 				const isV2Review = rawReview.schemaVersion === 2;
 				// C1: stamp engine-owned fields before persist; never trust model triggerReason/authorResponses.
@@ -1597,6 +1619,7 @@ export class WorkflowEngine {
 					identityReceipt,
 					modelFamily,
 					resolvedToolPolicyId,
+					completionKind,
 				});
 
 				if (isV2Review && (review.decision === "blocked" || hasMissingAuthority)) {
@@ -1837,6 +1860,7 @@ export class WorkflowEngine {
 					identityReceipt,
 					modelFamily,
 					resolvedToolPolicyId,
+					completionKind,
 				} = await this.#withProfileFallback(
 					"code_reviewer",
 					{
@@ -1893,6 +1917,7 @@ export class WorkflowEngine {
 					identityReceipt,
 					modelFamily,
 					resolvedToolPolicyId,
+					completionKind,
 				});
 
 				const blocking = review.findings.filter(
@@ -2014,6 +2039,7 @@ export class WorkflowEngine {
 					identityReceipt,
 					modelFamily,
 					resolvedToolPolicyId,
+					completionKind,
 				} = await this.#withProfileFallback(
 					"repair",
 					{
@@ -2096,6 +2122,7 @@ export class WorkflowEngine {
 					contextLedger,
 					optimizationReceipts,
 					resolvedToolPolicyId,
+					completionKind,
 					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
 				});
 				if (strictRepairNoOp) {
@@ -2395,6 +2422,7 @@ export class WorkflowEngine {
 					identityReceipt: result.identityReceipt,
 					modelFamily: result.modelFamily,
 					resolvedToolPolicyId: result.resolvedToolPolicyId,
+					completionKind: result.completionKind,
 				},
 			};
 		}
@@ -2466,6 +2494,7 @@ export class WorkflowEngine {
 						identityReceipt: result.identityReceipt,
 						modelFamily: result.modelFamily,
 						resolvedToolPolicyId: result.resolvedToolPolicyId,
+						completionKind: result.completionKind,
 					});
 				},
 			});
@@ -3520,6 +3549,7 @@ export class WorkflowEngine {
 			identityReceipt: arbitration.identityReceipt,
 			modelFamily: arbitration.modelFamily,
 			resolvedToolPolicyId: arbitration.resolvedToolPolicyId,
+			completionKind: arbitration.completionKind,
 		});
 		await this.#persistPlanReviewControl(workflowId, attemptId);
 		if (artifact.schemaVersion === 2 && artifact.decision === "approved") {
@@ -3976,6 +4006,20 @@ export class WorkflowEngine {
 		});
 	}
 
+	async #persistAbortCompletionKind(workflowId: string, error: unknown): Promise<void> {
+		const completionKind = completionKindFromError(error);
+		if (!completionKind || completionKind === "completed") return;
+		const state = await this.#requireState(workflowId);
+		if (!state.currentAttemptId) return;
+		await this.#persistArtifact(workflowId, state.currentAttemptId, "runtime-evidence", {
+			kind: "runtime-evidence",
+			schemaVersion: 1,
+			workflowId,
+			attemptId: state.currentAttemptId,
+			profileId: this.#lastRouteProfileId ?? null,
+			completionKind,
+		});
+	}
 	async #recordUsageAndProfile(
 		workflowId: string,
 		attemptId: string,
@@ -4054,7 +4098,12 @@ export class WorkflowEngine {
 				receipts: evidence.optimizationReceipts,
 			});
 		}
-		if (evidence?.identityReceipt || evidence?.resolvedProvider || evidence?.resolvedModel) {
+		if (
+			evidence?.identityReceipt ||
+			evidence?.resolvedProvider ||
+			evidence?.resolvedModel ||
+			evidence?.completionKind
+		) {
 			await this.#persistArtifact(workflowId, attemptId, "runtime-evidence", {
 				kind: "runtime-evidence",
 				schemaVersion: 1,
@@ -4083,6 +4132,7 @@ export class WorkflowEngine {
 				toolPolicyId: profile?.toolPolicyId ?? null,
 				resolvedToolPolicyId: evidence?.resolvedToolPolicyId ?? null,
 				scopeMetricsKind: evidence?.scopeMetricsKind ?? null,
+				completionKind: evidence?.completionKind ?? null,
 			});
 		}
 		await this.#persistRoutingAudit(workflowId, attemptId);

@@ -404,7 +404,7 @@ function buildExecutorOptions(
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
 	};
-const restrictToolNames =
+	const restrictToolNames =
 		policy.planMode || session.restrictToolNames === true || Boolean(request.allowedTools?.length);
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	// Forward prepareWorkflowInvocation session fields so createTools on the child
@@ -449,7 +449,7 @@ const restrictToolNames =
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
-restrictToolNames,
+		restrictToolNames,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
@@ -519,6 +519,7 @@ function buildFailureResult(
 			modelOverride: policy.modelOverride,
 			modelRole: policy.modelRole,
 			error: message,
+			completionKind: "hard_abort",
 		};
 	};
 }

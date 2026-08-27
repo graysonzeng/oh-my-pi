@@ -116,6 +116,7 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 			abortReason: result.result.abortReason,
 			resolvedModel: result.result.resolvedModel,
 			toolCalls: result.result.toolCalls,
+			completionKind: result.result.completionKind,
 		},
 		changesApplied: result.changesApplied,
 		mergeSummary: result.mergeSummary,
@@ -158,6 +159,7 @@ const productionCapturedChangesMerger: CapturedChangesMerger = async request => 
 		tokens: 0,
 		requests: 0,
 		patchPath: request.outputPatchPath,
+		completionKind: "completed",
 	};
 	const outcome = await mergeIsolatedChanges({
 		result,

@@ -176,6 +176,20 @@ describe("RuntimeAdapter", () => {
 		});
 	});
 
+	it("maps non-aborted budget_stop completionKind to budget_exhausted", async () => {
+		const runner: StructuredRunner = async () =>
+			okResult({ kind: "plan", summary: "forced yield" }, { completionKind: "budget_stop" });
+		await expect(new RuntimeAdapter(runner).run(baseRequest())).rejects.toMatchObject({
+			kind: "budget_exhausted",
+			details: { completionKind: "budget_stop" },
+		});
+	});
+
+	it("defaults successful structured output to completed provenance", async () => {
+		const result = await new RuntimeAdapter(async () => okResult({ ok: true })).run(baseRequest());
+		expect(result.completionKind).toBe("completed");
+	});
+
 	it("preserves request and abort signal on buildRequest", () => {
 		const adapter = new RuntimeAdapter(async () => okResult({}));
 		const controller = new AbortController();

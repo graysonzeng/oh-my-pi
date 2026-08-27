@@ -50,11 +50,12 @@ export class WorkflowPolicyError extends WorkflowError {
 }
 
 export class BudgetExhaustedError extends WorkflowError {
-	constructor(attempt: number, budgetUsed: number | "unknown", limit: number) {
+	constructor(attempt: number, budgetUsed: number | "unknown", limit: number, extra?: Record<string, unknown>) {
 		super(`Budget exhausted after ${attempt} attempts. Used ${budgetUsed} of ${limit}`, "budget_exhausted", {
 			attempt,
 			budgetUsed,
 			limit,
+			...extra,
 		});
 	}
 }

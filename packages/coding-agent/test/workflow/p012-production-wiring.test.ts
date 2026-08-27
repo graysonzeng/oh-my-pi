@@ -1236,3 +1236,55 @@ describe("benchmark quality gate scope violation", () => {
 		expect(warningRuns.some(r => r.passed && r.scopeStatus === "warning")).toBe(true);
 	});
 });
+
+describe("benchmark quality gate completionKind", () => {
+	it("fails live acceptance when a run is missing completionKind", async () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const results = await runBenchmarkSuite({
+			suite: { ...suite, cases: suite.cases.slice(0, 1) },
+			runtime: async () => ({
+				passed: true,
+				qualityScore: 100,
+				scopeStatus: "adhered",
+				durationMs: 1,
+				runtimeProvenance: {
+					source: "runtime_observed",
+					provider: "p",
+					model: "m",
+					checkpoint: null,
+					api: null,
+					adapter: null,
+					parser: null,
+				},
+			}),
+			minRepetitions: 1,
+			liveQualityUnknown: false,
+			provider: "p",
+			model: "m",
+		});
+		const scorecard = buildScorecard(suite, results, { liveQualityUnknown: false, acceptanceMinRepetitions: 1 });
+		const gate = evaluateBenchmarkQualityGate(scorecard);
+		expect(gate.passed).toBe(false);
+		expect(gate.reasons.some(reason => reason.includes("missing completionKind"))).toBe(true);
+	});
+
+	it("fails when completionKind is budget_stop even if runtime passed", async () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const results = await runBenchmarkSuite({
+			suite: { ...suite, cases: suite.cases.slice(0, 1) },
+			runtime: async () => ({
+				passed: true,
+				qualityScore: 100,
+				scopeStatus: "adhered",
+				durationMs: 1,
+				completionKind: "budget_stop",
+			}),
+			minRepetitions: 1,
+		});
+		expect(results.every(result => result.passed === false)).toBe(true);
+		const scorecard = buildScorecard(suite, results);
+		const gate = evaluateBenchmarkQualityGate(scorecard);
+		expect(gate.passed).toBe(false);
+		expect(gate.reasons.some(reason => reason.includes("completionKind=budget_stop"))).toBe(true);
+	});
+});

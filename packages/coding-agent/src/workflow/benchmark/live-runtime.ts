@@ -13,7 +13,13 @@ import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-ca
 import { Settings } from "../../config/settings";
 import { createAgentSession } from "../../sdk";
 import { getDefaultConfig } from "../default-config";
-import type { ModelProfile, WorkflowModelBackedStage, WorkflowRole, WorkflowStatusReportV1 } from "../types";
+import type {
+	ModelProfile,
+	WorkflowCompletionKind,
+	WorkflowModelBackedStage,
+	WorkflowRole,
+	WorkflowStatusReportV1,
+} from "../types";
 import { materializeBenchmarkFixture } from "./fixtures";
 import type { BenchmarkRuntime, BenchmarkRuntimeRequest, BenchmarkRuntimeResponse } from "./runner";
 import { resolveBenchmarkExperiment } from "./runner";
@@ -74,6 +80,7 @@ export interface LiveBenchmarkAgentResult {
 	/** Actual fallback count when observable; omitted means unknown. */
 	fallbackCount?: number;
 	identityError?: string;
+	completionKind?: WorkflowCompletionKind;
 }
 
 export type LiveBenchmarkAgentRunner = (
@@ -81,6 +88,28 @@ export type LiveBenchmarkAgentRunner = (
 	cwd: string,
 	options: LiveBenchmarkRuntimeOptions,
 ) => Promise<LiveBenchmarkAgentResult>;
+
+const COMPLETION_KIND_RANK: Record<WorkflowCompletionKind, number> = {
+	completed: 0,
+	budget_stop: 1,
+	timeout: 2,
+	hard_abort: 3,
+};
+
+export function aggregateLiveCompletionKind(
+	statusReport: WorkflowStatusReportV1 | undefined,
+): WorkflowCompletionKind | undefined {
+	if (!statusReport) return undefined;
+	let worst: WorkflowCompletionKind | undefined;
+	for (const attempt of statusReport.modelAttempts) {
+		for (const execution of attempt.executions) {
+			const kind = execution.completionKind ?? undefined;
+			if (!kind) return undefined;
+			if (!worst || COMPLETION_KIND_RANK[kind] > COMPLETION_KIND_RANK[worst]) worst = kind;
+		}
+	}
+	return worst;
+}
 
 function exact<T>(value: T): { value: T; provenance: "exact" } {
 	return { value, provenance: "exact" };
@@ -680,6 +709,7 @@ async function runProductionWorkflow(
 			fallbackCount: verified.fallbackCount,
 			identityError: verified.errors.join("; ") || undefined,
 			...(verified.runtimeProvenance ? { runtimeProvenance: verified.runtimeProvenance } : {}),
+			completionKind: aggregateLiveCompletionKind(workflow.statusReport),
 		};
 	} finally {
 		await session.dispose();
@@ -736,6 +766,7 @@ async function runLiveCase(
 		const scope = await observeScope(cwd, request.case.allowedPaths);
 		const passed =
 			agentResult.terminalStatus === "completed" &&
+			agentResult.completionKind === "completed" &&
 			verification.every(result => result.exitCode === 0) &&
 			scope.scopeStatus === "adhered" &&
 			Boolean(agentResult.runtimeProvenance) &&
@@ -748,10 +779,12 @@ async function runLiveCase(
 			durationMs: performance.now() - startedAt,
 			runtimeProvenance: agentResult.runtimeProvenance,
 			scopeStatus: scope.scopeStatus,
+			completionKind: agentResult.completionKind,
 			error: passed
 				? undefined
 				: [
 						`workflow=${agentResult.terminalStatus}`,
+						`completionKind=${agentResult.completionKind ?? "missing"}`,
 						`verification=${verification.map(result => result.exitCode).join(",")}`,
 						`changed=${scope.changedFiles.join(",")}`,
 						...(agentResult.identityError ? [`identity=${agentResult.identityError}`] : []),

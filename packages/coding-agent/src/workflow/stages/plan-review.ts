@@ -13,6 +13,7 @@ import type {
 	PromptAssemblyReceiptV1,
 	ReviewArtifactV1,
 	RuntimePort,
+	WorkflowCompletionKind,
 	WorkflowRuntimeIdentityReceiptV1,
 } from "../types";
 
@@ -52,6 +53,7 @@ export interface PlanReviewStageResult {
 	modelFamily?: string;
 	/** Tool policy actually applied to this stage (named profile policy or role default). */
 	resolvedToolPolicyId?: string;
+	completionKind?: WorkflowCompletionKind;
 }
 
 export class PlanReviewStage {
@@ -110,6 +112,7 @@ export class PlanReviewStage {
 				contextLedger: result.contextLedger,
 				optimizationReceipts: result.optimizationReceipts,
 				resolvedToolPolicyId: result.resolvedToolPolicyId,
+				completionKind: result.completionKind,
 			};
 		}
 		const modelArtifact = result.artifact as Partial<PlanReviewArtifactV2>;
@@ -164,6 +167,7 @@ export class PlanReviewStage {
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,
 			resolvedToolPolicyId: result.resolvedToolPolicyId,
+			completionKind: result.completionKind,
 		};
 	}
 }

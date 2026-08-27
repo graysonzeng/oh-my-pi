@@ -84,6 +84,8 @@ export interface SubagentEventPayload {
 	event: AgentSessionEvent;
 }
 
+/** Terminal completion provenance for a subagent run. Distinct from lifecycle `status`. */
+export type SubagentCompletionKind = "completed" | "budget_stop" | "timeout" | "hard_abort";
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
 export interface SubagentLifecyclePayload {
 	id: string;
@@ -91,6 +93,8 @@ export interface SubagentLifecyclePayload {
 	agentSource: AgentSource;
 	description?: string;
 	status: "started" | "completed" | "failed" | "aborted";
+	/** Required on terminal status (completed/failed/aborted); omit on `started`. */
+	completionKind?: SubagentCompletionKind;
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;
@@ -385,7 +389,7 @@ export interface AgentDefinition {
 	readSummarize?: boolean;
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;
-/** Opt-in code-review shadow cohort. Only `"code"` is recognized. */
+	/** Opt-in code-review shadow cohort. Only `"code"` is recognized. */
 	shadowReview?: "code";
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
 	advisor?: boolean | string;
@@ -526,6 +530,12 @@ export interface SingleResult {
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
+	/**
+	 * Terminal provenance. Successful 1.5× forced-yield is `budget_stop` even when
+	 * `status`/`exitCode` still look completed. Timeout and grace budget abort
+	 * outrank a still-true `budgetStopRequested`.
+	 */
+	completionKind?: SubagentCompletionKind;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
 	/** Output path for the task result */

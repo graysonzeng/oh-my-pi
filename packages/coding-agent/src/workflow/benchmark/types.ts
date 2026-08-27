@@ -224,6 +224,8 @@ export interface BenchmarkRunResult {
 	error?: string;
 	/** Wall clock for this repetition. */
 	durationMs: number;
+	/** Terminal provenance; live paired cases must set this explicitly. */
+	completionKind?: "completed" | "budget_stop" | "timeout" | "hard_abort";
 }
 
 export interface BenchmarkVariantSummary {

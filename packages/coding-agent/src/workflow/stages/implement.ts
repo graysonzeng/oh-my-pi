@@ -10,6 +10,7 @@ import type {
 	ModelProfile,
 	PromptAssemblyReceiptV1,
 	RuntimePort,
+	WorkflowCompletionKind,
 	WorkflowRuntimeIdentityReceiptV1,
 } from "../types";
 
@@ -38,6 +39,7 @@ export interface ImplementStageResult {
 	modelFamily?: string;
 	/** Tool policy actually applied to this stage (named profile policy or role default). */
 	resolvedToolPolicyId?: string;
+	completionKind?: WorkflowCompletionKind;
 }
 
 export class ImplementStage {
@@ -117,6 +119,7 @@ export class ImplementStage {
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,
 			resolvedToolPolicyId: result.resolvedToolPolicyId,
+			completionKind: result.completionKind,
 		};
 	}
 }

@@ -157,6 +157,33 @@ describe("task spawn routing", () => {
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
 
+	it("caps review/Gate agents at 20 minutes regardless of task.maxRuntimeMs", async () => {
+		const reviewer: AgentDefinition = {
+			name: "reviewer",
+			description: "Reviewer",
+			systemPrompt: "Review.",
+			source: "bundled",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [reviewer],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxRuntimeMs": 3_600_000 } }));
+		const result = await tool.execute("tc-review-cap", {
+			agent: "reviewer",
+			name: "Reviewer",
+			task: "Review the change.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBeTruthy();
+		await manager.getJob(jobId!)!.promise;
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(1_200_000);
+	});
+
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],

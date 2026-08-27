@@ -36,6 +36,10 @@ const WAIT_DURATION_MS: Record<string, number> = {
 	"5m": 5 * 60_000,
 };
 
+const WAIT_AUTO_DELIVER_HINT =
+	"Results auto-deliver; do not poll. Continue other work; re-issue wait only if you have zero remaining work.";
+const WAIT_IDLE_HINT = "If no jobs are running, do not repeat a bare wait.";
+
 /**
  * A wait snapshot where every watched job is still running and nothing was
  * cancelled — pure "still waiting" noise once a newer wait exists. The TUI
@@ -252,6 +256,9 @@ export function buildJobResult(
 		for (const j of running) {
 			lines.push(`- \`${j.id}\` [${j.type}] — ${j.label}`);
 		}
+		if (op === "wait") {
+			lines.push("", WAIT_AUTO_DELIVER_HINT);
+		}
 	}
 
 	if (agents.length > 0) {
@@ -315,7 +322,7 @@ export function noMatchingJobsResult(session: ToolSession, ids: string[]): Agent
 /** Bare `wait` with no running jobs and nobody who could message: nothing to block on. */
 export function nothingToWaitForResult(session: ToolSession): AgentToolResult<CoordinationDetails> {
 	const agents = runningAgentsOutsideJobs(session);
-	const lines: string[] = ["No running background jobs to wait for."];
+	const lines: string[] = ["No running background jobs to wait for.", WAIT_AUTO_DELIVER_HINT, WAIT_IDLE_HINT];
 	if (agents.length > 0) {
 		lines.push("", ...describeAgents(agents));
 	}

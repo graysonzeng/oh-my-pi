@@ -9,6 +9,7 @@ import type {
 	PlanArtifactV1,
 	PromptAssemblyReceiptV1,
 	RuntimePort,
+	WorkflowCompletionKind,
 	WorkflowRuntimeIdentityReceiptV1,
 } from "../types";
 
@@ -35,6 +36,7 @@ export interface PlanStageResult {
 	modelFamily?: string;
 	/** Tool policy actually applied to this stage (named profile policy or role default). */
 	resolvedToolPolicyId?: string;
+	completionKind?: WorkflowCompletionKind;
 }
 
 export class PlanStage {
@@ -86,6 +88,7 @@ export class PlanStage {
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,
 			resolvedToolPolicyId: result.resolvedToolPolicyId,
+			completionKind: result.completionKind,
 		};
 	}
 }

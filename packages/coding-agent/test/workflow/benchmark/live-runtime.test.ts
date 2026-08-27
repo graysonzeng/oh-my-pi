@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog";
 import {
+	aggregateLiveCompletionKind,
 	applyKnownGoodBenchmarkSolution,
 	buildDefaultBenchmarkSuite,
 	buildLiveBenchmarkExperimentConfig,
@@ -147,6 +148,7 @@ function exactChildReport(reviewer = FIXTURE_REVIEWER_CHILD_IDENTITY): WorkflowS
 						exactIdentityMatch: true,
 						effortSupported: true,
 						modelFamily: identity.modelFamily,
+						completionKind: "completed",
 					},
 				],
 			};
@@ -194,6 +196,7 @@ describe("live workflow benchmark runtime", () => {
 					usageObservable: true,
 					runtimeProvenance: FIXTURE_PROVENANCE,
 					fallbackCount: 0,
+					completionKind: "completed",
 				};
 			},
 		});
@@ -241,6 +244,7 @@ describe("live workflow benchmark runtime", () => {
 					toolCalls: 1,
 					runtimeProvenance: FIXTURE_PROVENANCE,
 					fallbackCount: 0,
+					completionKind: "completed",
 				};
 			},
 		});
@@ -277,6 +281,7 @@ describe("live workflow benchmark runtime", () => {
 					usageObservable: false,
 					costUsd: 0,
 					toolCalls: 0,
+					completionKind: "completed",
 				};
 			},
 		});
@@ -511,8 +516,8 @@ describe("live workflow benchmark runtime", () => {
 		expect(baseline.deepseek_implementer?.thinkingLevel).toBe(Effort.Max);
 		expect(baseline.gpt_planner?.thinkingLevel).toBe(Effort.Max);
 		expect(baseline.grok_implementer?.thinkingLevel).toBe(Effort.High);
-		expect(baseline.claude_plan_reviewer?.thinkingLevel).toBe(Effort.XHigh);
-		expect(baseline.claude_reviewer?.thinkingLevel).toBe(Effort.XHigh);
+		expect(baseline.claude_plan_reviewer?.thinkingLevel).toBe(Effort.Medium);
+		expect(baseline.claude_reviewer?.thinkingLevel).toBe(Effort.Medium);
 
 		const merged = resolveWorkflowProfilesFromSettings(baseline, getDefaultConfig().profiles);
 		expect(merged.claude_planner?.modelPattern).toBe("gateway/deepseek-v4-flash");
@@ -520,7 +525,7 @@ describe("live workflow benchmark runtime", () => {
 		expect(merged.claude_plan_reviewer?.modelPattern).toBe("gateway/claude-fable-5");
 		expect(merged.claude_reviewer?.modelPattern).toBe("gateway/claude-fable-5");
 		expect(merged.claude_planner?.thinkingLevel).toBe(Effort.Max);
-		expect(merged.claude_plan_reviewer?.thinkingLevel).toBe(Effort.XHigh);
+		expect(merged.claude_plan_reviewer?.thinkingLevel).toBe(Effort.Medium);
 		expect(merged.grok_implementer?.thinkingLevel).toBe(Effort.High);
 	});
 
@@ -544,6 +549,7 @@ describe("live workflow benchmark runtime", () => {
 					usageObservable: false,
 					costUsd: 0,
 					toolCalls: 0,
+					completionKind: "completed",
 				};
 			},
 		});
@@ -666,4 +672,52 @@ describe("live workflow benchmark runtime", () => {
 		expect(result?.error).toContain("required_role_unavailable");
 		expect(result?.runtimeProvenance).toBeNull();
 	}, 10_000);
+
+	it("fails a live case when completionKind is missing even if workflow completed", async () => {
+		const suite = buildDefaultBenchmarkSuite();
+		const benchmarkCase = { ...suite.cases[0]!, repetitions: 1 };
+		const runtime = createLiveWorkflowBenchmarkRuntime({
+			provider: "fixture-provider",
+			model: "fixture-model",
+			reviewerProvider: "fixture-reviewer-provider",
+			reviewerModel: "fixture-reviewer-model",
+			agentRunner: async (request, cwd) => {
+				await applyKnownGoodBenchmarkSolution(cwd, request.case);
+				return {
+					terminalStatus: "completed",
+					inputTokens: 1,
+					outputTokens: 1,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 0,
+					cacheObservable: false,
+					usageObservable: true,
+					costUsd: 0,
+					toolCalls: 1,
+					runtimeProvenance: FIXTURE_PROVENANCE,
+					fallbackCount: 0,
+				};
+			},
+		});
+		const [result] = await runBenchmarkSuite({
+			suite: { ...suite, cases: [benchmarkCase] },
+			runtime,
+			variants: ["baseline"],
+			liveQualityUnknown: false,
+			provider: "fixture-provider",
+			model: "fixture-model",
+		});
+		expect(result?.passed).toBe(false);
+		expect(result?.error).toContain("completionKind=missing");
+	});
+
+	it("aggregates the worst live completionKind and fail-closes on a missing execution", () => {
+		const report = exactChildReport();
+		expect(aggregateLiveCompletionKind(report)).toBe("completed");
+		report.modelAttempts[0]!.executions[0]!.completionKind = "budget_stop";
+		expect(aggregateLiveCompletionKind(report)).toBe("budget_stop");
+		report.modelAttempts[1]!.executions[0]!.completionKind = "timeout";
+		expect(aggregateLiveCompletionKind(report)).toBe("timeout");
+		delete report.modelAttempts[2]!.executions[0]!.completionKind;
+		expect(aggregateLiveCompletionKind(report)).toBeUndefined();
+	});
 });

@@ -16,6 +16,8 @@ import type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
 export type { ContextLedgerV1 } from "./context-ledger";
 export type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
 
+/** Same four-value provenance as task `SubagentCompletionKind`; kept local so workflow/types does not import task. */
+export type WorkflowCompletionKind = "completed" | "budget_stop" | "timeout" | "hard_abort";
 /** Isolation controls for write stages (mirrors task isolation without importing task). */
 export interface WorkflowIsolationControls {
 	requested?: boolean;
@@ -475,6 +477,7 @@ export interface WorkflowModelExecutionEvidenceV1 {
 	modelFamily: string | null;
 	/** Tool policy id actually applied for this execution (named override or role default). */
 	toolPolicyId?: string | null;
+	completionKind?: WorkflowCompletionKind | null;
 }
 
 export interface WorkflowModelAttemptEvidenceV1 {
@@ -745,6 +748,7 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	modelFamily?: string;
 	/** Tool policy id actually applied (named override or role default). */
 	resolvedToolPolicyId?: string;
+	completionKind?: WorkflowCompletionKind;
 }
 
 export interface WorkflowRuntimeEvidence {
@@ -761,6 +765,7 @@ export interface WorkflowRuntimeEvidence {
 	resolvedToolPolicyId?: string;
 	/** Relative artifact kind ref when scope-metrics was persisted. */
 	scopeMetricsKind?: string;
+	completionKind?: WorkflowCompletionKind;
 }
 
 export interface WorkflowRequest {

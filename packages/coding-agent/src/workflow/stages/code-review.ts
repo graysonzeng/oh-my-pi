@@ -9,6 +9,7 @@ import type {
 	PromptAssemblyReceiptV1,
 	ReviewArtifactV1,
 	RuntimePort,
+	WorkflowCompletionKind,
 	WorkflowRuntimeIdentityReceiptV1,
 } from "../types";
 
@@ -37,6 +38,7 @@ export interface CodeReviewStageResult {
 	modelFamily?: string;
 	/** Tool policy actually applied to this stage (named profile policy or role default). */
 	resolvedToolPolicyId?: string;
+	completionKind?: WorkflowCompletionKind;
 }
 
 export class CodeReviewStage {
@@ -89,6 +91,7 @@ export class CodeReviewStage {
 			contextLedger: result.contextLedger,
 			optimizationReceipts: result.optimizationReceipts,
 			resolvedToolPolicyId: result.resolvedToolPolicyId,
+			completionKind: result.completionKind,
 		};
 	}
 }

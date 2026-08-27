@@ -36,6 +36,7 @@ import {
 } from "../internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
+import { normalizeReadSelector } from "../latency/read-view-key";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
@@ -60,8 +61,7 @@ import {
 import { isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
-import { type ArchiveReader, formatArchiveEntryLines, openArchive, parseArchivePathCandidates } from "../utils/zip";
-import { applySessionToolOutput, workflowToolWireName } from "../workflow/tool-optimization";
+import { workflowToolWireName } from "../workflow/tool-optimization";
 import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import {
 	type ConflictEntry,
@@ -708,16 +708,16 @@ export function resolveWorkflowCatalogToolDocs(
 
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
-get customWireName(): string | undefined {
-	return workflowToolWireName(this.session, this.name);
-}
-readonly approval = (args: unknown): ToolTier => {
-	let readPath = "";
-	if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
-	if (pathTargetsSsh(readPath)) return "exec";
-	const target = splitPathAndSel(readPath);
-	return target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
-};
+	get customWireName(): string | undefined {
+		return workflowToolWireName(this.session, this.name);
+	}
+	readonly approval = (args: unknown): ToolTier => {
+		let readPath = "";
+		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
+		if (pathTargetsSsh(readPath)) return "exec";
+		const target = splitPathAndSel(readPath);
+		return target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
+	};
 	readonly label = "Read";
 	readonly loadMode = "essential";
 	description: string;
@@ -1164,9 +1164,9 @@ readonly approval = (args: unknown): ToolTier => {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-				const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
-				appendRepeatReadHint(this.session, params.path, result);
-				return result;
+		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
+		appendRepeatReadHint(this.session, params.path, result);
+		return result;
 	}
 
 	async #executeInner(
@@ -2464,6 +2464,7 @@ readonly approval = (args: unknown): ToolTier => {
 			},
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
+		this.#attestCanonicalSkillFullText(scheme, urlMeta, parsedSel, resource, details);
 
 		// If extraction was used, return directly (no pagination)
 		if (hasExtraction) {
@@ -2492,6 +2493,34 @@ readonly approval = (args: unknown): ToolTier => {
 			immutable: resource.immutable,
 			raw,
 		});
+	}
+
+	/**
+	 * Restricted attested identity for canonical `skill://<name>` full-text views
+	 * so `#dedupeOrdinaryReadResult` can stub a second identical read. Ranged,
+	 * raw, query, and `rule://` views stay fail-open.
+	 */
+	#attestCanonicalSkillFullText(
+		scheme: string,
+		urlMeta: InternalUrl,
+		parsedSel: ParsedSelector,
+		resource: { content: string; contentType?: string; immutable?: boolean },
+		details: ReadToolDetails,
+	): void {
+		if (scheme !== "skill") return;
+		if (!resource.immutable) return;
+		const skillName = urlMeta.rawHost || urlMeta.hostname;
+		if (!skillName) return;
+		const urlPath = urlMeta.pathname;
+		if (urlPath && urlPath !== "/" && urlPath !== "") return;
+		if (parsedSel.kind !== "none") return;
+		const selector = normalizeReadSelector({});
+		if (selector !== "full") return;
+		details.canonicalSource = `skill://${skillName}`;
+		details.branchOrWorktreeScope = readBranchOrWorktreeScope(this.session.cwd);
+		details.providerViewIdentity = `skill-immutable:${skillName}`;
+		details.contentOrRevisionIdentity = new Bun.CryptoHasher("sha256").update(resource.content).digest("hex");
+		details.outputMode = resource.contentType === "text/markdown" ? "converted" : "raw";
 	}
 
 	/**

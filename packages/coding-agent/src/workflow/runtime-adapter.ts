@@ -1,4 +1,5 @@
 import type { SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
+import type { SubagentCompletionKind } from "../task/types";
 import type { ToolSession } from "../tools";
 import { withContextProviderUsage } from "./context-ledger";
 import {
@@ -108,6 +109,8 @@ export interface StructuredRunnerResult {
 		abortReason?: string;
 		resolvedModel?: string;
 		toolCalls?: number;
+		/** Terminal provenance forwarded from SingleResult. */
+		completionKind?: SubagentCompletionKind;
 	};
 	/** Whether isolated changes were applied to the main worktree. null when N/A. */
 	changesApplied?: boolean | null;
@@ -421,20 +424,43 @@ export class RuntimeAdapter implements RuntimePort {
 
 			if (body.aborted) {
 				const abortText = `${body.abortReason ?? ""}\n${body.error ?? ""}`;
+				const kind = body.completionKind;
 				// Soft request budget is a budget stop, not caller cancellation.
-				if (/soft request budget exceeded/i.test(abortText)) {
-					throw new BudgetExhaustedError(1, "unknown", 0);
+				if (kind === "budget_stop" || /soft request budget exceeded/i.test(abortText)) {
+					throw new BudgetExhaustedError(1, "unknown", 0, { completionKind: "budget_stop" });
 				}
 				// Wall-clock profile maxRuntimeMs abort is a retryable timeout — not a user cancel.
-				if (/runtime limit exceeded|maxRuntimeMs|timed? ?out/i.test(abortText)) {
+				if (kind === "timeout" || /runtime limit exceeded|maxRuntimeMs|timed? ?out/i.test(abortText)) {
 					throw new WorkflowTimeoutError(
 						body.abortReason ?? body.error ?? "Workflow subagent runtime limit exceeded",
-						{ exitCode: body.exitCode, abortReason: body.abortReason },
+						{ exitCode: body.exitCode, abortReason: body.abortReason, completionKind: "timeout" },
 					);
 				}
 				throw new WorkflowCancelledError(body.error ?? body.abortReason ?? "Workflow subagent was aborted", {
 					exitCode: body.exitCode,
 					abortReason: body.abortReason,
+					completionKind: kind === "hard_abort" ? "hard_abort" : undefined,
+				});
+			}
+			const kind = body.completionKind;
+			if (kind === "budget_stop") {
+				throw new BudgetExhaustedError(1, "unknown", 0, { completionKind: "budget_stop" });
+			}
+			if (kind === "timeout") {
+				throw new WorkflowTimeoutError(
+					body.abortReason ?? body.error ?? "Workflow subagent runtime limit exceeded",
+					{
+						exitCode: body.exitCode,
+						abortReason: body.abortReason,
+						completionKind: "timeout",
+					},
+				);
+			}
+			if (kind === "hard_abort") {
+				throw new WorkflowCancelledError(body.error ?? body.abortReason ?? "Workflow subagent was aborted", {
+					exitCode: body.exitCode,
+					abortReason: body.abortReason,
+					completionKind: "hard_abort",
 				});
 			}
 			// Structured-invalid results must take the schema repair path even when executor
@@ -551,6 +577,7 @@ export class RuntimeAdapter implements RuntimePort {
 				identityReceipt,
 				modelFamily: identityReceipt.modelFamily ?? undefined,
 				resolvedToolPolicyId: prepared.resolvedToolPolicyId,
+				completionKind: body.completionKind ?? "completed",
 			};
 		} catch (error) {
 			throw this.#normalizeError(error);

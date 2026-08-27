@@ -84,6 +84,7 @@ import {
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
+	type SubagentCompletionKind,
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
@@ -964,6 +965,22 @@ export function createSubagentSettings(
 
 export type AbortReason = "signal" | "shutdown" | "terminate" | "timeout" | "budget";
 
+/**
+ * Map monitor flags onto terminal provenance. Timeout and grace hard-abort
+ * outrank a still-true budgetStopRequested; a successful forced yield is
+ * budget_stop even when the run looks completed.
+ */
+export function resolveSubagentCompletionKind(monitor: {
+	runtimeLimitExceeded(): boolean;
+	budgetLimitExceeded(): boolean;
+	budgetStopRequested(): boolean;
+}): SubagentCompletionKind {
+	if (monitor.runtimeLimitExceeded()) return "timeout";
+	if (monitor.budgetLimitExceeded()) return "hard_abort";
+	if (monitor.budgetStopRequested()) return "budget_stop";
+	return "completed";
+}
+
 const MAX_YIELD_TOOL_ERRORS = 6;
 
 /** Inputs for the run monitor driving one subagent assignment. */
@@ -1008,6 +1025,7 @@ interface SubagentRunMonitor {
 	hasUsage(): boolean;
 	yieldCalled(): boolean;
 	runtimeLimitExceeded(): boolean;
+	budgetLimitExceeded(): boolean;
 	/** True once the soft-budget stop fired: the free-running turn was aborted and the run is being driven to a forced final yield. */
 	budgetStopRequested(): boolean;
 	/** Resolves when the budget-stop session abort has settled (immediately when no stop fired). */
@@ -1841,6 +1859,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		hasUsage: () => hasUsage,
 		yieldCalled: () => yieldCalled,
 		runtimeLimitExceeded: () => runtimeLimitExceeded,
+		budgetLimitExceeded: () => budgetLimitExceeded,
 		terminalError: () => terminalError,
 		hasExplicitAbortReason: () =>
 			abortReason === "signal" ||
@@ -2314,6 +2333,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						: monitor.resolveAbortReasonText()
 		: undefined;
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
+	const completionKind = resolveSubagentCompletionKind(monitor);
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected
@@ -2326,6 +2346,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			agentSource: agent.source,
 			description: progress.description,
 			status: progress.status as "completed" | "failed" | "aborted",
+			completionKind,
 			sessionFile: args.sessionFile,
 			index,
 		});
@@ -2358,6 +2379,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
+		completionKind,
 		usage: monitor.hasUsage() ? monitor.accumulatedUsage : undefined,
 		outputPath,
 		extractedToolData: progress.extractedToolData,
@@ -2791,6 +2813,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			error: "Cancelled before start",
 			aborted: true,
 			abortReason: "Cancelled before start",
+			completionKind: "hard_abort",
 		};
 	}
 

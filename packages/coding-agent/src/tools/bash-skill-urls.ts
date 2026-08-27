@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { resolveContainedPathSync } from "../discovery/contained-path";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
-import { validateRelativePath } from "../internal-urls/skill-protocol";
+import { formatUnknownSkillError, validateRelativePath } from "../internal-urls/skill-protocol";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import type { ImageAttachmentEntry } from ".";
 import { normalizeLocalScheme } from "./path-utils";
@@ -72,8 +72,7 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	const { skill, suffix } = matchSkillName(rawSkillSegment, skills);
 	if (!skill) {
 		const available = skills.map(s => s.name);
-		const availableStr = available.length > 0 ? available.join(", ") : "none";
-		throw new ToolError(`Unknown skill: ${rawSkillSegment}. Available: ${availableStr}`);
+		throw new ToolError(formatUnknownSkillError(rawSkillSegment, available));
 	}
 
 	// Combine any colon suffix (line range like ":1-5") with the path segment

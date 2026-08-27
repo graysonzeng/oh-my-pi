@@ -53,6 +53,18 @@ import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
+const REVIEW_GATE_MAX_RUNTIME_MS = 1_200_000;
+const REVIEW_GATE_AGENTS: Record<string, true> = {
+	reviewer: true,
+	"subagent-sol": true,
+	"sol-xhigh-reviewer": true,
+	"security-reviewer": true,
+};
+
+function resolveTaskMaxRuntimeMs(session: ToolSession, agent: string | undefined): number {
+	if (agent && REVIEW_GATE_AGENTS[agent]) return REVIEW_GATE_MAX_RUNTIME_MS;
+	return session.settings.get("task.maxRuntimeMs");
+}
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
 		assignment: assignment.trim(),
@@ -752,7 +764,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-			maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
+			maxRuntimeMs: resolveTaskMaxRuntimeMs(this.session, params.agent),
 		});
 	}
 
@@ -1599,7 +1611,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
+				maxRuntimeMs: resolveTaskMaxRuntimeMs(this.session, params.agent),
 				signal,
 				onProgress: progress => {
 					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };
@@ -1653,13 +1665,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
 		this.#recordRuntimeTimeoutMetric(result.id, result);
-		const status = result.aborted
-			? "cancelled"
-			: result.exitCode === 0 && result.error
-				? "merge failed"
-				: result.exitCode === 0
-					? "completed"
-					: `failed (exit ${result.exitCode})`;
+		const completionKind = result.completionKind;
+		const status =
+			completionKind && completionKind !== "completed"
+				? completionKind
+				: result.aborted
+					? "cancelled"
+					: result.exitCode === 0 && result.error
+						? "merge failed"
+						: result.exitCode === 0
+							? "completed"
+							: `failed (exit ${result.exitCode})`;
 		const output = formatResultOutputFallback(result);
 		const outputCharCount = result.outputMeta?.charCount ?? output.length;
 		const fullOutputThreshold = 5000;
@@ -1680,6 +1696,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			id: result.id,
 			status,
 			duration: formatDuration(totalDurationMs),
+			completionKind: completionKind !== "completed" ? completionKind : undefined,
 			abortReason: result.aborted ? result.abortReason : undefined,
 			resumable,
 			preview,

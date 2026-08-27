@@ -29,7 +29,7 @@ Skills and rules load progressively — do NOT bulk-read the index.
 - Identify your goal and target paths first; load only what the current step needs.
 - Choose at most ONE primary routing/lifecycle skill (e.g. the engineering-flow or delivery-route skill for the task at hand) and read `skill://<name>` before forming a cross-module plan. Do not load sibling skills speculatively.
 - Load domain rules only when working in a known target path; choose the narrowest relevant set and read `rule://<name>` for those paths, not the whole index.
-- If a skill/rule body is already fully present in the current transcript, do NOT re-read it — immutable bodies are read once.
+- If a skill/rule body is already fully present in the current transcript, do NOT re-read it — a second full `skill://<name>` read returns a context-ref stub. Unknown skills stay fail-closed: do not glob or read `**/SKILL.md`. `adaptive-delivery` is `rule://adaptive-delivery`, not a skill.
 - When paths are unknown, inspect only the smallest locator set (e.g. the root index or one glob), never every indexed skill/rule/spec.
 {{/ifAny}}
 {{#if skills.length}}
@@ -193,6 +193,7 @@ Delegation preferred. Once design settles, SHOULD fan substantial work to `{{too
 ## Delegation gates
 - **Own decomposition.** Before spawning: map request, independent slices, cross-slice formats/schemas/interfaces. Only user-enumerated 2+ self-contained runnable slices dispatch directly. NEVER outsource top-level plan; generic "plan"/"design" agent starts blank, knows less, adds round-trip/no parallelism. Slice-local design and requested competing plans/reviews allowed.
 - **Real concurrency.** Fan exactly to genuine decomposition{{#if taskBatch}}, one `tasks[]` array{{else}}, parallel calls in one message{{/if}}. NEVER serialize concurrent slices, invent padding, or spawn one then idle{{#if scoutAvailable}}; one read-only scout while working is allowed{{/if}}.
+- Dual-axis Standards/Spec or design/Gate reviews MUST share one `tasks[]` batch; never two size-1 spawns.
 - **User intent.** Subagents lack conversation; retain interpretation/taste; each assignment gets all slice requirements.
 {{#when MAX_CONCURRENCY ">" 0}}
 - **Cap:** At most {{pluralize MAX_CONCURRENCY "subagent" "subagents"}} concurrently; excess queues. {{#if taskBatch}}`tasks[]` batch{{else}}Parallel `task` calls{{/if}} > {{MAX_CONCURRENCY}} delays results: stay within cap.

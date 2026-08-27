@@ -76,4 +76,37 @@ describe("WorkflowEngine budget stop", () => {
 		});
 		expect((await engine.getState(workflowId))?.status).toBe("blocked");
 	});
+
+	it("persists budget_stop completionKind from a successful forced yield", async () => {
+		const engine = new WorkflowEngine({
+			store,
+			adapter: new RuntimeAdapter(async () => ({
+				result: {
+					id: "raw_plan",
+					structuredOutput: { status: "valid", data: planArtifact() },
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+					},
+					completionKind: "budget_stop",
+				},
+			})),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+		});
+		const workflowId = await engine.startWorkflow({ request: "forced yield" });
+		await engine.resume(workflowId, { singleStep: true });
+		await expect(engine.resume(workflowId, { singleStep: true })).rejects.toMatchObject({
+			kind: "budget_exhausted",
+		});
+		const report = await engine.getStatusReport(workflowId);
+		const kinds = report?.modelAttempts.flatMap(attempt =>
+			attempt.executions.map(execution => execution.completionKind),
+		);
+		expect(kinds).toContain("budget_stop");
+	});
 });

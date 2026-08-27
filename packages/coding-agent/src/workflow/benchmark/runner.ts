@@ -44,6 +44,7 @@ export interface BenchmarkRuntimeResponse {
 	/** Runtime-observed identity required for live acceptance. */
 	runtimeProvenance?: BenchmarkRuntimeProvenance;
 	durationMs?: number;
+	completionKind?: BenchmarkRunResult["completionKind"];
 }
 
 export type BenchmarkRuntime = (req: BenchmarkRuntimeRequest) => Promise<BenchmarkRuntimeResponse>;
@@ -350,18 +351,21 @@ export async function runBenchmarkSuite(opts: BenchmarkRunOptions): Promise<Benc
 							identityErrors.push(`fixed-model live run observed ${fallbackCount} fallback(s)`);
 						}
 					}
+					const completionKind = response.completionKind;
+					const kindFails = completionKind !== undefined && completionKind !== "completed";
 					results.push({
 						fingerprint: resultFingerprint,
 						repetition,
-						passed: response.passed && identityErrors.length === 0,
-						firstPassed: identityErrors.length === 0 ? (response.firstPassed ?? null) : false,
-						qualityScore: identityErrors.length === 0 ? (response.qualityScore ?? null) : null,
+						passed: response.passed && identityErrors.length === 0 && !kindFails,
+						firstPassed: identityErrors.length === 0 && !kindFails ? (response.firstPassed ?? null) : false,
+						qualityScore: identityErrors.length === 0 && !kindFails ? (response.qualityScore ?? null) : null,
 						tokens: mergeTokens(response.tokens),
 						stage: mergeStage(response.stage),
 						scopeStatus: response.scopeStatus ?? null,
 						runtimeProvenance,
 						error: [...identityErrors, ...(response.error ? [response.error] : [])].join("; ") || undefined,
 						durationMs,
+						completionKind,
 					});
 				} catch (err) {
 					results.push({
@@ -552,12 +556,25 @@ export function evaluateBenchmarkQualityGate(
 				);
 			}
 			if (!scorecard.liveQualityUnknown) {
+				const missingCompletionKind = summary.runs.filter(run => !run.completionKind);
+				if (missingCompletionKind.length > 0) {
+					reasons.push(
+						`${caseId}: ${summary.variant} run(s) missing completionKind (${missingCompletionKind.length}/${summary.runs.length})`,
+					);
+				}
 				const missingRuntimeIdentity = summary.runs.filter(run => !run.runtimeProvenance);
 				if (missingRuntimeIdentity.length > 0) {
 					reasons.push(
 						`${caseId}: ${summary.variant} run(s) missing runtime provenance (${missingRuntimeIdentity.length}/${summary.runs.length})`,
 					);
 				}
+			}
+			const nonCompletedKind = summary.runs.filter(run => run.completionKind && run.completionKind !== "completed");
+			if (nonCompletedKind.length > 0) {
+				const kinds = [...new Set(nonCompletedKind.map(run => run.completionKind))].join(",");
+				reasons.push(
+					`${caseId}: ${summary.variant} completionKind=${kinds} is non-PASS (${nonCompletedKind.length}/${summary.runs.length})`,
+				);
 			}
 			if (summary.passRate * 100 < gate.minPassRate) {
 				reasons.push(
