@@ -184,7 +184,70 @@ function redactClosed(obfuscator: SecretObfuscator, texts: string[]): string[] |
 
 function inputBudget(model: Model, maxTokens: number): number {
 	const window = model.contextWindow && model.contextWindow > 0 ? model.contextWindow : FALLBACK_CONTEXT_WINDOW;
-	return Math.max(1024, window - maxTokens);
+	return Math.max(0, window - maxTokens);
+}
+
+function obfuscatePreparedMessages(
+	messages: AgentMessage[],
+	obfuscator: SecretObfuscator,
+	pinnedConstraints: string,
+	focus: string,
+): AgentMessage[] {
+	const shared = new Set<string>();
+	for (const message of messages) {
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			for (const value of collectSecretValues(obfuscator, [JSON.stringify(block.arguments ?? {})])) {
+				shared.add(value);
+			}
+		}
+	}
+	for (const text of [pinnedConstraints, renderTranscript(messages), focus]) {
+		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) shared.add(value);
+	}
+	return messages.map(message => {
+		if (message.role !== "assistant") return message;
+		let changed = false;
+		const content = message.content.map(block => {
+			if (block.type !== "toolCall") return block;
+			const arguments_ = obfuscateToolArguments(obfuscator, block.arguments ?? {}, shared);
+			if (arguments_ === block.arguments) return block;
+			changed = true;
+			return { ...block, arguments: arguments_ };
+		});
+		return changed ? { ...message, content } : message;
+	});
+}
+
+function finalizeConsultProjection(input: {
+	messages: AgentMessage[];
+	consultSystem: string;
+	pinnedConstraints: string;
+	focus?: string;
+	primaryModel: string;
+	obfuscator?: SecretObfuscator;
+}): Omit<ConsultProjection, "truncatedHistory"> | { error: ConsultProjectionError } {
+	const prepared = input.obfuscator
+		? obfuscatePreparedMessages(input.messages, input.obfuscator, input.pinnedConstraints, input.focus ?? "")
+		: input.messages;
+	const transcript = renderTranscript(prepared);
+	const texts = [input.consultSystem, input.pinnedConstraints, transcript, input.focus ?? ""];
+	let redacted = texts;
+	if (input.obfuscator) {
+		const next = redactClosed(input.obfuscator, texts);
+		if (!next) return { error: "redaction_unavailable" };
+		redacted = next;
+	}
+	return {
+		systemPrompt: redacted[0] ?? input.consultSystem,
+		userPrompt: renderUserPrompt({
+			focus: input.focus ? redacted[3] : undefined,
+			primaryModel: input.primaryModel,
+			pinnedConstraints: redacted[1] ?? input.pinnedConstraints,
+			transcript: redacted[2] ?? transcript,
+		}),
+	};
 }
 
 export function projectConsultContext(
@@ -203,17 +266,9 @@ export function projectConsultContext(
 
 	const tokenizer = new Tokenizer(options.model);
 	const pinnedConstraints = options.snapshot.systemPrompt.filter(Boolean).join("\n\n");
-	const framing = renderUserPrompt({
-		focus: options.focus,
-		primaryModel: options.primaryModel,
-		pinnedConstraints,
-		transcript: "",
-	});
 	const consultSystem = prompt.render(consultSystemPromptTemplate);
-	const reserved = tokenizer.countTokens([consultSystem, framing]);
 	const budget = inputBudget(options.model, options.maxTokens);
-	const remaining = Math.max(0, budget - reserved);
-
+	const obfuscator = options.secretsEnabled ? options.obfuscator : undefined;
 	const droppable = stubbed.filter(message => !pinned.has(message));
 	let keptDroppable = droppable;
 	let truncatedHistory = false;
@@ -223,67 +278,34 @@ export function projectConsultContext(
 		return stubbed.filter(message => keep.has(message));
 	};
 
-	const fits = (extra: AgentMessage[]): boolean => {
-		const transcript = renderTranscript(ordered(extra));
-		return tokenizer.checkTokenBudget(transcript, remaining).fits;
-	};
-
-	if (!fits(keptDroppable)) {
-		truncatedHistory = true;
-		while (keptDroppable.length > 0 && !fits(keptDroppable)) {
-			keptDroppable = keptDroppable.slice(1);
-		}
-	}
-
-	let prepared = ordered(keptDroppable);
-
-	const obfuscator = options.secretsEnabled ? options.obfuscator : undefined;
-	if (obfuscator) {
-		const shared = new Set<string>();
-		for (const message of prepared) {
-			if (message.role === "assistant") {
-				for (const block of message.content) {
-					if (block.type !== "toolCall") continue;
-					for (const value of collectSecretValues(obfuscator, [JSON.stringify(block.arguments ?? {})])) {
-						shared.add(value);
-					}
-				}
-			}
-		}
-		for (const text of [pinnedConstraints, renderTranscript(prepared), options.focus ?? ""]) {
-			for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) shared.add(value);
-		}
-		prepared = prepared.map(message => {
-			if (message.role !== "assistant") return message;
-			let changed = false;
-			const content = message.content.map(block => {
-				if (block.type !== "toolCall") return block;
-				const arguments_ = obfuscateToolArguments(obfuscator, block.arguments ?? {}, shared);
-				if (arguments_ === block.arguments) return block;
-				changed = true;
-				return { ...block, arguments: arguments_ };
-			});
-			return changed ? { ...message, content } : message;
+	const attempt = (extra: AgentMessage[]) =>
+		finalizeConsultProjection({
+			messages: ordered(extra),
+			consultSystem,
+			pinnedConstraints,
+			focus: options.focus,
+			primaryModel: options.primaryModel,
+			obfuscator,
 		});
-	}
 
-	const transcript = renderTranscript(prepared);
-	const texts = [consultSystem, pinnedConstraints, transcript, options.focus ?? ""];
-	let redacted = texts;
-	if (obfuscator) {
-		const next = redactClosed(obfuscator, texts);
-		if (!next) return { error: "redaction_unavailable" };
-		redacted = next;
+	const overBudget = (systemPrompt: string, userPrompt: string): boolean =>
+		!tokenizer.checkTokenBudget([systemPrompt, userPrompt], budget).fits;
+
+	let finalized = attempt(keptDroppable);
+	if ("error" in finalized) return finalized;
+
+	if (overBudget(finalized.systemPrompt, finalized.userPrompt)) {
+		truncatedHistory = true;
+		while (keptDroppable.length > 0 && overBudget(finalized.systemPrompt, finalized.userPrompt)) {
+			keptDroppable = keptDroppable.slice(1);
+			finalized = attempt(keptDroppable);
+			if ("error" in finalized) return finalized;
+		}
 	}
 
 	return {
-		systemPrompt: redacted[0] ?? consultSystem,
-		userPrompt: renderUserPrompt({
-			focus: options.focus ? redacted[3] : undefined,
-			primaryModel: options.primaryModel,
-			pinnedConstraints: redacted[1] ?? pinnedConstraints,
-			transcript: redacted[2] ?? transcript,
-		}),
+		systemPrompt: finalized.systemPrompt,
+		userPrompt: finalized.userPrompt,
 		truncatedHistory,
 	};
 }

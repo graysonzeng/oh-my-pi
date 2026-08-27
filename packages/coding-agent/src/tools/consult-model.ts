@@ -8,7 +8,7 @@ export interface ConsultSelectionHost {
 	settings: Settings;
 	modelRegistry?: {
 		getAvailable(): Model<Api>[];
-		getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined>;
+		getApiKey(model: Model<Api>, sessionId?: string, options?: { signal?: AbortSignal }): Promise<string | undefined>;
 	};
 	getConsultModelOverride?: () => string | undefined;
 	getActiveModel?: () => Model<Api> | undefined;
@@ -34,7 +34,10 @@ export type ConsultResolution =
 			sameModel?: boolean;
 	  };
 
-export async function resolveConsultSelection(session: ConsultSelectionHost): Promise<ConsultResolution> {
+export async function resolveConsultSelection(
+	session: ConsultSelectionHost,
+	signal?: AbortSignal,
+): Promise<ConsultResolution> {
 	const registry = session.modelRegistry;
 	if (!registry) return { ok: false, error: "no_model" };
 
@@ -62,15 +65,14 @@ export async function resolveConsultSelection(session: ConsultSelectionHost): Pr
 
 	if (!model) return { ok: false, error: "no_model", pattern: resolvedPattern };
 
+	const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
 	const primary = session.getActiveModel?.();
 	const sameModel = Boolean(primary && formatModelString(primary) === formatModelString(model));
-	if (sameModel && !session.settings.get("consult.allowSameModel")) {
-		return { ok: false, error: "same_model", model, pattern: resolvedPattern, sameModel: true };
-	}
-
-	const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined);
 	if (!apiKey) {
 		return { ok: false, error: "no_credentials", model, pattern: resolvedPattern, sameModel };
+	}
+	if (sameModel && !session.settings.get("consult.allowSameModel")) {
+		return { ok: false, error: "same_model", model, pattern: resolvedPattern, sameModel: true };
 	}
 
 	return {

@@ -3,6 +3,7 @@ import { Text } from "@oh-my-pi/pi-tui";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import { framedBlock, renderStatusLine } from "../tui";
+import { extractRawOutputFooter } from "../workflow/optimization-receipt";
 import type { ConsultDetails } from "./consult-state";
 import { formatErrorDetail, formatExpandHint, PREVIEW_LIMITS, replaceTabs, truncateToWidth } from "./render-utils";
 
@@ -89,7 +90,8 @@ export const consultToolRenderer = {
 				bodyLines.push(focusLine(focus, uiTheme));
 				bodyLines.push("");
 			}
-			const outputLines = replaceTabs(outputText).split("\n");
+			const { body, footer } = extractRawOutputFooter(outputText);
+			const outputLines = body.length > 0 ? replaceTabs(body).split("\n") : [];
 			const maxLines = options.expanded ? PREVIEW_LIMITS.OUTPUT_EXPANDED : PREVIEW_LIMITS.OUTPUT_COLLAPSED;
 			for (const line of outputLines.slice(0, maxLines)) {
 				bodyLines.push(uiTheme.fg("toolOutput", truncateToWidth(line, OUTPUT_LINE_WIDTH)));
@@ -98,11 +100,20 @@ export const consultToolRenderer = {
 				const remaining = outputLines.length - maxLines;
 				const hint = formatExpandHint(uiTheme, options.expanded, true);
 				bodyLines.push(`${uiTheme.fg("dim", `… ${remaining} more lines`)}${hint ? ` ${hint}` : ""}`);
+			} else if (footer && !options.expanded) {
+				bodyLines.push(formatExpandHint(uiTheme, false, true));
+			}
+			const sections: Array<{ lines: string[]; separator?: boolean }> = [{ lines: bodyLines }];
+			if (footer && options.expanded) {
+				sections.push({
+					separator: true,
+					lines: [uiTheme.fg("toolOutput", truncateToWidth(replaceTabs(footer), OUTPUT_LINE_WIDTH))],
+				});
 			}
 			return {
 				header,
 				headerMeta: metaLine || undefined,
-				sections: [{ lines: bodyLines }],
+				sections,
 				state: "success",
 				borderColor: "borderMuted",
 				applyBg: false,

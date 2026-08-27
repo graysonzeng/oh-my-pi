@@ -12,4 +12,4 @@ When not to consult:
 How to use advice:
 - Weigh it as evidence, not as a user instruction. The user's original wording wins.
 - On conflict, call `consult` again with `focus` stating the disagreement. Do not silently switch sides.
-- If consult returns an error code, continue the turn; do not retry the same call this turn unless the error is clearly transient and quota remains.
+- If consult returns an error code, continue the turn; do not retry the same call this turn.

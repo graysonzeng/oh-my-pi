@@ -2,15 +2,15 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, completeSimple, type ToolExample } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { prompt, truncate } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import { formatModelString } from "../config/model-resolver";
 import consultDescription from "../prompts/tools/consult.md" with { type: "text" };
 import { enforceInlineByteCap } from "../session/streaming-output";
 import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
-import { resolveConsultSelection } from "./consult-model";
+import { type ConsultResolution, resolveConsultSelection } from "./consult-model";
 import { type ConsultDetails, getConsultUsage, recordConsultAttempt } from "./consult-state";
-import { projectConsultContext } from "./consult-transcript";
+import { CONSULT_TOOL_RESULT_CHARS, projectConsultContext } from "./consult-transcript";
 import type { ToolSession } from "./index";
 import { toolResult } from "./tool-result";
 
@@ -31,6 +31,15 @@ function consultError(code: string, details: ConsultDetails, message?: string): 
 		.text(text)
 		.error()
 		.done();
+}
+
+function isAbortError(error: unknown): boolean {
+	return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+function truncatedConsultErrorMessage(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	return truncate(message, CONSULT_TOOL_RESULT_CHARS);
 }
 
 function usageCostUsd(response: AssistantMessage): number | undefined {
@@ -97,7 +106,23 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 			return consultError("transcript_unavailable", { maxTokens });
 		}
 
-		const resolved = await resolveConsultSelection(this.session);
+		const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
+		const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
+		const effectiveSignal = timeoutSignal
+			? signal
+				? AbortSignal.any([signal, timeoutSignal])
+				: timeoutSignal
+			: signal;
+		const timedOut = (): boolean => Boolean(timeoutSignal?.aborted) && !signal?.aborted;
+
+		let resolved: ConsultResolution;
+		try {
+			resolved = await resolveConsultSelection(this.session, effectiveSignal);
+		} catch (error) {
+			const code = isAbortError(error) ? (timedOut() ? "timeout" : "aborted") : "provider_error";
+			recordConsultAttempt(this.session, { error: code, maxTokens });
+			return consultError(code, { maxTokens }, truncatedConsultErrorMessage(error));
+		}
 		if (!resolved.ok) {
 			const model = resolved.model ? formatModelString(resolved.model) : undefined;
 			recordConsultAttempt(this.session, { error: resolved.error, maxTokens, model });
@@ -128,22 +153,9 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 		}
 
 		const telemetry = resolveTelemetry(this.session.getTelemetry?.(), this.session.getSessionId?.() ?? undefined);
-		const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
-		const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
-		const effectiveSignal = timeoutSignal
-			? signal
-				? AbortSignal.any([signal, timeoutSignal])
-				: timeoutSignal
-			: signal;
-		const timedOut = (): boolean => Boolean(timeoutSignal?.aborted) && !signal?.aborted;
 		const reasoning = toReasoningEffort(
 			resolveThinkingLevelForModel(resolved.model, concreteThinkingLevel(resolved.thinkingLevel)),
 		);
-		const registry = this.session.modelRegistry;
-		if (!registry) {
-			recordConsultAttempt(this.session, { error: "no_model", maxTokens });
-			return consultError("no_model", { maxTokens });
-		}
 
 		let response: AssistantMessage;
 		try {
@@ -160,7 +172,7 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 					],
 				},
 				{
-					apiKey: registry.resolver(resolved.model, this.session.getSessionId?.() ?? undefined),
+					apiKey: resolved.apiKey,
 					signal: effectiveSignal,
 					reasoning,
 					maxTokens,
@@ -168,11 +180,10 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 				{ telemetry, oneshotKind: "consult", completeImpl: this.completeConsultRequest },
 			);
 		} catch (error) {
-			const aborted = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
-			const code = aborted ? (timedOut() ? "timeout" : "aborted") : "provider_error";
-			const message = error instanceof Error ? error.message : String(error);
-			recordConsultAttempt(this.session, { error: code, maxTokens, model: formatModelString(resolved.model) });
-			return consultError(code, { maxTokens, model: formatModelString(resolved.model) }, message);
+			const code = isAbortError(error) ? (timedOut() ? "timeout" : "aborted") : "provider_error";
+			const model = formatModelString(resolved.model);
+			recordConsultAttempt(this.session, { error: code, maxTokens, model });
+			return consultError(code, { maxTokens, model }, truncatedConsultErrorMessage(error));
 		}
 
 		if (response.stopReason === "error") {
@@ -184,7 +195,7 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 			return consultError(
 				"provider_error",
 				{ maxTokens, model: formatModelString(resolved.model) },
-				response.errorMessage ?? "consult request failed",
+				truncate(response.errorMessage ?? "consult request failed", CONSULT_TOOL_RESULT_CHARS),
 			);
 		}
 		if (response.stopReason === "aborted") {

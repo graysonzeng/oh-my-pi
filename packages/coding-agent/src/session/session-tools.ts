@@ -1537,6 +1537,9 @@ export class SessionTools {
 			}
 			return true;
 		}
+		if (this.#host.agentKind() !== "main") {
+			return false;
+		}
 		if (!this.#toolRegistry.has("consult")) {
 			const tool = await this.#createConsultTool?.();
 			if (tool?.name !== "consult") {
@@ -1557,6 +1560,9 @@ export class SessionTools {
 
 	setConsultModelOverride(pattern: string | undefined): Promise<boolean> {
 		return this.runToolRegistryMutation(async () => {
+			if (pattern !== undefined && this.#host.agentKind() !== "main") {
+				return false;
+			}
 			this.#host.setConsultModelOverride(pattern);
 			if (pattern !== undefined) {
 				this.#host.settings.override("consult.enabled", true);

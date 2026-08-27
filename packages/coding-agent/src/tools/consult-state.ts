@@ -27,6 +27,13 @@ export function resetConsultTurn(holder: { consultUsage?: ConsultUsage }): void 
 	holder.consultUsage.turn = 0;
 }
 
+export function resetConsultSession(holder: { consultUsage?: ConsultUsage }): void {
+	if (!holder.consultUsage) return;
+	holder.consultUsage.turn = 0;
+	holder.consultUsage.session = 0;
+	delete holder.consultUsage.last;
+}
+
 export function recordConsultAttempt(session: ToolSession, last?: ConsultDetails): ConsultUsage {
 	const usage = getConsultUsage(session);
 	usage.turn += 1;

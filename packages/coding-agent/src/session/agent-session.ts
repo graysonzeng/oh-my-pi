@@ -255,7 +255,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { resolveConsultSelection } from "../tools/consult-model";
-import { type ConsultDetails, type ConsultUsage, resetConsultTurn } from "../tools/consult-state";
+import { type ConsultDetails, type ConsultUsage, resetConsultSession, resetConsultTurn } from "../tools/consult-state";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	buildResolveReminderMessage,
@@ -5324,25 +5324,39 @@ export class AgentSession {
 	}> {
 		const enabled = this.settings.get("consult.enabled") === true;
 		const active = this.getEnabledToolNames().includes("consult");
-		const resolved = await resolveConsultSelection({
-			settings: this.settings,
-			modelRegistry: this.#modelRegistry,
-			getConsultModelOverride: () => this.#consultModelOverride,
-			getActiveModel: () => this.model,
-			getSessionId: () => this.sessionId,
-		});
-		return {
-			enabled,
-			active,
-			model: resolved.model ? formatModelString(resolved.model) : undefined,
-			error: resolved.ok ? undefined : resolved.error,
-			sameModel: resolved.sameModel,
-			credentials: resolved.ok || resolved.error !== "no_credentials",
+		const usage = {
 			turn: this.consultUsage.turn,
 			session: this.consultUsage.session,
 			last: this.consultUsage.last,
 			override: this.#consultModelOverride,
 		};
+		try {
+			const resolved = await resolveConsultSelection({
+				settings: this.settings,
+				modelRegistry: this.#modelRegistry,
+				getConsultModelOverride: () => this.#consultModelOverride,
+				getActiveModel: () => this.model,
+				getSessionId: () => this.sessionId,
+			});
+			return {
+				enabled,
+				active,
+				model: resolved.model ? formatModelString(resolved.model) : undefined,
+				error: resolved.ok ? undefined : resolved.error,
+				sameModel: resolved.sameModel,
+				credentials: resolved.ok || resolved.error === "same_model",
+				...usage,
+			};
+		} catch (error) {
+			logger.warn("consult state resolution failed", { error: String(error) });
+			return {
+				enabled,
+				active,
+				error: "provider_error",
+				credentials: false,
+				...usage,
+			};
+		}
 	}
 
 	/** Cancels the local rollout-memory startup owned by this session. */
@@ -5643,6 +5657,7 @@ export class AgentSession {
 		// SessionManager; clearing only the current id would leave the old ledger.
 		clearBashAttemptLedgerStore(departedSessionId ?? this.sessionManager.getSessionId());
 		this.#tools.resetAnnouncedMounts();
+		resetConsultSession(this);
 	}
 
 	#ensureLatencyArmSnapshot(): LatencyArmSnapshotV1 {
@@ -8076,6 +8091,8 @@ export class AgentSession {
 			}
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
+			resetConsultSession(this);
+
 			// The fork clones the transcript and keeps this recovery state running
 			// under a fresh id, so the work already produced is still this session's.
 			this.#recovery.reanchorServedAttribution(previousSessionId);

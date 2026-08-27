@@ -59,30 +59,32 @@
 - `packages/coding-agent/src/tools/consult-renderer.ts` — TUI call/result。
 - `packages/coding-agent/src/slash-commands/builtin-consult.ts` — `/consult on|off|unset|status|<model>`。
 - prompts：`consult.md`、`consult-system.md`、`consult-user.md`、`system/consult-instructions.md`。
-- tests：`test/tools/consult.test.ts`、`test/cli-consult-flag.test.ts`；advisor config 丢弃 consult。
+- tests：`test/tools/consult.test.ts`、`test/tools/consult-renderer.test.ts`、`test/sdk-consult-tool-lifecycle.test.ts`、`test/cli-consult-flag.test.ts`；advisor config 丢弃 consult。
 
 接线：
 
 - `BUILTIN_TOOLS.consult`、`createTools` 门控、renderer 注册。
 - SDK `ToolSession.snapshotConsultContext` / `getSecretObfuscator` / 共享 `consultUsage`。
-- `AgentSession`：`consultUsage`、turn_start 重置 turn 计数、`setConsultToolEnabled`、`consultState`。
-- `SessionTools.#setConsultToolActive` 运行时 reconcile。
+- `AgentSession`：共享 `consultUsage`、turn_start 重置 turn、逻辑 session 切换原位清零 session/last、`setConsultToolEnabled`、实时 `consultState`。
+- `SessionTools.#setConsultToolActive` 运行时 reconcile，并在 mutation owner 内重校验 main session。
 - CLI `--consult` / `--consult-model`；settings schema `consult.*`；docs/changelog。
 
-## 5. 验证结果
+## 5. 最终验证结果（code-review 修复后）
 
-- 测试：`bun test packages/coding-agent/test/tools/consult.test.ts packages/coding-agent/test/cli-consult-flag.test.ts packages/coding-agent/test/advisor/config.test.ts` → 41 pass / 0 fail / 94 expect（含 xdev 顶层可见性、约束 pin、fail-closed redaction、`maxTokens` 透传、配额重置、same-model / no_credentials、advisor 丢弃 consult、CLI flags）。
-- lint：`bunx biome check` 覆盖本次 consult 相关源文件 → No fixes applied。
-- typecheck：`cd packages/coding-agent && bun run check:types`（`tsgo -p tsconfig.json --noEmit`）→ 通过。
-- 构建：未跑完整 binary/smoke；本变更为 coding-agent 源码路径，focused tests + package typecheck 覆盖合同。
-- 功能验证：无真实 provider 调用。合同由 stubbed `completeSimple` 与投影纯函数覆盖：enabled 注册、subagent 不注册、xdev 顶层保留、system/project/user pin、secret fail-closed、历史 consult stub、硬 `maxTokens`、失败 `isError` 不 throw。
+- 焦点合同测试：`bun test packages/coding-agent/test/tools/consult.test.ts packages/coding-agent/test/tools/consult-renderer.test.ts packages/coding-agent/test/sdk-consult-tool-lifecycle.test.ts packages/coding-agent/test/cli-consult-flag.test.ts packages/coding-agent/test/advisor/config.test.ts` → 60 pass / 0 fail / 198 expect。
+- 覆盖：execute-time same-model/no_credentials；凭据 abort/timeout/reject；provider 真抛错后 session 继续；provider error 截断；脱敏不一致 fail-closed 且零外发；脱敏后最终请求真实 token budget；session reset；subagent runtime gate；status credentials；renderer artifact recovery；CLI parse；advisor 隔离。
+- 回归测试红绿证据：把 input budget 临时恢复为 1024 下限后，低余量用例按预期失败；恢复真实余量后通过。临时移除 credential signal 透传后，timeout 用例按预期收到 `provider_error: credential signal was not forwarded`；恢复后通过。
+- 完整 coding-agent 套件：`bun run test` → 944 pass / 1 fail。唯一失败为 `test/discovery/codex-mcp-cwd.test.ts:82`（期望 `enabled` 未定义，实际为 true）；该文件不在 Consult 变更中，且在父提交 `d6e93ae06e` 的隔离 worktree 中单独运行同样为 4 pass / 1 fail。
+- 代码质量：本次变更文件 `bunx biome check ...` → No fixes applied；`bun run check:types` → 通过。包级 `bun run check` 的全目录 Biome 阶段仍被仓库既有、非 Consult 文件格式诊断阻断。
+- 构建：`cd packages/coding-agent && bun run build` → 通过。
+- 功能 smoke：`packages/coding-agent/dist/omp --smoke-test` → `smoke-test: ok`；`--version` → `omp/18.0.5`。
+- 未执行真实跨 provider 调用；自动验证使用注入的 `completeSimple`、公开 SDK session 和真实 renderer。调用频率与顾问质量仍是上线观测项。
 
 ## 6. 已知限制与后续建议
 
-- abort/timeout、inline artifact 展开、`/consult status` 会话级集成测试尚未单独覆盖；错误映射代码已在 execute 中实现。
-- 未验证真实跨 provider 请求的顾问质量；`WEAK_EVIDENCE` 的调用频率假设需上线观察。
-- `consult` 默认关闭；开启后仍可能把脱敏后的 transcript 发往另一 provider——这是功能本身，不是漏洞，但用户需知情。
-- renderer 使用 `PREVIEW_LIMITS` 折叠正文；完整正文依赖已有 tool expand，未新增独立 artifact 合同测试。
+- `consult` 默认关闭；开启后会把 fail-closed 脱敏后的策展 transcript 发往所选 provider，这是功能的数据边界，需由用户显式开启。
+- 未验证真实 provider 的延迟、回答质量与执行器主动调用频率；这些不影响本地合同正确性，但仍需 telemetry/线上观察。
+- 仓库完整 coding-agent 套件存在上述父提交可复现的 discovery 基线失败；Consult 焦点套件、typecheck、changed-file Biome、build 与 compiled smoke 均通过。
 
 ## 7. Handoff
 
