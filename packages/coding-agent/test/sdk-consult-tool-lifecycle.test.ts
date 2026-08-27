@@ -76,6 +76,7 @@ describe("consult tool lifecycle", () => {
 			taskDepth?: number;
 			parentTaskPrefix?: string;
 			extensions?: ExtensionFactory[];
+			toolNames?: string[];
 		} = {},
 	): Promise<AgentSession> {
 		const { session } = await createAgentSession({
@@ -111,6 +112,19 @@ describe("consult tool lifecycle", () => {
 		expect(session.getEnabledToolNames()).not.toContain("consult");
 		expect(session.getActiveToolNames()).not.toContain("consult");
 		expect(session.settings.get("consult.enabled")).toBe(true);
+	});
+
+	it("does not register consult on parentTaskPrefix clones at taskDepth 0", async () => {
+		const session = await openSession(Settings.isolated({ "consult.enabled": true }), {
+			parentTaskPrefix: "TanClone",
+			toolNames: ["consult", "read"],
+		});
+
+		expect(session.getAllToolNames()).not.toContain("consult");
+		expect(session.getEnabledToolNames()).not.toContain("consult");
+		expect(session.getActiveToolNames()).not.toContain("consult");
+		expect(await session.setConsultToolEnabled(true)).toBe(false);
+		expect(session.getAllToolNames()).not.toContain("consult");
 	});
 
 	it("zeros shared consultUsage on successful newSession", async () => {

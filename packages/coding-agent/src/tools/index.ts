@@ -266,6 +266,8 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Top-level vs nested session. Nested clones (e.g. `/tan`) stay `sub` even at taskDepth 0. */
+	agentKind?: "main" | "sub";
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
@@ -705,7 +707,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "inspect_image") return isInspectImageToolActive(session);
-		if (name === "consult") return session.settings.get("consult.enabled") && (session.taskDepth ?? 0) === 0;
+		if (name === "consult")
+			return (
+				session.settings.get("consult.enabled") && (session.taskDepth ?? 0) === 0 && session.agentKind !== "sub"
+			);
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "security_scan") return session.settings.get("security.enabled");
 		if (name === "think") return externalThinkingActive;

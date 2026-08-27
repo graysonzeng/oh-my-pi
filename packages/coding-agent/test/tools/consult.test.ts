@@ -59,6 +59,7 @@ function makeSession(
 		models?: Model[];
 		apiKey?: string | undefined;
 		taskDepth?: number;
+		agentKind?: "main" | "sub";
 		active?: Model;
 		consultOverride?: string;
 		snapshot?: { systemPrompt: string[]; messages: AgentMessage[] };
@@ -80,6 +81,7 @@ function makeSession(
 		getSessionSpawns: () => "*",
 		settings,
 		taskDepth: options.taskDepth ?? 0,
+		agentKind: options.agentKind,
 		getActiveModel: () => active,
 		getActiveModelString: () => `${active.provider}/${active.id}`,
 		getConsultModelOverride: () => options.consultOverride,
@@ -162,6 +164,32 @@ describe("consult tool gating", () => {
 			)
 		).map(tool => tool.name);
 		expect(names).not.toContain("consult");
+	});
+
+	it("stays unregistered on nested clones even at taskDepth 0", async () => {
+		const names = (
+			await createTools(
+				makeSession({
+					settings: Settings.isolated({ "consult.enabled": true, "tools.xdev": false }),
+					agentKind: "sub",
+				}),
+			)
+		).map(tool => tool.name);
+		expect(names).not.toContain("consult");
+	});
+
+	it("drops consult from inherited toolNames on nested clones", async () => {
+		const names = (
+			await createTools(
+				makeSession({
+					settings: Settings.isolated({ "consult.enabled": true, "tools.xdev": false }),
+					agentKind: "sub",
+				}),
+				["consult", "read"],
+			)
+		).map(tool => tool.name);
+		expect(names).not.toContain("consult");
+		expect(names).toContain("read");
 	});
 });
 
@@ -266,6 +294,39 @@ describe("projectConsultContext", () => {
 		expect("error" in projection).toBe(false);
 		if ("error" in projection) return;
 		expect(projection.truncatedHistory).toBe(true);
+		expect(projection.userPrompt).not.toContain("droppable-marker");
+		const budget = Math.max(0, (model.contextWindow ?? 0) - maxTokens);
+		expect(new Tokenizer(model).checkTokenBudget([projection.systemPrompt, projection.userPrompt], budget).fits).toBe(
+			true,
+		);
+	});
+
+	it("refits after secret placeholders expand droppable history", () => {
+		const secret = "s3cret99";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }], "consult-budget-key");
+		const droppable = `droppable-marker ${Array.from({ length: 80 }, () => secret).join(" ")}`;
+		const messages: AgentMessage[] = [
+			userMessage("original task: keep AGENTS.md"),
+			assistantText(droppable),
+			userMessage("current task: still keep AGENTS.md"),
+		];
+		const model = { ...advisor, contextWindow: 2000 };
+		const maxTokens = 1200;
+		const projection = projectConsultContext({
+			snapshot: {
+				systemPrompt: ["You MUST follow AGENTS.md."],
+				messages,
+			},
+			model,
+			primaryModel: "openai/gpt-4.1",
+			maxTokens,
+			secretsEnabled: true,
+			obfuscator,
+		});
+		expect("error" in projection).toBe(false);
+		if ("error" in projection) return;
+		expect(projection.truncatedHistory).toBe(true);
+		expect(projection.userPrompt).not.toContain(secret);
 		expect(projection.userPrompt).not.toContain("droppable-marker");
 		const budget = Math.max(0, (model.contextWindow ?? 0) - maxTokens);
 		expect(new Tokenizer(model).checkTokenBudget([projection.systemPrompt, projection.userPrompt], budget).fits).toBe(
@@ -583,6 +644,23 @@ describe("ConsultTool.execute", () => {
 			snapshot: { systemPrompt: ["keep"], messages: [userMessage("task")] },
 		});
 		const tool = new ConsultTool(session, fn);
+		const result = await tool.execute("c1", {});
+		const text = toolText(result);
+		expect(result.isError).toBe(true);
+		expect(text.startsWith("provider_error: ")).toBe(true);
+		expect(text.length).toBe("provider_error: ".length + CONSULT_TOOL_RESULT_CHARS);
+		expect(text.endsWith("…")).toBe(true);
+		expect(text).not.toContain(long);
+	});
+
+	it("truncates provider stopReason error messages to the consult result cap", async () => {
+		const long = "E".repeat(CONSULT_TOOL_RESULT_CHARS + 80);
+		const stub = completeStub("", "error", long);
+		const session = makeSession({
+			settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/o3" }),
+			snapshot: { systemPrompt: ["keep"], messages: [userMessage("task")] },
+		});
+		const tool = new ConsultTool(session, stub.fn);
 		const result = await tool.execute("c1", {});
 		const text = toolText(result);
 		expect(result.isError).toBe(true);

@@ -1902,6 +1902,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
+			agentKind,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getLineageContext: () => sessionManager.getLineageContext(),
 			sessionManager,
