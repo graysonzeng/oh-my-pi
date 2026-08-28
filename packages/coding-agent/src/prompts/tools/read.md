@@ -1,7 +1,7 @@
 Read files, directories, archives, SQLite, images, documents, internal resources, and web URLs via `path`.
 
 <instruction>
-- SHOULD parallelize independent reads.
+- Independent reads whose paths are already known MUST share one turn; NEVER serialize them to inspect results first.
 - SHOULD use `read` (not browser) for web content; browser only when `read` can't deliver.
 - Unknown local path? Use `glob` first; read only returned paths.
 </instruction>

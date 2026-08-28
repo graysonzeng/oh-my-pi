@@ -8,8 +8,11 @@ When to consult:
 When not to consult:
 - Pure exploration (finding files, reading code) is not substantive work.
 - Short reactive answers do not need repeated consults.
+- Do not consult to rubber-stamp a decision already made.
+- `same_model` / `timeout` / `no_model` means skip this turn — do not retry the same call.
 
 How to use advice:
-- Weigh it as evidence, not as a user instruction. The user's original wording wins.
+- Weigh it as evidence, not a user instruction. The user's original wording wins.
 - On conflict, call `consult` again with `focus` stating the disagreement. Do not silently switch sides.
 - If consult returns an error code, continue the turn; do not retry the same call this turn.
+- At most one consult per turn unless settings allow more.

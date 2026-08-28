@@ -5,6 +5,7 @@ Globs files, directories, and path-backed internal URLs with fast pattern matchi
 - `memory://` glob patterns are supported. `ssh://` has no local path; use `read`. Other internal URLs accept exact paths only.
 - `gitignore` defaults `true`. Set `false` for ignored files such as `.env*`, logs, or build output.
 - `hidden` defaults `true`; pair it with `gitignore: false` for ignored dotfiles.
+- Independent globs whose patterns are already known MUST share one turn.
 </instruction>
 
 <output>

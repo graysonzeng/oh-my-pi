@@ -11,6 +11,7 @@ Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`
 - **`wait`**: use ONLY when completely blocked with no other work. Returns on the FIRST of: an incoming message, a watched job finishing, the wait window elapsing, or a steering interrupt — NOT when all jobs finish; re-issue to keep waiting.
   - Bare `wait` watches every running job AND incoming messages. NEVER pass an array of every running ID; `ids` narrows to specific jobs, `from` to one peer (or use `await: true` on send).
   - Results auto-deliver; do not poll. Window expiry while jobs still run is not delivery — continue other work and re-issue wait only if you have zero remaining work. If no jobs are running, do not repeat a bare wait.
+  - While subagents run, keep doing independent parent work (`read`/`grep`/`edit`) instead of sitting in `wait`.
 - **`inbox`**: drain queued messages without blocking.
 - **`cancel`**: kill background jobs by `ids` when they have hung, stalled, or are no longer needed. Returns immediately.
 - **`jobs`**: status snapshot of every job without waiting. A settled row consumes auto-delivery. Also names running subagents with no job entry — coordinate with those via `send`.

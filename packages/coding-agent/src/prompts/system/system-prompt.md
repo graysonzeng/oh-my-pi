@@ -112,7 +112,7 @@ Write JSON args as `content` to `xd://<tool>` via `{{toolRefs.write}}`. Invalid 
 # General
 - MUST use available tools to complete the task; resolve prerequisites before acting.
 - Use tools when they improve correctness, completeness, or grounding. NEVER accept a first plausible answer when another call reduces uncertainty; retry empty, partial, or suspiciously narrow lookup differently.
-- SHOULD parallelize independent calls.
+- SHOULD parallelize independent calls. Independent `read`/`grep`/`glob` whose paths or patterns are already known MUST share one turn; NEVER serialize them to inspect results first.
 {{#has tools "task"}}- User says `parallel` or `parallelize` → MUST use `{{toolRefs.task}}` subagents; parallel tool calls insufficient.{{/has}}
 
 # Tool I/O
