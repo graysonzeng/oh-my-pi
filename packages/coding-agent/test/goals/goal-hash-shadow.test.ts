@@ -33,6 +33,19 @@ describe("goal hash shadow", () => {
 		expect(
 			shouldResetGoalContextHash({ prev: state({ status: "active" }), next: state({ status: "paused" }) }).reset,
 		).toBe(true);
+		expect(
+			shouldResetGoalContextHash({
+				prev: state({ hostGate: { goalRevision: 1, pendingVerification: false, consecutiveContinueCount: 0 } }),
+				next: state({
+					hostGate: {
+						goalRevision: 1,
+						pendingVerification: false,
+						consecutiveContinueCount: 0,
+						lastNextStep: "run bun test",
+					},
+				}),
+			}),
+		).toEqual({ reset: true, reason: "next_step" });
 		const first = adjacentShadow(undefined, {
 			v: 1,
 			sessionId: "s",

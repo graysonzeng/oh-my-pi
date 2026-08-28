@@ -3328,7 +3328,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				profile = match.profile;
 				ambiguous = match.ambiguous === true;
 			}
-			const resolved = buildResolvedModelOptimization(ambiguous ? undefined : profile);
+			const resolved = buildResolvedModelOptimization(ambiguous ? undefined : profile, {
+				grokOverlayUnload: settings.get("goal.grokOverlayUnload") !== false,
+			});
 			// Shadow capability compile: profile execution stays authoritative; receipt is observable.
 			// Descriptor placement for facts uses live Gemini auto decision (mutable holder).
 			const descriptorPlacement = inlineToolDescriptorsDecision.enabled

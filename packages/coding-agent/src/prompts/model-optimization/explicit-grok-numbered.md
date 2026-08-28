@@ -4,5 +4,7 @@ Follow these instructions exactly:
 
 1. Use tools for repository evidence — do not invent file contents
 2. Prefer small, verified edits over large speculative rewrites
-3. If uncertain, read files before editing
-4. Stay within the user request; do not add unrequested features
+3. Prefer numbered steps for multi-part work
+4. If uncertain, read files before editing
+
+Stay within the user request; do not add unrequested features.

@@ -584,10 +584,9 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.session.getGoalModeState()?.goal.tokenBudget).toBeUndefined();
 	});
 
-	it("returns the completion report from the goal tool and exits goal mode before the next turn rebuild", async () => {
+	it("keeps goal mode active when the goal tool nominates complete without host confirmation", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		await harness.mode.handleGoalModeCommand("budget 50");
-		const appendCustomEntry = vi.spyOn(harness.session.sessionManager, "appendCustomEntry");
 		const goalTool = (await createTools(harness.toolSession, harness.session.getActiveToolNames())).find(
 			tool => tool.name === "goal",
 		);
@@ -598,38 +597,17 @@ describe("InteractiveMode goal mode integration", () => {
 		const result = await goalTool.execute("call-1", { op: "complete" });
 		const completionText = JSON.stringify(result.content);
 
-		expect(result.details?.completionBudgetReport).toBe(
-			"Goal achieved. Report final budget usage to the user: tokens used: 0 of 50.",
-		);
-		expect(completionText).toContain("Goal achieved. Report final budget usage to the user: tokens used: 0 of 50.");
-		expect(harness.session.getGoalModeState()?.mode).toBe("exiting");
-		// Per fix #1: completeGoalFromTool clears state.enabled so subsequent createTools
-		// calls (e.g. mid-turn refreshes) no longer advertise the goal tool. The model's
-		// existing toolset for the in-flight turn is unaffected — what we care about here
-		// is that the next createTools observation reflects the deactivation.
-		expect(harness.session.getGoalModeState()?.enabled).toBe(false);
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(result.details?.gate).toBe("continue");
+		expect(completionText).toContain("Host gate: continue");
+		expect(harness.session.getGoalModeState()?.mode).toBe("active");
+		expect(harness.session.getGoalModeState()?.enabled).toBe(true);
+		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
+		expect(await toolNamesFor(harness)).toContain("goal");
 
-		const nextTurn = harness.mode.getUserInput();
-		// getUserInput observes mode === "exiting" and awaits #exitGoalMode before
-		// arming onInputCallback. Drain microtasks until that side-effect lands.
-		for (let i = 0; i < 100 && harness.session.getGoalModeState() !== undefined; i++) {
-			await Bun.sleep(0);
-		}
-		expect(harness.mode.goalModeEnabled).toBe(false);
-		expect(harness.mode.goalModePaused).toBe(false);
+		vi.spyOn(harness.mode, "showHookConfirm").mockResolvedValue(true);
+		await harness.mode.handleGoalModeCommand("complete");
 		expect(harness.session.getGoalModeState()).toBeUndefined();
+		expect(harness.mode.goalModeEnabled).toBe(false);
 		expect(await toolNamesFor(harness)).not.toContain("goal");
-		expect(appendCustomEntry).toHaveBeenCalledWith(
-			"goal-completed",
-			expect.objectContaining({
-				objective: "Ship the release",
-				tokenBudget: 50,
-				tokensUsed: 0,
-			}),
-		);
-
-		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "next turn" }));
-		await nextTurn;
 	});
 });

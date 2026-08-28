@@ -4903,6 +4903,56 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"goal.hostGate.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Host Completion Gate",
+			description:
+				'When true, goal({op:"complete"}) only nominates. Deterministic host checks must pass, then the user confirms with /goal complete. False restores immediate tool completion.',
+		},
+	},
+	"goal.hostGate.timeoutMs": {
+		type: "number",
+		default: 15_000,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Evaluator Timeout",
+			description: "Per-request timeout for the advisory goal evaluator, in milliseconds. Set to 0 to disable.",
+			condition: "goalHostGateEnabled",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "15000", label: "15 seconds" },
+				{ value: "30000", label: "30 seconds" },
+			],
+		},
+	},
+	"goal.hostGate.maxOutputTokens": {
+		type: "number",
+		default: 512,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Evaluator Max Output Tokens",
+			description: "Hard output token budget for the advisory goal evaluator.",
+			condition: "goalHostGateEnabled",
+		},
+	},
+	"goal.grokOverlayUnload": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Unload Grok Numbered Overlay",
+			description:
+				"When true, ordinary Grok sessions drop numbered/step-by-step overlay instructions. Independent of the goal host gate.",
+		},
+	},
+
 	// Multi-model coding workflow
 	"workflow.enabled": {
 		type: "boolean",

@@ -9,6 +9,7 @@ export type GoalHashResetReason =
 	| "status"
 	| "enabled"
 	| "mode"
+	| "next_step"
 	| "compaction"
 	| "rehydrate"
 	| "none";
@@ -45,6 +46,9 @@ export function shouldResetGoalContextHash(input: {
 	if (input.prev.goal.status !== input.next.goal.status) return { reset: true, reason: "status" };
 	if (input.prev.enabled !== input.next.enabled) return { reset: true, reason: "enabled" };
 	if (input.prev.mode !== input.next.mode) return { reset: true, reason: "mode" };
+	if (input.prev.goal.hostGate?.lastNextStep !== input.next.goal.hostGate?.lastNextStep) {
+		return { reset: true, reason: "next_step" };
+	}
 	return { reset: false, reason: "none" };
 }
 

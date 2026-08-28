@@ -21,6 +21,7 @@ import {
 	type OrdinaryDecisionReceiptV1,
 	type ResolvedModelOptimization,
 	type SessionContextStrategy,
+	type SessionPromptStrategy,
 	type SessionToolStrategy,
 } from "./types";
 
@@ -122,9 +123,18 @@ export function applyContextBudgetCandidate(
 /** Build a full resolved policy from a profile (or empty none). */
 export function buildResolvedModelOptimization(
 	profile: ModelOptimizationProfile | undefined,
+	options?: { grokOverlayUnload?: boolean },
 ): ResolvedModelOptimization {
 	if (!profile) return {};
-	const promptBlock = resolveSessionPromptBlock(profile.promptStrategy);
+	let promptStrategy: SessionPromptStrategy | undefined = profile.promptStrategy;
+	if (profile.id === "grok" && options?.grokOverlayUnload !== false && promptStrategy) {
+		promptStrategy = {
+			...promptStrategy,
+			thinkingPrompt: { enabled: false, style: "none" },
+			instructionFormat: "natural",
+		};
+	}
+	const promptBlock = resolveSessionPromptBlock(promptStrategy, options);
 	return {
 		profile,
 		promptBlock,

@@ -283,6 +283,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "show", description: "Show current goal details" },
 			{ name: "pause", description: "Pause the current goal" },
 			{ name: "resume", description: "Resume a paused goal" },
+			{ name: "complete", description: "Confirm host-gated completion" },
 			{ name: "drop", description: "Drop the current goal" },
 			{ name: "budget", description: "Adjust the token budget", usage: "<N|off>" },
 		],

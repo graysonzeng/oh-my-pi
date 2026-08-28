@@ -2,6 +2,23 @@ import type { UsageStatistics } from "../session/session-entries";
 
 export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
 
+export type GoalHostGateDecisionKind = "continue" | "candidate_complete" | "blocked" | "user_confirmed";
+
+export type GoalHostGateState = {
+	goalRevision: number;
+	pendingVerification: boolean;
+	nominationId?: string;
+	turnId?: string;
+	generation?: number;
+	lastDecision?: GoalHostGateDecisionKind;
+	lastEvidence?: string;
+	lastNextStep?: string;
+	lastBlockerKey?: string;
+	lastReasons?: string[];
+	consecutiveContinueCount: number;
+	lastGaps?: string[];
+};
+
 export interface Goal {
 	id: string;
 	objective: string;
@@ -12,6 +29,7 @@ export interface Goal {
 	headlessContinuationCount?: number;
 	createdAt: number;
 	updatedAt: number;
+	hostGate?: GoalHostGateState;
 }
 
 export interface GoalModeState {
@@ -26,6 +44,7 @@ export interface GoalToolDetails {
 	goal?: Goal | null;
 	remainingTokens?: number | null;
 	completionBudgetReport?: string | null;
+	gate?: "continue" | "candidate_complete" | "blocked" | "user_confirmed";
 }
 
 export type GoalRuntimeEvent =

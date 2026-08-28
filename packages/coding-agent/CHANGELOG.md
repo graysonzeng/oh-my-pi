@@ -22,6 +22,8 @@
 - Canonical `skill://<name>` full-text reads now stub a second identical view; unknown skills stay fail-closed with a `rule://` hint and no SKILL.md scan; `adaptive-delivery` is routed as a rule.
 - Review/Gate `task` spawns now cap at 20 minutes without raising a stricter or unlimited `task.maxRuntimeMs`, and workflow live quality treats missing or non-`completed` `completionKind` as non-PASS.
 - Grok model-optimization overlay no longer repeats the profile-injected step-by-step sentence. `task` tool prompt no longer restates schema-exposed `effort` / `schemaMode` enum literals.
+- `goal({op:"complete"})` now nominates only; a deterministic host gate must pass, and `/goal complete` is the user confirmation that actually closes the goal. Same-model evaluator output is advisory `next_step`/`blocker` and cannot complete.
+- Ordinary Grok overlay no longer requires numbered / step-by-step instructions; `goal.grokOverlayUnload=false` restores the previous overlay independently of the host gate.
 
 ### Fixed
 

@@ -339,9 +339,9 @@ function formatHudNoteMarker(count: number): string {
 	return theme.fg("dim", chalk.italic(` \u207a${sub}`));
 }
 
-type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
+type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget" | "complete";
 
-const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
+const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget", "complete"]);
 const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
@@ -2750,6 +2750,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			return undefined;
 		}
+		const rawGate = value.hostGate;
+		let hostGate: Goal["hostGate"];
+		if (rawGate && typeof rawGate === "object") {
+			const gate = rawGate as Record<string, unknown>;
+			hostGate = {
+				goalRevision: typeof gate.goalRevision === "number" ? gate.goalRevision : 0,
+				pendingVerification: gate.pendingVerification === true,
+				nominationId: typeof gate.nominationId === "string" ? gate.nominationId : undefined,
+				turnId: typeof gate.turnId === "string" ? gate.turnId : undefined,
+				generation: typeof gate.generation === "number" ? gate.generation : undefined,
+				lastDecision:
+					gate.lastDecision === "continue" ||
+					gate.lastDecision === "candidate_complete" ||
+					gate.lastDecision === "blocked" ||
+					gate.lastDecision === "user_confirmed"
+						? gate.lastDecision
+						: undefined,
+				lastEvidence: typeof gate.lastEvidence === "string" ? gate.lastEvidence : undefined,
+				lastNextStep: typeof gate.lastNextStep === "string" ? gate.lastNextStep : undefined,
+				lastBlockerKey: typeof gate.lastBlockerKey === "string" ? gate.lastBlockerKey : undefined,
+				lastReasons: Array.isArray(gate.lastReasons)
+					? gate.lastReasons.filter((item): item is string => typeof item === "string")
+					: undefined,
+				consecutiveContinueCount:
+					typeof gate.consecutiveContinueCount === "number" ? gate.consecutiveContinueCount : 0,
+				lastGaps: Array.isArray(gate.lastGaps)
+					? gate.lastGaps.filter((item): item is string => typeof item === "string")
+					: undefined,
+			};
+		}
 		return {
 			id: value.id,
 			objective: value.objective,
@@ -2761,6 +2791,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				typeof value.headlessContinuationCount === "number" ? value.headlessContinuationCount : 0,
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
+			hostGate,
 		};
 	}
 
@@ -2997,13 +3028,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				mode: "active",
 				goal,
 			});
+			await this.session.goalRuntime.recoverPendingVerification();
 			const restored = await this.session.goalRuntime.onThreadResumed({
 				preserveActiveGoal: options?.preserveActiveGoal,
 			});
 			this.goalModeEnabled = restored?.enabled === true;
 			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
-			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
-			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
 				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 				this.#goalModePreviousTools = previousTools;
@@ -4132,6 +4162,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			case "drop":
 				await this.#confirmAndDropGoal();
 				return false;
+			case "complete":
+				await this.#confirmAndCompleteGoal();
+				return false;
 			case "budget":
 				if (!this.goalModeEnabled) {
 					this.showWarning(
@@ -4155,7 +4188,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
 		const items =
 			state === "active"
-				? ["Show details", "Adjust budget…", "Pause", "Drop"]
+				? ["Show details", "Adjust budget…", "Pause", "Complete", "Drop"]
 				: ["Resume", "Show details", "Adjust budget…", "Drop"];
 		const choice = await this.showHookSelector(title, items);
 		if (!choice) return;
@@ -4171,6 +4204,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			case "Resume":
 				await this.#resumeGoalAction();
+				return;
+			case "Complete":
+				await this.#confirmAndCompleteGoal();
 				return;
 			case "Drop":
 				await this.#confirmAndDropGoal();
@@ -4242,6 +4278,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!confirmed) return;
 		await this.session.goalRuntime.dropGoal();
 		await this.#exitGoalMode({ reason: "dropped" });
+	}
+
+	async #confirmAndCompleteGoal(): Promise<void> {
+		const state = this.session.getGoalModeState();
+		if (!state?.goal || state.goal.status === "dropped" || state.goal.status === "complete") {
+			this.showWarning("No goal to complete.");
+			return;
+		}
+		const confirmed = await this.showHookConfirm(
+			"Complete goal?",
+			"This marks the goal complete from the host. Use only when the current repo evidence satisfies the objective.",
+		);
+		if (!confirmed) return;
+		this.session.goalRuntime.cancelInFlightNominations("user_confirmed");
+		await this.session.goalRuntime.completeGoalFromTool();
+		await this.#exitGoalMode({ reason: "completed" });
+		this.showStatus("Goal completed.");
 	}
 
 	async #startGoalFromObjective(

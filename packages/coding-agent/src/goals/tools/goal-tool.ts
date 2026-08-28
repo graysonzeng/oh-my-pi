@@ -11,6 +11,7 @@ import type { ToolSession } from "../../tools";
 import { formatErrorDetail, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { framedBlock, renderStatusLine, truncateToWidth } from "../../tui";
+import { executeGoalComplete } from "../complete";
 import { completionBudgetReport, remainingTokens } from "../runtime";
 import type { Goal, GoalStatus, GoalToolDetails } from "../state";
 
@@ -71,13 +72,21 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	async execute(
 		_toolCallId: string,
 		params: GoalToolInput,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<GoalToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GoalToolDetails>> {
 		const runtime = this.#session.getGoalRuntime?.();
 		if (!runtime) {
 			throw new ToolError("Goal mode is not active.");
+		}
+
+		if (params.op === "complete") {
+			const completed = await executeGoalComplete(this.#session, runtime, signal);
+			return {
+				content: [{ type: "text", text: completed.text }],
+				details: completed.details,
+			};
 		}
 
 		let response: GoalToolResponse;
@@ -90,12 +99,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		} else if (params.op === "resume") {
 			const resumed = await runtime.resumeGoal();
 			response = buildGoalToolResponse(resumed.goal);
-		} else if (params.op === "drop") {
+		} else {
 			const dropped = await runtime.dropGoal();
 			response = buildGoalToolResponse(dropped ?? null);
-		} else {
-			const completed = await runtime.completeGoalFromTool();
-			response = buildGoalToolResponse(completed, { includeCompletionReport: true });
 		}
 		let text: string;
 		if (response.goal) {
@@ -207,12 +213,17 @@ export const goalToolRenderer = {
 			);
 		}
 
+		const gate = details?.gate;
+		const warningGate = gate === "continue" || gate === "blocked";
 		const header = renderStatusLine(
 			{
-				iconOverride: uiTheme.styledSymbol("tool.goal", "accent"),
+				iconOverride: uiTheme.styledSymbol("tool.goal", warningGate ? "warning" : "accent"),
 				title: "Goal",
 				description,
-				badge: { label: goal.status, color: goalBadgeColor(goal.status) },
+				badge: {
+					label: gate === "continue" ? "verifying" : gate === "blocked" ? "blocked" : goal.status,
+					color: warningGate ? "warning" : goalBadgeColor(goal.status),
+				},
 			},
 			uiTheme,
 		);
@@ -241,8 +252,8 @@ export const goalToolRenderer = {
 		return framedBlock(uiTheme, width => ({
 			header,
 			sections,
-			state: "success",
-			borderColor: "borderMuted",
+			state: warningGate ? "warning" : "success",
+			borderColor: warningGate ? "warning" : "borderMuted",
 			width,
 		}));
 	},

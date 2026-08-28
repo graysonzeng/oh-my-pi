@@ -156,6 +156,11 @@ import {
 	hashGoalFinalString,
 	shouldResetGoalContextHash,
 } from "../goals/hash";
+import {
+	buildGoalCompletionSettleSnapshot,
+	falseCompletionNextStep,
+	looksLikeFalseCompletion,
+} from "../goals/host-gate";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -1616,6 +1621,7 @@ export class AgentSession {
 			},
 			omitGoalTime: () => this.#ensureLatencyArmSnapshot().arms.dsh_omit_goal_time === true,
 			markOmitGoalTimeFired: () => this.markLatencyArmFired("dsh_omit_goal_time"),
+			getPromptGeneration: () => this.#promptGeneration,
 		});
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
@@ -3359,6 +3365,10 @@ export class AgentSession {
 			// Mid-run sync is handled separately via #takeMidRunTodoNudge so a long
 			// tool-use loop still gets prodded to keep the live HUD honest (issue #3651).
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
+			if (msg.stopReason !== "error" && (await this.#queueFalseCompletionContinuation(msg))) {
+				await emitAgentEndNotification({ willContinue: true });
+				return;
+			}
 			if (hasToolCalls) {
 				await emitAgentEndNotification();
 				return;
@@ -10592,6 +10602,41 @@ export class AgentSession {
 		if (decision?.status !== "accepted") return false;
 		this.#ordinaryObligationContinuationCount = nextAttempt;
 		return true;
+	}
+
+	async #queueFalseCompletionContinuation(assistant: AssistantMessage): Promise<boolean> {
+		const state = this.#goalModeState;
+		if (!state?.enabled || state.goal.status !== "active") return false;
+		if (this.settings.get("goal.hostGate.enabled") === false) return false;
+		const snapshot = buildGoalCompletionSettleSnapshot({
+			turnId: this.#goalRuntime.currentTurnId() ?? `turn-${this.#goalTurnCounter}`,
+			generation: this.#promptGeneration,
+			assistant,
+			messages: this.agent.state.messages,
+			todos: this.getTodoPhases(),
+			goal: state.goal,
+			nominationOutcome: state.goal.hostGate?.pendingVerification ? "nominated" : "none",
+		});
+		if (!looksLikeFalseCompletion(snapshot)) return false;
+		const nextStep = falseCompletionNextStep(snapshot);
+		await this.#goalRuntime.recordHostAdvice({
+			nextStep,
+			evidence: "false_completion",
+			reasons: ["false_completion"],
+		});
+		const promptText = this.#goalRuntime.buildFalseCompletionPrompt() ?? nextStep;
+		const decision = this.#queueHiddenNextTurnMessage(
+			{
+				role: "custom",
+				customType: "goal-false-completion",
+				content: promptText,
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+			true,
+		);
+		return decision?.status === "accepted";
 	}
 
 	#emitOrdinaryCompletionDiagnostic(overrides?: {

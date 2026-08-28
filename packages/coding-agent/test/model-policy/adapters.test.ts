@@ -260,9 +260,21 @@ describe("GLM/DeepSeek baseline profiles", () => {
 		expect(deepseek.profile?.promptStrategy).toBeUndefined();
 		expect(glm.promptBlock).toBeUndefined();
 		expect(deepseek.promptBlock).toBeUndefined();
-		// Still keep tool/context baselines
 		expect(glm.toolScheduling).toBeDefined();
 		expect(deepseek.contextStrategy).toBeDefined();
+	});
+});
+
+describe("Grok overlay unload", () => {
+	it("drops numbered overlay by default and restores it independently of the host gate", () => {
+		const unloaded = buildResolvedModelOptimization(DEFAULT_MODEL_OPTIMIZATION_PROFILES.grok);
+		expect(unloaded.promptBlock).toBeDefined();
+		expect(unloaded.promptBlock).not.toMatch(/Prefer numbered steps/);
+
+		const restored = buildResolvedModelOptimization(DEFAULT_MODEL_OPTIMIZATION_PROFILES.grok, {
+			grokOverlayUnload: false,
+		});
+		expect(restored.promptBlock).toMatch(/Prefer numbered steps/);
 	});
 });
 

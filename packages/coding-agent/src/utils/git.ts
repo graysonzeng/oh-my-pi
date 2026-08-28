@@ -90,6 +90,7 @@ export interface DiffOptions {
 export interface StatusOptions {
 	readonly pathspecs?: readonly string[];
 	readonly porcelainV1?: boolean;
+	readonly short?: boolean;
 	readonly signal?: AbortSignal;
 	readonly untrackedFiles?: "all" | "no" | "normal";
 	readonly z?: boolean;
@@ -1729,11 +1730,15 @@ export const diff = Object.assign(
 // API: status
 // ════════════════════════════════════════════════════════════════════════════
 
-/** Run `git status --porcelain`. Returns raw status text. */
+/** Run `git status --porcelain`, or `-sb` when `short` is set. Returns raw status text. */
 export const status = Object.assign(
 	async function status(cwd: string, options: StatusOptions = {}): Promise<string> {
 		const args = ["status"];
-		args.push(options.porcelainV1 ? "--porcelain=v1" : "--porcelain");
+		if (options.short) {
+			args.push("-sb");
+		} else {
+			args.push(options.porcelainV1 ? "--porcelain=v1" : "--porcelain");
+		}
 		if (options.z) args.push("-z");
 		if (options.untrackedFiles) args.push(`--untracked-files=${options.untrackedFiles}`);
 		if (options.pathspecs?.length) args.push("--", ...options.pathspecs);
