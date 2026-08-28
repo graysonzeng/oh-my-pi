@@ -242,6 +242,29 @@ describe("ordinary session read dedupe", () => {
 			await session.dispose();
 		}
 	});
+	it("stubs a second identical inline path:start-end selector without merging ranges", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "inline-sel-"));
+		const filePath = path.join(workDir, "module.ts");
+		await fs.writeFile(filePath, makeFileBody());
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const firstArgs = { path: `${filePath}:1-20` };
+			const secondArgs = { path: `${filePath}:21-40` };
+			const firstExec = await readTool.execute("read-1", firstArgs);
+			await session.agent.afterToolCall!(readCtx("read-1", firstExec, firstArgs));
+			const otherRangeExec = await readTool.execute("read-2", secondArgs);
+			const otherRangeAfter = await session.agent.afterToolCall!(readCtx("read-2", otherRangeExec, secondArgs));
+			expect(textFromResult(otherRangeAfter ?? otherRangeExec)).not.toMatch(/^\[context ref: artifact:\/\//);
+			const repeatExec = await readTool.execute("read-3", secondArgs);
+			const repeatAfter = await session.agent.afterToolCall!(readCtx("read-3", repeatExec, secondArgs));
+			expect(textFromResult(repeatAfter)).toMatch(/^\[context ref: artifact:\/\/\d+ sha256:[a-f0-9]{64}\]$/);
+		} finally {
+			await session.dispose();
+		}
+	});
 
 	it("clears retained read artifacts when the model changes", async () => {
 		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "model-switch-"));
@@ -369,7 +392,7 @@ describe("canonical skill full-text read dedupe", () => {
 		}
 	});
 
-	it("does not attest query, fragment, raw, or rule views", async () => {
+	it("does not attest query, fragment, or raw skill views", async () => {
 		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "skill-ineligible-"));
 		const skillDir = path.join(workDir, "engineering-flow");
 		await fs.mkdir(skillDir);
@@ -386,19 +409,6 @@ describe("canonical skill full-text read dedupe", () => {
 				source: "test",
 			},
 		]);
-		setActiveRules([
-			{
-				name: "adaptive-delivery",
-				path: path.join(workDir, "adaptive-delivery.md"),
-				content: "rule body",
-				_source: {
-					provider: "test",
-					providerName: "test",
-					path: path.join(workDir, "adaptive-delivery.md"),
-					level: "project",
-				},
-			},
-		]);
 		const { session, sessionManager } = await createSession({
 			sessionManager: SessionManager.create(workDir, workDir),
 		});
@@ -408,7 +418,6 @@ describe("canonical skill full-text read dedupe", () => {
 				"skill://engineering-flow?q=once",
 				"skill://engineering-flow#frag",
 				"skill://engineering-flow:raw",
-				"rule://adaptive-delivery",
 			]) {
 				const exec = await readTool.execute(`ineligible-${pathArg}`, { path: pathArg });
 				expect(exec.details?.providerViewIdentity).toBeUndefined();
@@ -417,10 +426,149 @@ describe("canonical skill full-text read dedupe", () => {
 		} finally {
 			await session.dispose();
 			resetActiveSkillsForTests();
+		}
+	});
+
+	it("stubs a second identical rule:// full-text read", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "rule-"));
+		const body = `rule once. ${"keep this. ".repeat(80)}`;
+		const rulePath = path.join(workDir, "adaptive-delivery.md");
+		await fs.writeFile(rulePath, body);
+		setActiveRules([
+			{
+				name: "adaptive-delivery",
+				path: rulePath,
+				content: body,
+				_source: {
+					provider: "test",
+					providerName: "test",
+					path: rulePath,
+					level: "project",
+				},
+			},
+		]);
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const args = { path: "rule://adaptive-delivery" };
+			const firstExec = await readTool.execute("rule-1", args);
+			expect(firstExec.details?.canonicalSource).toBe("rule://adaptive-delivery");
+			expect(firstExec.details?.providerViewIdentity).toBe("rule-immutable:adaptive-delivery");
+			const firstAfter = await session.agent.afterToolCall!(readCtx("rule-1", firstExec, args));
+			expect(textFromResult(firstAfter ?? firstExec)).toContain("rule once.");
+			const secondExec = await readTool.execute("rule-2", args);
+			const secondAfter = await session.agent.afterToolCall!(readCtx("rule-2", secondExec, args));
+			expect(textFromResult(secondAfter)).toMatch(/^\[context ref: artifact:\/\/\d+ sha256:[a-f0-9]{64}\]$/);
+		} finally {
+			await session.dispose();
 			resetActiveRulesForTests();
 		}
 	});
 
+	it("stubs a second disk SKILL.md full-text read as the canonical skill view", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "skill-file-"));
+		const skillDir = path.join(workDir, "engineering-flow");
+		await fs.mkdir(skillDir);
+		const body = `# engineering-flow\n${"load once. ".repeat(80)}`;
+		const skillFile = path.join(skillDir, "SKILL.md");
+		await fs.writeFile(skillFile, `---\nname: engineering-flow\ndescription: test\n---\n\n${body}\n`);
+		setActiveSkills([
+			{
+				name: "engineering-flow",
+				description: "test",
+				filePath: skillFile,
+				baseDir: skillDir,
+				source: "test",
+			},
+		]);
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const args = { path: skillFile };
+			const firstExec = await readTool.execute("skill-file-1", args);
+			expect(firstExec.details?.canonicalSource).toBe("skill://engineering-flow");
+			expect(firstExec.details?.providerViewIdentity).toBe("skill-immutable:engineering-flow");
+			await session.agent.afterToolCall!(readCtx("skill-file-1", firstExec, args));
+			const secondExec = await readTool.execute("skill-file-2", args);
+			const secondAfter = await session.agent.afterToolCall!(readCtx("skill-file-2", secondExec, args));
+			expect(textFromResult(secondAfter)).toMatch(/^\[context ref: artifact:\/\/\d+ sha256:[a-f0-9]{64}\]$/);
+		} finally {
+			await session.dispose();
+			resetActiveSkillsForTests();
+		}
+	});
+
+	it("stubs mixed skill:// and disk SKILL.md full-text as one view", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "skill-mixed-"));
+		const skillDir = path.join(workDir, "engineering-flow");
+		await fs.mkdir(skillDir);
+		const body = `# engineering-flow\n${"load once. ".repeat(80)}`;
+		const skillFile = path.join(skillDir, "SKILL.md");
+		await fs.writeFile(skillFile, `---\nname: engineering-flow\ndescription: test\n---\n\n${body}\n`);
+		setActiveSkills([
+			{
+				name: "engineering-flow",
+				description: "test",
+				filePath: skillFile,
+				baseDir: skillDir,
+				source: "test",
+			},
+		]);
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const firstExec = await readTool.execute("skill-uri", { path: "skill://engineering-flow" });
+			await session.agent.afterToolCall!(readCtx("skill-uri", firstExec, { path: "skill://engineering-flow" }));
+			const secondExec = await readTool.execute("skill-file", { path: skillFile });
+			const secondAfter = await session.agent.afterToolCall!(readCtx("skill-file", secondExec, { path: skillFile }));
+			expect(secondExec.details?.canonicalSource).toBe("skill://engineering-flow");
+			expect(textFromResult(secondAfter)).toMatch(/^\[context ref: artifact:\/\/\d+ sha256:[a-f0-9]{64}\]$/);
+		} finally {
+			await session.dispose();
+			resetActiveSkillsForTests();
+		}
+	});
+
+	it("stubs mixed rule:// and disk rule-file full-text as one view", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "rule-mixed-"));
+		const body = `rule once. ${"keep this. ".repeat(80)}`;
+		const rulePath = path.join(workDir, "adaptive-delivery.md");
+		await fs.writeFile(rulePath, `---\nname: adaptive-delivery\n---\n\n${body}`);
+		setActiveRules([
+			{
+				name: "adaptive-delivery",
+				path: rulePath,
+				content: body,
+				_source: {
+					provider: "test",
+					providerName: "test",
+					path: rulePath,
+					level: "project",
+				},
+			},
+		]);
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const firstExec = await readTool.execute("rule-uri", { path: "rule://adaptive-delivery" });
+			await session.agent.afterToolCall!(readCtx("rule-uri", firstExec, { path: "rule://adaptive-delivery" }));
+			const secondExec = await readTool.execute("rule-file", { path: rulePath });
+			const secondAfter = await session.agent.afterToolCall!(readCtx("rule-file", secondExec, { path: rulePath }));
+			expect(secondExec.details?.canonicalSource).toBe("rule://adaptive-delivery");
+			expect(textFromResult(secondAfter)).toMatch(/^\[context ref: artifact:\/\/\d+ sha256:[a-f0-9]{64}\]$/);
+		} finally {
+			await session.dispose();
+			resetActiveRulesForTests();
+		}
+	});
 	it("re-injects skill full text after the retained map is cleared", async () => {
 		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "skill-reset-"));
 		const skillDir = path.join(workDir, "engineering-flow");

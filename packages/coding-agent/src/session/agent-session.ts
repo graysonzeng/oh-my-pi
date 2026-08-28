@@ -261,7 +261,7 @@ import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint"
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { resolveConsultSelection } from "../tools/consult-model";
 import { type ConsultDetails, type ConsultUsage, resetConsultSession, resetConsultTurn } from "../tools/consult-state";
-import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { normalizeLocalScheme, resolveToCwd, splitInternalUrlSel, splitPathAndSel } from "../tools/path-utils";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -3830,7 +3830,10 @@ export class AgentSession {
 						raw: args.raw === true,
 						offset: typeof args.offset === "number" ? args.offset : undefined,
 						limit: typeof args.limit === "number" ? args.limit : undefined,
-						selector: typeof args.selector === "string" ? args.selector : undefined,
+						selector:
+							typeof args.selector === "string"
+								? args.selector
+								: (splitInternalUrlSel(rawPath).sel ?? splitPathAndSel(rawPath).sel),
 						query: typeof args.query === "string" ? args.query : undefined,
 					}),
 					branchOrWorktreeScope,

@@ -10,6 +10,7 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { normalizeReadSelector } from "../../src/latency/read-view-key";
+import { splitInternalUrlSel, splitPathAndSel } from "../../src/tools/path-utils";
 import { buildReadToolContextEntry } from "../../src/workflow/context-ledger";
 import { sha256Hex } from "../../src/workflow/optimization-receipt";
 
@@ -31,7 +32,7 @@ function makeSession(cwd: string, overrides: Record<string, unknown> = {}): Tool
 	};
 }
 
-/** Mirror agent-session.ts #dedupeOrdinaryReadResult selector wiring (rawPath as selector). */
+/** Mirror agent-session.ts #dedupeOrdinaryReadResult selector wiring. */
 function readViewKeyFromProductionConsumer(
 	result: AgentToolResult<ReadToolDetails>,
 	rawPath: string,
@@ -44,7 +45,7 @@ function readViewKeyFromProductionConsumer(
 		readViewKeyParts: {
 			canonicalSource: details.canonicalSource ?? details.resolvedPath ?? details.finalUrl ?? rawPath,
 			normalizedSelector: normalizeReadSelector({
-				selector: rawPath,
+				selector: splitInternalUrlSel(rawPath).sel ?? splitPathAndSel(rawPath).sel,
 			}),
 			branchOrWorktreeScope: details.branchOrWorktreeScope ?? "",
 			providerViewIdentity: details.providerViewIdentity ?? "",
@@ -92,7 +93,7 @@ describe("read identity production", () => {
 		const readViewKey = readViewKeyFromProductionConsumer(result, filePath, output);
 		expect(readViewKey?.eligible).toBe(true);
 		expect(readViewKey?.failOpenReasons).toEqual([]);
-		expect(readViewKey?.parts.normalizedSelector).toBe(filePath);
+		expect(readViewKey?.parts.normalizedSelector).toBe("full");
 	});
 
 	it("F7: git worktree stamps git: scope for ReadViewKey eligibility", async () => {

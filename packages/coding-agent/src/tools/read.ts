@@ -19,6 +19,7 @@ import {
 	prompt,
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
+import { getActiveRules } from "../capability/rule";
 import {
 	canonicalSnapshotKey,
 	getFileSnapshotStore,
@@ -28,6 +29,7 @@ import {
 } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
 import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
+import { getActiveSkills } from "../extensibility/skills";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
 import {
 	MAX_INLINE_ARTIFACT_BYTES,
@@ -36,7 +38,6 @@ import {
 } from "../internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
-import { normalizeReadSelector } from "../latency/read-view-key";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
@@ -637,8 +638,8 @@ async function attachReadIdentity(
 
 type ReadParams = ReadToolInput;
 
-/** Identical reads tolerated before the loop hint is appended. */
-const REPEAT_READ_HINT_THRESHOLD = 3;
+/** Identical reads tolerated before the loop hint is appended. Second identical read hints. */
+const REPEAT_READ_HINT_THRESHOLD = 2;
 /** Per-session cap on tracked read keys; the map resets when exceeded. */
 const REPEAT_READ_TRACKER_CAP = 64;
 
@@ -673,6 +674,57 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	entry.count++;
 	if (entry.count < REPEAT_READ_HINT_THRESHOLD) return;
 	block.text += `\n\n[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — use a narrower selector (path:A-B), or proceed with the edit.]`;
+}
+
+async function overlayDiskSkillOrRuleFullText(
+	session: ToolSession,
+	absolutePath: string,
+	parsed: ParsedSelector,
+	result: AgentToolResult<ReadToolDetails>,
+): Promise<AgentToolResult<ReadToolDetails>> {
+	if (parsed.kind !== "none") return result;
+	if (result.isError || result.details?.truncation?.truncated === true) return result;
+	const resolved = path.resolve(absolutePath);
+	for (const skill of getActiveSkills()) {
+		if (path.resolve(skill.filePath) !== resolved) continue;
+		const text = await Bun.file(absolutePath).text();
+		return attachReadIdentity(
+			buildInMemoryTextResult(session, text, undefined, undefined, {
+				details: { resolvedPath: absolutePath, contentType: "text/markdown" },
+				sourcePath: absolutePath,
+				entityLabel: "resource",
+				ignoreResultLimits: true,
+				immutable: true,
+			}),
+			{
+				absolutePath,
+				cwd: session.cwd,
+				canonicalSource: `skill://${skill.name}`,
+				providerViewIdentity: `skill-immutable:${skill.name}`,
+				outputMode: "converted",
+			},
+		);
+	}
+	for (const rule of getActiveRules()) {
+		if (path.resolve(rule.path) !== resolved) continue;
+		return attachReadIdentity(
+			buildInMemoryTextResult(session, rule.content, undefined, undefined, {
+				details: { resolvedPath: absolutePath, contentType: "text/markdown" },
+				sourcePath: absolutePath,
+				entityLabel: "resource",
+				ignoreResultLimits: true,
+				immutable: true,
+			}),
+			{
+				absolutePath,
+				cwd: session.cwd,
+				canonicalSource: `rule://${rule.name}`,
+				providerViewIdentity: `rule-immutable:${rule.name}`,
+				outputMode: "converted",
+			},
+		);
+	}
+	return result;
 }
 
 /**
@@ -1165,7 +1217,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
-		appendRepeatReadHint(this.session, params.path, result);
+		if (!result.details?.providerViewIdentity) {
+			appendRepeatReadHint(this.session, params.path, result);
+		}
 		return result;
 	}
 
@@ -2050,11 +2104,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		const result = resultBuilder.done();
 		if (sourcePath && !mimeType) {
-			return attachReadIdentity(result, {
+			const identified = await attachReadIdentity(result, {
 				absolutePath,
 				cwd: this.session.cwd,
 				outputMode: details.summary ? "summary" : details.contentType === "text/markdown" ? "converted" : "raw",
 			});
+			return overlayDiskSkillOrRuleFullText(this.session, absolutePath, parsed, identified);
 		}
 		return result;
 	}
@@ -2489,18 +2544,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			sourcePath: resource.sourcePath,
 			sourceInternal: url,
 			entityLabel: "resource",
-			ignoreResultLimits: scheme === "skill",
+			ignoreResultLimits: scheme === "skill" || scheme === "rule",
 			immutable: resource.immutable,
 			raw,
 		});
 	}
 
 	/**
-	 * Restricted attested identity for canonical `skill://<name>` full-text views
-	 * so `#dedupeOrdinaryReadResult` can stub a second identical read. Ranged,
-	 * raw, query, fragment, and `rule://` views stay fail-open. Digest is the
-	 * model-visible `originalText` fallback in `#dedupeOrdinaryReadResult`, not
-	 * pre-renderer `resource.content`.
+	 * Restricted attested identity for canonical `skill://<name>` and
+	 * `rule://<name>` full-text views so `#dedupeOrdinaryReadResult` can stub a
+	 * second identical read. Ranged, raw, query, and fragment views stay fail-open.
+	 * Digest is the model-visible `originalText` fallback in `#dedupeOrdinaryReadResult`,
+	 * not pre-renderer `resource.content`.
 	 */
 	#attestCanonicalSkillFullText(
 		scheme: string,
@@ -2509,20 +2564,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		resource: { content: string; contentType?: string; immutable?: boolean },
 		details: ReadToolDetails,
 	): void {
-		if (scheme !== "skill") return;
+		if (scheme !== "skill" && scheme !== "rule") return;
 		if (!resource.immutable) return;
 		if (urlMeta.search || urlMeta.hash) return;
-		const skillName = urlMeta.rawHost || urlMeta.hostname;
-		if (!skillName) return;
+		const name = urlMeta.rawHost || urlMeta.hostname;
+		if (!name) return;
 		const urlPath = urlMeta.pathname;
 		if (urlPath && urlPath !== "/" && urlPath !== "") return;
 		if (parsedSel.kind !== "none") return;
-		const selector = normalizeReadSelector({});
-		if (selector !== "full") return;
-		details.canonicalSource = `skill://${skillName}`;
-		details.branchOrWorktreeScope = readBranchOrWorktreeScope(this.session.cwd);
-		details.providerViewIdentity = `skill-immutable:${skillName}`;
+		details.canonicalSource = `${scheme}://${name}`;
+		details.branchOrWorktreeScope = readBranchOrWorktreeScope(this.session.cwd) || "immutable:session";
 		details.outputMode = resource.contentType === "text/markdown" ? "converted" : "raw";
+		details.providerViewIdentity = `${scheme}-immutable:${name}`;
 	}
 
 	/**
