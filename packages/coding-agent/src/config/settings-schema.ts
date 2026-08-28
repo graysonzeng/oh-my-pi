@@ -4941,6 +4941,18 @@ export const SETTINGS_SCHEMA = {
 			condition: "goalHostGateEnabled",
 		},
 	},
+	"goal.hostGate.falseCompletion": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal False-Completion Continuation",
+			description:
+				"When true, a completion claim without shipped verification or with open todos injects a hidden next-turn continuation. Independent of the advisory evaluator.",
+			condition: "goalHostGateEnabled",
+		},
+	},
 	"goal.grokOverlayUnload": {
 		type: "boolean",
 		default: true,

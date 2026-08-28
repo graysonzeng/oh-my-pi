@@ -10608,6 +10608,7 @@ export class AgentSession {
 		const state = this.#goalModeState;
 		if (!state?.enabled || state.goal.status !== "active") return false;
 		if (this.settings.get("goal.hostGate.enabled") === false) return false;
+		if (this.settings.get("goal.hostGate.falseCompletion") === false) return false;
 		const snapshot = buildGoalCompletionSettleSnapshot({
 			turnId: this.#goalRuntime.currentTurnId() ?? `turn-${this.#goalTurnCounter}`,
 			generation: this.#promptGeneration,
@@ -10615,7 +10616,6 @@ export class AgentSession {
 			messages: this.agent.state.messages,
 			todos: this.getTodoPhases(),
 			goal: state.goal,
-			nominationOutcome: state.goal.hostGate?.pendingVerification ? "nominated" : "none",
 		});
 		if (!looksLikeFalseCompletion(snapshot)) return false;
 		const nextStep = falseCompletionNextStep(snapshot);

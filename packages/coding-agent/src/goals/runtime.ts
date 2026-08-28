@@ -150,6 +150,7 @@ function isAccountingStatus(goal: Goal): boolean {
 export class GoalRuntime {
 	readonly #host: GoalRuntimeHost;
 	#turnSnapshot: GoalTurnSnapshot | undefined;
+	#lastTurnId: string | undefined;
 	#wallClock: GoalWallClockSnapshot;
 	#budgetReportedFor: string | undefined;
 	#accountingTail: Promise<void> = Promise.resolve();
@@ -236,6 +237,7 @@ export class GoalRuntime {
 	}
 
 	onTurnStart(turnId: string, baselineUsage: GoalTokenUsage): void {
+		this.#lastTurnId = turnId;
 		this.#turnSnapshot = { turnId, baselineUsage: { ...baselineUsage } };
 		const state = this.#host.getState();
 		if (state?.enabled && isAccountingStatus(state.goal)) {
@@ -548,6 +550,7 @@ export class GoalRuntime {
 	}
 
 	async completeGoalFromTool(): Promise<Goal> {
+		this.cancelInFlightNominations("user_confirmed");
 		return await this.#withAccounting(async () => {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
@@ -573,18 +576,20 @@ export class GoalRuntime {
 	}
 
 	currentTurnId(): string | undefined {
-		return this.#turnSnapshot?.turnId;
+		return this.#turnSnapshot?.turnId ?? this.#lastTurnId;
 	}
 
 	currentGeneration(): number {
 		return this.#host.getPromptGeneration?.() ?? 0;
 	}
 
-	async nominateComplete(input: {
-		nominationId: string;
-		turnId: string;
-		generation: number;
-	}): Promise<{ accepted: boolean; shared: boolean; goal: Goal }> {
+	async nominateComplete(input: { nominationId: string; turnId: string; generation: number }): Promise<{
+		accepted: boolean;
+		shared: boolean;
+		goal: Goal;
+		flight?: Promise<void>;
+		settle?: { resolve: () => void; controller: AbortController };
+	}> {
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
 			if (!state?.goal) throw new Error("cannot complete goal because no goal is active");
@@ -597,7 +602,12 @@ export class GoalRuntime {
 				existing.generation === input.generation &&
 				existing.nominationId
 			) {
-				return { accepted: true, shared: true, goal: state.goal };
+				return {
+					accepted: true,
+					shared: true,
+					goal: state.goal,
+					flight: this.#inFlightNominations.get(state.goal.id)?.promise,
+				};
 			}
 			this.#abortInFlightLocked(state.goal.id, "replaced");
 			const revision = (existing?.goalRevision ?? 0) + 1;
@@ -612,12 +622,24 @@ export class GoalRuntime {
 			};
 			state.goal.updatedAt = this.#now();
 			await this.#commitState(state, { persist: "goal" });
-			return { accepted: true, shared: false, goal: state.goal };
+			const controller = new AbortController();
+			const settle = Promise.withResolvers<void>();
+			this.#inFlightNominations.set(state.goal.id, { controller, promise: settle.promise });
+			void settle.promise.finally(() => {
+				const current = this.#inFlightNominations.get(state.goal.id);
+				if (current?.promise === settle.promise) this.#inFlightNominations.delete(state.goal.id);
+			});
+			return {
+				accepted: true,
+				shared: false,
+				goal: state.goal,
+				settle: { resolve: settle.resolve, controller },
+			};
 		});
 	}
 
 	trackInFlightNomination(goalId: string, controller: AbortController, promise: Promise<void>): void {
-		this.#abortInFlightLocked(goalId, "replaced");
+		if (this.#inFlightNominations.has(goalId)) return;
 		this.#inFlightNominations.set(goalId, { controller, promise });
 		void promise.finally(() => {
 			const current = this.#inFlightNominations.get(goalId);

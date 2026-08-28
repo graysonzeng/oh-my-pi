@@ -3,7 +3,9 @@ import type { AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi
 import type { TodoPhase } from "../tools/todo";
 import type { Goal } from "./state";
 
-export const VERIFICATION_COMMAND_RE = /(?:bun\s+(?:test|check)|cargo\s+test|pytest|\btypecheck\b|\blint\b|\btest\b)/i;
+/** Shipped test/lint/typecheck invocations — not the bare word "test". */
+export const VERIFICATION_COMMAND_RE =
+	/(?:^|[;&|\n]|&&|\|\|)\s*(?:bun\s+(?:run\s+)?(?:test|check)|(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|check|lint|typecheck)|cargo\s+test|pytest|python\s+-m\s+pytest|go\s+test)\b/i;
 
 export const COMPLETION_CLAIM_RE =
 	/\b(?:completed|done|fixed|shipped)\b|all green|ready to merge|测试通过|已完成|全部完成/i;
@@ -32,6 +34,7 @@ export type GoalCompletionSettleSnapshot = {
 		nominationId?: string;
 	};
 	todos: Array<{ phase: string; content: string; status: string }>;
+	messages: AgentMessage[];
 };
 
 export type GoalHostGateDecision = {
@@ -94,6 +97,32 @@ export function extractAssistantText(message: AssistantMessage): string {
 		.trim();
 }
 
+export function settleTurnMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		if (messages[index]?.role === "user") return messages.slice(index);
+	}
+	return [...messages];
+}
+
+export function nominationOutcomeForTurn(
+	goal: Pick<Goal, "hostGate">,
+	turnId: string,
+	generation?: number,
+): GoalNominationOutcome {
+	const gate = goal.hostGate;
+	if (!gate) return "none";
+	if (gate.pendingVerification) return "nominated";
+	if (!gate.turnId || gate.turnId !== turnId) return "none";
+	if (generation !== undefined && gate.generation !== undefined && gate.generation !== generation) {
+		return "none";
+	}
+	if (gate.lastDecision === "candidate_complete" || gate.lastDecision === "user_confirmed") {
+		return "accepted";
+	}
+	if (gate.lastDecision === "continue" || gate.lastDecision === "blocked") return "rejected";
+	return "none";
+}
+
 function resultText(result: ToolResultMessage | undefined): { text: string; isError: boolean; unpaired: boolean } {
 	if (!result) return { text: "", isError: false, unpaired: true };
 	const text = result.content
@@ -110,28 +139,40 @@ export function buildGoalCompletionSettleSnapshot(input: {
 	messages: readonly AgentMessage[];
 	todos: TodoPhase[] | undefined;
 	goal: Pick<Goal, "id" | "hostGate">;
-	nominationOutcome: GoalNominationOutcome;
+	nominationOutcome?: GoalNominationOutcome;
+	excludeToolCallIds?: Iterable<string>;
 }): GoalCompletionSettleSnapshot {
+	const settleMessages = settleTurnMessages(input.messages);
+	const excludeToolCallIds = new Set(input.excludeToolCallIds ?? []);
 	const resultsById = new Map<string, ToolResultMessage>();
-	for (const message of input.messages) {
+	for (const message of settleMessages) {
 		if (message.role !== "toolResult") continue;
 		resultsById.set(message.toolCallId, message);
 	}
 
 	const tools: GoalSettleToolRecord[] = [];
-	for (const block of input.assistant.content) {
-		if (block.type !== "toolCall") continue;
-		const call = block as ToolCall;
-		const result = resultsById.get(call.id);
-		const resolved = resultText(result);
-		tools.push({
-			id: call.id,
-			name: call.name,
-			args: call.arguments ?? {},
-			resultText: resolved.text,
-			isError: resolved.isError,
-			unpaired: resolved.unpaired,
-		});
+	const seen = new Set<string>();
+	for (const message of settleMessages) {
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			const call = block as ToolCall;
+			if (seen.has(call.id)) continue;
+			seen.add(call.id);
+			const result = resultsById.get(call.id);
+			const resolved = resultText(result);
+			if (excludeToolCallIds.has(call.id)) continue;
+			const op = call.arguments && typeof call.arguments === "object" ? call.arguments.op : undefined;
+			if (call.name === "goal" && op === "complete" && resolved.unpaired) continue;
+			tools.push({
+				id: call.id,
+				name: call.name,
+				args: call.arguments ?? {},
+				resultText: resolved.text,
+				isError: resolved.isError,
+				unpaired: resolved.unpaired,
+			});
+		}
 	}
 
 	return {
@@ -143,10 +184,11 @@ export function buildGoalCompletionSettleSnapshot(input: {
 		goalId: input.goal.id,
 		goalRevision: input.goal.hostGate?.goalRevision ?? 0,
 		nomination: {
-			outcome: input.nominationOutcome,
+			outcome: input.nominationOutcome ?? nominationOutcomeForTurn(input.goal, input.turnId, input.generation),
 			nominationId: input.goal.hostGate?.nominationId,
 		},
 		todos: flattenTodoSnapshot(input.todos),
+		messages: settleMessages,
 	};
 }
 
@@ -177,7 +219,8 @@ export function evaluateGoalHostGate(snapshot: GoalCompletionSettleSnapshot): Go
 }
 
 export function looksLikeFalseCompletion(snapshot: GoalCompletionSettleSnapshot): boolean {
-	if (snapshot.nomination.outcome === "nominated" || snapshot.nomination.outcome === "accepted") {
+	if (snapshot.nomination.outcome !== "none") return false;
+	if (snapshot.tools.some(record => record.name === "goal" && record.args.op === "complete")) {
 		return false;
 	}
 	if (snapshot.stopReason === "error" || snapshot.stopReason === "aborted") return false;

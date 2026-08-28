@@ -3,16 +3,18 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { runGoalEvaluator } from "./evaluator";
+import * as evaluator from "./evaluator";
 import {
 	buildGoalCompletionSettleSnapshot,
 	evaluateGoalHostGate,
 	flattenTodoSnapshot,
 	type GoalCompletionSettleSnapshot,
+	settleTurnMessages,
 } from "./host-gate";
 import type { GoalRuntime } from "./runtime";
 import type { Goal, GoalToolDetails } from "./state";
 import { buildGoalToolResponse, type GoalToolResponse } from "./tools/goal-tool";
+
 export type GoalCompleteResult = {
 	response: GoalToolResponse;
 	details: GoalToolDetails;
@@ -47,8 +49,9 @@ export function snapshotForComplete(
 	session: ToolSession,
 	runtime: GoalRuntime,
 	goal: Goal,
+	excludeToolCallIds?: Iterable<string>,
 ): GoalCompletionSettleSnapshot {
-	const messages = session.snapshotConsultContext?.().messages ?? [];
+	const messages = settleTurnMessages(session.snapshotConsultContext?.().messages ?? []);
 	const assistant = latestAssistant(messages);
 	if (!assistant) {
 		return {
@@ -64,6 +67,7 @@ export function snapshotForComplete(
 				nominationId: goal.hostGate?.nominationId,
 			},
 			todos: flattenTodoSnapshot(session.getTodoPhases?.()),
+			messages,
 		};
 	}
 	return buildGoalCompletionSettleSnapshot({
@@ -74,28 +78,39 @@ export function snapshotForComplete(
 		todos: session.getTodoPhases?.(),
 		goal,
 		nominationOutcome: "nominated",
+		excludeToolCallIds,
 	});
+}
+
+function completeResponse(
+	goal: Goal,
+	gate: GoalToolDetails["gate"],
+	extra: string,
+	includeCompletionReport = false,
+): GoalCompleteResult {
+	const response = buildGoalToolResponse(goal, { includeCompletionReport });
+	return {
+		response,
+		details: {
+			op: "complete",
+			goal: response.goal,
+			remainingTokens: response.remainingTokens,
+			completionBudgetReport: includeCompletionReport ? response.completionBudgetReport : null,
+			gate,
+		},
+		text: formatCompleteText(response, extra),
+	};
 }
 
 export async function executeGoalComplete(
 	session: ToolSession,
 	runtime: GoalRuntime,
 	signal?: AbortSignal,
+	toolCallId?: string,
 ): Promise<GoalCompleteResult> {
 	if (session.settings.get("goal.hostGate.enabled") === false) {
 		const completed = await runtime.completeGoalFromTool();
-		const response = buildGoalToolResponse(completed, { includeCompletionReport: true });
-		return {
-			response,
-			details: {
-				op: "complete",
-				goal: response.goal,
-				remainingTokens: response.remainingTokens,
-				completionBudgetReport: response.completionBudgetReport,
-				gate: "user_confirmed",
-			},
-			text: formatCompleteText(response),
-		};
+		return completeResponse(completed, "user_confirmed", "", true);
 	}
 
 	const existing = session.getGoalModeState?.()?.goal;
@@ -105,43 +120,71 @@ export async function executeGoalComplete(
 	const generation = runtime.currentGeneration();
 	const nominated = await runtime.nominateComplete({ nominationId, turnId, generation });
 	const goal = nominated.goal;
-	const snapshot = snapshotForComplete(session, runtime, goal);
+	const snapshot = snapshotForComplete(session, runtime, goal, toolCallId ? [toolCallId] : undefined);
 	const host = evaluateGoalHostGate(snapshot);
-	if (host.decision === "continue") {
-		const applied = await runtime.applyNominationResult({
-			goalId: goal.id,
-			goalRevision: goal.hostGate?.goalRevision ?? 0,
-			nominationId: goal.hostGate?.nominationId ?? nominationId,
-			turnId,
-			generation,
-			decision: "continue",
-			evidence: host.reasons.join(","),
-			nextStep: host.nextStep,
-			reasons: host.reasons,
-		});
-		if (applied === "stale") {
-			logger.warn("discarded stale goal host-gate continue", { goalId: goal.id, nominationId, turnId, generation });
-		}
+
+	if (nominated.shared) {
+		if (nominated.flight) await nominated.flight;
 		const latest = session.getGoalModeState?.()?.goal ?? goal;
-		const response = buildGoalToolResponse(latest);
-		const extra = `Host gate: continue\nReasons: ${host.reasons.join(", ")}\nNext step: ${host.nextStep}`;
-		return {
-			response,
-			details: {
-				op: "complete",
-				goal: response.goal,
-				remainingTokens: response.remainingTokens,
-				completionBudgetReport: null,
-				gate: "continue",
-			},
-			text: formatCompleteText(response, extra),
-		};
+		const decision = latest.hostGate?.lastDecision;
+		if (decision === "blocked") {
+			return completeResponse(
+				latest,
+				"blocked",
+				`Host gate: blocked\nblocker_key: ${latest.hostGate?.lastBlockerKey ?? ""}\n${latest.hostGate?.lastNextStep ?? ""}`,
+			);
+		}
+		if (decision === "continue") {
+			return completeResponse(
+				latest,
+				"continue",
+				`Host gate: continue\nReasons: ${(latest.hostGate?.lastReasons ?? host.reasons).join(", ")}\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+			);
+		}
+		return completeResponse(
+			latest,
+			"candidate_complete",
+			`Host checks passed. Ask the user to confirm with /goal complete.\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+		);
 	}
 
-	const controller = new AbortController();
+	const settle = nominated.settle;
+	if (host.decision === "continue") {
+		try {
+			const applied = await runtime.applyNominationResult({
+				goalId: goal.id,
+				goalRevision: goal.hostGate?.goalRevision ?? 0,
+				nominationId: goal.hostGate?.nominationId ?? nominationId,
+				turnId,
+				generation,
+				decision: "continue",
+				evidence: host.reasons.join(","),
+				nextStep: host.nextStep,
+				reasons: host.reasons,
+			});
+			if (applied === "stale") {
+				logger.warn("discarded stale goal host-gate continue", {
+					goalId: goal.id,
+					nominationId,
+					turnId,
+					generation,
+				});
+			}
+			const latest = session.getGoalModeState?.()?.goal ?? goal;
+			return completeResponse(
+				latest,
+				"continue",
+				`Host gate: continue\nReasons: ${host.reasons.join(", ")}\nNext step: ${host.nextStep}`,
+			);
+		} finally {
+			settle?.resolve();
+		}
+	}
+
+	const controller = settle?.controller ?? new AbortController();
 	const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-	const run = (async () => {
-		const evaluator = await runGoalEvaluator({ session, goal, snapshot, signal: combined });
+	try {
+		const result = await evaluator.runGoalEvaluator({ session, goal, snapshot, signal: combined });
 		if (combined.aborted) throw new ToolAbortError();
 		const applied = await runtime.applyNominationResult({
 			goalId: goal.id,
@@ -149,10 +192,10 @@ export async function executeGoalComplete(
 			nominationId: goal.hostGate?.nominationId ?? nominationId,
 			turnId,
 			generation,
-			decision: evaluator.decision === "blocked" ? "blocked" : "candidate_complete",
-			evidence: evaluator.evidence,
-			nextStep: evaluator.nextStep,
-			blockerKey: evaluator.blockerKey || undefined,
+			decision: result.decision === "blocked" ? "blocked" : "candidate_complete",
+			evidence: result.evidence,
+			nextStep: result.nextStep,
+			blockerKey: result.blockerKey || undefined,
 			reasons: host.reasons,
 		});
 		if (applied === "stale") {
@@ -163,55 +206,27 @@ export async function executeGoalComplete(
 				generation,
 			});
 		}
-	})();
-	runtime.trackInFlightNomination(
-		goal.id,
-		controller,
-		run.then(
-			() => undefined,
-			() => undefined,
-		),
-	);
-	try {
-		await run;
 	} catch (error) {
 		if (error instanceof ToolAbortError || combined.aborted) {
 			await runtime.recoverPendingVerification();
 			throw error instanceof ToolAbortError ? error : new ToolAbortError();
 		}
 		throw error;
+	} finally {
+		settle?.resolve();
 	}
 
 	const latest = session.getGoalModeState?.()?.goal ?? goal;
 	if (latest.hostGate?.lastDecision === "blocked") {
 		await runtime.pauseGoal();
 		const paused = session.getGoalModeState?.()?.goal ?? latest;
-		const response = buildGoalToolResponse(paused);
 		const extra = `Host gate: blocked\nblocker_key: ${paused.hostGate?.lastBlockerKey ?? latest.hostGate?.lastBlockerKey}\n${paused.hostGate?.lastNextStep ?? latest.hostGate?.lastNextStep}`;
-		return {
-			response,
-			details: {
-				op: "complete",
-				goal: response.goal,
-				remainingTokens: response.remainingTokens,
-				completionBudgetReport: null,
-				gate: "blocked",
-			},
-			text: formatCompleteText(response, extra),
-		};
+		return completeResponse(paused, "blocked", extra);
 	}
 
-	const response = buildGoalToolResponse(latest);
-	const extra = `Host checks passed. Ask the user to confirm with /goal complete.\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`;
-	return {
-		response,
-		details: {
-			op: "complete",
-			goal: response.goal,
-			remainingTokens: response.remainingTokens,
-			completionBudgetReport: null,
-			gate: "candidate_complete",
-		},
-		text: formatCompleteText(response, extra),
-	};
+	return completeResponse(
+		latest,
+		"candidate_complete",
+		`Host checks passed. Ask the user to confirm with /goal complete.\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+	);
 }

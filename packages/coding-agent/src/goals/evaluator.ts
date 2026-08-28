@@ -1,10 +1,12 @@
-import { instrumentedCompleteSimple, resolveTelemetry, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import * as agentCore from "@oh-my-pi/pi-agent-core";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { escapeXmlText, logger, prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent, parseJsonPayload } from "../commit/utils";
 import evaluatorSystemPrompt from "../prompts/goals/evaluator-system.md" with { type: "text" };
 import evaluatorUserPrompt from "../prompts/goals/evaluator-user.md" with { type: "text" };
+import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import type { ToolSession } from "../tools";
 import * as git from "../utils/git";
 import type { GoalCompletionSettleSnapshot } from "./host-gate";
@@ -113,6 +115,11 @@ export function parseGoalEvaluatorJson(text: string): GoalEvaluatorResult | { er
 }
 
 function transcriptLines(snapshot: GoalCompletionSettleSnapshot): string[] {
+	const rendered = formatSessionHistoryMarkdown(snapshot.messages, {
+		includeThinking: false,
+		watchedRoles: true,
+	}).trim();
+	if (rendered.length > 0) return rendered.split("\n");
 	const lines = [`assistant: ${clip(snapshot.assistantText, TRANSCRIPT_ITEM_CHAR_LIMIT)}`];
 	for (const tool of snapshot.tools) {
 		const args = clip(JSON.stringify(tool.args), TRANSCRIPT_ITEM_CHAR_LIMIT);
@@ -217,9 +224,12 @@ export async function runGoalEvaluator(input: {
 	if (!model) {
 		return failOpenContinue("no_model");
 	}
-	const timeoutMs = input.session.settings.get("goal.hostGate.timeoutMs") || DEFAULT_TIMEOUT_MS;
+	const timeoutMs = input.session.settings.get("goal.hostGate.timeoutMs");
+	const resolvedTimeoutMs =
+		typeof timeoutMs === "number" && Number.isFinite(timeoutMs) ? timeoutMs : DEFAULT_TIMEOUT_MS;
 	const maxTokens = input.session.settings.get("goal.hostGate.maxOutputTokens") || DEFAULT_MAX_OUTPUT_TOKENS;
-	const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+	const hasTimeout = resolvedTimeoutMs > 0;
+	const timeoutSignal = hasTimeout ? AbortSignal.timeout(resolvedTimeoutMs) : undefined;
 	const effectiveSignal = timeoutSignal
 		? input.signal
 			? AbortSignal.any([input.signal, timeoutSignal])
@@ -254,12 +264,15 @@ export async function runGoalEvaluator(input: {
 		priorGaps: bundle.priorGaps,
 		transcript: bundle.transcript,
 	});
-	const telemetry = resolveTelemetry(input.session.getTelemetry?.(), input.session.getSessionId?.() ?? undefined);
+	const telemetry = agentCore.resolveTelemetry(
+		input.session.getTelemetry?.(),
+		input.session.getSessionId?.() ?? undefined,
+	);
 	const reasoning = clampThinkingLevelForModel(model, Effort.Low);
 	const apiKey = await input.session.getApiKey?.(model);
 	let response: AssistantMessage;
 	try {
-		response = await instrumentedCompleteSimple(
+		response = await agentCore.instrumentedCompleteSimple(
 			model,
 			{
 				systemPrompt: [systemPrompt],

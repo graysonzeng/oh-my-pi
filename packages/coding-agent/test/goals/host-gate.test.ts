@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import {
 	buildGoalCompletionSettleSnapshot,
+	commandLooksLikeVerification,
 	evaluateGoalHostGate,
 	looksLikeFalseCompletion,
 } from "../../src/goals/host-gate";
@@ -42,6 +44,10 @@ function toolResult(id: string, name: string, text: string, isError = false): To
 	};
 }
 
+function user(text: string): AgentMessage {
+	return { role: "user", content: text, timestamp: 0 };
+}
+
 const goal: Goal = {
 	id: "g1",
 	objective: "ship it",
@@ -71,7 +77,7 @@ describe("evaluateGoalHostGate", () => {
 
 	it("rejects open todos even when bun test succeeded", () => {
 		const call = toolCall("c1", "bash", { command: "bun test" });
-		const msg = assistant("done", [call]);
+		const msg = assistant("shipped", [call]);
 		const snapshot = buildGoalCompletionSettleSnapshot({
 			turnId: "turn-1",
 			generation: 1,
@@ -154,5 +160,94 @@ describe("looksLikeFalseCompletion", () => {
 			nominationOutcome: "nominated",
 		});
 		expect(looksLikeFalseCompletion(snapshot)).toBe(false);
+	});
+
+	it("skips D3 after host rejected or candidate_complete nomination", () => {
+		const claimed = assistant("all green");
+		const rejected = buildGoalCompletionSettleSnapshot({
+			turnId: "turn-1",
+			generation: 1,
+			assistant: claimed,
+			messages: [claimed],
+			todos: [],
+			goal: {
+				...goal,
+				hostGate: {
+					goalRevision: 2,
+					pendingVerification: false,
+					turnId: "turn-1",
+					lastDecision: "continue",
+					consecutiveContinueCount: 1,
+				},
+			},
+		});
+		expect(rejected.nomination.outcome).toBe("rejected");
+		expect(looksLikeFalseCompletion(rejected)).toBe(false);
+
+		const accepted = buildGoalCompletionSettleSnapshot({
+			turnId: "turn-1",
+			generation: 1,
+			assistant: claimed,
+			messages: [claimed],
+			todos: [],
+			goal: {
+				...goal,
+				hostGate: {
+					goalRevision: 2,
+					pendingVerification: false,
+					turnId: "turn-1",
+					lastDecision: "candidate_complete",
+					consecutiveContinueCount: 0,
+				},
+			},
+		});
+		expect(accepted.nomination.outcome).toBe("accepted");
+		expect(looksLikeFalseCompletion(accepted)).toBe(false);
+	});
+});
+
+describe("buildGoalCompletionSettleSnapshot", () => {
+	it("builds the current settle turn and keeps earlier verification", () => {
+		const priorCall = toolCall("old", "bash", { command: "echo previous" });
+		const priorAssistant = assistant("working", [priorCall]);
+		const verify = toolCall("v1", "bash", { command: "bun test packages/coding-agent" });
+		const complete = toolCall("g1", "goal", { op: "complete" });
+		const settleAssistant = assistant("verified", [verify, complete]);
+		const snapshot = buildGoalCompletionSettleSnapshot({
+			turnId: "turn-2",
+			generation: 2,
+			assistant: settleAssistant,
+			messages: [
+				user("previous turn"),
+				priorAssistant,
+				toolResult("old", "bash", "ok"),
+				user("finish the goal"),
+				settleAssistant,
+				toolResult("v1", "bash", "pass"),
+			],
+			todos: [{ name: "Ship", tasks: [{ content: "write tests", status: "completed" }] }],
+			goal,
+			excludeToolCallIds: ["g1"],
+		});
+		expect(snapshot.messages[0]).toMatchObject({ role: "user", content: "finish the goal" });
+		expect(snapshot.tools.map(tool => tool.id)).toEqual(["v1"]);
+		expect(evaluateGoalHostGate(snapshot).decision).toBe("pass");
+	});
+
+	it("does not treat a generic test word as shipped verification", () => {
+		expect(commandLooksLikeVerification("echo test passed")).toBe(false);
+		expect(commandLooksLikeVerification("bun test")).toBe(true);
+		const call = toolCall("c1", "bash", { command: "echo test passed" });
+		const msg = assistant("done", [call]);
+		const snapshot = buildGoalCompletionSettleSnapshot({
+			turnId: "turn-1",
+			generation: 1,
+			assistant: msg,
+			messages: [msg, toolResult("c1", "bash", "test passed")],
+			todos: [],
+			goal,
+			nominationOutcome: "nominated",
+		});
+		expect(evaluateGoalHostGate(snapshot).reasons).toContain("missing_verification");
 	});
 });

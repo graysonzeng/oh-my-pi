@@ -70,7 +70,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: GoalToolInput,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<GoalToolDetails>,
@@ -82,7 +82,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		}
 
 		if (params.op === "complete") {
-			const completed = await executeGoalComplete(this.#session, runtime, signal);
+			const completed = await executeGoalComplete(this.#session, runtime, signal, toolCallId);
 			return {
 				content: [{ type: "text", text: completed.text }],
 				details: completed.details,

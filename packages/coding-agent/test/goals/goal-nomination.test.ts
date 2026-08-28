@@ -58,6 +58,16 @@ describe("goal nomination compare-and-set", () => {
 		expect(first.shared).toBe(false);
 		expect(second.shared).toBe(true);
 		expect(second.goal.hostGate?.nominationId).toBe("n1");
+		expect(first.settle).toBeDefined();
+		expect(second.flight).toBeDefined();
+		let settled = false;
+		const waited = second.flight!.then(() => {
+			settled = true;
+		});
+		expect(settled).toBe(false);
+		first.settle!.resolve();
+		await waited;
+		expect(settled).toBe(true);
 
 		const stale = await harness.runtime.applyNominationResult({
 			goalId: second.goal.id,
@@ -95,19 +105,16 @@ describe("goal nomination compare-and-set", () => {
 		const harness = createHarness();
 		await harness.runtime.createGoal({ objective: "Ship it" });
 		harness.runtime.onTurnStart("turn-1", createUsage());
-		await harness.runtime.nominateComplete({ nominationId: "n1", turnId: "turn-1", generation: 7 });
-
-		const { promise, resolve } = Promise.withResolvers<void>();
-		const controller = new AbortController();
-		harness.runtime.trackInFlightNomination("ignored", controller, promise);
-		const goalId = harness.getState()?.goal.id;
-		expect(goalId).toBeDefined();
-		harness.runtime.trackInFlightNomination(goalId!, controller, promise);
-		expect(controller.signal.aborted).toBe(false);
+		const nominated = await harness.runtime.nominateComplete({
+			nominationId: "n1",
+			turnId: "turn-1",
+			generation: 7,
+		});
+		expect(nominated.settle?.controller.signal.aborted).toBe(false);
 
 		await harness.runtime.dropGoal();
-		expect(controller.signal.aborted).toBe(true);
-		resolve();
+		expect(nominated.settle?.controller.signal.aborted).toBe(true);
+		nominated.settle?.resolve();
 		expect(harness.getState()).toBeUndefined();
 	});
 
