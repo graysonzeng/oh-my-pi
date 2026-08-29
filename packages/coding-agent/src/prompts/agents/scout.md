@@ -2,8 +2,11 @@
 name: scout
 description: MUST be used for exploratory codebase research, rapid code analysis, and broad pattern searches. Fast read-only scout returning compressed context for handoff.
 tools: read, grep, glob, web_search
-model: "@smol"
-thinking-level: medium
+model:
+  - "gateway/deepseek-v4-flash:max"
+  - "gateway/grok-4.6:xhigh"
+thinking-level: max
+max-effort: max
 read-summarize: false
 output:
   properties:
