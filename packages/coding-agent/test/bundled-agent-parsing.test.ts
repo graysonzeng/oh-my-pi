@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildCustomModelOverlay, finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import {
 	resolveAgentModelPatterns,
 	resolveAgentModelSelection,
@@ -32,32 +33,42 @@ describe("bundled agent parsing", () => {
 	});
 
 	it("resolves scout to deepseek-v4-flash:max first, then grok-4.6:xhigh", () => {
-		const flash = buildModel({
-			id: "deepseek-v4-flash",
-			name: "DeepSeek V4 Flash",
-			api: "openai-completions",
-			provider: "gateway",
-			baseUrl: "https://gateway.example.com/v1",
-			reasoning: true,
-			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High, Effort.Max] },
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 128000,
-			maxTokens: 32768,
-		});
-		const grok = buildModel({
-			id: "grok-4.6",
-			name: "Grok 4.6",
-			api: "openai-completions",
-			provider: "gateway",
-			baseUrl: "https://gateway.example.com/v1",
-			reasoning: true,
-			thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 500000,
-			maxTokens: 500000,
-		});
+		const flashOverlay = buildCustomModelOverlay(
+			"gateway",
+			"https://gateway.example.com/v1",
+			"openai-completions",
+			undefined,
+			undefined,
+			true,
+			undefined,
+			undefined,
+			undefined,
+			{ id: "deepseek-v4-flash", name: "deepseek-v4-flash", api: "openai-completions" },
+		);
+		const grokOverlay = buildCustomModelOverlay(
+			"gateway",
+			"https://gateway.example.com/v1",
+			"openai-completions",
+			undefined,
+			undefined,
+			true,
+			undefined,
+			undefined,
+			undefined,
+			{
+				id: "grok-4.6",
+				name: "grok-4.6",
+				api: "openai-completions",
+				reasoning: true,
+				input: ["text", "image"],
+				contextWindow: 500000,
+				maxTokens: 500000,
+				cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
+			},
+		);
+		if (!flashOverlay || !grokOverlay) throw new Error("expected gateway overlays for scout candidates");
+		const flash = finalizeCustomModel(flashOverlay, { useDefaults: true });
+		const grok = finalizeCustomModel(grokOverlay, { useDefaults: true });
 		const settings = Settings.isolated();
 		const scout = getBundledAgent("scout");
 		const patterns = resolveAgentModelPatterns({ agentModel: scout?.model, settings });
@@ -65,12 +76,14 @@ describe("bundled agent parsing", () => {
 
 		const both = { getAvailable: () => [grok, flash] } as Parameters<typeof resolveModelOverride>[1];
 		const first = resolveModelOverride(patterns, both, settings);
+		expect(first.model?.provider).toBe("gateway");
 		expect(first.model?.id).toBe("deepseek-v4-flash");
 		expect(first.explicitThinkingLevel).toBe(true);
 		expect(first.thinkingLevel).toBe(Effort.Max);
 
 		const grokOnly = { getAvailable: () => [grok] } as Parameters<typeof resolveModelOverride>[1];
 		const second = resolveModelOverride(patterns, grokOnly, settings);
+		expect(second.model?.provider).toBe("gateway");
 		expect(second.model?.id).toBe("grok-4.6");
 		expect(second.explicitThinkingLevel).toBe(true);
 		expect(second.thinkingLevel).toBe(Effort.XHigh);
