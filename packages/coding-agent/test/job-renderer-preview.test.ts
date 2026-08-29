@@ -5,11 +5,16 @@
  * passes through unchanged.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { copySpawnJobLiveProgress, type AgentProgress } from "@oh-my-pi/pi-coding-agent/task";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { AsyncJobManager } from "../src/async/job-manager";
 import taskSummaryTemplate from "../src/prompts/tools/task-summary.md" with { type: "text" };
+import type { ToolSession } from "../src/tools";
 import { hubToolRenderer } from "../src/tools/hub";
+import { snapshotJobs } from "../src/tools/hub/jobs";
 
 function renderLines(resultText: string): string {
 	const result = {
@@ -274,3 +279,177 @@ describe("job renderer task-result preview", () => {
 		});
 	});
 });
+
+function makeCopiedProgress(overrides: Partial<AgentProgress> & { id: string }): AgentProgress {
+	const target: AgentProgress = {
+		index: 0,
+		id: overrides.id,
+		agent: "task",
+		agentSource: "bundled",
+		status: "running",
+		task: "old task",
+		currentTool: "grep",
+		currentToolArgs: "stale-args",
+		currentToolStartMs: 1,
+		recentTools: [{ tool: "bash", args: "stale", endMs: 1 }],
+		recentOutput: ["stale"],
+		toolCount: 0,
+		requests: 0,
+		tokens: 0,
+		cost: 0,
+		durationMs: 0,
+	};
+	copySpawnJobLiveProgress(target, {
+		...target,
+		currentTool: undefined,
+		currentToolArgs: undefined,
+		currentToolStartMs: undefined,
+		lastIntent: undefined,
+		recentTools: [],
+		recentOutput: [],
+		...overrides,
+	});
+	return target;
+}
+
+async function renderRunningCopiedJob(progress: AgentProgress, width = 120): Promise<string> {
+	const reported = Promise.withResolvers<void>();
+	const finish = Promise.withResolvers<string>();
+	const manager = new AsyncJobManager({ onJobComplete: () => {} });
+	const id = manager.register(
+		"task",
+		progress.id,
+		async ({ reportProgress }) => {
+			await reportProgress("running", { progress: [{ ...progress }] });
+			reported.resolve();
+			return finish.promise;
+		},
+		{ id: progress.id },
+	);
+	await reported.promise;
+	const session = { asyncJobManager: manager } as unknown as ToolSession;
+	const component = hubToolRenderer.renderResult(
+		{
+			content: [{ type: "text", text: "Listed background jobs" }],
+			details: { op: "jobs", jobs: snapshotJobs(session, manager.getAllJobs()) },
+		},
+		{ expanded: false, isPartial: false } as Parameters<typeof hubToolRenderer.renderResult>[1],
+		theme,
+		{ op: "jobs" },
+	);
+	const output = Bun.stripANSI((component.render(width) as readonly string[]).join("\n"));
+	finish.resolve("done");
+	await manager.getJob(id)?.promise;
+	return output;
+}
+
+describe("job renderer running live activity", () => {
+	beforeAll(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		await initTheme();
+	});
+
+	afterAll(() => {
+		resetSettingsForTest();
+	});
+
+	it("renders a compact activity sub-row from a detached spawn copy snapshot", async () => {
+		const output = await renderRunningCopiedJob(
+			makeCopiedProgress({
+				id: "AuthLoader",
+				currentTool: "read",
+				currentToolArgs: "src/auth.ts",
+			}),
+		);
+		expect(output).toContain("AuthLoader");
+		expect(output).toMatch(/read: src\/auth\.ts/);
+	});
+
+	it("prefers current tool over recent tools and lastIntent over args", async () => {
+		const output = await renderRunningCopiedJob(
+			makeCopiedProgress({
+				id: "AuthLoader",
+				lastIntent: "Inspect login",
+				currentTool: "read",
+				currentToolArgs: "src/auth.ts",
+				recentTools: [{ tool: "grep", args: "password", endMs: Date.now() }],
+			}),
+		);
+		expect(output).toMatch(/read: Inspect login/);
+		expect(output).not.toContain("password");
+		expect(output).not.toContain("src/auth.ts");
+	});
+
+	it("falls back to the most recent completed tool after currentTool is cleared", async () => {
+		const output = await renderRunningCopiedJob(
+			makeCopiedProgress({
+				id: "AuthLoader",
+				recentTools: [{ tool: "grep", args: "password", endMs: Date.now() }],
+			}),
+		);
+		expect(output).toMatch(/grep: password/);
+		expect(output).not.toContain("stale-args");
+	});
+
+	it("sanitizes tabs and home paths and truncates the activity sub-row to width", async () => {
+		const homeFile = `${os.homedir()}/secret/${"token-".repeat(20)}.ts`;
+		const output = await renderRunningCopiedJob(
+			makeCopiedProgress({
+				id: "AuthLoader",
+				currentTool: "read",
+				currentToolArgs: `\t${homeFile}`,
+			}),
+			48,
+		);
+		expect(output).toContain("read:");
+		expect(output).toContain("~/secret/");
+		expect(output).not.toContain("\t");
+		expect(output).not.toContain(homeFile);
+		for (const line of output.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(48);
+		}
+	});
+
+	it("keeps running rows without live activity compatible and ignores live activity after settle", async () => {
+		const missing = await renderRunningCopiedJob(makeCopiedProgress({ id: "AuthLoader" }));
+		expect(missing).toContain("AuthLoader");
+		expect(missing).not.toMatch(/\bread\b/);
+		expect(missing).not.toMatch(/\bgrep\b/);
+		const envelope = prompt.render(taskSummaryTemplate, {
+			agentName: "task",
+			id: "AuthLoader",
+			status: "completed",
+			duration: "8.7s",
+			preview: "settled body",
+			truncated: false,
+			mergeSummary: "",
+		});
+		const component = hubToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					op: "wait",
+					jobs: [
+						{
+							id: "AuthLoader",
+							type: "task",
+							status: "completed",
+							label: "AuthLoader",
+							durationMs: 8_700,
+							resultText: envelope,
+							liveActivity: { tool: "read", detail: "src/auth.ts" },
+						},
+					],
+				},
+			},
+			{ expanded: true } as Parameters<typeof hubToolRenderer.renderResult>[1],
+			theme,
+		);
+		const settled = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		expect(settled).toContain("settled body");
+		expect(settled).not.toContain("<task-result>");
+		expect(settled).not.toMatch(/read: src\/auth\.ts/);
+	});
+});
+

@@ -1037,6 +1037,11 @@ describe("AgentSession retry delay cap", () => {
 		["OpenAI-completions stall", "error", "OpenAI completions stream stalled while waiting for the next event"],
 		["reasonless abort", "aborted", "Request was aborted"],
 		["Codex websocket 1006", "error", "Codex websocket transport error: websocket closed (1006)"],
+		[
+			"Bun socket close",
+			"error",
+			"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+		],
 	] as const)("resumes a %s after a synthetic unexecuted tool result", async (_case, stopReason, errorMessage) => {
 		const model = createMockModel({
 			id: "grok-4",

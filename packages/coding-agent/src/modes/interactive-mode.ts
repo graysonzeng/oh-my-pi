@@ -124,8 +124,15 @@ import { agentTypeBadge, formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
+import { formatCompactLiveActivityLine, liveActivityFromProgress } from "../tools/hub/jobs";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import {
+	formatMoreItems,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
@@ -554,7 +561,10 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
 					}
 				}
-				return line;
+				const activity = liveActivityFromProgress(session.progress, Date.now());
+				if (!activity) return line;
+				const activityBudget = Math.max(1, columns - 8);
+				return [line, formatCompactLiveActivityLine(activity, activityBudget, theme)];
 			},
 		},
 		theme,

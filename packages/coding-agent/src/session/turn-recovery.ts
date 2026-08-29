@@ -22,7 +22,7 @@ import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, isUnexpectedSocketCloseMessage, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -1216,8 +1216,8 @@ export class TurnRecovery {
 	 * Codex 1006 recovery additionally requires an exact tail of synthetic,
 	 * unexecuted provider-error results before continuation is allowed.
 	 *
-	 * Classify a reasonless abort, idle stream stall, HTTP/2 stream reset, or
-	 * premature stream close whose emitted tool calls all have results. The failed
+	 * Classify a reasonless abort, idle stream stall, HTTP/2 stream reset,
+	 * unexpected socket close, or premature stream close whose emitted tool calls all have results. The failed
 	 * assistant/tool-result pair stays in context so continuation cannot replay
 	 * completed side effects; synthetic results tell the next turn that an
 	 * unexecuted call must be reissued.
@@ -1239,7 +1239,7 @@ export class TurnRecovery {
 			message.stopReason === "error" && STREAM_STALL_ERROR_RE.test(errorMessage) && AIError.retriable(id);
 		const transportReset =
 			message.stopReason === "error" &&
-			HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) &&
+			(HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) || isUnexpectedSocketCloseMessage(errorMessage)) &&
 			AIError.retriable(id) &&
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&

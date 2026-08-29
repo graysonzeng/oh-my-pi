@@ -5,8 +5,8 @@
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
+import { type Component, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
 import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
@@ -22,7 +22,9 @@ import {
 	formatStatusIcon,
 	getPreviewLines,
 	PREVIEW_LIMITS,
+	previewLine,
 	replaceTabs,
+	shortenPath,
 	type ToolUIColor,
 	type ToolUIStatus,
 } from "../render-utils";
@@ -158,6 +160,80 @@ interface TrackedJobLike {
 	errorText?: string;
 }
 
+const CURRENT_TOOL_ELAPSED_MS = 5000;
+
+function asTrimmedString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+export function liveActivityFromProgress(
+	record: unknown,
+	now: number,
+): JobSnapshot["liveActivity"] | undefined {
+	if (!record || typeof record !== "object") return undefined;
+	const progressRecord = record as Record<string, unknown>;
+	const currentTool = asTrimmedString(progressRecord.currentTool);
+	const recentTools = Array.isArray(progressRecord.recentTools) ? progressRecord.recentTools : [];
+	const recent = recentTools[0];
+	const recentRecord = recent && typeof recent === "object" ? (recent as Record<string, unknown>) : undefined;
+	const recentTool = asTrimmedString(recentRecord?.tool);
+	const tool = currentTool ?? recentTool;
+	if (!tool) return undefined;
+	const lastIntent = asTrimmedString(progressRecord.lastIntent);
+	const args = currentTool ? asTrimmedString(progressRecord.currentToolArgs) : asTrimmedString(recentRecord?.args);
+	const detail = lastIntent ?? args;
+	let elapsedMs: number | undefined;
+	if (currentTool) {
+		const startMs = progressRecord.currentToolStartMs;
+		if (typeof startMs === "number" && Number.isFinite(startMs)) {
+			const elapsed = now - startMs;
+			if (elapsed > CURRENT_TOOL_ELAPSED_MS) elapsedMs = elapsed;
+		}
+	}
+	return {
+		tool,
+		...(detail ? { detail } : {}),
+		...(elapsedMs !== undefined ? { elapsedMs } : {}),
+	};
+}
+
+export function formatCompactLiveActivityLine(
+	activity: NonNullable<JobSnapshot["liveActivity"]>,
+	budget: number,
+	uiTheme: Theme,
+): string {
+	const hook = `${uiTheme.tree.hook} `;
+	const tool = sanitizeText(activity.tool);
+	const detailRaw = activity.detail
+		? shortenPath(replaceTabs(sanitizeText(activity.detail)).trim())
+		: undefined;
+	const elapsedText = activity.elapsedMs !== undefined ? formatDuration(activity.elapsedMs) : "";
+	const elapsedPart = elapsedText ? `${uiTheme.sep.dot}${uiTheme.fg("warning", elapsedText)}` : "";
+	const elapsedWidth = elapsedPart ? visibleWidth(Bun.stripANSI(elapsedPart)) : 0;
+	let remaining = Math.max(1, budget - visibleWidth(hook));
+	const toolShown = truncateToWidth(tool, remaining, Ellipsis.Unicode);
+	remaining -= visibleWidth(toolShown);
+	let line = `${hook}${uiTheme.fg("muted", toolShown)}`;
+	if (detailRaw && remaining > 2) {
+		remaining -= 2;
+		const detailBudget = Math.max(0, remaining - (elapsedWidth > 0 && elapsedWidth <= remaining ? elapsedWidth : 0));
+		if (detailBudget > 0) {
+			const detailShown = previewLine(detailRaw, detailBudget, Ellipsis.Unicode);
+			if (detailShown) {
+				line += `: ${uiTheme.fg("dim", detailShown)}`;
+				remaining -= visibleWidth(detailShown) + 2;
+			}
+		}
+	}
+	if (elapsedPart && elapsedWidth > 0 && elapsedWidth <= remaining) {
+		line += elapsedPart;
+	}
+	return line;
+}
+
+
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
@@ -165,6 +241,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		const latest = current ?? j;
 		const resultConsumed = session.asyncJobManager?.isJobResultConsumed(latest.id) === true;
 		let resolvedModel: string | undefined;
+		let liveActivity: JobSnapshot["liveActivity"] | undefined;
 		if (latest.type === "task") {
 			const progressValue = latest.latestDetails?.progress;
 			if (Array.isArray(progressValue)) {
@@ -183,6 +260,9 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 					const trimmed = modelValue.trim();
 					if (trimmed) resolvedModel = trimmed;
 				}
+				if (latest.status === "running") {
+					liveActivity = liveActivityFromProgress(progressRecord, now);
+				}
 			}
 		}
 		return {
@@ -192,6 +272,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			label: latest.label,
 			durationMs: Math.max(0, now - latest.startTime),
 			...(resolvedModel ? { resolvedModel } : {}),
+			...(liveActivity ? { liveActivity } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
 		};
@@ -689,16 +770,20 @@ export function jobsRenderResult(
 						for (let i = 1; i < visibleLabelLines.length; i++) {
 							lines.push(`  ${uiTheme.fg("toolOutput", visibleLabelLines[i]!)}`);
 						}
-
-						const preview = flattenStructuredPreview(
-							stripTaskResultEnvelope(job.errorText?.trim() || job.resultText?.trim() || ""),
-						);
-						if (preview) {
-							const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
-							const previewLines = getPreviewLines(preview, maxLines, PREVIEW_LINE_WIDTH, Ellipsis.Unicode);
-							const tone = job.errorText ? "error" : "dim";
-							for (const pl of previewLines) {
-								lines.push(`  ${uiTheme.fg(tone, pl)}`);
+						if (job.status === "running" && job.liveActivity) {
+							const budget = Math.max(1, width - 6);
+							lines.push(formatCompactLiveActivityLine(job.liveActivity, budget, uiTheme));
+						} else {
+							const preview = flattenStructuredPreview(
+								stripTaskResultEnvelope(job.errorText?.trim() || job.resultText?.trim() || ""),
+							);
+							if (preview) {
+								const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
+								const previewLines = getPreviewLines(preview, maxLines, PREVIEW_LINE_WIDTH, Ellipsis.Unicode);
+								const tone = job.errorText ? "error" : "dim";
+								for (const pl of previewLines) {
+									lines.push(`  ${uiTheme.fg(tone, pl)}`);
+								}
 							}
 						}
 						return lines;

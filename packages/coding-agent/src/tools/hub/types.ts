@@ -66,6 +66,12 @@ export interface JobSnapshot {
 	resolvedModel?: string;
 	resultText?: string;
 	errorText?: string;
+	/** Compact current/recent tool gist for running TUI rows. Omitted when absent. */
+	liveActivity?: {
+		tool: string;
+		detail?: string;
+		elapsedMs?: number;
+	};
 }
 
 export type CancelStatus = "cancelled" | "not_found" | "already_completed";

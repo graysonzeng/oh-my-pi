@@ -139,6 +139,33 @@ export {
 } from "./types";
 
 /**
+ * Copy live metrics from a child executor snapshot onto the detached spawn
+ * job's progress object. The job body keeps status/identity; this list is the
+ * hub-path transport for current/recent tool activity. Assignments are
+ * direct — including `undefined` after tool end — so stale args/start cannot
+ * linger on the job-owned copy.
+ */
+export function copySpawnJobLiveProgress(target: AgentProgress, source: AgentProgress): void {
+	target.modelRole = source.modelRole ?? target.modelRole;
+	target.resolvedModel = source.resolvedModel;
+	target.resolvedModelIsFallback = source.resolvedModelIsFallback ?? target.resolvedModelIsFallback;
+	target.tokens = source.tokens;
+	target.requests = source.requests;
+	target.contextTokens = source.contextTokens;
+	target.contextWindow = source.contextWindow;
+	target.cost = source.cost;
+	target.toolCount = source.toolCount;
+	target.currentTool = source.currentTool;
+	target.currentToolArgs = source.currentToolArgs;
+	target.currentToolStartMs = source.currentToolStartMs;
+	target.lastIntent = source.lastIntent;
+	target.recentTools = source.recentTools.slice();
+	target.recentOutput = source.recentOutput.slice();
+	target.retryState = source.retryState;
+	target.retryFailure = source.retryFailure;
+}
+
+/**
  * Preview text for a child result. Falls back to "(no output)" — annotated
  * with the request count when the child actually did work, so the parent can
  * tell a no-op child from one that burned requests before being cancelled.
@@ -1307,27 +1334,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const forwardSyncProgress: AgentToolUpdateCallback<TaskToolDetails> = async update => {
 						const nextProgress = update.details?.progress?.[0];
 						if (nextProgress) {
-							// The job body owns status and identity (id/index/agent);
-							// copy only the live metrics the subagent streams so the
-							// polling row reflects the resolved model, reasoning level,
-							// and running counters without reverting the "running"
-							// status back to the subagent's initial "pending" snapshot.
-							progress.modelRole = nextProgress.modelRole ?? progress.modelRole;
-							progress.resolvedModel = nextProgress.resolvedModel;
-							progress.resolvedModelIsFallback =
-								nextProgress.resolvedModelIsFallback ?? progress.resolvedModelIsFallback;
-							progress.tokens = nextProgress.tokens;
-							progress.requests = nextProgress.requests;
-							progress.contextTokens = nextProgress.contextTokens;
-							progress.contextWindow = nextProgress.contextWindow;
-							progress.cost = nextProgress.cost;
-							progress.toolCount = nextProgress.toolCount;
-							progress.currentTool = nextProgress.currentTool;
-							progress.lastIntent = nextProgress.lastIntent;
-							progress.recentTools = nextProgress.recentTools.slice();
-							progress.recentOutput = nextProgress.recentOutput.slice();
-							progress.retryState = nextProgress.retryState;
-							progress.retryFailure = nextProgress.retryFailure;
+							copySpawnJobLiveProgress(progress, nextProgress);
 						}
 						const updateText =
 							update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;

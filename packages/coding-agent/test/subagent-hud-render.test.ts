@@ -6,6 +6,7 @@
  * their progress is already rendered inline (tool block / eval cell).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -171,6 +172,109 @@ describe("subagent HUD lines", () => {
 		expect(out).not.toContain("Done-");
 		expect(out).not.toContain("Main Session");
 	});
+
+	it("appends a compact current-tool activity sub-row under a running HUD identity line", () => {
+		const out = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: makeProgress({
+					id: "AuthLoader",
+					currentTool: "read",
+					currentToolArgs: "src/auth.ts",
+					currentToolStartMs: Date.now() - 600,
+				}),
+			}),
+		]);
+		expect(out).toContain("AuthLoader: Refactor the auth flow");
+		expect(out).toMatch(/read: src\/auth\.ts/);
+		expect(out).not.toMatch(/read: src\/auth\.ts[\s\S]*read: src\/auth\.ts/);
+	});
+
+	it("prefers lastIntent over current args and falls back to the most recent completed tool", () => {
+		const current = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: makeProgress({
+					id: "AuthLoader",
+					lastIntent: "Inspect login",
+					currentTool: "read",
+					currentToolArgs: "src/auth.ts",
+					recentTools: [{ tool: "grep", args: "password", endMs: Date.now() }],
+				}),
+			}),
+		]);
+		expect(current).toMatch(/read: Inspect login/);
+		expect(current).not.toContain("password");
+		expect(current).not.toContain("src/auth.ts");
+
+		const idle = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: makeProgress({
+					id: "AuthLoader",
+					recentTools: [{ tool: "grep", args: "password", endMs: Date.now() }],
+				}),
+			}),
+		]);
+		expect(idle).toMatch(/grep: password/);
+	});
+
+	it("sanitizes tabs and home paths in the HUD activity sub-row and keeps the identity line when activity is missing", () => {
+		const homeFile = `${os.homedir()}/secret/token.ts`;
+		const dirty = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: makeProgress({
+					id: "AuthLoader",
+					currentTool: "read",
+					currentToolArgs: `\t${homeFile}`,
+				}),
+			}),
+		]);
+		expect(dirty).toContain("AuthLoader: Refactor the auth flow");
+		expect(dirty).toContain("read:");
+		expect(dirty).toContain("~/secret/token.ts");
+		expect(dirty).not.toContain("\t");
+		expect(dirty).not.toContain(homeFile);
+
+		const missing = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: makeProgress({ id: "AuthLoader" }),
+			}),
+		]);
+		expect(missing).toContain("AuthLoader: Refactor the auth flow");
+		expect(missing.split("\n").filter(line => line.includes("AuthLoader")).length).toBe(1);
+	});
+
+	it("truncates the HUD activity sub-row to the viewport width", () => {
+		const longPath = `src/${"very-long-module-name-".repeat(8)}auth.ts`;
+		const lines = renderSubagentHudLines(
+			[
+				makeSession({
+					id: "AuthLoader",
+					description: "Refactor the auth flow",
+					progress: makeProgress({
+						id: "AuthLoader",
+						currentTool: "read",
+						currentToolArgs: longPath,
+					}),
+				}),
+			],
+			80,
+		).map(line => Bun.stripANSI(line));
+		const activity = lines.find(line => line.includes("read"));
+		expect(activity).toBeDefined();
+		expect(activity).not.toContain(longPath);
+		expect(Bun.stringWidth(activity!)).toBeLessThanOrEqual(80);
+		expect(lines.join("\n")).toContain("AuthLoader: Refactor the auth flow");
+	});
+
 
 	it("falls back to the description and task carried by progress snapshots", () => {
 		const fromProgressDesc = render([
