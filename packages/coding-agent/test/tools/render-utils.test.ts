@@ -12,6 +12,7 @@ import {
 	formatExpandHint,
 	formatParseErrors,
 	formatScreenshot,
+	shortenHomePathsInText,
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -188,6 +189,28 @@ describe("formatScreenshot", () => {
 		expect(lines).toContain(
 			"[Image: original 1600x1200, displayed at 800x600. Multiply coordinates by 2.00 to map to original image.]",
 		);
+	});
+});
+
+describe("shortenHomePathsInText", () => {
+	it("rewrites a home path that is not the first token", () => {
+		const home = "/Users/alice";
+		expect(shortenHomePathsInText(`cat ${home}/private.txt`, home)).toBe("cat ~/private.txt");
+	});
+
+	it("rewrites every home path in compact arguments", () => {
+		const home = "/Users/alice";
+		expect(shortenHomePathsInText(`["${home}/a","${home}/b"]`, home)).toBe(`["~/a","~/b"]`);
+	});
+
+	it("does not rewrite a sibling directory that shares a home prefix", () => {
+		const home = String.raw`C:\Users\me`;
+		const sibling = String.raw`C:\Users\me2\projects\demo`;
+		expect(shortenHomePathsInText(`open ${sibling}`, home)).toBe(`open ${sibling}`);
+	});
+
+	it("still shortens a whole-string home path", () => {
+		expect(shortenHomePathsInText("/Users/alice/secret.ts", "/Users/alice")).toBe("~/secret.ts");
 	});
 });
 

@@ -14,6 +14,7 @@
  *    background ("running") finalizes and untracks it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
@@ -22,6 +23,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { BashToolDetails } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import type { CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-coding-agent/tools/hub";
 
 function taskResult(asyncState: "running" | "completed" | "failed" | undefined, text: string) {
 	const details: TaskToolDetails = {
@@ -38,6 +40,15 @@ function bashResult(text: string) {
 		async: { state: "running", jobId: "bash-1", type: "bash" },
 	};
 	return { content: [{ type: "text" as const, text }], details };
+}
+
+function hubWaitResult(jobs: JobSnapshot[], text = "") {
+	const details: CoordinationDetails = { op: "wait", jobs };
+	return { content: [{ type: "text" as const, text }], details };
+}
+
+function visible(component: { render: (width: number) => readonly string[] }): string {
+	return Bun.stripANSI(component.render(120).join("\n"));
 }
 
 describe("EventController async update finalization", () => {
@@ -211,5 +222,192 @@ describe("EventController async update finalization", () => {
 		await controller.handleEvent({ type: "agent_start" });
 
 		expect(pendingTools.get("tc-task")).toBe(component);
+	});
+
+	it("renders hub wait live activity on tool_execution_update and drops it after settle", async () => {
+		const { controller, pendingTools } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-wait",
+			toolName: "hub",
+			args: { op: "wait", ids: ["AuthLoader"] },
+		});
+		const component = pendingTools.get("tc-wait")!;
+		sealed.push(component);
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-wait",
+			toolName: "hub",
+			args: { op: "wait", ids: ["AuthLoader"] },
+			partialResult: hubWaitResult([
+				{
+					id: "AuthLoader",
+					type: "task",
+					status: "running",
+					label: "AuthLoader",
+					durationMs: 8_700,
+					liveActivity: { tool: "read", detail: "src/auth.ts", elapsedMs: 6_000 },
+				},
+			]),
+		});
+		const live = visible(component);
+		expect(live).toContain("AuthLoader");
+		expect(live).toMatch(/read: src\/auth\.ts/);
+		expect(live).toContain("6.0s");
+		const liveNarrow = Bun.stripANSI(component.render(40).join("\n"));
+		expect(liveNarrow).toContain("AuthLoader");
+		expect(liveNarrow).toMatch(/read: src\/auth\.ts/);
+		expect(liveNarrow).toContain("6.0s");
+		for (const line of liveNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-wait",
+			toolName: "hub",
+			args: { op: "wait", ids: ["AuthLoader"] },
+			partialResult: hubWaitResult([
+				{
+					id: "AuthLoader",
+					type: "task",
+					status: "running",
+					label: "AuthLoader",
+					durationMs: 9_200,
+					liveActivity: { tool: "grep", detail: "password" },
+				},
+			]),
+		});
+		const switched = visible(component);
+		expect(switched).toMatch(/grep: password/);
+		expect(switched).not.toContain("src/auth.ts");
+		expect(switched).not.toContain("6.0s");
+		const switchedNarrow = Bun.stripANSI(component.render(40).join("\n"));
+		expect(switchedNarrow).toMatch(/grep: password/);
+		expect(switchedNarrow).not.toContain("src/auth.ts");
+		expect(switchedNarrow).not.toContain("6.0s");
+		for (const line of switchedNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-wait",
+			toolName: "hub",
+			result: hubWaitResult(
+				[
+					{
+						id: "AuthLoader",
+						type: "task",
+						status: "completed",
+						label: "AuthLoader",
+						durationMs: 10_000,
+						resultText: "settled body",
+					},
+				],
+				"settled body",
+			),
+			isError: false,
+		});
+		const settled = visible(component);
+		expect(settled).toContain("settled body");
+		expect(settled).not.toMatch(/read: src\/auth\.ts/);
+		expect(settled).not.toMatch(/grep: password/);
+		const settledNarrow = Bun.stripANSI(component.render(40).join("\n"));
+		expect(settledNarrow).toContain("settled body");
+		expect(settledNarrow).not.toMatch(/read: src\/auth\.ts/);
+		expect(settledNarrow).not.toMatch(/grep: password/);
+		for (const line of settledNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+		expect(pendingTools.has("tc-wait")).toBe(false);
+	});
+
+	it("truncates hub wait live activity to the parent transcript viewport", async () => {
+		const { controller, pendingTools } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-wait-narrow",
+			toolName: "hub",
+			args: { op: "wait", ids: ["AuthLoader"] },
+		});
+		const component = pendingTools.get("tc-wait-narrow")!;
+		sealed.push(component);
+		const longTool = `mcp__${"very-long-custom-tool-name-".repeat(8)}search`;
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-wait-narrow",
+			toolName: "hub",
+			args: { op: "wait", ids: ["AuthLoader"] },
+			partialResult: hubWaitResult([
+				{
+					id: "AuthLoader",
+					type: "task",
+					status: "running",
+					label: "AuthLoader",
+					durationMs: 8_700,
+					liveActivity: { tool: longTool, detail: "src/auth.ts" },
+				},
+			]),
+		});
+		const lines = component.render(48).map(line => Bun.stripANSI(line));
+		const activity = lines.find(line => /mcp|search|auth/.test(line) && !line.includes("AuthLoader"));
+		expect(activity).toBeDefined();
+		expect(activity).not.toContain(longTool);
+		expect(Bun.stringWidth(activity!)).toBeLessThanOrEqual(48);
+		for (const line of lines) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(48);
+		}
+		const mcpNarrow = component.render(40).map(line => Bun.stripANSI(line));
+		const mcpActivity = mcpNarrow.find(line => /mcp|search|auth/.test(line) && !line.includes("AuthLoader"));
+		expect(mcpActivity).toBeDefined();
+		expect(mcpActivity).not.toContain(longTool);
+		expect(Bun.stringWidth(mcpActivity!)).toBeLessThanOrEqual(40);
+		for (const line of mcpNarrow) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+	});
+
+	it("shortens home paths in hub wait live activity on the parent transcript", async () => {
+		const { controller, pendingTools } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-wait-home",
+			toolName: "hub",
+			args: { op: "wait", ids: ["AuthLoader"] },
+		});
+		const component = pendingTools.get("tc-wait-home")!;
+		sealed.push(component);
+		const homeFile = `${os.homedir()}/secret/token.ts`;
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-wait-home",
+			toolName: "hub",
+			args: { op: "wait", ids: ["AuthLoader"] },
+			partialResult: hubWaitResult([
+				{
+					id: "AuthLoader",
+					type: "task",
+					status: "running",
+					label: "AuthLoader",
+					durationMs: 8_700,
+					liveActivity: { tool: "bash", detail: `\tcat ${homeFile}` },
+				},
+			]),
+		});
+		const live = visible(component);
+		expect(live).toContain("bash:");
+		expect(live).toContain("~/secret/token.ts");
+		expect(live).not.toContain("\t");
+		expect(live).not.toContain(homeFile);
+		const narrow = Bun.stripANSI(component.render(40).join("\n"));
+		expect(narrow).toContain("bash:");
+		expect(narrow).toContain("~/secret");
+		expect(narrow).not.toContain("\t");
+		expect(narrow).not.toContain(homeFile);
+		for (const line of narrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
 	});
 });

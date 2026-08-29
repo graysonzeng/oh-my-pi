@@ -11,9 +11,12 @@
  * Param validation (missing agent / missing task) is covered by
  * test/task/task-schema.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
@@ -28,8 +31,12 @@ import {
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
-import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition, AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { hubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -38,7 +45,11 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
-function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
+function createSession(options: {
+	manager?: AsyncJobManager;
+	settings?: Record<string, unknown>;
+	eventBus?: EventBus;
+}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -46,6 +57,7 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
+		eventBus: options.eventBus,
 	} as unknown as ToolSession;
 }
 
@@ -99,6 +111,10 @@ describe("task spawn routing", () => {
 		managers.push(manager);
 		return manager;
 	}
+
+	beforeAll(async () => {
+		await initTheme();
+	});
 
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
@@ -283,7 +299,7 @@ describe("task spawn routing", () => {
 		const secondJob = manager.getJob(second.details!.async!.jobId)!;
 
 		// First job body reaches the executor; second stays parked at the
-		// semaphore — still flagged queued because markRunning never ran.
+		// semaphore — still flagged queued becausekRunning never ran.
 		await pollUntil(() => started.length >= 1);
 		expect(started).toEqual(["First"]);
 		expect(secondJob.queued).toBe(true);
@@ -789,5 +805,195 @@ describe("task spawn routing", () => {
 
 		gates.get("Fifth")!.resolve();
 		await Promise.all(jobs.map(job => job.promise));
+	});
+
+	it("copies executor current-tool args and start timestamp onto the job snapshot", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const started = Promise.withResolvers<void>();
+		const switchTools = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			expect(options.detached).toBe(true);
+			const emit = (progress: AgentProgress) => {
+				options.onProgress?.(progress);
+				options.eventBus?.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+					index: options.index ?? 0,
+					agent: options.agent.name,
+					agentSource: options.agent.source,
+					task: options.task,
+					parentToolCallId: options.parentToolCallId,
+					detached: options.detached,
+					assignment: options.assignment,
+					progress,
+					sessionFile: options.sessionFile,
+				});
+			};
+			emit({
+				index: 0,
+				id: options.id,
+				agent: "task",
+				agentSource: "bundled",
+				status: "running",
+				task: options.task,
+				lastIntent: "Inspect login",
+				currentTool: "read",
+				currentToolArgs: "src/auth.ts",
+				currentToolStartMs: now - 6_000,
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 1,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 6_000,
+			});
+			started.resolve();
+			await switchTools.promise;
+			emit({
+				index: 0,
+				id: options.id,
+				agent: "task",
+				agentSource: "bundled",
+				status: "running",
+				task: options.task,
+				currentTool: undefined,
+				currentToolArgs: undefined,
+				currentToolStartMs: undefined,
+				recentTools: [{ tool: "grep", args: "password", endMs: now }],
+				recentOutput: [],
+				toolCount: 1,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 6_000,
+			});
+			await finish.promise;
+			return makeResult(options.id);
+		});
+		const manager = createManager();
+		const eventBus = new EventBus();
+		const observers = new SessionObserverRegistry();
+		observers.subscribeToEventBus(eventBus);
+		const session = createSession({ manager, eventBus });
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-live-copy", {
+			agent: "task",
+			name: "AuthLoader",
+			task: "Refactor the auth flow.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBe("AuthLoader");
+		await started.promise;
+		await pollUntil(() => snapshotJobs(session, manager.getAllJobs())[0]?.liveActivity?.tool === "read");
+		const running = snapshotJobs(session, manager.getAllJobs());
+		expect(running[0]?.liveActivity).toEqual({
+			tool: "read",
+			detail: "Inspect login",
+			elapsedMs: 6_000,
+		});
+		const runningOut = Bun.stripANSI(
+			(
+				hubToolRenderer
+					.renderResult(
+						{ content: [{ type: "text", text: "" }], details: { op: "wait", jobs: running } },
+						{ expanded: false, isPartial: true } as Parameters<typeof hubToolRenderer.renderResult>[1],
+						theme,
+						{ op: "wait", ids: [] },
+					)
+					.render(120) as readonly string[]
+			).join("\n"),
+		);
+		expect(runningOut).toMatch(/read: Inspect login/);
+		expect(runningOut).not.toContain("src/auth.ts");
+		expect(runningOut).toContain("6.0s");
+		const runningHud = Bun.stripANSI(renderSubagentHudLines(observers.getSessions(), 120).join("\n"));
+		expect(runningHud).toContain("AuthLoader");
+		expect(runningHud).toMatch(/read: Inspect login/);
+		expect(runningHud).not.toContain("src/auth.ts");
+		expect(runningHud).toContain("6.0s");
+		const runningWaitNarrow = Bun.stripANSI(
+			(
+				hubToolRenderer
+					.renderResult(
+						{ content: [{ type: "text", text: "" }], details: { op: "wait", jobs: running } },
+						{ expanded: false, isPartial: true } as Parameters<typeof hubToolRenderer.renderResult>[1],
+						theme,
+						{ op: "wait", ids: [] },
+					)
+					.render(40) as readonly string[]
+			).join("\n"),
+		);
+		expect(runningWaitNarrow).toMatch(/read: Inspect login/);
+		expect(runningWaitNarrow).not.toContain("src/auth.ts");
+		expect(runningWaitNarrow).toContain("6.0s");
+		for (const line of runningWaitNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+		const runningHudNarrow = Bun.stripANSI(renderSubagentHudLines(observers.getSessions(), 40).join("\n"));
+		expect(runningHudNarrow).toContain("AuthLoader");
+		expect(runningHudNarrow).toMatch(/read: Inspect login/);
+		expect(runningHudNarrow).not.toContain("src/auth.ts");
+		expect(runningHudNarrow).toContain("6.0s");
+		for (const line of runningHudNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+		switchTools.resolve();
+		await pollUntil(() => snapshotJobs(session, manager.getAllJobs())[0]?.liveActivity?.tool === "grep");
+		const recent = snapshotJobs(session, manager.getAllJobs());
+		expect(recent[0]?.liveActivity).toEqual({
+			tool: "grep",
+			detail: "password",
+		});
+		const recentOut = Bun.stripANSI(
+			(
+				hubToolRenderer
+					.renderResult(
+						{ content: [{ type: "text", text: "" }], details: { op: "wait", jobs: recent } },
+						{ expanded: false, isPartial: true } as Parameters<typeof hubToolRenderer.renderResult>[1],
+						theme,
+						{ op: "wait", ids: [] },
+					)
+					.render(120) as readonly string[]
+			).join("\n"),
+		);
+		expect(recentOut).toMatch(/grep: password/);
+		expect(recentOut).not.toContain("src/auth.ts");
+		expect(recentOut).not.toContain("6.0s");
+		const recentHud = Bun.stripANSI(renderSubagentHudLines(observers.getSessions(), 120).join("\n"));
+		expect(recentHud).toMatch(/grep: password/);
+		expect(recentHud).not.toContain("src/auth.ts");
+		expect(recentHud).not.toContain("6.0s");
+		const recentWaitNarrow = Bun.stripANSI(
+			(
+				hubToolRenderer
+					.renderResult(
+						{ content: [{ type: "text", text: "" }], details: { op: "wait", jobs: recent } },
+						{ expanded: false, isPartial: true } as Parameters<typeof hubToolRenderer.renderResult>[1],
+						theme,
+						{ op: "wait", ids: [] },
+					)
+					.render(40) as readonly string[]
+			).join("\n"),
+		);
+		expect(recentWaitNarrow).toMatch(/grep: password/);
+		expect(recentWaitNarrow).not.toContain("src/auth.ts");
+		expect(recentWaitNarrow).not.toContain("6.0s");
+		for (const line of recentWaitNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+		const recentHudNarrow = Bun.stripANSI(renderSubagentHudLines(observers.getSessions(), 40).join("\n"));
+		expect(recentHudNarrow).toMatch(/grep: password/);
+		expect(recentHudNarrow).not.toContain("src/auth.ts");
+		expect(recentHudNarrow).not.toContain("6.0s");
+		for (const line of recentHudNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+		finish.resolve();
+		await manager.getJob(jobId!)?.promise;
 	});
 });

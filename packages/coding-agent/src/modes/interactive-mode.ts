@@ -26,8 +26,10 @@ import {
 	Container,
 	clearRenderCache,
 	getComposerStyle,
+	getPaddingX,
 	Loader,
 	Markdown,
+	padding,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -126,13 +128,7 @@ import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { formatCompactLiveActivityLine, liveActivityFromProgress } from "../tools/hub/jobs";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import {
-	formatMoreItems,
-	replaceTabs,
-	shortenPath,
-	TRUNCATE_LENGTHS,
-	truncateToWidth,
-} from "../tools/render-utils";
+import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
@@ -443,6 +439,27 @@ export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
 /** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
 class AnchoredLiveContainer extends Container {}
 
+class SubagentHudContainer extends AnchoredLiveContainer {
+	readonly #getSessions: () => ObservableSession[];
+
+	constructor(getSessions: () => ObservableSession[]) {
+		super();
+		this.#getSessions = getSessions;
+	}
+
+	override render(width: number): readonly string[] {
+		const paddingX = getPaddingX(1);
+		const contentWidth = Math.max(1, width - paddingX * 2);
+		const lines = renderSubagentHudLines(this.#getSessions(), contentWidth);
+		if (lines.length === 0) return [];
+		const left = padding(paddingX);
+		return lines.map(line => {
+			const withPad = left + line;
+			return withPad + padding(Math.max(0, width - visibleWidth(withPad)));
+		});
+	}
+}
+
 class TodoHudContainer extends AnchoredLiveContainer {
 	constructor(private readonly mode: InteractiveMode) {
 		super();
@@ -546,10 +563,8 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				const distinctDescription =
 					description && !labelEchoesHandle(session.id, description) ? description : undefined;
 				if (distinctDescription) {
-					const budget = Math.max(
-						TRUNCATE_LENGTHS.SHORT,
-						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 10,
-					);
+					const used = visibleWidth(Bun.stripANSI(line));
+					const budget = Math.max(1, columns - used - 2);
 					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
 					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
 				} else {
@@ -557,8 +572,10 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 					// the inline task rows when a row has no label.
 					const taskPreview = session.progress?.task?.trim();
 					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
+						const used = visibleWidth(Bun.stripANSI(line));
+						const budget = Math.max(1, Math.min(TRUNCATE_LENGTHS.SHORT, columns - used - 1));
 						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
+						line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
 					}
 				}
 				const activity = liveActivityFromProgress(session.progress, Date.now());
@@ -570,9 +587,13 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 		theme,
 	);
 	if (hiddenCount > 0) {
-		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
+		rows.push(
+			theme.fg("dim", truncateToWidth(`… ${hiddenCount} more running — open Agent Hub for full list`, columns)),
+		);
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)].map(line =>
+		truncateToWidth(line, columns),
+	);
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -832,7 +853,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#voicePreviousShowHardwareCursor: boolean | null = null;
 	#voicePreviousUseTerminalCursor: boolean | null = null;
 	#resizeHandler?: () => void;
-	#observerRegistry: SessionObserverRegistry;
+	#observerRegistry = new SessionObserverRegistry();
 	#eventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
@@ -936,7 +957,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.statusContainer = new StatusHudContainer(this);
 		this.todoContainer = new TodoHudContainer(this);
-		this.subagentContainer = new AnchoredLiveContainer();
+		this.subagentContainer = new SubagentHudContainer(() => this.#observerRegistry.getSessions());
 		this.btwContainer = new AnchoredLiveContainer();
 		this.omfgContainer = new AnchoredLiveContainer();
 		this.cleanseContainer = new AnchoredLiveContainer();
@@ -1043,7 +1064,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#inputController.notifyTitleGenerationStart();
 		});
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
-		this.#observerRegistry = new SessionObserverRegistry();
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -2648,18 +2668,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
-
-	/**
-	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
 	 * editor. Driven entirely by observer-registry change events, so rows appear
 	 * on spawn and the whole block clears itself once the last subagent leaves
 	 * the "active" state.
 	 */
 	#renderSubagentList(): void {
-		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
-		if (lines.length === 0) return;
-		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		this.subagentContainer.invalidate();
 	}
 
 	async #loadTodoList(source: AgentSession = this.session): Promise<void> {

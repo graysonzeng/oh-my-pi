@@ -24,7 +24,7 @@ import {
 	PREVIEW_LIMITS,
 	previewLine,
 	replaceTabs,
-	shortenPath,
+	shortenHomePathsInText,
 	type ToolUIColor,
 	type ToolUIStatus,
 } from "../render-utils";
@@ -168,10 +168,7 @@ function asTrimmedString(value: unknown): string | undefined {
 	return trimmed ? trimmed : undefined;
 }
 
-export function liveActivityFromProgress(
-	record: unknown,
-	now: number,
-): JobSnapshot["liveActivity"] | undefined {
+export function liveActivityFromProgress(record: unknown, now: number): JobSnapshot["liveActivity"] | undefined {
 	if (!record || typeof record !== "object") return undefined;
 	const progressRecord = record as Record<string, unknown>;
 	const currentTool = asTrimmedString(progressRecord.currentTool);
@@ -207,7 +204,7 @@ export function formatCompactLiveActivityLine(
 	const hook = `${uiTheme.tree.hook} `;
 	const tool = sanitizeText(activity.tool);
 	const detailRaw = activity.detail
-		? shortenPath(replaceTabs(sanitizeText(activity.detail)).trim())
+		? shortenHomePathsInText(replaceTabs(sanitizeText(activity.detail)).trim())
 		: undefined;
 	const elapsedText = activity.elapsedMs !== undefined ? formatDuration(activity.elapsedMs) : "";
 	const elapsedPart = elapsedText ? `${uiTheme.sep.dot}${uiTheme.fg("warning", elapsedText)}` : "";
@@ -232,7 +229,6 @@ export function formatCompactLiveActivityLine(
 	}
 	return line;
 }
-
 
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
 	const now = Date.now();
@@ -770,6 +766,9 @@ export function jobsRenderResult(
 						for (let i = 1; i < visibleLabelLines.length; i++) {
 							lines.push(`  ${uiTheme.fg("toolOutput", visibleLabelLines[i]!)}`);
 						}
+						// Running rows with no liveActivity intentionally skip the
+						// settled result/error preview: those fields are written at
+						// settle. Identity + duration already sit on the main row.
 						if (job.status === "running" && job.liveActivity) {
 							const budget = Math.max(1, width - 6);
 							lines.push(formatCompactLiveActivityLine(job.liveActivity, budget, uiTheme));

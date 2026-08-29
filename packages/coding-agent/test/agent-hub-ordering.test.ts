@@ -1021,4 +1021,48 @@ describe("Agent hub row ordering", () => {
 			hub.dispose();
 		}
 	});
+
+	it("still opens settled-agent details from session progress after HUD live activity is gone", () => {
+		geometry = stubStdoutGeometry(80);
+		geometry.setRows(16);
+		const agents = new AgentRegistry();
+		agents.register({ id: "AuthLoader", displayName: "Auth Loader", kind: "sub", session: null, status: "idle" });
+		const observers = new SessionObserverRegistry();
+		const observed = {
+			id: "AuthLoader",
+			kind: "subagent" as const,
+			label: "Auth Loader",
+			status: "completed" as const,
+			lastUpdate: Date.now(),
+			progress: {
+				id: "AuthLoader",
+				status: "completed",
+				task: "Refactor the auth flow",
+				currentTool: "read",
+				currentToolArgs: "src/auth.ts",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 3,
+				requests: 2,
+				tokens: 900,
+				cost: 0,
+				durationMs: 2_000,
+			} as never,
+		};
+		vi.spyOn(observers, "getSessions").mockReturnValue([observed]);
+		vi.spyOn(observers, "getSession").mockImplementation(id => (id === "AuthLoader" ? observed : undefined));
+		const hub = makeHub(agents, { observers });
+
+		try {
+			hub.handleInput("\t");
+			const details = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(details).toContain("Agent Hub · AuthLoader");
+			expect(details).toContain("Current");
+			expect(details).toContain("read · src/auth.ts");
+			expect(details).toContain("Task");
+			expect(details).toContain("Refactor the auth flow");
+		} finally {
+			hub.dispose();
+		}
+	});
 });

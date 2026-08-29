@@ -740,6 +740,46 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
+/**
+ * Rewrite every home-directory prefix in one-line preview text, including
+ * compact arguments with multiple paths. A sibling directory such as
+ * `C:\\Users\\me2` is left alone because each match still requires the
+ * same home + separator boundary as {@link shortenPath}.
+ */
+export function shortenHomePathsInText(text: string, homeDir?: string): string {
+	if (text.length === 0) return text;
+	const home = homeDir ?? os.homedir();
+	if (!home) return text;
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
+	const needle = windowsStyle ? home.toLowerCase() : home;
+	const haystack = windowsStyle ? text.toLowerCase() : text;
+	let result = "";
+	let cursor = 0;
+	while (cursor < text.length) {
+		const idx = haystack.indexOf(needle, cursor);
+		if (idx === -1) {
+			result += text.slice(cursor);
+			break;
+		}
+		const prev = idx === 0 ? "" : text[idx - 1]!;
+		if (idx > 0 && /[A-Za-z0-9._-]/.test(prev)) {
+			result += text.slice(cursor, idx + 1);
+			cursor = idx + 1;
+			continue;
+		}
+		const end = idx + home.length;
+		const next = text[end] ?? "";
+		if (next && next !== path.posix.sep && next !== path.win32.sep) {
+			result += text.slice(cursor, idx + 1);
+			cursor = idx + 1;
+			continue;
+		}
+		result += text.slice(cursor, idx) + shortenPath(text.slice(idx, end), home);
+		cursor = end;
+	}
+	return result;
+}
+
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
 	if (!workdir) return undefined;
 	const resolvedProjectDir = path.resolve(projectDir);
