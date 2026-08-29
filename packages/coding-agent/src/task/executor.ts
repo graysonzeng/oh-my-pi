@@ -74,6 +74,14 @@ import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
+import {
+	emptyReviewMetrics,
+	isReviewerAgentName,
+	REVIEWER_SOFT_REQUEST_BUDGET,
+	resolveReviewerSoftRequestBudget,
+	resolveReviewerSoftRuntimeMs,
+	type SubagentReviewMetrics,
+} from "./review-performance";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -113,6 +121,7 @@ const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 	scout: 100,
 	sonic: 100,
+	...REVIEWER_SOFT_REQUEST_BUDGET,
 	default: 200,
 };
 
@@ -125,6 +134,9 @@ export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 export function resolveSoftRequestBudget(agentName: string, configuredBudget: number): number {
 	const normalized = Math.max(0, Math.trunc(configuredBudget));
 	if (normalized === 0) return 0;
+	if (isReviewerAgentName(agentName)) {
+		return resolveReviewerSoftRequestBudget(agentName, normalized);
+	}
 	return Math.min(normalized, SOFT_REQUEST_BUDGET[agentName] ?? normalized);
 }
 
@@ -1076,6 +1088,8 @@ interface SubagentRunMonitor {
 	/** Final raw output: end-of-run assistant text when available, else accumulated chunks. */
 	rawOutput(): string;
 	scheduleProgress(flush?: boolean): void;
+	/** Snapshot of reviewer-class request/tool/checkpoint latency. */
+	reviewMetrics(): SubagentReviewMetrics;
 	/** Stop processing events and clear listeners/timers. Call once the run settled. */
 	finish(): void;
 }
@@ -1123,6 +1137,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		durationMs: 0,
 		modelOverride: args.modelOverride,
 		modelRole: args.modelRole,
+		reviewMetrics: emptyReviewMetrics(),
 	};
 
 	const outputChunks: string[] = [];
@@ -1156,6 +1171,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	let hasUsage = false;
+	let requestStartedAt: number | undefined;
+	let lastRequestIndex = 0;
 	let budgetSteerSent = false;
 	let budgetLimitExceeded = false;
 	let budgetStopRequested = false;
@@ -1228,9 +1245,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// Deliberately not routed through abortActiveSession(): that memoizes its
 	// promise, and a later hard abort (grace exhausted) must be able to abort
 	// the session again.
-	const requestBudgetStop = () => {
+	const requestBudgetStop = (kind: "soft_budget" | "runtime_timeout" = "soft_budget") => {
 		if (budgetStopRequested || abortSent || resolved) return;
 		budgetStopRequested = true;
+		progress.reviewMetrics?.checkpoints.push({
+			atMs: Date.now() - startTime,
+			requests: progress.requests,
+			kind,
+		});
 		const session = activeSession;
 		budgetStopAbortPromise = session
 			? session.abort().catch(error => {
@@ -1285,6 +1307,20 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// `isOpenAICompletionsProgressChunk`). Disabled by default; set
 	// `task.maxRuntimeMs > 0` to cap each subagent's lifetime.
 	let runtimeTimeoutId: NodeJS.Timeout | undefined;
+	let runtimeSoftTimeoutId: NodeJS.Timeout | undefined;
+	const softRuntimeMs = resolveReviewerSoftRuntimeMs(agent.name, maxRuntimeMs);
+	if (softRuntimeMs > 0) {
+		runtimeSoftTimeoutId = setTimeout(() => {
+			if (resolved || abortSent || budgetStopRequested) return;
+			logger.warn("Subagent reviewer soft runtime checkpoint; wrapping up", {
+				id,
+				agent: agent.name,
+				softRuntimeMs,
+				maxRuntimeMs,
+			});
+			requestBudgetStop("runtime_timeout");
+		}, softRuntimeMs);
+	}
 	if (maxRuntimeMs > 0) {
 		runtimeTimeoutId = setTimeout(() => {
 			if (!resolved) {
@@ -1294,6 +1330,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					maxRuntimeMs,
 				});
 				requestAbort("timeout");
+				progress.reviewMetrics?.checkpoints.push({
+					atMs: Date.now() - startTime,
+					requests: progress.requests,
+					kind: "runtime_timeout",
+				});
 			}
 		}, maxRuntimeMs);
 	}
@@ -1486,6 +1527,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			case "message_start":
 				if (event.message?.role === "assistant") {
 					resetRecentOutput();
+					requestStartedAt = now;
 				}
 				// An async-result follow-up injected after a recorded yield
 				// supersedes that yield: its payload predates the job outcome the
@@ -1532,9 +1574,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						args: progress.currentToolArgs || "",
 						endMs: now,
 					});
-					// Keep only last 5
 					if (progress.recentTools.length > 5) {
 						progress.recentTools.pop();
+					}
+					if (progress.currentToolStartMs !== undefined) {
+						progress.reviewMetrics?.toolPhases.push({
+							name: progress.currentTool,
+							durationMs: Math.max(0, now - progress.currentToolStartMs),
+						});
 					}
 				}
 				progress.currentTool = undefined;
@@ -1669,6 +1716,27 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const role = event.message?.role;
 				if (role === "assistant") {
 					progress.requests += 1;
+					lastRequestIndex = progress.requests;
+					if (requestStartedAt !== undefined) {
+						const durationMs = Math.max(0, now - requestStartedAt);
+						const usageRecord =
+							isRecord(event) && "usage" in event && isRecord(event.usage)
+								? event.usage
+								: isRecord(event.message) && isRecord(event.message.usage)
+									? event.message.usage
+									: undefined;
+						progress.reviewMetrics?.requestPhases.push({
+							index: lastRequestIndex,
+							startedAtMs: requestStartedAt,
+							durationMs,
+							generationMs: durationMs,
+							inputTokens: usageRecord ? getNumberField(usageRecord, "input") : undefined,
+							cacheReadTokens: usageRecord ? getNumberField(usageRecord, "cacheRead") : undefined,
+							outputTokens: usageRecord ? getNumberField(usageRecord, "output") : undefined,
+							contextBytes: usageRecord ? getNumberField(usageRecord, "totalTokens") : undefined,
+						});
+						requestStartedAt = undefined;
+					}
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
 					const messageContent = getMessageContent(event.message) || eventContent;
 					if (messageContent && Array.isArray(messageContent)) {
@@ -1924,9 +1992,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		lastAssistantSalvageText: () => lastAssistantSalvageText,
 		rawOutput: () => (finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("")),
 		scheduleProgress,
+		reviewMetrics: () => progress.reviewMetrics ?? emptyReviewMetrics(),
 		finish: () => {
 			resolved = true;
 			listenerController.abort();
+			if (runtimeSoftTimeoutId !== undefined) {
+				clearTimeout(runtimeSoftTimeoutId);
+				runtimeSoftTimeoutId = undefined;
+			}
 			if (runtimeTimeoutId !== undefined) {
 				clearTimeout(runtimeTimeoutId);
 				runtimeTimeoutId = undefined;
@@ -2271,12 +2344,12 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// surface the last assistant text + stats instead of "(no output)" so the
 	// parent doesn't redo work the child already finished.
 	const salvageText = monitor.lastAssistantSalvageText();
-	if (
-		(done.aborted || signal?.aborted || monitor.runtimeLimitExceeded()) &&
-		!rawOutput.trim() &&
-		salvageText !== undefined
-	) {
-		rawOutput = `[cancelled after ${progress.requests} req, ${progress.tokens} tok — last activity: "${formatSalvageSnippet(salvageText)}"]`;
+	if (done.aborted || signal?.aborted || monitor.runtimeLimitExceeded()) {
+		if (salvageText !== undefined) {
+			rawOutput = rawOutput.trim()
+				? `${rawOutput}\n[checkpoint after ${progress.requests} req, ${progress.tokens} tok]`
+				: `[cancelled after ${progress.requests} req, ${progress.tokens} tok — last activity: "${formatSalvageSnippet(salvageText)}"]`;
+		}
 	}
 	const lastYield = yieldItems?.[yieldItems.length - 1];
 	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
@@ -2393,6 +2466,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		extractedToolData: progress.extractedToolData,
 		retryFailure: progress.retryFailure,
 		outputMeta,
+		...(progress.reviewMetrics ? { reviewMetrics: progress.reviewMetrics } : {}),
 	};
 }
 
@@ -3500,14 +3574,24 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			unsubscribe = monitor.attach(session);
 
 			checkAbort();
-			tryRegisterShadowReviewJob({
+			const shadowJobId = tryRegisterShadowReviewJob({
 				session,
 				agent,
 				cwd: effectiveCwd,
 				spawnShadowReview: options.shadowReview,
 				restrictToolNames,
 				settings: subagentSettings,
+				assignment: task,
+				onProgress: (_text, details) => {
+					const shadow = details?.shadowReview;
+					if (!progress.reviewMetrics || !shadow || typeof shadow !== "object") return;
+					const waitMs = Reflect.get(shadow, "waitMs");
+					const childCount = Reflect.get(shadow, "childCount");
+					if (typeof waitMs === "number") progress.reviewMetrics.shadowWaitMs = waitMs;
+					if (typeof childCount === "number") progress.reviewMetrics.shadowChildCount = childCount;
+				},
 			});
+			if (shadowJobId) session.asyncJobManager?.acknowledgeDeliveries([shadowJobId]);
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
 			if (options.autoloadSkills?.length) {
 				for (const skill of options.autoloadSkills) {

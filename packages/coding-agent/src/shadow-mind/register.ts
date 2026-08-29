@@ -14,6 +14,8 @@ export function tryRegisterShadowReviewJob(options: {
 	spawnShadowReview?: ShadowReviewMode;
 	restrictToolNames: boolean;
 	settings: Settings;
+	assignment?: string;
+	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
 }): string | undefined {
 	try {
 		const manager = options.session.asyncJobManager;
@@ -55,9 +57,14 @@ export function tryRegisterShadowReviewJob(options: {
 					signal: ctx.signal,
 					reportProgress: ctx.reportProgress,
 					markRunning: ctx.markRunning,
+					assignment: options.assignment,
 				});
 			},
-			{ ownerId: reviewerAgentId, agentId: reviewerAgentId },
+			{
+				ownerId: reviewerAgentId,
+				agentId: reviewerAgentId,
+				onProgress: options.onProgress,
+			},
 		);
 	} catch (error) {
 		logger.warn("shadow-review register failed; continuing single-core", {

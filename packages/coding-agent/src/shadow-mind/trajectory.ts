@@ -1,4 +1,7 @@
-export function serializeTrajectory(messages: readonly { role?: string; content?: unknown }[]): string {
+export function serializeTrajectory(
+	messages: readonly { role?: string; content?: unknown }[],
+	assignment?: string,
+): string {
 	const lines: string[] = [];
 	for (const message of messages) {
 		if (message.role === "user") {
@@ -19,6 +22,10 @@ export function serializeTrajectory(messages: readonly { role?: string; content?
 				}
 			}
 		}
+	}
+	const assignmentText = assignment?.trim();
+	if (lines.length === 0 && assignmentText) {
+		lines.push(`USER: ${assignmentText}`);
 	}
 	return `<reviewer-trajectory>\n${lines.join("\n")}\n</reviewer-trajectory>`;
 }

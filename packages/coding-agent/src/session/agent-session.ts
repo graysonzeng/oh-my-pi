@@ -3752,7 +3752,20 @@ export class AgentSession {
 		// dedupe path rewrote a read result — both actually engaged this turn.
 		this.markLatencyArmFired("context_optimization");
 		if (readDedupeEnabled) this.markLatencyArmFired("read_dedupe");
-		return { content: [{ type: "text", text: visibleText }, ...nonText] };
+		return {
+			content: [{ type: "text", text: visibleText }, ...nonText],
+			...(detailed.receipt
+				? {
+						details: {
+							...(typeof ctx.result.details === "object" && ctx.result.details !== null
+								? (ctx.result.details as Record<string, unknown>)
+								: {}),
+							originalBytes: detailed.receipt.originalBytes,
+							visibleBytes: detailed.receipt.visibleBytes,
+						},
+					}
+				: {}),
+		};
 	}
 
 	async #verifyReadArtifact(artifactRef: string, sha256: string): Promise<boolean> {

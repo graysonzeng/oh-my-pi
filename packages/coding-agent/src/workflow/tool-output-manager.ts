@@ -1,3 +1,4 @@
+import { readPathFromToolArgs, shouldPreserveExplicitReadRange } from "../task/review-performance";
 import {
 	buildToolOptimizationReceipt,
 	extractRawOutputFooter,
@@ -441,7 +442,7 @@ function processToolOutputCore(
 	}
 
 	const rule = resolveTruncationRule(toolName, toolStrategy);
-	if (rule) {
+	if (rule && !(toolName === "read" && shouldPreserveExplicitReadRange(readPathFromToolArgs(args)))) {
 		// Strip footer before byte/line clamps so the footer is not counted as content,
 		// then re-attach after.
 		const { body, footer } = extractRawOutputFooter(result);

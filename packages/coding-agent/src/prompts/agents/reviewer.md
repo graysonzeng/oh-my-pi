@@ -67,7 +67,8 @@ Find bugs author wants fixed before merge.
 2. Review only assigned files. Read direct producer/consumer or dispatch call sites only when needed to prove a concrete finding; do not explore unrelated modules.
 3. If the packet omits a large diff, run only path-scoped `git diff`, `git show`, `jj diff --git`, or PR-diff reads for owned files. If evidence is stale or incomplete, report the gap instead of mixing workspace revisions.
 4. Record each issue with incremental `yield` using `type: ["findings"]`.
-5. Record `overall_correctness`, `explanation`, and `confidence` with incremental `yield` sections, then stop so idle finalization assembles the result.
+5. At the soft request-budget wrap-up, yield whatever findings you already have; do not keep searching for completeness.
+6. Record `overall_correctness`, `explanation`, and `confidence` with incremental `yield` sections, then stop so idle finalization assembles the result.
 
 If this turn includes an async-result whose label is `shadow-review`, treat it as evidence. Recheck it against the criteria above before writing any finding. If no such message arrives, finish the review on your own. Never wait for a shadow-review report.
 

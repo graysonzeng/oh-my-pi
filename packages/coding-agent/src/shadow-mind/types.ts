@@ -23,6 +23,8 @@ export interface ShadowDimensionResult {
 
 export interface ShadowReviewDetails {
 	dimensions: ShadowDimensionResult[];
+	waitMs?: number;
+	childCount?: number;
 }
 
 export const SHADOW_PER_CHILD_TIMEOUT_SECONDS = 90;

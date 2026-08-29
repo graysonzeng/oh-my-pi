@@ -31,6 +31,7 @@ export interface RunShadowCohortOptions {
 	createSession?: CreateShadowSession;
 	perChildTimeoutSeconds?: number;
 	drainTimeoutSeconds?: number;
+	assignment?: string;
 }
 
 export async function runShadowCohort(options: RunShadowCohortOptions): Promise<string> {
@@ -40,7 +41,7 @@ export async function runShadowCohort(options: RunShadowCohortOptions): Promise<
 	const createSession = options.createSession ?? createAgentSession;
 	const perChildMs = (options.perChildTimeoutSeconds ?? SHADOW_PER_CHILD_TIMEOUT_SECONDS) * 1000;
 	const drainMs = (options.drainTimeoutSeconds ?? SHADOW_COHORT_DRAIN_TIMEOUT_SECONDS) * 1000;
-	const trajectory = serializeTrajectory(options.parent.messages);
+	const trajectory = serializeTrajectory(options.parent.messages, options.assignment);
 	const systemPrompt = buildShadowSystemPrompt(options.parent.systemPrompt.join("\n\n"));
 	if (!options.parent.model) {
 		throw new Error("shadow-review skipped: parent session has no model");
@@ -86,7 +87,12 @@ export async function runShadowCohort(options: RunShadowCohortOptions): Promise<
 				durationMs: 0,
 			};
 		});
-		const details: ShadowReviewDetails = { dimensions };
+		const waitMs = Date.now() - startedMs;
+		const details: ShadowReviewDetails = {
+			dimensions,
+			waitMs,
+			childCount: BUILTIN_SHADOWS.length,
+		};
 		const text = formatShadowReport(dimensions);
 		await options.reportProgress(text, { shadowReview: details });
 		const observation = {

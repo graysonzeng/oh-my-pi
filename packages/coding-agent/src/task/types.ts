@@ -3,6 +3,7 @@ import type { Effort, Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel, TaskEffort } from "../thinking";
+import type { SubagentReviewMetrics } from "./review-performance";
 import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
@@ -488,6 +489,8 @@ export interface AgentProgress {
 	 * `extractedToolData.task` after that.
 	 */
 	inflightTaskDetails?: TaskToolDetails;
+	/** Reviewer-class request/tool/shadow latency sampled during the run. */
+	reviewMetrics?: SubagentReviewMetrics;
 }
 
 /** Result from a single agent execution */
@@ -566,6 +569,8 @@ export interface SingleResult {
 	};
 	/** Output metadata for agent:// URL integration */
 	outputMeta?: { lineCount: number; charCount: number };
+	/** Reviewer-class request/tool/shadow latency sampled during the run. */
+	reviewMetrics?: SubagentReviewMetrics;
 }
 
 /** Tool details for TUI rendering */

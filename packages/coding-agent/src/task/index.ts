@@ -120,6 +120,7 @@ export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
+export * from "./review-performance";
 export type {
 	AgentDefinition,
 	AgentProgress,
@@ -163,6 +164,7 @@ export function copySpawnJobLiveProgress(target: AgentProgress, source: AgentPro
 	target.recentOutput = source.recentOutput.slice();
 	target.retryState = source.retryState;
 	target.retryFailure = source.retryFailure;
+	target.reviewMetrics = source.reviewMetrics;
 }
 
 /**

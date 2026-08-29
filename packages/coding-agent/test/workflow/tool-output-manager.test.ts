@@ -440,6 +440,30 @@ describe("processToolOutputDetailedAsync + ordinary defaults", () => {
 		expect(detailed.text).toContain("line 0 content body");
 	});
 
+	it("skips truncation for explicit raw and range reads via path or file_path", async () => {
+		const profile = DEFAULT_MODEL_OPTIMIZATION_PROFILES.claude;
+		const huge = Array.from({ length: 200 }, (_, i) => `line ${i} content body`).join("\n");
+		const viaPath = await processToolOutputDetailedAsync(
+			huge,
+			"read",
+			profile.toolStrategy,
+			{ path: "src/x.ts:raw" },
+			{ saveRaw: async () => "raw-1" },
+		);
+		expect(viaPath.text).toBe(huge);
+		expect(viaPath.receipt).toBeUndefined();
+
+		const viaFilePath = await processToolOutputDetailedAsync(
+			huge,
+			"read",
+			profile.toolStrategy,
+			{ file_path: "src/x.ts:10-20" },
+			{ saveRaw: async () => "range-1" },
+		);
+		expect(viaFilePath.text).toBe(huge);
+		expect(viaFilePath.receipt).toBeUndefined();
+	});
+
 	it("summarization-only strategy still transforms when truncation is disabled", async () => {
 		const huge = Array.from({ length: 80 }, (_, i) => `noise line ${i} ok 12ms`).join("\n");
 		const strategy: ToolStrategy = {
