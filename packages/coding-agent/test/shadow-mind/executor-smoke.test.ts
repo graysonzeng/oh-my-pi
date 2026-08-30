@@ -88,7 +88,7 @@ describe("shadow-review executor smoke", () => {
 		authStorage.close();
 	});
 
-	it("registers a cohort, suppresses delivery so yield is not parked, and disposes four children", async () => {
+	it("registers a cohort, delivers one shadow-review async-result, and disposes four children", async () => {
 		registerMockApi(SOURCE);
 		const yieldExplanations: string[] = [];
 		let releaseChildren = () => {};
@@ -174,7 +174,12 @@ describe("shadow-review executor smoke", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(yieldExplanations[0]).toBe("early yield");
-		expect(result.output).toContain("early yield");
+		expect(yieldExplanations.at(-1)).toBe("fresh after shadow-review");
+		expect(yieldExplanations.length).toBeGreaterThan(1);
+		const lastYield = result.extractedToolData?.yield?.at(-1) as { data?: { explanation?: string } } | undefined;
+		expect(lastYield?.data?.explanation).toBe("fresh after shadow-review");
+		expect(result.output).toContain("fresh after shadow-review");
+		expect(result.output).not.toContain("early yield");
 
 		const expectedChildIds = SHADOW_DIMENSION_IDS.map(id => `SmokeReviewer:shadow:${id}`);
 		expect(childAgentIds.sort()).toEqual([...expectedChildIds].sort());
@@ -188,12 +193,15 @@ describe("shadow-review executor smoke", () => {
 		const asyncResults = (parentSession?.messages ?? []).filter(
 			message => message.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE,
 		);
-		expect(asyncResults).toHaveLength(0);
-		const shadowJobs = manager
-			.getAllJobs({ ownerId: "SmokeReviewer" })
-			.filter(job => job.label === SHADOW_REVIEW_JOB_LABEL);
-		expect(shadowJobs).toHaveLength(1);
-		expect(manager.isDeliverySuppressed(shadowJobs[0]!.id)).toBe(true);
+		expect(asyncResults).toHaveLength(1);
+		const report = String((asyncResults[0] as { content?: unknown } | undefined)?.content ?? "");
+		expect(report).toContain("architecture-review: reported");
+		expect(report).toContain("grounded-review: completed_no_finding");
+		expect(report).toContain("correctness-review: completed_no_finding");
+		expect(report).toContain("completion-review: completed_no_finding");
+		const jobs = (asyncResults[0]?.details as { jobs?: Array<{ label?: string }> } | undefined)?.jobs ?? [];
+		expect(jobs).toHaveLength(1);
+		expect(jobs[0]?.label).toBe(SHADOW_REVIEW_JOB_LABEL);
 		authStorage.close();
 	});
 });

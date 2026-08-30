@@ -261,7 +261,8 @@ import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint"
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { resolveConsultSelection } from "../tools/consult-model";
 import { type ConsultDetails, type ConsultUsage, resetConsultSession, resetConsultTurn } from "../tools/consult-state";
-import { normalizeLocalScheme, resolveToCwd, splitInternalUrlSel, splitPathAndSel } from "../tools/path-utils";
+import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { parseReadPathSelector } from "../tools/read-selector";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -3792,6 +3793,7 @@ export class AgentSession {
 			const meta = isRecord(details.meta) ? details.meta : {};
 			const source = isRecord(meta.source) ? meta.source : {};
 			const rawPath = typeof args.path === "string" ? args.path.trim() : "";
+			if (parseReadPathSelector(rawPath).kind !== "none") return visibleText;
 			const canonicalSource =
 				"canonicalSource" in details
 					? typeof details.canonicalSource === "string"
@@ -3843,10 +3845,7 @@ export class AgentSession {
 						raw: args.raw === true,
 						offset: typeof args.offset === "number" ? args.offset : undefined,
 						limit: typeof args.limit === "number" ? args.limit : undefined,
-						selector:
-							typeof args.selector === "string"
-								? args.selector
-								: (splitInternalUrlSel(rawPath).sel ?? splitPathAndSel(rawPath).sel),
+						selector: typeof args.selector === "string" ? args.selector : undefined,
 						query: typeof args.query === "string" ? args.query : undefined,
 					}),
 					branchOrWorktreeScope,

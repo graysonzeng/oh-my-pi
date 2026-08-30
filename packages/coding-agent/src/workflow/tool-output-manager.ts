@@ -1,4 +1,4 @@
-import { readPathFromToolArgs, shouldPreserveExplicitReadRange } from "../task/review-performance";
+import { readPathFromToolArgs, shouldPreserveExplicitReadRange } from "../tools/read-selector";
 import {
 	buildToolOptimizationReceipt,
 	extractRawOutputFooter,

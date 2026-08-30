@@ -1,12 +1,16 @@
 import { describe, expect, it } from "bun:test";
-import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runShadowCohort } from "@oh-my-pi/pi-coding-agent/shadow-mind/cohort";
 import { SHADOW_DIMENSION_IDS } from "@oh-my-pi/pi-coding-agent/shadow-mind/types";
 
-function fakeParent(): AgentSession {
+function fakeParent(
+	messages: Array<{ role: "user"; content: string; timestamp: number }> = [
+		{ role: "user", content: "review this patch", timestamp: Date.now() },
+	],
+): AgentSession {
 	return {
-		messages: [{ role: "user", content: "review this patch", timestamp: Date.now() }],
+		messages,
 		systemPrompt: ["you are a reviewer"],
 		model: { id: "mock-model", provider: "mock", api: "mock" },
 		configuredThinkingLevel: () => "medium",
@@ -25,7 +29,7 @@ describe("shadow cohort dimension statuses", () => {
 	it("maps report, silent, timeout, and error without treating silent as uncovered", async () => {
 		const parent = fakeParent();
 		const disposed: string[] = [];
-		const createSession: typeof import("@oh-my-pi/pi-coding-agent/sdk").createAgentSession = async options => {
+		const createSession: typeof createAgentSession = async options => {
 			const shadowId = String(options?.agentId ?? "").split(":shadow:")[1];
 			const session = {
 				getActiveToolNames: () => ["read", "grep", "glob", "report_to_main"],
@@ -71,5 +75,40 @@ describe("shadow cohort dimension statuses", () => {
 		expect(text).toContain("completion-review: error");
 		expect(text).not.toMatch(/grounded-review: (timeout|error|aborted)/);
 		expect(disposed.sort()).toEqual([...SHADOW_DIMENSION_IDS].sort());
+	});
+
+	it("passes the assignment to shadow children when the parent transcript is empty", async () => {
+		const prompts: string[] = [];
+		const createSession: typeof createAgentSession = async () => {
+			const session = {
+				getActiveToolNames: () => ["read", "grep", "glob", "report_to_main"],
+				prompt: async (request: string) => {
+					prompts.push(request);
+				},
+				waitForIdle: async () => {},
+				abort: async () => {},
+				dispose: async () => {},
+			};
+			return { session } as unknown as CreateAgentSessionResult;
+		};
+
+		await runShadowCohort({
+			parent: fakeParent([]),
+			cwd: "/tmp",
+			reviewerAgentId: "ReviewerOne",
+			signal: new AbortController().signal,
+			reportProgress: async () => {},
+			markRunning: () => {},
+			createSession,
+			assignment: "review the fixture patch",
+			perChildTimeoutSeconds: 1,
+			drainTimeoutSeconds: 1,
+		});
+
+		expect(prompts).toHaveLength(SHADOW_DIMENSION_IDS.length);
+		for (const request of prompts) {
+			expect(request).toContain("USER: review the fixture patch");
+			expect(request).not.toContain("review this patch");
+		}
 	});
 });

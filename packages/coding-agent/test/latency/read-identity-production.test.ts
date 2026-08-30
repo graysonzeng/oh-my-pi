@@ -10,7 +10,6 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { normalizeReadSelector } from "../../src/latency/read-view-key";
-import { splitInternalUrlSel, splitPathAndSel } from "../../src/tools/path-utils";
 import { buildReadToolContextEntry } from "../../src/workflow/context-ledger";
 import { sha256Hex } from "../../src/workflow/optimization-receipt";
 
@@ -44,9 +43,7 @@ function readViewKeyFromProductionConsumer(
 		content: originalText,
 		readViewKeyParts: {
 			canonicalSource: details.canonicalSource ?? details.resolvedPath ?? details.finalUrl ?? rawPath,
-			normalizedSelector: normalizeReadSelector({
-				selector: splitInternalUrlSel(rawPath).sel ?? splitPathAndSel(rawPath).sel,
-			}),
+			normalizedSelector: normalizeReadSelector({}),
 			branchOrWorktreeScope: details.branchOrWorktreeScope ?? "",
 			providerViewIdentity: details.providerViewIdentity ?? "",
 			contentOrRevisionIdentity: details.contentOrRevisionIdentity ?? "",
