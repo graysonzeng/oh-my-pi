@@ -44,10 +44,7 @@ import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/type
 import type { EventBus } from "../utils/event-bus";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";
-import { WorkflowEngine } from "../workflow/engine";
-import { createDefaultAvailabilityPort, createDefaultRuntimeAdapter } from "../workflow/runtime-default";
-import { buildWorkflowConfigFromSessionSettings } from "../workflow/session-config";
-import { WorkflowStore } from "../workflow/sqlite-store";
+import { createEngineFromSessionSettings } from "../workflow/session-engine";
 import { WorkflowTool } from "../workflow/workflow-tool";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
@@ -483,22 +480,6 @@ export interface ToolSession {
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
-
-/** Build a production WorkflowEngine from session `workflow.*` settings. */
-function createEngineFromSessionSettings(session: ToolSession): WorkflowEngine {
-	const raw = (key: string): unknown => session.settings?.get?.(key as never);
-	const storageRaw = raw("workflow.storagePath");
-	const storage = typeof storageRaw === "string" && storageRaw.length > 0 ? storageRaw : "";
-	const store = storage ? new WorkflowStore(storage) : new WorkflowStore();
-	return new WorkflowEngine({
-		store,
-		ownsStore: true,
-		session,
-		adapter: createDefaultRuntimeAdapter(),
-		availability: createDefaultAvailabilityPort(),
-		config: buildWorkflowConfigFromSessionSettings(raw),
-	});
-}
 
 /**
  * Public callable factory map. External callers may invoke `BUILTIN_TOOLS.read(session)` or

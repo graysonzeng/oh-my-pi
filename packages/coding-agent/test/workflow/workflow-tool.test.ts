@@ -89,6 +89,7 @@ describe("WorkflowTool", () => {
 		expect((tool.approval as (a: unknown) => string)({ op: "start" })).toBe("write");
 		expect((tool.approval as (a: unknown) => string)({ op: "resume" })).toBe("write");
 		expect((tool.approval as (a: unknown) => string)({ op: "cancel" })).toBe("write");
+		expect((tool.approval as (a: unknown) => string)({ op: "run" })).toBe("write");
 	});
 
 	it("schema accepts only the supported quality tiers", () => {

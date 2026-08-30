@@ -170,6 +170,21 @@ export class WorkflowStore {
 		return id;
 	}
 
+	async findLatestActiveDevflow(): Promise<WorkflowState | null> {
+		const row = this.#db
+			.prepare(
+				`
+				SELECT * FROM workflows
+				WHERE pipeline_kind = 'devflow'
+					AND status NOT IN ('completed', 'cancelled', 'failed', 'blocked')
+				ORDER BY updated_at DESC
+				LIMIT 1
+			`,
+			)
+			.get() as WorkflowRow | null;
+		return row ? this.#mapState(row) : null;
+	}
+
 	async getCurrentState(workflowId: string): Promise<WorkflowState | null> {
 		const row = this.#db.prepare("SELECT * FROM workflows WHERE id = ?").get(workflowId) as WorkflowRow | null;
 		if (!row) return null;

@@ -45,6 +45,7 @@ export interface PipelineAuditorInput {
 	request: string;
 	planSummary?: string;
 	grillAnswers?: readonly string[];
+	signal?: AbortSignal;
 }
 
 export type PipelineAuditor = (input: PipelineAuditorInput) => Promise<PipelineCompletenessResult>;
@@ -113,6 +114,18 @@ export function sidecarWithGrillPause(
 			lastQuestion,
 		},
 	};
+}
+
+/** Fail-closed parse of Flash completeness JSON. Invalid shapes are undefined. */
+export function parsePipelineCompletenessResult(raw: unknown): PipelineCompletenessResult | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const record = raw as Record<string, unknown>;
+	if (typeof record.complete !== "boolean") return undefined;
+	const missing = Array.isArray(record.missing)
+		? record.missing.filter((item): item is string => typeof item === "string")
+		: [];
+	const next = typeof record.next === "string" ? record.next : undefined;
+	return { complete: record.complete, missing, next };
 }
 
 export function sidecarIdle(sidecar: OverlaySidecar): OverlaySidecar {

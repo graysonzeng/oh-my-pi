@@ -5,7 +5,7 @@ import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
 import { WorkflowEngine } from "./engine";
 import { WorkflowPolicyError } from "./errors";
-import { emptyDevflowSidecar } from "./overlay";
+import { emptyDevflowSidecar, type PipelineAuditorInput, type PipelineCompletenessResult } from "./overlay";
 import { WorkflowStore } from "./sqlite-store";
 import type { WorkflowAvailabilityReport, WorkflowStatus, WorkflowStatusReportV1 } from "./types";
 
@@ -86,6 +86,27 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				const store = storage ? new WorkflowStore(storage) : new WorkflowStore();
 				return new WorkflowEngine({ store, session: s });
 			});
+	}
+
+	async auditDeliveryCompleteness(input: PipelineAuditorInput): Promise<PipelineCompletenessResult> {
+		const engine = this.#engineFactory(this.#session);
+		try {
+			return await engine.auditPipelineCompleteness(input);
+		} finally {
+			engine.dispose?.();
+		}
+	}
+
+	async recoverDeliveryGrill(workflowId: string, answers: readonly string[], reason?: string): Promise<void> {
+		const engine = this.#engineFactory(this.#session);
+		try {
+			await engine.appendGrillAnswers(workflowId, answers);
+			if (reason === "needs_redesign") {
+				await engine.replanFromRedesign(workflowId);
+			}
+		} finally {
+			engine.dispose?.();
+		}
 	}
 
 	static createIf(session: ToolSession): WorkflowTool | null {

@@ -83,6 +83,8 @@ export interface StructuredRunnerRequest {
 	processToolResult?: (toolName: string, output: string, args?: unknown) => string;
 	/** Remap tool descriptors (aliases) for the model wire surface. */
 	transformTools?: (tools: ToolDescriptor[]) => ToolDescriptor[];
+	/** Devflow plan/code review requests `shadowReview: "code"`. */
+	shadowReview?: "code" | "off";
 }
 
 /** Minimal shape returned by runStructuredSubagent — kept local so pure tests need no natives. */
@@ -437,6 +439,10 @@ export class RuntimeAdapter implements RuntimePort {
 			transformTools: prepared.transformTools,
 			onResponse: identityCollector.onResponse,
 			strictModelIdentity: request.profile.strictIdentity === true,
+			shadowReview:
+				request.pipelineKind === "devflow" && (request.role === "plan_reviewer" || request.role === "code_reviewer")
+					? "code"
+					: undefined,
 		};
 
 		try {

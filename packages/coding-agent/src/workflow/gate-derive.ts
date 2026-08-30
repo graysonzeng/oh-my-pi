@@ -128,7 +128,7 @@ export function stampGateResultArtifact(input: {
 	createdAt?: string;
 	reviewerIdentity?: { modelFamily?: string; provider?: string; model?: string };
 }): GateResultArtifact {
-	const verdict = input.gate.verdict === "PASS_WITH_NODE" ? "PASS_WITH_NOTES" : input.gate.verdict;
+	const verdict = input.gate.verdict;
 	return {
 		schemaVersion: 1,
 		kind: "gate-result",

@@ -94,6 +94,7 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 		allowedTools: request.allowedTools,
 		onResponse: request.onResponse,
 		strictModelIdentity: request.strictModelIdentity,
+		shadowReview: request.shadowReview,
 	});
 
 	let patchPath = result.result.patchPath;

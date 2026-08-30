@@ -79,6 +79,8 @@ import {
 	isAwaitingGrill,
 	overlayReason,
 	type PipelineAuditor,
+	type PipelineAuditorInput,
+	type PipelineCompletenessResult,
 	sidecarIdle,
 	sidecarWithGrillPause,
 } from "./overlay";
@@ -511,6 +513,18 @@ export class WorkflowEngine {
 		this.#findingTracker = options.findingTracker ?? new FindingTracker();
 		this.#artifactStore = options.artifactStore ?? new ArtifactStore();
 		this.#pipelineAuditor = options.pipelineAuditor;
+	}
+
+	/** Flash completeness oneshot. Missing auditor fail-closes as incomplete. */
+	async auditPipelineCompleteness(input: PipelineAuditorInput): Promise<PipelineCompletenessResult> {
+		if (!this.#pipelineAuditor) {
+			return {
+				complete: false,
+				missing: ["pipeline_auditor_unavailable"],
+				next: "Provide a complete executable request.",
+			};
+		}
+		return this.#pipelineAuditor(input);
 	}
 
 	/** Close owned SQLite handle (idempotent). */
@@ -3718,12 +3732,16 @@ export class WorkflowEngine {
 		request: WorkflowRequest,
 	): Promise<boolean> {
 		const sidecar = state.overlaySidecar ?? emptyDevflowSidecar();
+		if (this.#controller?.signal.aborted) {
+			throw new WorkflowCancelledError("aborted before completeness audit");
+		}
 		const audit = this.#pipelineAuditor
 			? await this.#pipelineAuditor({
 					kind: "plan",
 					request: request.request,
 					planSummary: this.#plan?.summary,
 					grillAnswers: sidecar.grill.answers,
+					signal: this.#controller?.signal,
 				})
 			: {
 					complete: false,
@@ -3832,18 +3850,28 @@ export class WorkflowEngine {
 		session: ToolSession,
 		signal: AbortSignal | undefined,
 		subject: "plan" | "implementation",
-	): Promise<GateResultModel | undefined> {
+	): Promise<{ gate: GateResultModel; modelFamily?: string } | undefined> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
 				const ran = await this.#runDevflowGate(workflowId, attemptId, session, signal, subject);
-				return parseGateResultArtifact(ran.raw, {
-					subject,
-					workflowId,
-					attemptId,
-					identity: ran.modelFamily ? { modelFamily: ran.modelFamily } : undefined,
-				});
+				return {
+					gate: parseGateResultArtifact(ran.raw, {
+						subject,
+						workflowId,
+						attemptId,
+						identity: ran.modelFamily ? { modelFamily: ran.modelFamily } : undefined,
+					}),
+					modelFamily: ran.modelFamily,
+				};
 			} catch (error) {
+				if (error instanceof WorkflowCancelledError || signal?.aborted || this.#controller?.signal.aborted) {
+					throw error instanceof WorkflowCancelledError
+						? error
+						: new WorkflowCancelledError(error instanceof Error ? error.message : "gate aborted", {
+								cause: error,
+							});
+				}
 				lastError = error;
 			}
 		}
@@ -3856,11 +3884,12 @@ export class WorkflowEngine {
 		});
 		const after = await this.#requireState(workflowId);
 		const sidecar = after.overlaySidecar ?? emptyDevflowSidecar();
+		const parseSummary = redactSecretsInText(
+			lastError instanceof Error ? lastError.message : String(lastError),
+		).slice(0, 500);
 		await this.#store.updateOverlaySidecar(
 			workflowId,
-			sidecarWithGrillPause(sidecar, "gate_parse_failed", [
-				String(lastError instanceof Error ? lastError.message : lastError),
-			]),
+			sidecarWithGrillPause(sidecar, "gate_parse_failed", [parseSummary]),
 			after.version,
 		);
 		return undefined;
@@ -3875,13 +3904,14 @@ export class WorkflowEngine {
 		request: WorkflowRequest,
 	): Promise<void> {
 		await this.#ensureRequirementsSnapshot(workflowId, attemptId, request);
-		const gate = await this.#parseDevflowGateWithRetry(workflowId, attemptId, session, signal, "plan");
-		if (!gate) return;
+		const parsed = await this.#parseDevflowGateWithRetry(workflowId, attemptId, session, signal, "plan");
+		if (!parsed) return;
+		const { gate, modelFamily } = parsed;
 		const stamped = stampGateResultArtifact({
 			gate,
 			workflowId,
 			attemptId,
-			reviewerIdentity: { modelFamily: this.#planReviewerIdentity?.modelFamily },
+			reviewerIdentity: { modelFamily },
 		});
 		await this.#persistArtifact(workflowId, attemptId, "gate-result", stamped);
 		const intent = gateAdapter(gate.verdict, gate.subject);
@@ -3976,13 +4006,14 @@ export class WorkflowEngine {
 		session: ToolSession,
 		signal: AbortSignal | undefined,
 	): Promise<void> {
-		const gate = await this.#parseDevflowGateWithRetry(workflowId, attemptId, session, signal, "implementation");
-		if (!gate) return;
+		const parsed = await this.#parseDevflowGateWithRetry(workflowId, attemptId, session, signal, "implementation");
+		if (!parsed) return;
+		const { gate, modelFamily } = parsed;
 		const stamped = stampGateResultArtifact({
 			gate,
 			workflowId,
 			attemptId,
-			reviewerIdentity: { modelFamily: this.#implementerModelFamily },
+			reviewerIdentity: { modelFamily },
 		});
 		await this.#persistArtifact(workflowId, attemptId, "gate-result", stamped);
 		const intent = gateAdapter(gate.verdict, gate.subject);

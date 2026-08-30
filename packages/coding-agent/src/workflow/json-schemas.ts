@@ -43,6 +43,17 @@ const reviewFindingItem = {
 	},
 } as const;
 
+/** Gate-only finding item. Optional `blocking` must survive structured output (Continuity P2). */
+const gateFindingItem = {
+	type: "object",
+	additionalProperties: false,
+	required: reviewFindingItem.required,
+	properties: {
+		...reviewFindingItem.properties,
+		blocking: { type: "boolean" },
+	},
+} as const;
+
 const commandRunItem = {
 	type: "object",
 	additionalProperties: false,
@@ -345,9 +356,9 @@ export const GateResultJsonSchema = {
 	additionalProperties: false,
 	required: ["verdict", "subject", "findings", "notes", "explanation"],
 	properties: {
-		verdict: { enum: ["PASS", "PASS_WITH_NOTES", "NEEDS_REVISION", "NEEDS_REDESIGN", "PASS_WITH_NODE"] },
+		verdict: { enum: ["PASS", "PASS_WITH_NOTES", "NEEDS_REVISION", "NEEDS_REDESIGN"] },
 		subject: { enum: ["plan", "implementation"] },
-		findings: { type: "array", items: reviewFindingItem },
+		findings: { type: "array", items: gateFindingItem },
 		notes: { type: "string" },
 		explanation: { type: "string", minLength: 1 },
 		workflowId: { type: "string", minLength: 1 },

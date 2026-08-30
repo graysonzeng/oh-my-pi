@@ -8,9 +8,15 @@ import type { SlashCommandRuntime } from "../../src/slash-commands/types";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { AVAILABILITY_ROLE_ORDER } from "../../src/workflow/availability-candidates";
 import { WorkflowEngine } from "../../src/workflow/engine";
+import { WorkflowCancelledError } from "../../src/workflow/errors";
 import { gateAdapter } from "../../src/workflow/gate-adapter";
 import { derivePlanReviewArtifactV2 } from "../../src/workflow/gate-derive";
-import { emptyDevflowSidecar, sidecarWithGrillPause } from "../../src/workflow/overlay";
+import { GateResultJsonSchema } from "../../src/workflow/json-schemas";
+import {
+	emptyDevflowSidecar,
+	parsePipelineCompletenessResult,
+	sidecarWithGrillPause,
+} from "../../src/workflow/overlay";
 import { buildRequirementsSnapshot } from "../../src/workflow/requirements-snapshot";
 import { RuntimeAdapter, resolvePipelineReviewAgent, WORKFLOW_ROLE_TO_AGENT } from "../../src/workflow/runtime-adapter";
 import { GateParseError, parseGateResultArtifact } from "../../src/workflow/schemas";
@@ -18,7 +24,19 @@ import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import { WorkflowTool } from "../../src/workflow/workflow-tool";
 import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
 
-function gateFinding(overrides: Record<string, unknown> = {}) {
+type GateFindingFixture = {
+	id: string;
+	priority: string;
+	category: string;
+	status: string;
+	confidence: number;
+	summary: string;
+	explanation: string;
+	suggestedOwner: string;
+	blocking?: boolean;
+};
+
+function gateFinding(overrides: Partial<GateFindingFixture> = {}): GateFindingFixture {
 	return {
 		id: "f1",
 		priority: "P3",
@@ -35,7 +53,7 @@ function gateFinding(overrides: Record<string, unknown> = {}) {
 function gateRaw(
 	verdict: string,
 	subject: "plan" | "implementation",
-	findings: ReturnType<typeof gateFinding>[] = [],
+	findings: GateFindingFixture[] = [],
 	extra: Record<string, unknown> = {},
 ) {
 	return {
@@ -78,6 +96,105 @@ describe("DevFlow overlay slash + coordinator", () => {
 		expect(JSON.stringify(calls)).not.toContain("workflowz");
 	});
 
+	it("production handle uses tool auditor and does not INSERT when preflight is incomplete", async () => {
+		const spec = lookupBuiltinSlashCommand("delivery");
+		const calls: unknown[] = [];
+		const runtime = {
+			session: {
+				getToolByName: () => ({
+					auditDeliveryCompleteness: async () => ({
+						complete: false,
+						missing: ["acceptance criteria"],
+						next: "What is the acceptance test?",
+					}),
+					execute: async (_id: string, input: unknown) => {
+						calls.push(input);
+						return { content: [{ type: "text", text: "should not run" }] };
+					},
+				}),
+				sessionManager: { getEntries: () => [] },
+			},
+			output: async () => {},
+		} as unknown as SlashCommandRuntime;
+		await spec!.handle!({ name: "delivery", args: "ship incomplete", text: "/delivery ship incomplete" }, runtime);
+		expect(calls).toEqual([]);
+	});
+
+	it("preflight answers are copied onto op=run and no workflow is created before complete", async () => {
+		const calls: unknown[] = [];
+		let complete = false;
+		const runtime = {
+			session: { getToolByName: () => undefined, sessionManager: { getEntries: () => [] } },
+			output: async () => {},
+		} as unknown as SlashCommandRuntime;
+		const deps = {
+			auditor: async () =>
+				complete
+					? { complete: true, missing: [] as string[] }
+					: { complete: false, missing: ["acceptance"], next: "What is the acceptance test?" },
+			executeWorkflow: async (input: { op: string; grillAnswers?: string[] }) => {
+				calls.push(input);
+				return {
+					content: [{ type: "text", text: "ran" }],
+					details: {
+						op: "run" as const,
+						workflowId: "wf_pre",
+						status: "planning" as const,
+						approvalTier: "write" as const,
+					},
+				};
+			},
+		};
+		await runDeliveryPipeline(runtime, "ship it", deps);
+		expect(calls).toEqual([]);
+		complete = true;
+		await runDeliveryPipeline(runtime, "bun test is the bar", deps);
+		expect(calls).toEqual([
+			{ op: "run", request: "bun test is the bar", pipeline: "devflow", grillAnswers: ["bun test is the bar"] },
+		]);
+	});
+
+	it("grilling recovery without an explicit answer re-asks and does not append transcript tail", async () => {
+		const answers: string[][] = [];
+		const ops: string[] = [];
+		const outputs: string[] = [];
+		await runDeliveryPipeline(
+			{
+				session: {
+					getToolByName: () => undefined,
+					sessionManager: {
+						getEntries: () => [{ type: "message", message: { role: "user", content: "original request" } }],
+					},
+				},
+				output: async text => {
+					outputs.push(text);
+				},
+			} as unknown as SlashCommandRuntime,
+			"",
+			{
+				loadActiveDevflow: async () => ({
+					workflowId: "wf_grill",
+					sidecar: sidecarWithGrillPause(
+						emptyDevflowSidecar(),
+						"incomplete_plan",
+						["scope"],
+						"What is the scope?",
+					),
+				}),
+				appendAnswers: async (_id, next) => {
+					answers.push([...next]);
+				},
+				executeWorkflow: async input => {
+					ops.push(input.op);
+					return { content: [{ type: "text", text: "should not resume" }] };
+				},
+			},
+		);
+		expect(answers).toEqual([]);
+		expect(ops).toEqual([]);
+		expect(outputs.at(-1)).toBe("What is the scope?");
+	});
+
 	it("coordinator resumes when maxStepsReached and does not couple to workflowz", async () => {
 		const ops: string[] = [];
 		await runDeliveryPipeline(
@@ -97,6 +214,7 @@ describe("DevFlow overlay slash + coordinator", () => {
 								op: "run",
 								workflowId: "wf_cap",
 								status: "implementing",
+								approvalTier: "write",
 								maxStepsReached: true,
 								awaitingGrill: false,
 							},
@@ -104,12 +222,78 @@ describe("DevFlow overlay slash + coordinator", () => {
 					}
 					return {
 						content: [{ type: "text", text: "resumed" }],
-						details: { op: "resume", workflowId: "wf_cap", status: "completed", maxStepsReached: false },
+						details: {
+							op: "resume",
+							workflowId: "wf_cap",
+							status: "completed",
+							approvalTier: "write",
+							maxStepsReached: false,
+						},
 					};
 				},
 			},
 		);
 		expect(ops).toEqual(["run", "resume"]);
+	});
+
+	it("coordinator appends answers and replans before resume when redesign grilling is open", async () => {
+		const ops: string[] = [];
+		const answers: string[][] = [];
+		const replans: string[] = [];
+		await runDeliveryPipeline(
+			{
+				session: { getToolByName: () => undefined, sessionManager: { getEntries: () => [] } },
+				output: async () => {},
+			} as unknown as SlashCommandRuntime,
+			"keep the public API",
+			{
+				loadActiveDevflow: async () => ({
+					workflowId: "wf_grill",
+					sidecar: sidecarWithGrillPause(emptyDevflowSidecar(), "needs_redesign", ["scope"], "What is the API?"),
+				}),
+				appendAnswers: async (_id, next) => {
+					answers.push([...next]);
+				},
+				replanFromRedesign: async id => {
+					replans.push(id);
+				},
+				executeWorkflow: async input => {
+					ops.push(input.op);
+					return {
+						content: [{ type: "text", text: "resumed" }],
+						details: {
+							op: "resume",
+							workflowId: "wf_grill",
+							status: "planning",
+							approvalTier: "write",
+						},
+					};
+				},
+			},
+		);
+		expect(answers).toEqual([["keep the public API"]]);
+		expect(replans).toEqual(["wf_grill"]);
+		expect(ops).toEqual(["resume"]);
+		expect(ops).not.toContain("run");
+	});
+});
+
+describe("pipeline completeness parse", () => {
+	it("accepts complete JSON and rejects invalid shapes fail-closed", () => {
+		expect(parsePipelineCompletenessResult({ complete: true, missing: [] })).toEqual({
+			complete: true,
+			missing: [],
+			next: undefined,
+		});
+		expect(
+			parsePipelineCompletenessResult({ complete: false, missing: ["scope"], next: "What is the scope?" }),
+		).toEqual({
+			complete: false,
+			missing: ["scope"],
+			next: "What is the scope?",
+		});
+		expect(parsePipelineCompletenessResult({ complete: "yes" })).toBeUndefined();
+		expect(parsePipelineCompletenessResult(null)).toBeUndefined();
 	});
 });
 
@@ -190,6 +374,13 @@ describe("parseGateResultArtifact + PASS* blockers", () => {
 		);
 		expect(parsed.verdict).toBe("PASS_WITH_NOTES");
 		expect(gateAdapter(parsed.verdict, parsed.subject)).toBe("approve");
+	});
+
+	it("model-facing Gate schema keeps finding.blocking so Continuity P2 can reach parse", () => {
+		const findingSchema = GateResultJsonSchema.properties.findings.items;
+		expect(findingSchema.additionalProperties).toBe(false);
+		expect(findingSchema.properties.blocking).toEqual({ type: "boolean" });
+		expect(findingSchema.required).not.toContain("blocking");
 	});
 
 	it("Continuity P2: open P2/P3 with blocking true cannot stay on PASS*", () => {
@@ -363,7 +554,7 @@ describe("DevFlow overlay engine contracts", () => {
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: completeAuditor,
 			adapter: new RuntimeAdapter(async request => {
-				if ((request.agent ?? "") === "designer" || request.role === "planner") {
+				if ((request.agent ?? "") === "designer") {
 					planContext = request.context ?? "";
 				}
 				return scriptedRunner({
@@ -381,6 +572,41 @@ describe("DevFlow overlay engine contracts", () => {
 		);
 		await engine.run(started.workflowId);
 		expect(planContext).toContain("must keep the public API");
+	});
+
+	it("gate abort cancels instead of retrying into grill", async () => {
+		let gateCalls = 0;
+		const engine = new WorkflowEngine({
+			store,
+			session: fakeSession(),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			pipelineAuditor: completeAuditor,
+			adapter: new RuntimeAdapter(async request => {
+				if ((request.agent ?? "") === "subagent-sol") {
+					gateCalls += 1;
+					throw new WorkflowCancelledError("user abort");
+				}
+				return scriptedRunner({ plan: planArtifact() })(request);
+			}),
+		});
+		const started = await engine.start({ request: "abort gate" }, {}, { pipelineKind: "devflow" });
+		const result = await engine.run(started.workflowId);
+		expect(gateCalls).toBe(1);
+		expect(result.state.status).toBe("cancelled");
+		expect(result.awaitingGrill).toBe(false);
+		expect(result.overlayReason).not.toBe("gate_parse_failed");
+	});
+
+	it("completeness auditor abort cancels instead of grilling incomplete_plan", async () => {
+		const engine = engineWith({ plan: planArtifact() }, async () => {
+			throw new WorkflowCancelledError("auditor aborted");
+		});
+		const started = await engine.start({ request: "abort audit" }, {}, { pipelineKind: "devflow" });
+		const result = await engine.run(started.workflowId);
+		expect(result.state.status).toBe("cancelled");
+		expect(result.awaitingGrill).toBe(false);
+		expect(result.overlayReason).not.toBe("incomplete_plan");
 	});
 
 	it("planning completeness failure stays in planning and does not consume maxPlanCycles", async () => {
@@ -470,7 +696,7 @@ describe("DevFlow overlay engine contracts", () => {
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: completeAuditor,
 			adapter: new RuntimeAdapter(async request => {
-				agents.push(request.agent ?? request.role);
+				agents.push(request.agent ?? request.assignment);
 				return scriptedRunner({
 					plan: planArtifact(),
 					gatePlanReview: gateRaw("PASS", "plan"),
