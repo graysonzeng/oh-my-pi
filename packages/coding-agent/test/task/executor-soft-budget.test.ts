@@ -507,9 +507,9 @@ describe("resolveSoftRequestBudget", () => {
 		expect(resolveSoftRequestBudget("scout", 20.9)).toBe(20);
 	});
 
-	it("caps bundled reviewer-class agents at 40", () => {
-		expect(resolveSoftRequestBudget("reviewer", 200)).toBe(40);
-		expect(resolveSoftRequestBudget("subagent-sol", 90)).toBe(40);
+	it("caps bundled reviewer-class agents at 80", () => {
+		expect(resolveSoftRequestBudget("reviewer", 200)).toBe(80);
+		expect(resolveSoftRequestBudget("subagent-sol", 90)).toBe(80);
 		expect(resolveSoftRequestBudget("reviewer", 20)).toBe(20);
 	});
 });

@@ -1,12 +1,12 @@
 import { splitInternalUrlSel, splitPathAndSel } from "../tools/path-utils";
 import { type ParsedSelector, parseSel } from "../tools/read-selector";
 
-/** Bundled reviewer-class agents whose request budget must fire before the 20m wall. */
+/** Bundled reviewer-class agents whose request budget must fire before the 30m wall. */
 export const REVIEWER_SOFT_REQUEST_BUDGET: Record<string, number> = {
-	reviewer: 40,
-	"subagent-sol": 40,
-	"sol-xhigh-reviewer": 40,
-	"security-reviewer": 40,
+	reviewer: 80,
+	"subagent-sol": 80,
+	"sol-xhigh-reviewer": 80,
+	"security-reviewer": 80,
 };
 
 const REVIEWER_AGENT_NAMES: Record<string, true> = {

@@ -53,7 +53,7 @@ import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
-const REVIEW_GATE_MAX_RUNTIME_MS = 1_200_000;
+const REVIEW_GATE_MAX_RUNTIME_MS = 1_800_000;
 const REVIEW_GATE_AGENTS: Record<string, true> = {
 	reviewer: true,
 	"subagent-sol": true,
@@ -65,7 +65,7 @@ function resolveTaskMaxRuntimeMs(session: ToolSession, agent: string | undefined
 	const configured = session.settings.get("task.maxRuntimeMs");
 	if (!agent || !REVIEW_GATE_AGENTS[agent]) return configured;
 	// 0 remains unlimited (same public contract as other agents). A stricter
-	// non-zero user cap still wins over the 20-minute reviewer ceiling.
+	// non-zero user cap still wins over the 30-minute reviewer ceiling.
 	if (configured === 0) return 0;
 	return Math.min(configured, REVIEW_GATE_MAX_RUNTIME_MS);
 }

@@ -173,7 +173,7 @@ describe("task spawn routing", () => {
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
 
-	it("caps review/Gate agents at 20 minutes regardless of task.maxRuntimeMs", async () => {
+	it("caps review/Gate agents at 30 minutes regardless of task.maxRuntimeMs", async () => {
 		const reviewer: AgentDefinition = {
 			name: "reviewer",
 			description: "Reviewer",
@@ -197,10 +197,10 @@ describe("task spawn routing", () => {
 		const jobId = result.details?.async?.jobId;
 		expect(jobId).toBeTruthy();
 		await manager.getJob(jobId!)!.promise;
-		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(1_200_000);
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(1_800_000);
 	});
 
-	it("keeps a stricter reviewer maxRuntimeMs below the 20-minute ceiling", async () => {
+	it("keeps a stricter reviewer maxRuntimeMs below the 30-minute ceiling", async () => {
 		const reviewer: AgentDefinition = {
 			name: "reviewer",
 			description: "Reviewer",
