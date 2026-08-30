@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import {
 	buildLatencyRolloutDecision,
 	freezeLatencyArmSnapshot,
@@ -60,7 +61,10 @@ import {
 	WorkflowTimeoutError,
 } from "./errors";
 import { FindingTracker } from "./finding-tracker";
+import { gateAdapter } from "./gate-adapter";
+import { derivePlanReviewArtifactV2, deriveReviewArtifact, stampGateResultArtifact } from "./gate-derive";
 import { assertStrictRuntimeIdentity } from "./identity-receipt";
+import { GateResultJsonSchema } from "./json-schemas";
 import {
 	assertSupportedModelProfile,
 	configuredIdentityForProfile,
@@ -68,6 +72,16 @@ import {
 } from "./model-profile-registry";
 import { ModelRouter, type RouteOptions, type RoutingDecision } from "./model-router";
 import { sha256Hex } from "./optimization-receipt";
+import {
+	appendGrillAnswers,
+	type CreateWorkflowOptions,
+	emptyDevflowSidecar,
+	isAwaitingGrill,
+	overlayReason,
+	type PipelineAuditor,
+	sidecarIdle,
+	sidecarWithGrillPause,
+} from "./overlay";
 import { derivePlanReviewTrigger } from "./plan-review-trigger";
 import {
 	compileQualityRouteSnapshot,
@@ -82,7 +96,7 @@ import {
 	validateApprovedMandatoryCoverage,
 } from "./requirements-snapshot";
 import { RuntimeAdapter } from "./runtime-adapter";
-import { PlanReviewControlStateSchema } from "./schemas";
+import { type GateResultModel, PlanReviewControlStateSchema, parseGateResultArtifact } from "./schemas";
 import {
 	buildScopeMetrics,
 	collectScopeMetricsFromGit,
@@ -344,6 +358,8 @@ export interface WorkflowEngineOptions {
 	nowMs?: () => number;
 	/** Optional process-local breaker (tests); default is a new engine-scoped instance. */
 	providerHealthBreaker?: ProviderHealthBreaker;
+	/** Devflow completeness oneshot. Missing auditor fail-closes as incomplete. */
+	pipelineAuditor?: PipelineAuditor;
 }
 
 export interface WorkflowStartResult {
@@ -363,6 +379,10 @@ export interface WorkflowRunResult {
 	routingAudit: Array<Record<string, unknown>>;
 	/** Preflight report from this start/resume invocation (when availability port is configured). */
 	availability?: WorkflowAvailabilityReport;
+	stepsExecuted: number;
+	maxStepsReached: boolean;
+	awaitingGrill: boolean;
+	overlayReason?: string;
 }
 
 /**
@@ -398,6 +418,7 @@ export class WorkflowEngine {
 	readonly #latencyRolloutPersisted = new Set<string>();
 	#preflightUnavailableReasons: Record<string, string> = {};
 	readonly #providerHealthBreaker: ProviderHealthBreaker;
+	readonly #pipelineAuditor: PipelineAuditor | undefined;
 
 	// In-memory artifact cache for the current process (also persisted to store)
 	#plan: PlanArtifactV1 | undefined;
@@ -489,6 +510,7 @@ export class WorkflowEngine {
 			});
 		this.#findingTracker = options.findingTracker ?? new FindingTracker();
 		this.#artifactStore = options.artifactStore ?? new ArtifactStore();
+		this.#pipelineAuditor = options.pipelineAuditor;
 	}
 
 	/** Close owned SQLite handle (idempotent). */
@@ -509,6 +531,7 @@ export class WorkflowEngine {
 	async start(
 		request: WorkflowRequest | Record<string, unknown>,
 		policyOverrides: Record<string, unknown> = {},
+		createOpts?: CreateWorkflowOptions,
 	): Promise<WorkflowStartResult> {
 		const requestedTier = (request as Record<string, unknown>).qualityTier;
 		if (requestedTier !== undefined && requestedTier !== "balanced" && requestedTier !== "critical") {
@@ -549,7 +572,14 @@ export class WorkflowEngine {
 			failClosed: routeSnapshot !== undefined,
 			persistBudget: false,
 		});
-		const workflowId = await this.#store.createWorkflow(persistedRequest, policy);
+		const resolvedCreateOpts =
+			createOpts?.pipelineKind === "devflow"
+				? {
+						pipelineKind: "devflow" as const,
+						overlaySidecar: createOpts.overlaySidecar ?? emptyDevflowSidecar(),
+					}
+				: createOpts;
+		const workflowId = await this.#store.createWorkflow(persistedRequest, policy, resolvedCreateOpts);
 		await this.#store.saveBudgetTotals(
 			workflowId,
 			this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
@@ -777,6 +807,56 @@ export class WorkflowEngine {
 	async forceUnlock(workflowId: string): Promise<void> {
 		await this.#requireState(workflowId);
 		await this.#store.clearRunnerOwner(workflowId);
+	}
+
+	async appendGrillAnswers(workflowId: string, answers: readonly string[]): Promise<WorkflowState> {
+		const state = await this.#requireState(workflowId);
+		if (state.pipelineKind !== "devflow" || !state.overlaySidecar) {
+			throw new WorkflowPolicyError("overlay_requires_devflow", { workflowId });
+		}
+		const next = appendGrillAnswers(state.overlaySidecar, answers);
+		await this.#store.updateOverlaySidecar(workflowId, next, state.version);
+		return this.#requireState(workflowId);
+	}
+
+	/**
+	 * Exempt plan redesign: plan_review → planning without incrementing planRejectionCount.
+	 * Requires runner_owner IS NULL. Success CAS sets runner_owner=NULL and must not call releaseRunner.
+	 */
+	async replanFromRedesign(workflowId: string): Promise<WorkflowState> {
+		const snapshot = await this.#store.resumeFromPersistedState(workflowId);
+		if (!snapshot) throw new WorkflowPolicyError("workflow_not_found", { workflowId });
+		const sidecar = snapshot.state.overlaySidecar;
+		const last = snapshot.transitions.at(-1);
+		if (
+			snapshot.state.status === "planning" &&
+			last?.reason === "plan_review:needs_redesign" &&
+			sidecar?.phase === "idle"
+		) {
+			return snapshot.state;
+		}
+		if (snapshot.state.pipelineKind !== "devflow") {
+			throw new WorkflowPolicyError("overlay_requires_devflow", { workflowId });
+		}
+		if (TERMINAL.has(snapshot.state.status) || snapshot.state.status !== "plan_review") {
+			throw new WorkflowPolicyError("replan_requires_plan_review", { status: snapshot.state.status });
+		}
+		if (sidecar?.phase !== "grilling" || sidecar.grill.reason !== "needs_redesign") {
+			throw new WorkflowPolicyError("replan_requires_needs_redesign", { phase: sidecar?.phase });
+		}
+		if (snapshot.state.runnerOwner) {
+			throw new WorkflowPolicyError("runner_lock_held", {
+				workflowId,
+				heldBy: snapshot.state.runnerOwner,
+			});
+		}
+		await this.#store.completeExemptReplan({
+			workflowId,
+			expectedVersion: snapshot.state.version,
+			overlaySidecar: sidecarIdle(sidecar),
+			attemptId: snapshot.state.currentAttemptId,
+		});
+		return this.#requireState(workflowId);
 	}
 
 	/**
@@ -1039,10 +1119,11 @@ export class WorkflowEngine {
 						);
 					}
 
-					if (
-						(await this.#requireState(workflowId)).status === "plan_review" &&
-						this.#planReviewControl?.substate === "awaiting_human"
-					) {
+					const afterStage = await this.#requireState(workflowId);
+					if (afterStage.status === "plan_review" && this.#planReviewControl?.substate === "awaiting_human") {
+						break;
+					}
+					if (isAwaitingGrill(afterStage.overlaySidecar)) {
 						break;
 					}
 					if (singleStep) break;
@@ -1062,6 +1143,7 @@ export class WorkflowEngine {
 					// Rollout bookkeeping must not fail a workflow that already reached terminal.
 				});
 			}
+			const awaitingGrill = isAwaitingGrill(finalState.overlaySidecar);
 			return {
 				state: finalState,
 				plan: this.#plan,
@@ -1073,6 +1155,10 @@ export class WorkflowEngine {
 				workPackageState: this.#workPackageState,
 				routingAudit: [...this.#routingAudit],
 				availability: availability ?? this.#lastAvailability,
+				stepsExecuted: steps,
+				maxStepsReached: steps >= maxSteps && !TERMINAL.has(finalState.status) && !awaitingGrill,
+				awaitingGrill,
+				overlayReason: overlayReason(finalState.overlaySidecar),
 			};
 		} finally {
 			unregisterWorkflowAbort(workflowId, this.#controller);
@@ -1314,6 +1400,7 @@ export class WorkflowEngine {
 							request,
 							priorReview: this.#planReview,
 							constraints: request.constraints,
+							grillAnswers: state.overlaySidecar?.grill.answers,
 						}),
 						profile,
 						session,
@@ -1395,12 +1482,20 @@ export class WorkflowEngine {
 					resolvedToolPolicyId,
 					completionKind,
 				});
+				if (state.pipelineKind === "devflow") {
+					const paused = await this.#applyPlanningCompletenessGate(workflowId, attemptId, state, request);
+					if (paused) return;
+				}
 				const next = getNextStage("planning", "approved");
 				await this.#completeTo(workflowId, attemptId, fresh.status, next!, "plan ready", fresh.version);
 				return;
 			}
 			case "plan_review": {
 				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
+				if (state.pipelineKind === "devflow") {
+					await this.#executeDevflowPlanReview(workflowId, attemptId, state, session, signal, request);
+					return;
+				}
 				await this.#ensureRequirementsSnapshot(workflowId, attemptId, request);
 
 				if (!this.#planReviewControl) {
@@ -1825,6 +1920,10 @@ export class WorkflowEngine {
 			case "code_review": {
 				if (!this.#plan || !this.#implementation) {
 					throw new WorkflowPolicyError("missing_artifacts_for_code_review", { workflowId });
+				}
+				if (state.pipelineKind === "devflow") {
+					await this.#executeDevflowCodeReview(workflowId, attemptId, state, session, signal);
+					return;
 				}
 				this.#budgetLedger.recordReviewerCycle();
 				const patchRef = await this.#ensurePatchArtifactRef(
@@ -3610,6 +3709,298 @@ export class WorkflowEngine {
 			kind: "plan_review_awaiting_human",
 			summary: reason,
 		});
+	}
+
+	async #applyPlanningCompletenessGate(
+		workflowId: string,
+		attemptId: string,
+		state: WorkflowState,
+		request: WorkflowRequest,
+	): Promise<boolean> {
+		const sidecar = state.overlaySidecar ?? emptyDevflowSidecar();
+		const audit = this.#pipelineAuditor
+			? await this.#pipelineAuditor({
+					kind: "plan",
+					request: request.request,
+					planSummary: this.#plan?.summary,
+					grillAnswers: sidecar.grill.answers,
+				})
+			: {
+					complete: false,
+					missing: ["pipeline_auditor_unavailable"],
+					next: "Provide a complete executable request.",
+				};
+		if (audit.complete) return false;
+		const retries = sidecar.planningCompletenessRetries + 1;
+		const maxRetries = this.#config.pipelineOverlay?.maxPlanningCompletenessRetries ?? 2;
+		await this.#finishOpenAttempt(workflowId, attemptId, "completed");
+		const after = await this.#requireState(workflowId);
+		if (retries < maxRetries) {
+			await this.#store.updateOverlaySidecar(
+				workflowId,
+				{ ...sidecar, planningCompletenessRetries: retries },
+				after.version,
+			);
+			return true;
+		}
+		await this.#store.updateOverlaySidecar(
+			workflowId,
+			sidecarWithGrillPause(
+				{ ...sidecar, planningCompletenessRetries: retries },
+				"incomplete_plan",
+				audit.missing,
+				audit.next ?? "",
+			),
+			after.version,
+		);
+		return true;
+	}
+
+	async #runDevflowGate(
+		workflowId: string,
+		attemptId: string,
+		session: ToolSession,
+		signal: AbortSignal | undefined,
+		subject: "plan" | "implementation",
+	): Promise<{ raw: unknown; modelFamily?: string; usage?: Usage }> {
+		const role = subject === "plan" ? "plan_reviewer" : "code_reviewer";
+		const authorFamily = subject === "plan" ? this.#plannerModelFamily : this.#implementerModelFamily;
+		const assignment =
+			subject === "plan"
+				? "Review the plan for correctness and feasibility"
+				: "Independent code review of the implementation";
+		const ran = await this.#withProfileFallback(role, {}, async profile => {
+			const builtContext =
+				subject === "plan"
+					? await this.#buildStageContext(
+							this.#contextBuilder.buildPlanReviewContext(this.#plan!, undefined, this.#requirementsSnapshot),
+							profile,
+							session,
+							this.#plan?.affectedFiles.map(file => file.path),
+						)
+					: await this.#buildStageContext(
+							this.#contextBuilder.buildCodeReviewContext({
+								plan: this.#plan!,
+								implementation: this.#implementation!,
+								verification: this.#verification,
+							}),
+							profile,
+							session,
+							[
+								...(this.#plan?.affectedFiles.map(f => f.path) ?? []),
+								...(this.#implementation?.changedFiles ?? []),
+							],
+						);
+			const result = await this.#adapter.run<unknown>({
+				workflowId,
+				attemptId,
+				role,
+				profile,
+				assignment,
+				context: builtContext,
+				outputSchema: GateResultJsonSchema,
+				session,
+				signal,
+				pipelineKind: "devflow",
+				authorModelFamily: authorFamily,
+				agent: RuntimeAdapter.agentNameForRole(role, {
+					pipelineKind: "devflow",
+					authorModelFamily: authorFamily,
+				}),
+			});
+			return {
+				artifact: result.artifact,
+				usage: result.usage,
+				identityReceipt: result.identityReceipt,
+				modelFamily: result.modelFamily,
+				resolvedProvider: result.resolvedProvider,
+				resolvedModel: result.resolvedModel,
+				toolCalls: result.toolCalls,
+				promptAssemblyReceipt: result.promptAssemblyReceipt,
+				contextLedger: result.contextLedger,
+				optimizationReceipts: result.optimizationReceipts,
+				resolvedToolPolicyId: result.resolvedToolPolicyId,
+				completionKind: result.completionKind,
+			};
+		});
+		return { raw: ran.artifact, modelFamily: ran.modelFamily, usage: ran.usage };
+	}
+
+	async #parseDevflowGateWithRetry(
+		workflowId: string,
+		attemptId: string,
+		session: ToolSession,
+		signal: AbortSignal | undefined,
+		subject: "plan" | "implementation",
+	): Promise<GateResultModel | undefined> {
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				const ran = await this.#runDevflowGate(workflowId, attemptId, session, signal, subject);
+				return parseGateResultArtifact(ran.raw, {
+					subject,
+					workflowId,
+					attemptId,
+					identity: ran.modelFamily ? { modelFamily: ran.modelFamily } : undefined,
+				});
+			} catch (error) {
+				lastError = error;
+			}
+		}
+		await this.#finishOpenAttempt(workflowId, attemptId, "failed", {
+			kind: "schema_violation",
+			summary: redactSecretsInText(lastError instanceof Error ? lastError.message : "gate parse failed").slice(
+				0,
+				500,
+			),
+		});
+		const after = await this.#requireState(workflowId);
+		const sidecar = after.overlaySidecar ?? emptyDevflowSidecar();
+		await this.#store.updateOverlaySidecar(
+			workflowId,
+			sidecarWithGrillPause(sidecar, "gate_parse_failed", [
+				String(lastError instanceof Error ? lastError.message : lastError),
+			]),
+			after.version,
+		);
+		return undefined;
+	}
+
+	async #executeDevflowPlanReview(
+		workflowId: string,
+		attemptId: string,
+		_state: WorkflowState,
+		session: ToolSession,
+		signal: AbortSignal | undefined,
+		request: WorkflowRequest,
+	): Promise<void> {
+		await this.#ensureRequirementsSnapshot(workflowId, attemptId, request);
+		const gate = await this.#parseDevflowGateWithRetry(workflowId, attemptId, session, signal, "plan");
+		if (!gate) return;
+		const stamped = stampGateResultArtifact({
+			gate,
+			workflowId,
+			attemptId,
+			reviewerIdentity: { modelFamily: this.#planReviewerIdentity?.modelFamily },
+		});
+		await this.#persistArtifact(workflowId, attemptId, "gate-result", stamped);
+		const intent = gateAdapter(gate.verdict, gate.subject);
+		const snapshot = await this.#requireRequirementsSnapshot(workflowId, attemptId, request);
+		const fresh = await this.#requireState(workflowId);
+		if (intent === "replan_exempt") {
+			const sidecar = fresh.overlaySidecar ?? emptyDevflowSidecar();
+			await this.#finishOpenAttempt(workflowId, attemptId, "completed");
+			const after = await this.#requireState(workflowId);
+			await this.#store.updateOverlaySidecar(
+				workflowId,
+				sidecarWithGrillPause(sidecar, "needs_redesign"),
+				after.version,
+			);
+			return;
+		}
+		if (intent === "approve" || intent === "replan_counted" || intent === "block") {
+			const derived = derivePlanReviewArtifactV2({
+				gate,
+				workflowId,
+				attemptId,
+				stage: "plan_review",
+				control: this.#planReviewControl,
+				requirementsSnapshot: snapshot,
+				requirementsSnapshotRef: this.#requirementsSnapshotRef?.recoveryUri,
+			});
+			this.#planReview = derived;
+			this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", derived);
+			if (intent === "replan_counted") {
+				const prior = this.#planReviewControl?.planRejectionCount ?? this.#planCycles;
+				const nextRejectionCount = prior + 1;
+				this.#planCycles = nextRejectionCount;
+				this.#planReviewControl = {
+					schemaVersion: 1,
+					kind: "plan_review_control_state",
+					substate: "awaiting_replan",
+					reviewRound: 2,
+					planRejectionCount: nextRejectionCount,
+					arbitrationCycles: this.#planReviewControl?.arbitrationCycles ?? 0,
+					arbitrationTrigger: null,
+					arbitrationAttemptId: this.#planReviewControl?.arbitrationAttemptId ?? null,
+					arbitrationAttemptPhase: this.#planReviewControl?.arbitrationAttemptPhase ?? null,
+					reviewSchemaCohort: "v2",
+					latestPlanArtifactRef: this.#planArtifactRef?.artifactId ?? null,
+					latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
+					authorResponsesArtifactRef: this.#authorResponsesArtifactRef?.artifactId ?? null,
+					routeSelectionReceiptRef: this.#planReviewControl?.routeSelectionReceiptRef ?? null,
+					humanRequestReason: null,
+					updatedAt: new Date().toISOString(),
+				};
+				await this.#persistPlanReviewControl(workflowId, attemptId);
+				if (nextRejectionCount >= this.#config.maxPlanCycles) {
+					await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "max_plan_cycles_exceeded");
+					return;
+				}
+				await this.#completeTo(
+					workflowId,
+					attemptId,
+					fresh.status,
+					"planning",
+					"plan_review:changes_requested",
+					fresh.version,
+				);
+				return;
+			}
+			if (intent === "block") {
+				await this.#completeTo(
+					workflowId,
+					attemptId,
+					fresh.status,
+					"blocked",
+					"plan_review:blocked",
+					fresh.version,
+				);
+				return;
+			}
+			await this.#completeTo(
+				workflowId,
+				attemptId,
+				fresh.status,
+				"implementing",
+				"plan_review:approved",
+				fresh.version,
+			);
+		}
+	}
+
+	async #executeDevflowCodeReview(
+		workflowId: string,
+		attemptId: string,
+		_state: WorkflowState,
+		session: ToolSession,
+		signal: AbortSignal | undefined,
+	): Promise<void> {
+		const gate = await this.#parseDevflowGateWithRetry(workflowId, attemptId, session, signal, "implementation");
+		if (!gate) return;
+		const stamped = stampGateResultArtifact({
+			gate,
+			workflowId,
+			attemptId,
+			reviewerIdentity: { modelFamily: this.#implementerModelFamily },
+		});
+		await this.#persistArtifact(workflowId, attemptId, "gate-result", stamped);
+		const intent = gateAdapter(gate.verdict, gate.subject);
+		const fresh = await this.#requireState(workflowId);
+		if (intent === "approve" || intent === "replan_counted" || intent === "block") {
+			const derived = deriveReviewArtifact({
+				gate,
+				workflowId,
+				attemptId,
+				stage: "code_review",
+			});
+			this.#codeReview = derived;
+			this.#codeReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", derived);
+			const decision = derived.decision;
+			const next = getNextStage("code_review", decision);
+			if (!next) throw new WorkflowPolicyError("invalid_review_decision", { decision });
+			await this.#completeTo(workflowId, attemptId, fresh.status, next, `code_review:${decision}`, fresh.version);
+		}
 	}
 
 	async #completeTo(

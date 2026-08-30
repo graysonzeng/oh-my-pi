@@ -338,3 +338,26 @@ export const ImplementationArtifactJsonSchema = {
 		unresolved: { type: "array", items: { type: "string" } },
 	},
 } as const;
+
+/** Minimal model-facing Gate JSON. Engine stamps ids/identity and derives durable review artifacts. */
+export const GateResultJsonSchema = {
+	type: "object",
+	additionalProperties: false,
+	required: ["verdict", "subject", "findings", "notes", "explanation"],
+	properties: {
+		verdict: { enum: ["PASS", "PASS_WITH_NOTES", "NEEDS_REVISION", "NEEDS_REDESIGN", "PASS_WITH_NODE"] },
+		subject: { enum: ["plan", "implementation"] },
+		findings: { type: "array", items: reviewFindingItem },
+		notes: { type: "string" },
+		explanation: { type: "string", minLength: 1 },
+		workflowId: { type: "string", minLength: 1 },
+		attemptId: { type: "string", minLength: 1 },
+		identity: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				modelFamily: { type: "string", minLength: 1 },
+			},
+		},
+	},
+} as const;

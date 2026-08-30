@@ -9,6 +9,7 @@ import type {
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ToolSession } from "../tools";
 import type { ContextEntry, ContextLedgerV1 } from "./context-ledger";
+import type { OverlaySidecar } from "./overlay";
 import type { PolicyExperimentReceiptV1 } from "./policy-experiment";
 import type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
 
@@ -692,6 +693,10 @@ export interface WorkflowAgentRequest {
 	workflowId: string;
 	attemptId: string;
 	role: WorkflowRole;
+	/** Optional pipeline review agent override (`subagent-sol` / `subagent-grok`). Not a new WorkflowRole. */
+	agent?: string;
+	pipelineKind?: "devflow";
+	authorModelFamily?: string | null;
 	profile: ModelProfile;
 	assignment: string;
 	context?: string;
@@ -806,6 +811,9 @@ export interface WorkflowState {
 	policyJson: string;
 	/** Exclusive runner owner id when a process holds the lock; undefined when free. */
 	runnerOwner?: string;
+	/** NULL/absent = legacy workflow. Never inferred from request prose. */
+	pipelineKind?: "devflow";
+	overlaySidecar?: OverlaySidecar;
 }
 
 export interface Artifact {

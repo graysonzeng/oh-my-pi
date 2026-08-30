@@ -6,6 +6,7 @@ import {
 	resolveCliModel,
 } from "../config/model-resolver";
 import type { SettingPath, Settings } from "../config/settings";
+import { runDeliveryPipeline } from "../modes/delivery";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
@@ -300,6 +301,14 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.handleGoalModeCommand(command.args || undefined, runtime.input),
 			);
 		},
+	},
+	{
+		name: "delivery",
+		icon: "goal",
+		description: "Start the DevFlow autopilot pipeline (grill → plan → review → implement → code review → fix)",
+		inlineHint: "[optional patch]",
+		allowArgs: true,
+		handle: async (command, runtime) => runDeliveryPipeline(runtime, command.args),
 	},
 	{
 		name: "guided-goal",

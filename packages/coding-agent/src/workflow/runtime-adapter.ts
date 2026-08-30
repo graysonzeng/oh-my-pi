@@ -132,6 +132,22 @@ export const WORKFLOW_ROLE_TO_AGENT: Readonly<Record<WorkflowAgentRequest["role"
 	repair: "task",
 };
 
+export interface PipelineReviewAgentOpts {
+	pipelineKind?: "devflow";
+	authorModelFamily?: string | null;
+	preferredReviewer?: "subagent-sol" | "subagent-grok";
+}
+
+/** Devflow review maps onto native sol/grok agents without adding a WorkflowRole. */
+export function resolvePipelineReviewAgent(role: WorkflowAgentRequest["role"], opts?: PipelineReviewAgentOpts): string {
+	if (opts?.pipelineKind === "devflow" && (role === "plan_reviewer" || role === "code_reviewer")) {
+		const authorGrok = (opts.authorModelFamily ?? "").toLowerCase().includes("grok");
+		if (opts.preferredReviewer === "subagent-grok" && !authorGrok) return "subagent-grok";
+		return "subagent-sol";
+	}
+	return WORKFLOW_ROLE_TO_AGENT[role] ?? "task";
+}
+
 // Re-export preparation helpers so existing imports keep working.
 export { injectWorkflowPrompt, wrapSessionForWorkflowIsolation } from "./runtime-invocation";
 
@@ -151,8 +167,8 @@ export class RuntimeAdapter implements RuntimePort {
 		return request;
 	}
 
-	static agentNameForRole(role: WorkflowAgentRequest["role"]): string {
-		return WORKFLOW_ROLE_TO_AGENT[role] ?? "task";
+	static agentNameForRole(role: WorkflowAgentRequest["role"], opts?: PipelineReviewAgentOpts): string {
+		return resolvePipelineReviewAgent(role, opts);
 	}
 
 	async run<TArtifact = unknown>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>> {
@@ -400,7 +416,12 @@ export class RuntimeAdapter implements RuntimePort {
 			assignment: prepared.assignment,
 			// Assembled stable+dynamic prompt text is the production model-facing context.
 			context: prepared.assembledPromptText || prepared.context,
-			agent: RuntimeAdapter.agentNameForRole(request.role),
+			agent:
+				request.agent ??
+				RuntimeAdapter.agentNameForRole(request.role, {
+					pipelineKind: request.pipelineKind,
+					authorModelFamily: request.authorModelFamily,
+				}),
 			model: request.profile.modelPattern,
 			thinkingLevel: request.profile.thinkingLevel,
 			outputSchema: prepared.outputSchema ?? request.outputSchema,

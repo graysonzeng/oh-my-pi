@@ -233,6 +233,8 @@ export function scriptedRunner(script: {
 	implement?: ImplementationArtifactV1 | (() => ImplementationArtifactV1);
 	codeReview?: ReviewArtifactV1 | (() => ReviewArtifactV1);
 	repair?: ImplementationArtifactV1 | (() => ImplementationArtifactV1);
+	gatePlanReview?: unknown | (() => unknown);
+	gateCodeReview?: unknown | (() => unknown);
 }): StructuredRunner {
 	return async request => {
 		const agent = request.agent ?? "";
@@ -246,6 +248,14 @@ export function scriptedRunner(script: {
 		if (agent === "designer" || agent === "planner") {
 			label = "plan";
 			data = pick(script.plan, label);
+		} else if (agent === "subagent-sol" || agent === "subagent-grok") {
+			if (/code review|implementation/i.test(assignment) && !/plan/i.test(assignment)) {
+				label = "gateCodeReview";
+				data = pick(script.gateCodeReview ?? script.codeReview, label);
+			} else {
+				label = "gatePlanReview";
+				data = pick(script.gatePlanReview ?? script.planReview, label);
+			}
 		} else if (agent === "reviewer" || agent === "plan_reviewer" || agent === "code_reviewer") {
 			// plan_reviewer and code_reviewer both map to bundled "reviewer"
 			if (/code review|implementation/i.test(assignment) && !/plan/i.test(assignment)) {

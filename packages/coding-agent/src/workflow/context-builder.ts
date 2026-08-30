@@ -46,12 +46,15 @@ export class ContextBuilder {
 		request: WorkflowRequest | { request: string; constraints?: string };
 		priorReview?: PlanReviewArtifact | null;
 		constraints?: string;
+		grillAnswers?: readonly string[];
 	}): string {
+		const grillAnswers = (input.grillAnswers ?? []).map((answer, index) => `${index + 1}. ${answer}`).join("\n");
 		return renderContextTemplate(planContextTemplate, {
 			request: input.request.request,
 			constraints: input.constraints ?? ("constraints" in input.request ? (input.request.constraints ?? "") : ""),
 			priorReviewExplanation: input.priorReview?.explanation?.trim() ?? "",
 			priorFindings: input.priorReview ? this.#findingsBlock(input.priorReview.findings) : "",
+			grillAnswers,
 		});
 	}
 

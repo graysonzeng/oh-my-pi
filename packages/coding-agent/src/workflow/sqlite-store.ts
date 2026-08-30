@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { WorkflowPolicyError } from "./errors";
+import { type CreateWorkflowOptions, type OverlaySidecar, parseOverlaySidecar } from "./overlay";
 import { isValidTransition } from "./transitions";
 import type { Artifact, Attempt, Transition, WorkflowState, WorkflowStatus } from "./types";
 
@@ -20,6 +21,8 @@ interface WorkflowRow {
 	version: number;
 	budget_json: string | null;
 	runner_owner: string | null;
+	pipeline_kind: string | null;
+	overlay_sidecar_json: string | null;
 }
 
 interface AttemptRow {
@@ -89,7 +92,9 @@ export class WorkflowStore {
 				updated_at TEXT NOT NULL,
 				version INTEGER NOT NULL,
 				budget_json TEXT,
-				runner_owner TEXT
+				runner_owner TEXT,
+				pipeline_kind TEXT,
+				overlay_sidecar_json TEXT
 			);
 
 			CREATE TABLE IF NOT EXISTS attempts (
@@ -139,20 +144,29 @@ export class WorkflowStore {
 		if (!cols.some(c => c.name === "runner_owner")) {
 			this.#db.exec("ALTER TABLE workflows ADD COLUMN runner_owner TEXT");
 		}
+		if (!cols.some(c => c.name === "pipeline_kind")) {
+			this.#db.exec("ALTER TABLE workflows ADD COLUMN pipeline_kind TEXT");
+		}
+		if (!cols.some(c => c.name === "overlay_sidecar_json")) {
+			this.#db.exec("ALTER TABLE workflows ADD COLUMN overlay_sidecar_json TEXT");
+		}
 	}
 
 	/** Create workflow in terminal-ready `created` state with no premature attempt. */
-	async createWorkflow(request: unknown, policy: unknown): Promise<string> {
+	async createWorkflow(request: unknown, policy: unknown, opts?: CreateWorkflowOptions): Promise<string> {
 		const id = `wf_${randomUUID()}`;
 		const now = new Date().toISOString();
+		const pipelineKind = opts?.pipelineKind ?? null;
+		const sidecarJson = opts?.overlaySidecar ? JSON.stringify(opts.overlaySidecar) : null;
 		this.#db
 			.prepare(`
 				INSERT INTO workflows (
 					id, status, request_json, policy_json, current_stage, current_attempt_id,
-					degraded_mode, created_at, updated_at, version, budget_json
-				) VALUES (?, 'created', ?, ?, 'created', NULL, 0, ?, ?, 1, NULL)
+					degraded_mode, created_at, updated_at, version, budget_json,
+					pipeline_kind, overlay_sidecar_json
+				) VALUES (?, 'created', ?, ?, 'created', NULL, 0, ?, ?, 1, NULL, ?, ?)
 			`)
-			.run(id, JSON.stringify(request), JSON.stringify(policy), now, now);
+			.run(id, JSON.stringify(request), JSON.stringify(policy), now, now, pipelineKind, sidecarJson);
 		return id;
 	}
 
@@ -175,6 +189,8 @@ export class WorkflowStore {
 			requestJson: row.request_json,
 			policyJson: row.policy_json,
 			runnerOwner: row.runner_owner ?? undefined,
+			pipelineKind: row.pipeline_kind === "devflow" ? "devflow" : undefined,
+			overlaySidecar: parseOverlaySidecar(row.overlay_sidecar_json),
 		};
 	}
 
@@ -519,6 +535,87 @@ export class WorkflowStore {
 				WHERE id = ? AND runner_owner IS NOT NULL
 			`)
 			.run(new Date().toISOString(), workflowId);
+	}
+
+	async updateOverlaySidecar(workflowId: string, sidecar: OverlaySidecar, expectedVersion?: number): Promise<void> {
+		const now = new Date().toISOString();
+		const result = this.#db
+			.prepare(`
+				UPDATE workflows
+				SET overlay_sidecar_json = ?, updated_at = ?, version = version + 1
+				WHERE id = ? ${expectedVersion !== undefined ? "AND version = ?" : ""}
+			`)
+			.run(
+				...(expectedVersion !== undefined
+					? [JSON.stringify(sidecar), now, workflowId, expectedVersion]
+					: [JSON.stringify(sidecar), now, workflowId]),
+			);
+		if (result.changes !== 1) {
+			throw new WorkflowPolicyError("optimistic_version_conflict", { workflowId, expectedVersion });
+		}
+	}
+
+	/**
+	 * Exempt redesign CAS: one transaction, exactly one UPDATE workflows.
+	 * WHERE requires runner_owner IS NULL. SET clears runner_owner. Caller must not releaseRunner.
+	 */
+	async completeExemptReplan(params: {
+		workflowId: string;
+		expectedVersion: number;
+		overlaySidecar: OverlaySidecar;
+		attemptId?: string;
+		reason?: string;
+	}): Promise<void> {
+		const { workflowId, expectedVersion, overlaySidecar, attemptId } = params;
+		const reason = params.reason ?? "plan_review:needs_redesign";
+		this.#db.transaction(() => {
+			const now = new Date().toISOString();
+			const row = this.#db.prepare("SELECT * FROM workflows WHERE id = ?").get(workflowId) as WorkflowRow | null;
+			if (!row) throw new WorkflowPolicyError("workflow_not_found", { workflowId });
+			if (attemptId) {
+				this.#db
+					.prepare(`
+						UPDATE attempts
+						SET status = 'completed', finished_at = COALESCE(finished_at, ?)
+						WHERE id = ? AND workflow_id = ?
+					`)
+					.run(now, attemptId, workflowId);
+			}
+			this.#db
+				.prepare(`
+					INSERT INTO transitions (workflow_id, from_status, to_status, reason, attempt_id, created_at)
+					VALUES (?, 'plan_review', 'planning', ?, ?, ?)
+				`)
+				.run(workflowId, reason, attemptId ?? null, now);
+			const result = this.#db
+				.prepare(`
+					UPDATE workflows
+					SET status = 'planning',
+						current_stage = 'planning',
+						overlay_sidecar_json = ?,
+						runner_owner = NULL,
+						updated_at = ?,
+						version = version + 1
+					WHERE id = ? AND status = 'plan_review' AND version = ? AND runner_owner IS NULL
+				`)
+				.run(JSON.stringify(overlaySidecar), now, workflowId, expectedVersion);
+			if (result.changes !== 1) {
+				const after = this.#db
+					.prepare("SELECT version, runner_owner FROM workflows WHERE id = ?")
+					.get(workflowId) as { version: number; runner_owner: string | null } | null;
+				if (after?.runner_owner) {
+					throw new WorkflowPolicyError("runner_lock_held", {
+						workflowId,
+						heldBy: after.runner_owner,
+					});
+				}
+				throw new WorkflowPolicyError("optimistic_version_conflict", {
+					workflowId,
+					expectedVersion,
+					actualVersion: after?.version ?? row.version,
+				});
+			}
+		})();
 	}
 
 	/** @deprecated Use claimRunner — kept so older call sites compile during migration. */

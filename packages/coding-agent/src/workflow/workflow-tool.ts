@@ -5,19 +5,22 @@ import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
 import { WorkflowEngine } from "./engine";
 import { WorkflowPolicyError } from "./errors";
+import { emptyDevflowSidecar } from "./overlay";
 import { WorkflowStore } from "./sqlite-store";
 import type { WorkflowAvailabilityReport, WorkflowStatus, WorkflowStatusReportV1 } from "./types";
 
 const workflowSchema = type({
 	"+": "reject",
-	op: type("'start' | 'status' | 'resume' | 'cancel'").describe("workflow operation"),
-	"request?": type("string").describe("start: user request / objective"),
-	"constraints?": type("string").describe("start: optional constraints"),
-	"qualityTier?": type("'balanced' | 'critical'").describe("start: quality route tier; defaults from settings"),
+	op: type("'start' | 'status' | 'resume' | 'cancel' | 'run'").describe("workflow operation"),
+	"request?": type("string").describe("start/run: user request / objective"),
+	"constraints?": type("string").describe("start/run: optional constraints"),
+	"qualityTier?": type("'balanced' | 'critical'").describe("start/run: quality route tier; defaults from settings"),
 	"workflowId?": type("string").describe("status/resume/cancel: workflow id"),
-	"degradedMode?": type("boolean").describe("start: allow same-vendor review"),
+	"degradedMode?": type("boolean").describe("start/run: allow same-vendor review"),
 	"singleStep?": type("boolean").describe("resume: run only one stage"),
 	"forceUnlock?": type("boolean").describe("resume: clear stale runner_owner after crash"),
+	"pipeline?": type("'devflow'").describe("start/run: DevFlow overlay; omit for legacy"),
+	"grillAnswers?": type("string[]").describe("start/run: pre-stage grill answers copied into sidecar"),
 });
 
 export type WorkflowToolInput = typeof workflowSchema.infer;
@@ -29,6 +32,10 @@ export type WorkflowToolDetails = {
 	approvalTier: "read" | "write";
 	availability?: WorkflowAvailabilityReport;
 	statusReport?: WorkflowStatusReportV1;
+	stepsExecuted?: number;
+	maxStepsReached?: boolean;
+	awaitingGrill?: boolean;
+	overlayReason?: string;
 };
 
 /**
@@ -38,6 +45,14 @@ export type WorkflowToolDetails = {
  */
 export function approvalTierForOp(op: WorkflowToolInput["op"]): "read" | "write" {
 	return op === "status" ? "read" : "write";
+}
+
+function createOptsFromParams(params: WorkflowToolInput) {
+	if (params.pipeline !== "devflow") return undefined;
+	return {
+		pipelineKind: "devflow" as const,
+		overlaySidecar: emptyDevflowSidecar(params.grillAnswers ?? []),
+	};
 }
 
 export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowToolDetails> {
@@ -52,7 +67,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 	/** status → read; start|resume|cancel → write (never default to bare exec). */
 	readonly approval = (args: unknown): "read" | "write" => {
 		const op = args && typeof args === "object" && "op" in args ? String((args as { op?: unknown }).op) : "";
-		if (op === "start" || op === "resume" || op === "cancel" || op === "status") {
+		if (op === "start" || op === "resume" || op === "cancel" || op === "status" || op === "run") {
 			return approvalTierForOp(op as WorkflowToolInput["op"]);
 		}
 		// Unknown op: fail closed to write (requires approval)
@@ -106,6 +121,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				const started = await engine.start(
 					{ request, constraints: params.constraints, qualityTier: params.qualityTier },
 					{ degradedMode: params.degradedMode === true },
+					createOptsFromParams(params),
 				);
 				const workflowId = started.workflowId;
 				activeWorkflowId = workflowId;
@@ -156,6 +172,49 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				};
 			}
 
+			if (params.op === "run") {
+				const request = params.request?.trim();
+				if (!request) throw new ToolError("request is required when op=run");
+				const started = await engine.start(
+					{ request, constraints: params.constraints, qualityTier: params.qualityTier },
+					{ degradedMode: params.degradedMode === true },
+					createOptsFromParams(params),
+				);
+				const workflowId = started.workflowId;
+				activeWorkflowId = workflowId;
+				const result = await engine.run(workflowId, this.#session);
+				const availabilityText = result.availability ? `\n${formatAvailabilitySummary(result.availability)}` : "";
+				const statusReport = await engine.getStatusReport(workflowId);
+				const qualityRouteText = `\n${
+					statusReport
+						? formatWorkflowStatusReport(statusReport)
+						: formatQualityRoutePolicy(result.state.policyJson)
+				}`;
+				const capText = result.maxStepsReached ? "\nmaxStepsReached=true (resume to continue; cap=32)" : "";
+				const grillText = result.awaitingGrill
+					? `\nawaitingGrill=true reason=${result.overlayReason ?? "unknown"}`
+					: "";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Workflow run: ${workflowId}\nStatus: ${result.state.status}\nStage: ${result.state.currentStage}\nstepsExecuted=${result.stepsExecuted}${capText}${grillText}${qualityRouteText}${availabilityText}`,
+						},
+					],
+					details: {
+						op: "run",
+						workflowId,
+						status: result.state.status,
+						approvalTier: tier,
+						availability: result.availability ?? started.availability,
+						stepsExecuted: result.stepsExecuted,
+						maxStepsReached: result.maxStepsReached,
+						awaitingGrill: result.awaitingGrill,
+						overlayReason: result.overlayReason,
+					},
+				};
+			}
+
 			if (params.op === "resume") {
 				const workflowId = params.workflowId?.trim();
 				if (!workflowId) throw new ToolError("workflowId is required when op=resume");
@@ -186,6 +245,10 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 						status: result.state.status,
 						approvalTier: tier,
 						availability: result.availability,
+						stepsExecuted: result.stepsExecuted,
+						maxStepsReached: result.maxStepsReached,
+						awaitingGrill: result.awaitingGrill,
+						overlayReason: result.overlayReason,
 					},
 				};
 			}

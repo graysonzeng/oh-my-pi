@@ -698,6 +698,13 @@ export interface WorkflowDefaultConfig {
 	 * Profiles keep presentationPolicy.enabled = false; only enable after quality holds.
 	 */
 	presentationOptimizationEnabled: boolean;
+	/** DevFlow overlay knobs. Not a new role profile. */
+	pipelineOverlay: {
+		kindDefault: "off";
+		auditorModel: "deepseek-v4-flash";
+		maxGrillQuestions: number;
+		maxPlanningCompletenessRetries: number;
+	};
 }
 
 export function getDefaultConfig(): WorkflowDefaultConfig {
@@ -719,6 +726,12 @@ export function getDefaultConfig(): WorkflowDefaultConfig {
 		forbiddenPaths: ["node_modules", "dist", "build", ".git"],
 		profiles: DEFAULT_MODEL_PROFILES,
 		presentationOptimizationEnabled: false,
+		pipelineOverlay: {
+			kindDefault: "off",
+			auditorModel: "deepseek-v4-flash",
+			maxGrillQuestions: 8,
+			maxPlanningCompletenessRetries: 2,
+		},
 	};
 }
 

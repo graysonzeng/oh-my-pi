@@ -419,5 +419,147 @@ export const WorkflowStateSchema = z
 		version: z.number().int().positive(),
 		requestJson: z.string(),
 		policyJson: z.string(),
+		pipelineKind: z.literal("devflow").optional(),
+		overlaySidecar: z.unknown().optional(),
 	})
 	.strict();
+
+const PIPELINE_BLOCKING_PRIORITIES = new Set(["P0", "P1"]);
+
+export const PipelineGateVerdictSchema = z.enum([
+	"PASS",
+	"PASS_WITH_NOTES",
+	"NEEDS_REVISION",
+	"NEEDS_REDESIGN",
+	"PASS_WITH_NODE",
+]);
+
+export const GateExpectedContextSchema = z
+	.object({
+		subject: z.enum(["plan", "implementation"]),
+		workflowId: z.string().min(1).optional(),
+		attemptId: z.string().min(1).optional(),
+		identity: z
+			.object({
+				modelFamily: z.string().min(1).optional(),
+			})
+			.strict()
+			.optional(),
+	})
+	.strict();
+
+const GateModelIdentitySchema = z
+	.object({
+		modelFamily: z.string().min(1).optional(),
+	})
+	.strict();
+
+/** Minimal model-facing Gate JSON (id/identity optional; engine stamps the rest). */
+export const GateResultModelSchema = z
+	.object({
+		verdict: PipelineGateVerdictSchema,
+		subject: z.enum(["plan", "implementation"]),
+		findings: z.array(ReviewFindingSchema).default([]),
+		notes: z.string().default(""),
+		explanation: z.string().min(1),
+		workflowId: z.string().min(1).optional(),
+		attemptId: z.string().min(1).optional(),
+		identity: GateModelIdentitySchema.optional(),
+	})
+	.strict();
+
+export const GateResultArtifactSchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		kind: z.literal("gate-result"),
+		verdict: z.enum(["PASS", "PASS_WITH_NOTES", "NEEDS_REVISION", "NEEDS_REDESIGN"]),
+		subject: z.enum(["plan", "implementation"]),
+		findings: z.array(ReviewFindingSchema),
+		notes: z.string(),
+		explanation: z.string().min(1),
+		workflowId: z.string().min(1),
+		attemptId: z.string().min(1),
+		createdAt: z.string().datetime(),
+		reviewerIdentity: z
+			.object({
+				modelFamily: z.string().optional(),
+				provider: z.string().optional(),
+				model: z.string().optional(),
+			})
+			.strict()
+			.optional(),
+	})
+	.strict();
+
+export type GateExpectedContext = z.infer<typeof GateExpectedContextSchema>;
+export type GateResultModelRaw = z.infer<typeof GateResultModelSchema>;
+export type NormalizedGateVerdict = "PASS" | "PASS_WITH_NOTES" | "NEEDS_REVISION" | "NEEDS_REDESIGN";
+export type GateResultModel = Omit<GateResultModelRaw, "verdict"> & { verdict: NormalizedGateVerdict };
+export type GateResultArtifact = z.infer<typeof GateResultArtifactSchema>;
+
+export class GateParseError extends Error {
+	readonly code: string;
+
+	constructor(code: string, message: string) {
+		super(message);
+		this.name = "GateParseError";
+		this.code = code;
+	}
+}
+
+/** Open finding is a PASS* blocker when blocking===true or priority is P0/P1. */
+export function isOpenPassBlocker(finding: { status?: string; blocking?: boolean; priority?: string }): boolean {
+	if (finding.status !== "open") return false;
+	return finding.blocking === true || PIPELINE_BLOCKING_PRIORITIES.has(finding.priority ?? "");
+}
+
+/**
+ * Pipeline-only. Fail-closed when PASS* still has an open P0/P1 or blocking finding.
+ * Does not rewrite the verdict to NEEDS_REVISION.
+ */
+export function assertPassHasNoOpenBlockers(
+	verdict: string,
+	findings: ReadonlyArray<{ status?: string; blocking?: boolean; priority?: string }>,
+): void {
+	if (verdict !== "PASS" && verdict !== "PASS_WITH_NOTES") return;
+	if (findings.some(isOpenPassBlocker)) {
+		throw new GateParseError(
+			"pass_open_blockers",
+			"PASS/PASS_WITH_NOTES cannot retain open P0/P1 or blocking findings",
+		);
+	}
+}
+
+function normalizeGateVerdict(
+	verdict: z.infer<typeof PipelineGateVerdictSchema>,
+): "PASS" | "PASS_WITH_NOTES" | "NEEDS_REVISION" | "NEEDS_REDESIGN" {
+	return verdict === "PASS_WITH_NODE" ? "PASS_WITH_NOTES" : verdict;
+}
+
+/**
+ * Fail-closed Gate parse bound to the current stage. Missing id/identity are stamped later.
+ */
+export function parseGateResultArtifact(raw: unknown, expected: GateExpectedContext): GateResultModel {
+	const expectedParsed = GateExpectedContextSchema.parse(expected);
+	const model = GateResultModelSchema.parse(raw);
+	const verdict = normalizeGateVerdict(model.verdict);
+	if (model.subject !== expectedParsed.subject) {
+		throw new GateParseError("subject_mismatch", `Gate subject ${model.subject} !== ${expectedParsed.subject}`);
+	}
+	if (model.workflowId && expectedParsed.workflowId && model.workflowId !== expectedParsed.workflowId) {
+		throw new GateParseError("stale_workflow_id", "Gate workflowId does not match expected context");
+	}
+	if (model.attemptId && expectedParsed.attemptId && model.attemptId !== expectedParsed.attemptId) {
+		throw new GateParseError("stale_attempt_id", "Gate attemptId does not match expected context");
+	}
+	const expectedFamily = expectedParsed.identity?.modelFamily;
+	const actualFamily = model.identity?.modelFamily;
+	if (expectedFamily && actualFamily && expectedFamily !== actualFamily) {
+		throw new GateParseError("identity_mismatch", "Gate identity.modelFamily does not match expected context");
+	}
+	if (verdict === "NEEDS_REVISION" && model.findings.length < 1) {
+		throw new GateParseError("revision_requires_finding", "NEEDS_REVISION requires at least one finding");
+	}
+	assertPassHasNoOpenBlockers(verdict, model.findings);
+	return { ...model, verdict };
+}
