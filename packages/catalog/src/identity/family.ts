@@ -104,11 +104,8 @@ export const isDeepseekModelIdOrName = memo((value: string): boolean => {
 
 /**
  * DeepSeek V4 Flash SKU in any host/namespace form (`deepseek-v4-flash`, dated
- * `deepseek-v4-flash-0731`, `deepseek-ai/DeepSeek-V4-Flash`). Both V4 SKUs
- * (Flash and Pro) accept the `low` reasoning_effort tier; this predicate keeps
- * Flash distinguishable from Pro where a host quirk splits them (e.g.
- * OpenRouter exposes `low` on Flash but only `high` on non-Flash V4).
- * See https://api-docs.deepseek.com/api/create-chat-completion.
+ * `deepseek-v4-flash-0731`, `deepseek-ai/DeepSeek-V4-Flash`). Effort policy
+ * uses this identity to enforce the model-wide mandatory `max` tier.
  */
 export const isDeepseekV4FlashModelId = memo((modelId: string): boolean => {
 	return bareModelId(modelId).toLowerCase().includes("deepseek-v4-flash");

@@ -3192,10 +3192,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
-			// Caller-requested coarse effort maps onto the resolved model's
-			// supported range. The operator ceiling applies to explicit effort;
-			// an agent ceiling applies to every path, including explicit suffixes,
-			// agent defaults, and retry fallbacks.
+			// Caller/agent ceilings stay attached to the session so later retry
+			// models remain capped. Mandatory single-effort models override the
+			// ceiling only when resolving their own effective level.
 			const globalEffortCeiling = options.effort !== undefined ? settings.get("task.maxEffort") : undefined;
 			const spawnEffortCeiling =
 				agent.maxEffort !== undefined

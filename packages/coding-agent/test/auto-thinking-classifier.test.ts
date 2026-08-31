@@ -14,6 +14,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	AUTO_THINKING,
 	clampAutoThinkingEffort,
+	clampThinkingLevelToCeiling,
 	parseCliThinkingLevel,
 	parseConfiguredThinkingLevel,
 	parseEffort,
@@ -301,6 +302,32 @@ describe("auto thinking classifier helpers", () => {
 
 	it("has no provisional level on a max-only ladder", () => {
 		expect(resolveProvisionalAutoLevel(buildLadderModel("mock-max-only", [Effort.Max]))).toBeUndefined();
+	});
+
+	it("forces a mandatory max-only ladder to max before classification", () => {
+		const model = buildModel({
+			id: "mandatory-max-only",
+			name: "mandatory-max-only",
+			api: "openai-completions",
+			provider: "mock",
+			baseUrl: "https://example.com",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Max],
+				defaultLevel: Effort.Max,
+				requiresEffort: true,
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		});
+
+		expect(resolveProvisionalAutoLevel(model)).toBe(Effort.Max);
+		expect(clampAutoThinkingEffort(model, Effort.Low, Effort.Low)).toBe(Effort.Max);
+		expect(resolveTaskEffortLevel(model, "lo", Effort.Low)).toBe(Effort.Max);
+		expect(clampThinkingLevelToCeiling(model, Effort.Low, Effort.Low)).toBe(Effort.Max);
 	});
 
 	it("stops at the highest tier under the ceiling on a sparse ladder", async () => {

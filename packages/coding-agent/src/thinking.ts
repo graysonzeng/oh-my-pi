@@ -250,6 +250,7 @@ export function clampAutoThinkingEffort(
 	ceiling: Effort = Effort.Max,
 ): Effort | undefined {
 	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
+	if (model?.thinking?.requiresEffort === true && supported.length === 1) return supported[0];
 	if (supported.length === 0) return undefined;
 	const lowIndex = THINKING_EFFORTS.indexOf(Effort.Low);
 	const ceilingIndex = THINKING_EFFORTS.indexOf(ceiling);
@@ -287,6 +288,8 @@ export function resolveTaskEffortLevel(
 	maxEffort?: Effort,
 ): Effort | undefined {
 	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
+	const mandatorySingleEffort =
+		model?.thinking?.requiresEffort === true && supported.length === 1 ? supported[0] : undefined;
 	if (supported.length === 0) return undefined;
 	let resolved: Effort;
 	switch (effort) {
@@ -301,6 +304,7 @@ export function resolveTaskEffortLevel(
 			break;
 	}
 	if (maxEffort === undefined) return resolved;
+	if (mandatorySingleEffort !== undefined) return mandatorySingleEffort;
 	const maxIndex = THINKING_EFFORTS.indexOf(maxEffort);
 	const ceiling = supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
 	if (ceiling === undefined) {
@@ -334,24 +338,26 @@ export function clampThinkingLevelToCeiling(
 	level: ThinkingLevel | undefined,
 	ceiling: Effort | undefined,
 ): ThinkingLevel | undefined {
+	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
+	if (model?.thinking?.requiresEffort === true && supported.length === 1) return supported[0];
 	if (ceiling === undefined || level === undefined || level === ThinkingLevel.Off || level === ThinkingLevel.Inherit) {
 		return level;
 	}
 	const maxIndex = THINKING_EFFORTS.indexOf(ceiling);
 	if (THINKING_EFFORTS.indexOf(level) <= maxIndex) return level;
-	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
+
 	return supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex) ?? level;
 }
 
 /**
- * True when `model` can honor a thinking-effort ceiling: it either has no
- * controllable effort surface (nothing to cap) or supports at least one effort
- * at or below the ceiling. Retry-fallback candidate filtering uses this to
- * skip models whose floor would force the session above the ceiling.
+ * True when `model` can honor a thinking-effort ceiling. A mandatory model
+ * with a single legal effort is allowed through because lowering it is
+ * impossible; the model invariant outranks a caller or agent ceiling.
  */
 export function modelSupportsEffortCeiling(model: Model, ceiling: Effort): boolean {
 	const supported = getSupportedEfforts(model);
 	if (supported.length === 0) return true;
+	if (model.thinking?.requiresEffort === true && supported.length === 1) return true;
 	const maxIndex = THINKING_EFFORTS.indexOf(ceiling);
 	return supported.some(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
 }
@@ -372,6 +378,8 @@ export function modelSupportsEffortCeiling(model: Model, ceiling: Effort): boole
  */
 export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | undefined {
 	if (!model?.reasoning) return undefined;
+	const supported = getSupportedEfforts(model);
+	if (model.thinking?.requiresEffort === true && supported.length === 1) return supported[0];
 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
 	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
 }

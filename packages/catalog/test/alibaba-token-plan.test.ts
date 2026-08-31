@@ -136,15 +136,21 @@ describe("QwenCloud Token Plan provider", () => {
 		for (const [id, contextWindow, maxTokens] of expectedLimits) {
 			expect(models?.find(model => model.id === id)).toMatchObject({ contextWindow, maxTokens });
 		}
-		for (const id of ["deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v4-pro-0813"]) {
+		for (const id of ["deepseek-v4-flash", "deepseek-v4-flash-0731"]) {
 			expect(models?.find(model => model.id === id)).toMatchObject({
 				reasoning: true,
 				thinking: {
 					mode: "effort",
-					efforts: ["high", "max"],
+					efforts: ["max"],
+					defaultLevel: "max",
+					requiresEffort: true,
 				},
 			});
 		}
+		expect(models?.find(model => model.id === "deepseek-v4-pro-0813")).toMatchObject({
+			reasoning: true,
+			thinking: { mode: "effort", efforts: ["high", "max"] },
+		});
 		expect(models?.find(model => model.id === "future-chat-model")).toMatchObject({
 			id: "future-chat-model",
 			contextWindow: null,

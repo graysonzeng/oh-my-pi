@@ -201,6 +201,16 @@ describe("model thinking derivation", () => {
 		});
 		// Explicit compat overrides still win over identity-derived wire values.
 		expect(deepseek.thinking?.effortMap).toEqual({ max: "max-plus" });
+		expect(getSupportedEfforts(deepseek)).toEqual([Effort.Max]);
+		expect(deepseek.thinking).toMatchObject({
+			efforts: [Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
+		expect(minimumSupportedEffort(deepseek)).toBe(Effort.Max);
+		expect(defaultSupportedEffort(deepseek)).toBe(Effort.Max);
+		expect(clampThinkingLevelForModel(deepseek, Effort.Low)).toBe(Effort.Max);
+		expect(() => requireSupportedEffort(deepseek, Effort.High)).toThrow(/Supported efforts: max/);
 		// OpenRouter-hosted Anthropic adaptive models carry the wire-exact
 		// five-tier ladder with no remapping.
 		expect(getSupportedEfforts(openRouterAnthropic)).toEqual([
@@ -289,6 +299,7 @@ describe("model thinking derivation", () => {
 			api: "ollama-chat",
 			provider: "ollama-cloud",
 			baseUrl: "https://ollama.com",
+			reasoning: false,
 		});
 		const pro = createModel({
 			id: "deepseek-v4-pro",
@@ -303,29 +314,34 @@ describe("model thinking derivation", () => {
 			baseUrl: "https://ollama.com",
 		});
 
-		// V4 Flash keeps its low/high/max ladder over the ollama-chat transport
-		// instead of Ollama's generic minimal..xhigh scale (medium/xhigh fold
-		// into high, max is a real wire tier).
-		expect(getSupportedEfforts(flash)).toEqual([Effort.Low, Effort.High, Effort.Max]);
-		expect(getSupportedEfforts(flashDated)).toEqual([Effort.Low, Effort.High, Effort.Max]);
-		expect(flash.thinking?.effortMap).toBeUndefined();
-		// V4 Pro shares Flash's low/high/max ladder on the direct API and every
-		// aggregator route (DeepSeek's docs advertise `low` for both V4 SKUs);
-		// the older V3.x reasoners still top out at high/max.
+		// V4 Flash is globally pinned to max regardless of transport or dated id.
+		expect(getSupportedEfforts(flash)).toEqual([Effort.Max]);
+		expect(getSupportedEfforts(flashDated)).toEqual([Effort.Max]);
+		expect(flashDated.reasoning).toBe(true);
+		expect(flash.thinking).toMatchObject({
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
+		// V4 Pro retains its provider-supported low/high/max ladder; older V3.x
+		// reasoners still top out at high/max.
 		expect(getSupportedEfforts(pro)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(getSupportedEfforts(v32)).toEqual([Effort.High, Effort.Max]);
 	});
 
 	it("applies the DeepSeek effort contract to opencode-go openai-responses flash (issue #9134)", () => {
-		// opencode-go/deepseek-v4-flash is pinned to the Responses transport
-		// (the Go gateway serves it only at /responses), but the effort ladder
-		// is a model property: it must expose low/high/max like the pro sibling
-		// on chat completions, not the generic minimal..xhigh fallback.
+		// The max-only contract is a model invariant, including the Responses
+		// transport and stale cached low/high/max metadata.
 		const flash = createModel({
 			id: "deepseek-v4-flash",
 			api: "openai-responses",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.High, Effort.Max],
+				defaultLevel: Effort.High,
+				requiresEffort: false,
+			},
 		});
 		const pro = createModel({
 			id: "deepseek-v4-pro",
@@ -334,9 +350,12 @@ describe("model thinking derivation", () => {
 			baseUrl: "https://opencode.ai/zen/go/v1",
 		});
 
-		expect(getSupportedEfforts(flash)).toEqual([Effort.Low, Effort.High, Effort.Max]);
-		expect(flash.thinking?.effortMap).toBeUndefined();
-		expect(() => requireSupportedEffort(flash, Effort.Medium)).toThrow(/Supported efforts: low, high, max/);
+		expect(getSupportedEfforts(flash)).toEqual([Effort.Max]);
+		expect(flash.thinking).toMatchObject({
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
+		expect(() => requireSupportedEffort(flash, Effort.Medium)).toThrow(/Supported efforts: max/);
 		expect(getSupportedEfforts(pro)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 

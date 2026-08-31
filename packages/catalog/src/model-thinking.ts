@@ -66,7 +66,9 @@ const GEMINI_3_FLASH_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, E
 const GPT_5_2_PLUS_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 const GPT_5_1_CODEX_MINI_EFFORTS: readonly Effort[] = [Effort.Medium, Effort.High];
 const LOW_MEDIUM_HIGH_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
-/** Wire-exact `low`/`high`/`max` scale used by Kimi K3 and DeepSeek V4 (Flash and Pro, direct API and aggregators). */
+/** DeepSeek V4 Flash always runs at maximum effort; lower tiers are intentionally unavailable. */
+const MAX_ONLY_REASONING_EFFORTS: readonly Effort[] = [Effort.Max];
+/** Wire-exact `low`/`high`/`max` scale used by Kimi K3 and DeepSeek V4 Pro. */
 const LOW_HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High, Effort.Max];
 /** Wire-exact two-tier scale (`high`/`max`): GLM-5.2 on Z.ai/Umans/Ollama Cloud/Baseten, Sakana Fugu, older DeepSeek reasoners (V3.x/R1). */
 const HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.High, Effort.Max];
@@ -147,8 +149,9 @@ export function resolveModelThinking<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
-	if (!spec.reasoning) return undefined;
-	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
+	const deepseekV4Flash = isDeepseekV4FlashModelId(spec.id);
+	if (!spec.reasoning && !deepseekV4Flash) return undefined;
+	if (!deepseekV4Flash && omitsWireReasoningEffort(spec.api, compat)) return undefined;
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
@@ -185,13 +188,16 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		thinking.supportsDisplay === undefined &&
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		supportsAdaptiveThinkingDisplay(spec.id);
-	const needsRequiresEffort =
-		thinking.requiresEffort === undefined &&
-		(impliesMandatoryReasoning(parsed, spec.id) ||
-			isQwenTemplateReasoningEffortCompat(compat) ||
-			isOpenCodeGatewayOxAlphaModel(spec));
-	const needsDefaultLevel =
-		thinking.defaultLevel === undefined && (isKimiK3ModelId(spec.id) || isGlm53ReasoningEffortModelId(spec.id));
+	const deepseekV4Flash = isDeepseekV4FlashModelId(spec.id);
+	const needsRequiresEffort = deepseekV4Flash
+		? thinking.requiresEffort !== true
+		: thinking.requiresEffort === undefined &&
+			(impliesMandatoryReasoning(parsed, spec.id) ||
+				isQwenTemplateReasoningEffortCompat(compat) ||
+				isOpenCodeGatewayOxAlphaModel(spec));
+	const needsDefaultLevel = deepseekV4Flash
+		? thinking.defaultLevel !== Effort.Max
+		: thinking.defaultLevel === undefined && (isKimiK3ModelId(spec.id) || isGlm53ReasoningEffortModelId(spec.id));
 	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
 		return thinking;
 	}
@@ -229,7 +235,7 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 		mode: inferThinkingControlMode(spec, parsed),
 		efforts,
 	};
-	if (isKimiK3ModelId(spec.id) || isGlm53ReasoningEffortModelId(spec.id)) {
+	if (isDeepseekV4FlashModelId(spec.id) || isKimiK3ModelId(spec.id) || isGlm53ReasoningEffortModelId(spec.id)) {
 		config.defaultLevel = Effort.Max;
 	}
 	const effortMap = inferEffortMap(spec, compat, config.mode, config.efforts);
@@ -243,6 +249,7 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 		config.supportsDisplay = true;
 	}
 	if (
+		isDeepseekV4FlashModelId(spec.id) ||
 		impliesMandatoryReasoning(parsed, spec.id) ||
 		isQwenTemplateReasoningEffortCompat(compat) ||
 		isOpenCodeGatewayOxAlphaModel(spec)
@@ -329,6 +336,9 @@ function getModelDefinedEfforts<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	compat: CompatOf<TApi>,
 ): readonly Effort[] | undefined {
+	if (isDeepseekV4FlashModelId(spec.id)) {
+		return MAX_ONLY_REASONING_EFFORTS;
+	}
 	if (
 		isOpenAICompatReasoningApi(spec.api) &&
 		isChatTemplateThinkingFormat(compat) &&
@@ -414,21 +424,13 @@ function getModelDefinedEfforts<TApi extends Api>(
 			(spec.api === "ollama-chat" && spec.provider === "ollama-cloud")) &&
 		isDeepseekReasoningModel(spec)
 	) {
-		// The DeepSeek V4 effort ladder is a model property, not a transport one:
-		// `opencode-go/deepseek-v4-flash` is pinned to `openai-responses` (the Go
-		// gateway serves it only at /responses), yet carries the same wire-exact
-		// low/high/max scale — so the Responses transport is admitted here too.
-		// DeepSeek V4 (Flash and Pro) accepts the wire-exact low/high/max ladder
-		// on every first-party/aggregator host — the direct API, aggregators, and
-		// Ollama Cloud alike (medium/xhigh fold into high, max is a real wire
-		// tier). See https://api-docs.deepseek.com/api/create-chat-completion.
+		// DeepSeek V4 Pro accepts the wire-exact low/high/max ladder on the
+		// direct API and aggregator hosts. V4 Flash is handled above as a
+		// mandatory max-only model so no task can lower its effort.
 		// OpenRouter's non-Flash V4 route exposes only high, except the dated
 		// `deepseek-v4-pro-0813` SKU: its /models metadata advertises (and the
 		// route accepts) the full low/high/max ladder like every other host.
 		// The older reasoners (V3.x, R1, deepseek-reasoner) top out at high/max.
-		if (isDeepseekV4FlashModelId(spec.id)) {
-			return LOW_HIGH_MAX_REASONING_EFFORTS;
-		}
 		if (bareModelId(spec.id).toLowerCase().includes("deepseek-v4")) {
 			if (!isOpenRouterThinkingFormat(compat)) {
 				return LOW_HIGH_MAX_REASONING_EFFORTS;

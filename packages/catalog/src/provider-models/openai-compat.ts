@@ -12,6 +12,7 @@ import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-mo
 import { getBundledModelReferenceIndex } from "../identity/bundled";
 import {
 	anthropicModelSupportsThinking,
+	isDeepseekV4FlashModelId,
 	isGlmVisionModelId,
 	isGrokReasoningEffortCapable,
 	isKimiK3ModelId,
@@ -3511,14 +3512,23 @@ export function alibabaTokenPlanModelManagerOptions(
 								}
 							: defaults;
 
-						if (normalizedId.startsWith("deepseek-v4")) {
+						if (isDeepseekV4FlashModelId(normalizedId)) {
 							return {
 								...enriched,
 								reasoning: true,
 								thinking: {
 									mode: "effort" as const,
-									efforts: [Effort.High, Effort.Max],
+									efforts: [Effort.Max],
+									defaultLevel: Effort.Max,
+									requiresEffort: true,
 								},
+							};
+						}
+						if (normalizedId.startsWith("deepseek-v4")) {
+							return {
+								...enriched,
+								reasoning: true,
+								thinking: { mode: "effort" as const, efforts: [Effort.High, Effort.Max] },
 							};
 						}
 						return enriched;
