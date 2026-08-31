@@ -2,12 +2,11 @@ import { describe, expect, it } from "bun:test";
 import {
 	EXPLORE_MAX_RUNTIME_MS,
 	REVIEW_GATE_MAX_RUNTIME_MS,
-	readPathFromToolArgs,
 	resolveClassMaxRuntimeMs,
 	resolveClassSoftRuntimeMs,
 	resolveSubagentPerformanceClass,
-	shouldPreserveExplicitReadRange,
 } from "@oh-my-pi/pi-coding-agent/task";
+import { readPathFromToolArgs, shouldPreserveExplicitReadRange } from "../../src/tools/read-selector";
 
 describe("subagent performance class", () => {
 	it("classifies the frozen name/frontmatter/spawn matrix", () => {

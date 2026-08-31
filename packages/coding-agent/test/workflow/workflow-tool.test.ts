@@ -49,7 +49,7 @@ describe("WorkflowTool", () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-tool-"));
 		artifactStore = new ArtifactStore(artifactDir);
-		session = fakeSession();
+		session = fakeSession({ getSessionId: () => "session-owner" });
 		tool = new WorkflowTool(
 			session,
 			s =>
@@ -111,6 +111,13 @@ describe("WorkflowTool", () => {
 		expect(details.workflowId).toBeTruthy();
 		expect(details.status).toBe("created");
 		expect(details.approvalTier).toBe("write");
+	});
+
+	it("persists the session owner for devflow discovery", async () => {
+		const started = await tool.execute("t-owner", { op: "start", request: "build it", pipeline: "devflow" });
+		const active = await store.findLatestActiveDevflow("session-owner");
+		expect(active?.id).toBe(started.details?.workflowId);
+		expect(active?.ownerSessionId).toBe("session-owner");
 	});
 
 	it("status is read-only", async () => {

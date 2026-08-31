@@ -1,8 +1,10 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runDeliveryPipeline } from "../../src/modes/delivery";
+import gateReviewAdapterPrompt from "../../src/prompts/workflow/gate-review-adapter.md" with { type: "text" };
 import { lookupBuiltinSlashCommand } from "../../src/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "../../src/slash-commands/types";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
@@ -14,6 +16,7 @@ import { derivePlanReviewArtifactV2 } from "../../src/workflow/gate-derive";
 import { GateResultJsonSchema } from "../../src/workflow/json-schemas";
 import {
 	emptyDevflowSidecar,
+	parseOverlaySidecar,
 	parsePipelineCompletenessResult,
 	sidecarWithGrillPause,
 } from "../../src/workflow/overlay";
@@ -21,6 +24,7 @@ import { buildRequirementsSnapshot } from "../../src/workflow/requirements-snaps
 import { RuntimeAdapter, resolvePipelineReviewAgent, WORKFLOW_ROLE_TO_AGENT } from "../../src/workflow/runtime-adapter";
 import { GateParseError, parseGateResultArtifact } from "../../src/workflow/schemas";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
+import type { WorkflowState } from "../../src/workflow/types";
 import { WorkflowTool } from "../../src/workflow/workflow-tool";
 import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
 
@@ -120,18 +124,168 @@ describe("DevFlow overlay slash + coordinator", () => {
 		expect(calls).toEqual([]);
 	});
 
-	it("preflight answers are copied onto op=run and no workflow is created before complete", async () => {
+	it("queries the workflow tool with the persistent session owner before deciding resume versus run", async () => {
+		const queriedOwners: string[] = [];
 		const calls: unknown[] = [];
+		const workflow = {
+			findActiveDeliveryWorkflow: async (ownerSessionId: string) => {
+				queriedOwners.push(ownerSessionId);
+				return { id: "wf_owned", runnerOwner: undefined, overlaySidecar: emptyDevflowSidecar() };
+			},
+			execute: async (_id: string, input: unknown) => {
+				calls.push(input);
+				return {
+					content: [{ type: "text", text: "resumed" }],
+					details: {
+						op: "resume" as const,
+						workflowId: "wf_owned",
+						status: "completed" as const,
+						approvalTier: "write" as const,
+					},
+				};
+			},
+		};
+		const runtime = {
+			session: {
+				getToolByName: () => workflow,
+				sessionManager: { getEntries: () => [] },
+			},
+			sessionManager: { getSessionId: () => "session-owner" },
+			settings: { get: () => ":memory:" },
+			output: async () => {},
+		} as unknown as SlashCommandRuntime;
+
+		await runDeliveryPipeline(runtime, "must not start another workflow");
+		expect(queriedOwners).toEqual(["session-owner"]);
+		expect(calls).toEqual([{ op: "resume", workflowId: "wf_owned" }]);
+	});
+
+	it("keeps two production /delivery sessions on their own locked workflows", async () => {
+		const store = new WorkflowStore(":memory:");
+		try {
+			const firstId = await store.createWorkflow(
+				{ request: "first" },
+				{},
+				{ pipelineKind: "devflow", overlaySidecar: emptyDevflowSidecar(), ownerSessionId: "session-a" },
+			);
+			const secondId = await store.createWorkflow(
+				{ request: "second" },
+				{},
+				{ pipelineKind: "devflow", overlaySidecar: emptyDevflowSidecar(), ownerSessionId: "session-b" },
+			);
+			const first = await store.getCurrentState(firstId);
+			const second = await store.getCurrentState(secondId);
+			await store.claimRunner(firstId, "runner-a", first!.version);
+			await store.claimRunner(secondId, "runner-b", second!.version);
+
+			const runSession = async (sessionId: string) => {
+				const outputs: string[] = [];
+				const toolSession = fakeSession({ getSessionId: () => sessionId });
+				const workflow = new WorkflowTool(
+					toolSession,
+					session => new WorkflowEngine({ store, session, verifier: passVerifier() }),
+				);
+				await runDeliveryPipeline(
+					{
+						session: {
+							getToolByName: () => workflow,
+							sessionManager: { getEntries: () => [] },
+						},
+						sessionManager: { getSessionId: () => sessionId },
+						output: async (text: string) => {
+							outputs.push(text);
+						},
+					} as unknown as SlashCommandRuntime,
+					"must not start",
+				);
+				return outputs.at(-1);
+			};
+
+			expect(await runSession("session-a")).toContain(firstId);
+			expect(await runSession("session-b")).toContain(secondId);
+		} finally {
+			store.close();
+		}
+	});
+
+	it("clears persisted non-redesign grill pauses before the coordinator resumes", async () => {
+		for (const reason of ["incomplete_plan", "gate_parse_failed", "max_grill_questions"] as const) {
+			const store = new WorkflowStore(":memory:");
+			try {
+				const workflowId = await store.createWorkflow(
+					{ request: reason },
+					{},
+					{
+						pipelineKind: "devflow",
+						ownerSessionId: `session-${reason}`,
+						overlaySidecar: sidecarWithGrillPause(
+							emptyDevflowSidecar(),
+							reason,
+							["missing detail"],
+							"What is missing?",
+						),
+					},
+				);
+				const toolSession = fakeSession({ getSessionId: () => `session-${reason}` });
+				const realTool = new WorkflowTool(
+					toolSession,
+					session => new WorkflowEngine({ store, session, verifier: passVerifier() }),
+				);
+				let stateAtResume: WorkflowState | null | undefined;
+				const workflow = {
+					findActiveDeliveryWorkflow: (ownerSessionId: string) =>
+						realTool.findActiveDeliveryWorkflow(ownerSessionId),
+					recoverDeliveryGrill: (id: string, answers: readonly string[]) =>
+						realTool.recoverDeliveryGrill(id, answers),
+					execute: async (_id: string, input: { op: string; workflowId?: string }) => {
+						stateAtResume = await store.getCurrentState(workflowId);
+						return {
+							content: [{ type: "text", text: "resumed" }],
+							details: {
+								op: input.op as "resume",
+								workflowId: input.workflowId,
+								status: "completed" as const,
+								approvalTier: "write" as const,
+							},
+						};
+					},
+				};
+				await runDeliveryPipeline(
+					{
+						session: {
+							getToolByName: () => workflow,
+							sessionManager: { getEntries: () => [] },
+						},
+						sessionManager: { getSessionId: () => `session-${reason}` },
+						output: async () => {},
+					} as unknown as SlashCommandRuntime,
+					"the missing answer",
+				);
+
+				expect(stateAtResume?.overlaySidecar?.phase).toBe("idle");
+				expect(stateAtResume?.overlaySidecar?.grill.reason).toBeUndefined();
+				expect(stateAtResume?.overlaySidecar?.grill.lastQuestion).toBe("");
+				expect(stateAtResume?.overlaySidecar?.grill.answers).toEqual(["the missing answer"]);
+			} finally {
+				store.close();
+			}
+		}
+	});
+	it("preserves the first request while collecting preflight answers", async () => {
+		const calls: unknown[] = [];
+		const auditedRequests: string[] = [];
 		let complete = false;
 		const runtime = {
 			session: { getToolByName: () => undefined, sessionManager: { getEntries: () => [] } },
 			output: async () => {},
 		} as unknown as SlashCommandRuntime;
 		const deps = {
-			auditor: async () =>
-				complete
+			auditor: async (input: { request: string }) => {
+				auditedRequests.push(input.request);
+				return complete
 					? { complete: true, missing: [] as string[] }
-					: { complete: false, missing: ["acceptance"], next: "What is the acceptance test?" },
+					: { complete: false, missing: ["acceptance"], next: "What is the acceptance test?" };
+			},
 			executeWorkflow: async (input: { op: string; grillAnswers?: string[] }) => {
 				calls.push(input);
 				return {
@@ -149,9 +303,92 @@ describe("DevFlow overlay slash + coordinator", () => {
 		expect(calls).toEqual([]);
 		complete = true;
 		await runDeliveryPipeline(runtime, "bun test is the bar", deps);
+		expect(auditedRequests).toEqual(["ship it", "ship it"]);
 		expect(calls).toEqual([
-			{ op: "run", request: "bun test is the bar", pipeline: "devflow", grillAnswers: ["bun test is the bar"] },
+			{ op: "run", request: "ship it", pipeline: "devflow", grillAnswers: ["bun test is the bar"] },
 		]);
+	});
+
+	it("asks all eight preflight questions before reporting unresolved detail", async () => {
+		const outputs: string[] = [];
+		const calls: unknown[] = [];
+		let audits = 0;
+		const runtime = {
+			session: { getToolByName: () => undefined, sessionManager: { getEntries: () => [] } },
+			output: async (text: string) => {
+				outputs.push(text);
+			},
+		} as unknown as SlashCommandRuntime;
+		const deps = {
+			auditor: async () => {
+				audits += 1;
+				return { complete: false, missing: ["still missing"], next: `Question ${audits}?` };
+			},
+			executeWorkflow: async (input: unknown) => {
+				calls.push(input);
+				return { content: [{ type: "text", text: "should not run" }] };
+			},
+		};
+
+		await runDeliveryPipeline(runtime, "original request", deps);
+		for (let answer = 1; answer <= 8; answer += 1) {
+			await runDeliveryPipeline(runtime, `answer ${answer}`, deps);
+		}
+
+		expect(outputs.slice(0, 8)).toEqual(Array.from({ length: 8 }, (_, index) => `Question ${index + 1}?`));
+		expect(outputs.at(-1)).toBe("still missing");
+		expect(calls).toEqual([]);
+	});
+
+	it("reports an owned active workflow lock without resuming or starting another workflow", async () => {
+		const outputs: string[] = [];
+		const ops: string[] = [];
+		await runDeliveryPipeline(
+			{
+				session: { getToolByName: () => undefined, sessionManager: { getEntries: () => [] } },
+				output: async (text: string) => {
+					outputs.push(text);
+				},
+			} as unknown as SlashCommandRuntime,
+			"new request must not start",
+			{
+				loadActiveDevflow: async () => ({ workflowId: "wf_locked", runnerOwner: "runner-1" }),
+				executeWorkflow: async input => {
+					ops.push(input.op);
+					return { content: [{ type: "text", text: "unexpected" }] };
+				},
+			},
+		);
+		expect(ops).toEqual([]);
+		expect(outputs.at(-1)).toContain("wf_locked");
+		expect(outputs.at(-1)).toContain("runner-1");
+	});
+
+	it("resumes an unlocked owned active workflow instead of starting another workflow", async () => {
+		const ops: string[] = [];
+		await runDeliveryPipeline(
+			{
+				session: { getToolByName: () => undefined, sessionManager: { getEntries: () => [] } },
+				output: async () => {},
+			} as unknown as SlashCommandRuntime,
+			"new request must not start",
+			{
+				loadActiveDevflow: async () => ({ workflowId: "wf_active", sidecar: emptyDevflowSidecar() }),
+				executeWorkflow: async input => {
+					ops.push(input.op);
+					return {
+						content: [{ type: "text", text: "resumed" }],
+						details: {
+							op: "resume",
+							workflowId: "wf_active",
+							status: "completed",
+							approvalTier: "write",
+						},
+					};
+				},
+			},
+		);
+		expect(ops).toEqual(["resume"]);
 	});
 
 	it("grilling recovery without an explicit answer re-asks and does not append transcript tail", async () => {
@@ -166,7 +403,7 @@ describe("DevFlow overlay slash + coordinator", () => {
 						getEntries: () => [{ type: "message", message: { role: "user", content: "original request" } }],
 					},
 				},
-				output: async text => {
+				output: async (text: string) => {
 					outputs.push(text);
 				},
 			} as unknown as SlashCommandRuntime,
@@ -181,7 +418,7 @@ describe("DevFlow overlay slash + coordinator", () => {
 						"What is the scope?",
 					),
 				}),
-				appendAnswers: async (_id, next) => {
+				recoverGrill: async (_id, next) => {
 					answers.push([...next]);
 				},
 				executeWorkflow: async input => {
@@ -236,10 +473,9 @@ describe("DevFlow overlay slash + coordinator", () => {
 		expect(ops).toEqual(["run", "resume"]);
 	});
 
-	it("coordinator appends answers and replans before resume when redesign grilling is open", async () => {
+	it("coordinator recovers redesign answers before resume", async () => {
 		const ops: string[] = [];
-		const answers: string[][] = [];
-		const replans: string[] = [];
+		const recoveries: Array<{ workflowId: string; answers: readonly string[] }> = [];
 		await runDeliveryPipeline(
 			{
 				session: { getToolByName: () => undefined, sessionManager: { getEntries: () => [] } },
@@ -251,11 +487,8 @@ describe("DevFlow overlay slash + coordinator", () => {
 					workflowId: "wf_grill",
 					sidecar: sidecarWithGrillPause(emptyDevflowSidecar(), "needs_redesign", ["scope"], "What is the API?"),
 				}),
-				appendAnswers: async (_id, next) => {
-					answers.push([...next]);
-				},
-				replanFromRedesign: async id => {
-					replans.push(id);
+				recoverGrill: async (workflowId, answers) => {
+					recoveries.push({ workflowId, answers });
 				},
 				executeWorkflow: async input => {
 					ops.push(input.op);
@@ -271,8 +504,7 @@ describe("DevFlow overlay slash + coordinator", () => {
 				},
 			},
 		);
-		expect(answers).toEqual([["keep the public API"]]);
-		expect(replans).toEqual(["wf_grill"]);
+		expect(recoveries).toEqual([{ workflowId: "wf_grill", answers: ["keep the public API"] }]);
 		expect(ops).toEqual(["resume"]);
 		expect(ops).not.toContain("run");
 	});
@@ -326,6 +558,83 @@ describe("DevFlow overlay create + hydrate", () => {
 		expect(legacy?.overlaySidecar).toBeUndefined();
 		legacyStore.close();
 		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	it("uses a versioned strict sidecar schema", () => {
+		const sidecar = emptyDevflowSidecar(["keep scope"]);
+		expect(sidecar.schemaVersion).toBe(1);
+		expect(parseOverlaySidecar(JSON.stringify(sidecar))).toEqual(sidecar);
+		expect(
+			parseOverlaySidecar(
+				JSON.stringify({
+					...sidecar,
+					unexpected: true,
+				}),
+			),
+		).toBeUndefined();
+		expect(
+			parseOverlaySidecar(JSON.stringify({ schemaVersion: 1, phase: "running", grill: { answers: [] } })),
+		).toBeUndefined();
+	});
+
+	it("fails closed when a persisted devflow sidecar is corrupt", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-devflow-corrupt-"));
+		const dbPath = path.join(dir, "workflow.db");
+		try {
+			const store = new WorkflowStore(dbPath);
+			const workflowId = await store.createWorkflow(
+				{ request: "ship overlay" },
+				{},
+				{ pipelineKind: "devflow", overlaySidecar: emptyDevflowSidecar() },
+			);
+			store.close();
+			const db = new Database(dbPath);
+			db.prepare("UPDATE workflows SET overlay_sidecar_json = ? WHERE id = ?").run(
+				'{"schemaVersion":1}',
+				workflowId,
+			);
+			db.close();
+
+			const reopened = new WorkflowStore(dbPath);
+			try {
+				await expect(reopened.getCurrentState(workflowId)).rejects.toThrow(/invalid_devflow_sidecar/);
+			} finally {
+				reopened.close();
+			}
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("finds active devflow only for its persisted owner session", async () => {
+		const store = new WorkflowStore(":memory:");
+		try {
+			const firstId = await store.createWorkflow(
+				{ request: "session A" },
+				{},
+				{
+					pipelineKind: "devflow",
+					overlaySidecar: emptyDevflowSidecar(),
+					ownerSessionId: "session-a",
+				},
+			);
+			await store.createWorkflow(
+				{ request: "session B" },
+				{},
+				{
+					pipelineKind: "devflow",
+					overlaySidecar: emptyDevflowSidecar(),
+					ownerSessionId: "session-b",
+				},
+			);
+
+			const owned = await store.findLatestActiveDevflow("session-a");
+			expect(owned?.id).toBe(firstId);
+			expect(owned?.ownerSessionId).toBe("session-a");
+			expect(await store.findLatestActiveDevflow("session-c")).toBeNull();
+		} finally {
+			store.close();
+		}
 	});
 });
 
@@ -583,7 +892,7 @@ describe("DevFlow overlay engine contracts", () => {
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: completeAuditor,
 			adapter: new RuntimeAdapter(async request => {
-				if ((request.agent ?? "") === "subagent-sol") {
+				if (request.workflowRole === "plan_reviewer") {
 					gateCalls += 1;
 					throw new WorkflowCancelledError("user abort");
 				}
@@ -711,6 +1020,61 @@ describe("DevFlow overlay engine contracts", () => {
 		expect(result.verification?.kind).toBe("verification");
 		expect(result.finalVerification?.kind).toBe("verification");
 		expect(agents.some(agent => /verif/i.test(agent))).toBe(false);
+	});
+	it("keeps Gate agent, model, and runtime identity aligned and records every parse retry", async () => {
+		let planGateCalls = 0;
+		const gateRequests: Array<{ agent?: string; model?: string | string[]; assignment: string }> = [];
+		const baseRunner = scriptedRunner({
+			plan: planArtifact(),
+			implement: implArtifact(),
+			gateCodeReview: gateRaw("PASS", "implementation"),
+		});
+		const engine = new WorkflowEngine({
+			store,
+			session: fakeSession(),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			pipelineAuditor: completeAuditor,
+			adapter: new RuntimeAdapter(async request => {
+				if (
+					request.agent === "subagent-sol" ||
+					request.agent === "subagent-grok" ||
+					request.agent?.includes("claude")
+				) {
+					gateRequests.push({ agent: request.agent, model: request.model, assignment: request.assignment });
+					if (request.workflowRole === "plan_reviewer") {
+						planGateCalls += 1;
+						const planRunner = scriptedRunner({
+							gatePlanReview: planGateCalls === 1 ? gateRaw("PASS", "implementation") : gateRaw("PASS", "plan"),
+						});
+						return planRunner(request);
+					}
+				}
+				return baseRunner(request);
+			}),
+		});
+		const started = await engine.start({ request: "gate retry evidence" }, {}, { pipelineKind: "devflow" });
+		const result = await engine.run(started.workflowId);
+		expect(result.state.status).toBe("completed");
+		expect(planGateCalls).toBe(2);
+		for (const request of gateRequests) {
+			const models = Array.isArray(request.model) ? request.model : [request.model ?? ""];
+			const model = models.join(" ").toLowerCase();
+			if (request.agent === "subagent-sol") expect(model).toContain("sol");
+			if (request.agent === "subagent-grok") expect(model).toContain("grok");
+			if (request.agent?.includes("claude")) expect(model).toContain("claude");
+			expect(request.assignment).toBe(gateReviewAdapterPrompt.trim());
+		}
+		const artifacts = await new ArtifactStore(artifactDir).listByWorkflow(started.workflowId);
+		const planAttemptId = (await store.listAttempts(started.workflowId)).find(
+			attempt => attempt.stage === "plan_review",
+		)?.id;
+		const planUsage = artifacts.filter(artifact => artifact.kind === "usage" && artifact.attemptId === planAttemptId);
+		const planRuntime = artifacts.filter(
+			artifact => artifact.kind === "runtime-evidence" && artifact.attemptId === planAttemptId,
+		);
+		expect(planUsage).toHaveLength(2);
+		expect(planRuntime).toHaveLength(2);
 	});
 
 	it("legacy NULL kind keeps bundled reviewer mapping and the existing graph", async () => {

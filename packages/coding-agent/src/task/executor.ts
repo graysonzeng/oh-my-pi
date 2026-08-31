@@ -3628,6 +3628,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					);
 				}
 			}
+			if (shadowJobId) session.asyncJobManager?.resumeDeliveries([shadowJobId]);
 
 			readyAt = performance.now();
 			const outcome = await driveSessionToYield(session, monitor, task);

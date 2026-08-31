@@ -1,3 +1,5 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
+
 /** DevFlow pipeline overlay types. No new WorkflowStatus / WorkflowRole. */
 
 export type PipelineKind = "devflow";
@@ -23,6 +25,7 @@ export interface OverlayGrillState {
 }
 
 export interface OverlaySidecar {
+	schemaVersion: 1;
 	phase: OverlaySidecarPhase;
 	grill: OverlayGrillState;
 	planningCompletenessRetries: number;
@@ -32,6 +35,7 @@ export interface OverlaySidecar {
 export interface CreateWorkflowOptions {
 	pipelineKind?: PipelineKind;
 	overlaySidecar?: OverlaySidecar;
+	ownerSessionId?: string;
 }
 
 export interface PipelineCompletenessResult {
@@ -55,6 +59,7 @@ export const PIPELINE_ANTI_ANCHORING_RATIONALE =
 
 export function emptyDevflowSidecar(answers: readonly string[] = [], maxQuestions = 8): OverlaySidecar {
 	return {
+		schemaVersion: 1,
 		phase: "running",
 		grill: {
 			round: 0,
@@ -67,14 +72,66 @@ export function emptyDevflowSidecar(answers: readonly string[] = [], maxQuestion
 	};
 }
 
+const SIDECAR_KEYS: Record<string, true> = {
+	schemaVersion: true,
+	phase: true,
+	grill: true,
+	planningCompletenessRetries: true,
+	gateResultArtifactId: true,
+};
+const GRILL_KEYS: Record<string, true> = {
+	round: true,
+	maxQuestions: true,
+	lastQuestion: true,
+	missing: true,
+	reason: true,
+	answers: true,
+};
+const GRILL_REASONS: Record<OverlayGrillReason, true> = {
+	incomplete_plan: true,
+	needs_redesign: true,
+	gate_parse_failed: true,
+	max_grill_questions: true,
+};
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string");
+}
+
 export function parseOverlaySidecar(raw: string | null | undefined): OverlaySidecar | undefined {
 	if (raw == null || raw === "") return undefined;
 	try {
-		const parsed = JSON.parse(raw) as OverlaySidecar;
-		if (!parsed || typeof parsed !== "object") return undefined;
+		const parsed: unknown = JSON.parse(raw);
+		if (
+			!isRecord(parsed) ||
+			!Object.keys(parsed).every(key => SIDECAR_KEYS[key] === true) ||
+			parsed.schemaVersion !== 1
+		) {
+			return undefined;
+		}
 		if (parsed.phase !== "running" && parsed.phase !== "grilling" && parsed.phase !== "idle") return undefined;
-		if (!parsed.grill || !Array.isArray(parsed.grill.answers)) return undefined;
-		return parsed;
+		if (!Number.isInteger(parsed.planningCompletenessRetries) || Number(parsed.planningCompletenessRetries) < 0) {
+			return undefined;
+		}
+		if (
+			Object.hasOwn(parsed, "gateResultArtifactId") &&
+			(typeof parsed.gateResultArtifactId !== "string" || parsed.gateResultArtifactId.length === 0)
+		) {
+			return undefined;
+		}
+		const grill = parsed.grill;
+		if (!isRecord(grill) || !Object.keys(grill).every(key => GRILL_KEYS[key] === true)) return undefined;
+		if (!Number.isInteger(grill.round) || Number(grill.round) < 0) return undefined;
+		if (!Number.isInteger(grill.maxQuestions) || Number(grill.maxQuestions) <= 0) return undefined;
+		if (typeof grill.lastQuestion !== "string") return undefined;
+		if (!isStringArray(grill.missing) || !isStringArray(grill.answers)) return undefined;
+		if (
+			Object.hasOwn(grill, "reason") &&
+			(typeof grill.reason !== "string" || GRILL_REASONS[grill.reason as OverlayGrillReason] !== true)
+		) {
+			return undefined;
+		}
+		return parsed as unknown as OverlaySidecar;
 	} catch {
 		return undefined;
 	}

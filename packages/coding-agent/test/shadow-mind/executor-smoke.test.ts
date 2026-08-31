@@ -100,7 +100,7 @@ describe("shadow-review executor smoke", () => {
 				const blob = stringifyContext(context);
 				const toolNames = (context.tools ?? []).map(tool => tool.name);
 				if (toolNames.includes("report_to_main")) {
-					if (blob.includes("architecture-review")) {
+					if (blob.includes("architectural defects")) {
 						return {
 							content: [
 								{

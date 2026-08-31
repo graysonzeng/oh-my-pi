@@ -47,11 +47,12 @@ export function approvalTierForOp(op: WorkflowToolInput["op"]): "read" | "write"
 	return op === "status" ? "read" : "write";
 }
 
-function createOptsFromParams(params: WorkflowToolInput) {
+function createOptsFromParams(params: WorkflowToolInput, ownerSessionId?: string | null) {
 	if (params.pipeline !== "devflow") return undefined;
 	return {
 		pipelineKind: "devflow" as const,
 		overlaySidecar: emptyDevflowSidecar(params.grillAnswers ?? []),
+		ownerSessionId: ownerSessionId || undefined,
 	};
 }
 
@@ -97,13 +98,19 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 		}
 	}
 
-	async recoverDeliveryGrill(workflowId: string, answers: readonly string[], reason?: string): Promise<void> {
+	async recoverDeliveryGrill(workflowId: string, answers: readonly string[]): Promise<void> {
 		const engine = this.#engineFactory(this.#session);
 		try {
-			await engine.appendGrillAnswers(workflowId, answers);
-			if (reason === "needs_redesign") {
-				await engine.replanFromRedesign(workflowId);
-			}
+			await engine.recoverDeliveryGrill(workflowId, answers);
+		} finally {
+			engine.dispose?.();
+		}
+	}
+
+	async findActiveDeliveryWorkflow(ownerSessionId: string) {
+		const engine = this.#engineFactory(this.#session);
+		try {
+			return await engine.findActiveDeliveryWorkflow(ownerSessionId);
 		} finally {
 			engine.dispose?.();
 		}
@@ -142,7 +149,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				const started = await engine.start(
 					{ request, constraints: params.constraints, qualityTier: params.qualityTier },
 					{ degradedMode: params.degradedMode === true },
-					createOptsFromParams(params),
+					createOptsFromParams(params, this.#session.getSessionId?.()),
 				);
 				const workflowId = started.workflowId;
 				activeWorkflowId = workflowId;
@@ -199,7 +206,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				const started = await engine.start(
 					{ request, constraints: params.constraints, qualityTier: params.qualityTier },
 					{ degradedMode: params.degradedMode === true },
-					createOptsFromParams(params),
+					createOptsFromParams(params, this.#session.getSessionId?.()),
 				);
 				const workflowId = started.workflowId;
 				activeWorkflowId = workflowId;

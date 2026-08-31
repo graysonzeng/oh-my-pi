@@ -1,6 +1,3 @@
-import { splitInternalUrlSel, splitPathAndSel } from "../tools/path-utils";
-import { type ParsedSelector, parseSel } from "../tools/read-selector";
-
 /** Bundled reviewer-class agents whose request budget must fire before the 30m wall. */
 export const REVIEWER_SOFT_REQUEST_BUDGET: Record<string, number> = {
 	reviewer: 80,
@@ -9,22 +6,10 @@ export const REVIEWER_SOFT_REQUEST_BUDGET: Record<string, number> = {
 	"security-reviewer": 80,
 };
 
-const REVIEWER_AGENT_NAMES: Record<string, true> = {
-	reviewer: true,
-	"subagent-sol": true,
-	"sol-xhigh-reviewer": true,
-	"security-reviewer": true,
-};
-
 const EXPLORE_AGENT_NAMES: Record<string, true> = {
 	scout: true,
 	sonic: true,
 };
-
-/** Default fast evidence-scout chain: DeepSeek V4 Flash max, then Grok 4.6 xhigh. */
-export const DEFAULT_EVIDENCE_SCOUT_MODEL = ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:xhigh"] as const;
-
-export const EVIDENCE_SCOUT_JOB_LABEL = "review-evidence";
 
 /** Explore-class structured invocations cap the soft request budget at this value. */
 export const EXPLORE_SOFT_REQUEST_BUDGET = 40;
@@ -81,7 +66,7 @@ export interface SubagentReviewMetrics {
 }
 
 export function isReviewerAgentName(agentName: string): agentName is keyof typeof REVIEWER_SOFT_REQUEST_BUDGET {
-	return REVIEWER_AGENT_NAMES[agentName] === true;
+	return Object.hasOwn(REVIEWER_SOFT_REQUEST_BUDGET, agentName);
 }
 
 /**
@@ -109,29 +94,6 @@ export function resolveClassSoftRuntimeMs(performanceClass: SubagentPerformanceC
 	if (maxRuntimeMs <= 0 || performanceClass === "worker") return 0;
 	const softMs = Math.floor(maxRuntimeMs * REVIEWER_SOFT_RUNTIME_RATIO);
 	return softMs > 0 && softMs < maxRuntimeMs ? softMs : 0;
-}
-function isInternalUrl(path: string): boolean {
-	return /^[a-z][a-z0-9+.-]*:\/\//i.test(path);
-}
-
-export function parseReadPathSelector(path: unknown): ParsedSelector {
-	if (typeof path !== "string" || path.length === 0) return { kind: "none" };
-	const split = isInternalUrl(path) ? splitInternalUrlSel(path) : splitPathAndSel(path);
-	return parseSel(split.sel);
-}
-
-/** Explicit bounded ranges and `:raw` must survive ordinary-session tool-output clamps. */
-export function shouldPreserveExplicitReadRange(path: unknown): boolean {
-	const parsed = parseReadPathSelector(path);
-	return parsed.kind === "raw" || parsed.kind === "lines";
-}
-
-/** Read tool args historically use `path`; some call sites still pass `file_path`. */
-export function readPathFromToolArgs(args: unknown): unknown {
-	if (!args || typeof args !== "object") return undefined;
-	if (Object.hasOwn(args, "path")) return Reflect.get(args, "path");
-	if (Object.hasOwn(args, "file_path")) return Reflect.get(args, "file_path");
-	return undefined;
 }
 
 export function emptyReviewMetrics(): SubagentReviewMetrics {

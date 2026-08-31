@@ -26,6 +26,7 @@ import {
 	LatencyRolloutCohortStore,
 	type LatencyRolloutObservationV1,
 } from "../latency/rollout-cohort";
+import gateReviewAdapterPrompt from "../prompts/workflow/gate-review-adapter.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import * as git from "../utils/git";
 import {
@@ -591,6 +592,7 @@ export class WorkflowEngine {
 				? {
 						pipelineKind: "devflow" as const,
 						overlaySidecar: createOpts.overlaySidecar ?? emptyDevflowSidecar(),
+						ownerSessionId: createOpts.ownerSessionId,
 					}
 				: createOpts;
 		const workflowId = await this.#store.createWorkflow(persistedRequest, policy, resolvedCreateOpts);
@@ -620,6 +622,9 @@ export class WorkflowEngine {
 		return this.#lastAvailability;
 	}
 
+	async findActiveDeliveryWorkflow(ownerSessionId: string): Promise<WorkflowState | null> {
+		return this.#store.findLatestActiveDevflow(ownerSessionId);
+	}
 	async getState(workflowId: string): Promise<WorkflowState | null> {
 		return this.#store.getCurrentState(workflowId);
 	}
@@ -823,13 +828,21 @@ export class WorkflowEngine {
 		await this.#store.clearRunnerOwner(workflowId);
 	}
 
-	async appendGrillAnswers(workflowId: string, answers: readonly string[]): Promise<WorkflowState> {
+	async recoverDeliveryGrill(workflowId: string, answers: readonly string[]): Promise<WorkflowState> {
 		const state = await this.#requireState(workflowId);
-		if (state.pipelineKind !== "devflow" || !state.overlaySidecar) {
+		const sidecar = state.overlaySidecar;
+		if (state.pipelineKind !== "devflow" || !sidecar) {
 			throw new WorkflowPolicyError("overlay_requires_devflow", { workflowId });
 		}
-		const next = appendGrillAnswers(state.overlaySidecar, answers);
-		await this.#store.updateOverlaySidecar(workflowId, next, state.version);
+		if (sidecar.phase !== "grilling") {
+			throw new WorkflowPolicyError("grill_recovery_requires_pause", { workflowId, phase: sidecar.phase });
+		}
+		const answered = appendGrillAnswers(sidecar, answers);
+		if (sidecar.grill.reason === "needs_redesign") {
+			await this.#store.updateOverlaySidecar(workflowId, answered, state.version);
+			return this.replanFromRedesign(workflowId);
+		}
+		await this.#store.updateOverlaySidecar(workflowId, sidecarIdle(answered), state.version);
 		return this.#requireState(workflowId);
 	}
 
@@ -3783,10 +3796,7 @@ export class WorkflowEngine {
 	): Promise<{ raw: unknown; modelFamily?: string; usage?: Usage }> {
 		const role = subject === "plan" ? "plan_reviewer" : "code_reviewer";
 		const authorFamily = subject === "plan" ? this.#plannerModelFamily : this.#implementerModelFamily;
-		const assignment =
-			subject === "plan"
-				? "Review the plan for correctness and feasibility"
-				: "Independent code review of the implementation";
+		const assignment = gateReviewAdapterPrompt.trim();
 		const ran = await this.#withProfileFallback(role, {}, async profile => {
 			const builtContext =
 				subject === "plan"
@@ -3805,7 +3815,7 @@ export class WorkflowEngine {
 							profile,
 							session,
 							[
-								...(this.#plan?.affectedFiles.map(f => f.path) ?? []),
+								...(this.#plan?.affectedFiles.map(file => file.path) ?? []),
 								...(this.#implementation?.changedFiles ?? []),
 							],
 						);
@@ -3824,11 +3834,10 @@ export class WorkflowEngine {
 				agent: RuntimeAdapter.agentNameForRole(role, {
 					pipelineKind: "devflow",
 					authorModelFamily: authorFamily,
+					reviewerModel: profile.modelPattern,
 				}),
 			});
-			return {
-				artifact: result.artifact,
-				usage: result.usage,
+			await this.#recordUsageAndProfile(workflowId, attemptId, result.usage, {
 				identityReceipt: result.identityReceipt,
 				modelFamily: result.modelFamily,
 				resolvedProvider: result.resolvedProvider,
@@ -3839,6 +3848,11 @@ export class WorkflowEngine {
 				optimizationReceipts: result.optimizationReceipts,
 				resolvedToolPolicyId: result.resolvedToolPolicyId,
 				completionKind: result.completionKind,
+			});
+			return {
+				artifact: result.artifact,
+				usage: result.usage,
+				modelFamily: result.modelFamily,
 			};
 		});
 		return { raw: ran.artifact, modelFamily: ran.modelFamily, usage: ran.usage };

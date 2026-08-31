@@ -102,6 +102,28 @@ describe("RuntimeAdapter", () => {
 		expect(result.usage?.output).toBe(2);
 	});
 
+	it("pins a DevFlow native reviewer agent to the matching model family", async () => {
+		let mapped: StructuredRunnerRequest | undefined;
+		const adapter = new RuntimeAdapter(async request => {
+			mapped = request;
+			return okResult({ verdict: "PASS" });
+		});
+		await adapter.run(
+			baseRequest(undefined, {
+				role: "code_reviewer",
+				agent: "subagent-sol",
+				pipelineKind: "devflow",
+				profile: {
+					...DEFAULT_MODEL_PROFILES.gpt_reviewer,
+					strictIdentity: false,
+				},
+				isolation: { requested: false, merge: "patch", apply: false },
+			}),
+		);
+		expect(mapped?.agent).toBe("subagent-sol");
+		expect(mapped?.model).toEqual(["gpt-5.6-sol"]);
+	});
+
 	it("exposes an optional captured-change merger seam and preserves the legacy constructor", async () => {
 		const merger: CapturedChangesMerger = async request => ({
 			patchPath: request.outputPatchPath,

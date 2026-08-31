@@ -248,8 +248,8 @@ export function scriptedRunner(script: {
 		if (agent === "designer" || agent === "planner") {
 			label = "plan";
 			data = pick(script.plan, label);
-		} else if (agent === "subagent-sol" || agent === "subagent-grok") {
-			if (/code review|implementation/i.test(assignment) && !/plan/i.test(assignment)) {
+		} else if (agent === "subagent-sol" || agent === "subagent-grok" || agent.includes("claude")) {
+			if (request.workflowRole === "code_reviewer") {
 				label = "gateCodeReview";
 				data = pick(script.gateCodeReview ?? script.codeReview, label);
 			} else {

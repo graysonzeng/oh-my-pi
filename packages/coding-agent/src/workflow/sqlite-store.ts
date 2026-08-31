@@ -23,6 +23,7 @@ interface WorkflowRow {
 	runner_owner: string | null;
 	pipeline_kind: string | null;
 	overlay_sidecar_json: string | null;
+	owner_session_id: string | null;
 }
 
 interface AttemptRow {
@@ -94,7 +95,8 @@ export class WorkflowStore {
 				budget_json TEXT,
 				runner_owner TEXT,
 				pipeline_kind TEXT,
-				overlay_sidecar_json TEXT
+				overlay_sidecar_json TEXT,
+				owner_session_id TEXT
 			);
 
 			CREATE TABLE IF NOT EXISTS attempts (
@@ -150,6 +152,9 @@ export class WorkflowStore {
 		if (!cols.some(c => c.name === "overlay_sidecar_json")) {
 			this.#db.exec("ALTER TABLE workflows ADD COLUMN overlay_sidecar_json TEXT");
 		}
+		if (!cols.some(c => c.name === "owner_session_id")) {
+			this.#db.exec("ALTER TABLE workflows ADD COLUMN owner_session_id TEXT");
+		}
 	}
 
 	/** Create workflow in terminal-ready `created` state with no premature attempt. */
@@ -158,30 +163,34 @@ export class WorkflowStore {
 		const now = new Date().toISOString();
 		const pipelineKind = opts?.pipelineKind ?? null;
 		const sidecarJson = opts?.overlaySidecar ? JSON.stringify(opts.overlaySidecar) : null;
+		const ownerSessionId = opts?.ownerSessionId?.trim() || null;
 		this.#db
 			.prepare(`
 				INSERT INTO workflows (
 					id, status, request_json, policy_json, current_stage, current_attempt_id,
 					degraded_mode, created_at, updated_at, version, budget_json,
-					pipeline_kind, overlay_sidecar_json
-				) VALUES (?, 'created', ?, ?, 'created', NULL, 0, ?, ?, 1, NULL, ?, ?)
+					pipeline_kind, overlay_sidecar_json, owner_session_id
+				) VALUES (?, 'created', ?, ?, 'created', NULL, 0, ?, ?, 1, NULL, ?, ?, ?)
 			`)
-			.run(id, JSON.stringify(request), JSON.stringify(policy), now, now, pipelineKind, sidecarJson);
+			.run(id, JSON.stringify(request), JSON.stringify(policy), now, now, pipelineKind, sidecarJson, ownerSessionId);
 		return id;
 	}
 
-	async findLatestActiveDevflow(): Promise<WorkflowState | null> {
+	async findLatestActiveDevflow(ownerSessionId: string): Promise<WorkflowState | null> {
+		const owner = ownerSessionId.trim();
+		if (!owner) return null;
 		const row = this.#db
 			.prepare(
 				`
 				SELECT * FROM workflows
 				WHERE pipeline_kind = 'devflow'
+					AND owner_session_id = ?
 					AND status NOT IN ('completed', 'cancelled', 'failed', 'blocked')
 				ORDER BY updated_at DESC
 				LIMIT 1
 			`,
 			)
-			.get() as WorkflowRow | null;
+			.get(owner) as WorkflowRow | null;
 		return row ? this.#mapState(row) : null;
 	}
 
@@ -192,6 +201,17 @@ export class WorkflowStore {
 	}
 
 	#mapState(row: WorkflowRow): WorkflowState {
+		if (row.pipeline_kind !== null && row.pipeline_kind !== "devflow") {
+			throw new WorkflowPolicyError("invalid_pipeline_kind", {
+				workflowId: row.id,
+				pipelineKind: row.pipeline_kind,
+			});
+		}
+		const pipelineKind = row.pipeline_kind === "devflow" ? "devflow" : undefined;
+		const overlaySidecar = parseOverlaySidecar(row.overlay_sidecar_json);
+		if (pipelineKind === "devflow" && !overlaySidecar) {
+			throw new WorkflowPolicyError("invalid_devflow_sidecar", { workflowId: row.id });
+		}
 		return {
 			id: row.id,
 			status: row.status,
@@ -204,8 +224,9 @@ export class WorkflowStore {
 			requestJson: row.request_json,
 			policyJson: row.policy_json,
 			runnerOwner: row.runner_owner ?? undefined,
-			pipelineKind: row.pipeline_kind === "devflow" ? "devflow" : undefined,
-			overlaySidecar: parseOverlaySidecar(row.overlay_sidecar_json),
+			ownerSessionId: row.owner_session_id ?? undefined,
+			pipelineKind,
+			overlaySidecar,
 		};
 	}
 

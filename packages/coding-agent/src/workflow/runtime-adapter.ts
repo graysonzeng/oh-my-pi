@@ -57,6 +57,7 @@ export interface StructuredRunnerRequest {
 	invocationKind: "task" | "eval";
 	assignment: string;
 	context?: string;
+	workflowRole?: WorkflowAgentRequest["role"];
 	agent?: string;
 	model?: string | string[];
 	thinkingLevel?: WorkflowAgentRequest["profile"]["thinkingLevel"];
@@ -137,17 +138,42 @@ export const WORKFLOW_ROLE_TO_AGENT: Readonly<Record<WorkflowAgentRequest["role"
 export interface PipelineReviewAgentOpts {
 	pipelineKind?: "devflow";
 	authorModelFamily?: string | null;
+	reviewerModel?: string | string[] | null;
 	preferredReviewer?: "subagent-sol" | "subagent-grok";
 }
 
-/** Devflow review maps onto native sol/grok agents without adding a WorkflowRole. */
+/** Devflow review agent follows the selected profile model; grok never reviews grok-authored work. */
 export function resolvePipelineReviewAgent(role: WorkflowAgentRequest["role"], opts?: PipelineReviewAgentOpts): string {
 	if (opts?.pipelineKind === "devflow" && (role === "plan_reviewer" || role === "code_reviewer")) {
+		const reviewerModel =
+			typeof opts.reviewerModel === "string" ? opts.reviewerModel : (opts.reviewerModel?.join(" ") ?? "");
+		const reviewer = reviewerModel.toLowerCase();
 		const authorGrok = (opts.authorModelFamily ?? "").toLowerCase().includes("grok");
-		if (opts.preferredReviewer === "subagent-grok" && !authorGrok) return "subagent-grok";
+		if ((reviewer.includes("grok") || (!reviewer && opts.preferredReviewer === "subagent-grok")) && !authorGrok) {
+			return "subagent-grok";
+		}
+		if (reviewer.includes("claude")) return "claude-opus-5-thinking-high";
 		return "subagent-sol";
 	}
 	return WORKFLOW_ROLE_TO_AGENT[role] ?? "task";
+}
+
+function resolvePipelineReviewModel(agentName: string, modelPattern: string | string[]): string | string[] {
+	const patterns = Array.isArray(modelPattern) ? modelPattern : [modelPattern];
+	const marker =
+		agentName === "subagent-sol"
+			? "sol"
+			: agentName === "subagent-grok"
+				? "grok"
+				: agentName.includes("claude")
+					? "claude"
+					: "";
+	if (!marker) return modelPattern;
+	const matching = patterns.filter(pattern => pattern.toLowerCase().includes(marker));
+	if (matching.length === 0) {
+		throw new WorkflowPolicyError("review_agent_model_mismatch", { agentName, modelPattern: patterns });
+	}
+	return Array.isArray(modelPattern) ? matching : matching[0]!;
 }
 
 // Re-export preparation helpers so existing imports keep working.
@@ -412,19 +438,26 @@ export class RuntimeAdapter implements RuntimePort {
 			request.profile.outputStrategy?.schemaEnhancement?.strictMode === false ? "permissive" : "strict";
 
 		const identityCollector = new ProviderIdentityCollector();
+		const mappedAgent =
+			request.agent ??
+			RuntimeAdapter.agentNameForRole(request.role, {
+				pipelineKind: request.pipelineKind,
+				authorModelFamily: request.authorModelFamily,
+				reviewerModel: request.profile.modelPattern,
+			});
+		const mappedModel =
+			request.pipelineKind === "devflow" && (request.role === "plan_reviewer" || request.role === "code_reviewer")
+				? resolvePipelineReviewModel(mappedAgent, request.profile.modelPattern)
+				: request.profile.modelPattern;
 		const mappedRequest: StructuredRunnerRequest = {
 			session: prepared.session,
 			invocationKind: "task",
 			assignment: prepared.assignment,
+			workflowRole: request.role,
 			// Assembled stable+dynamic prompt text is the production model-facing context.
 			context: prepared.assembledPromptText || prepared.context,
-			agent:
-				request.agent ??
-				RuntimeAdapter.agentNameForRole(request.role, {
-					pipelineKind: request.pipelineKind,
-					authorModelFamily: request.authorModelFamily,
-				}),
-			model: request.profile.modelPattern,
+			agent: mappedAgent,
+			model: mappedModel,
 			thinkingLevel: request.profile.thinkingLevel,
 			outputSchema: prepared.outputSchema ?? request.outputSchema,
 			schemaMode,

@@ -811,6 +811,8 @@ export interface WorkflowState {
 	policyJson: string;
 	/** Exclusive runner owner id when a process holds the lock; undefined when free. */
 	runnerOwner?: string;
+	/** Persistent interactive session that owns automatic `/delivery` discovery. */
+	ownerSessionId?: string;
 	/** NULL/absent = legacy workflow. Never inferred from request prose. */
 	pipelineKind?: "devflow";
 	overlaySidecar?: OverlaySidecar;
