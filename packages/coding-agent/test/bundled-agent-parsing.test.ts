@@ -28,8 +28,9 @@ describe("bundled agent parsing", () => {
 		expect(scout).toBeDefined();
 		expect(scout?.source).toBe("bundled");
 		expect(scout?.model).toEqual(["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:xhigh"]);
-		expect(scout?.thinkingLevel).toBe(Effort.Max);
-		expect(scout?.maxEffort).toBe(Effort.Max);
+		expect(scout?.thinkingLevel).toBe(Effort.Medium);
+		expect(scout?.maxEffort).toBe(Effort.Medium);
+		expect(scout?.readSummarize).toBe(true);
 	});
 
 	it("resolves scout to deepseek-v4-flash:max first, then grok-4.6:xhigh", () => {

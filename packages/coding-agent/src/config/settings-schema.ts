@@ -5580,7 +5580,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Max Subagent Runtime",
 			description:
-				"Hard wall-clock limit per subagent (ms). 0 disables it. Review/Gate agents (`reviewer`, `subagent-sol`, `sol-xhigh-reviewer`, `security-reviewer`) additionally cap at 30 minutes: a stricter non-zero value still wins, and 0 stays unlimited. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a runtime-limit reason. Default 1 hour is a proposed acceptance target pending p95 baseline.",
+				'Hard wall-clock limit per subagent (ms). 0 disables it. Review-class = floor names (`reviewer`, `subagent-sol`, `sol-xhigh-reviewer`, `security-reviewer`) ∪ frontmatter `"code"` ∪ spawn `"code"` (explore names excluded). Explore-class = `scout`/`sonic`. 10/30 min class ceilings apply only to task invocations that omit a caller runtime cap; an explicit request cap (0 or >0) is authoritative, and eval omitted inherits the fresh setting. Default 1 hour is a proposed acceptance target pending p95 baseline. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a runtime-limit reason.',
 			options: [
 				{ value: "0", label: "Unlimited" },
 				{ value: "300000", label: "5 minutes" },
@@ -5630,7 +5630,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Soft Subagent Request Budget",
 			description:
-				"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must yield its partial findings. 0 disables the guard. Bundled scout/sonic agents cap at 100; bundled reviewer-class agents (`reviewer`, `subagent-sol`, `sol-xhigh-reviewer`, `security-reviewer`) cap at 80, and also wrap up at 75% of their wall-clock before the 30-minute hard abort.",
+				'Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must yield its partial findings. 0 disables the guard. All structured invocations use class request budgets and class prompts: explore-class (`scout`/`sonic`) cap at 40, review-class (floor names ∪ frontmatter `"code"` ∪ spawn `"code"`, explore names excluded) cap at 80. 75% of the wall-clock is an advisory steer, not a budget_stop.',
 			options: [
 				{ value: "0", label: "Disabled" },
 				{ value: "90", label: "90 requests" },

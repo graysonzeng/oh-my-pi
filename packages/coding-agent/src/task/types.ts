@@ -152,7 +152,7 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
-	/** Request a code-review shadow cohort (`code`) or force it off. */
+	/** Request a code-review shadow cohort (`code`) or force it off. Non-explore `"code"` is also a review performance opt-in (80 req; task+omitted runtime cap has a 30 min ceiling). */
 	shadowReview?: "code" | "off";
 }
 
@@ -317,7 +317,7 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
-	/** Request a code-review shadow cohort (`code`) or force it off. */
+	/** Request a code-review shadow cohort (`code`) or force it off. Non-explore `"code"` is also a review performance opt-in (80 req; task+omitted runtime cap has a 30 min ceiling). */
 	shadowReview?: "code" | "off";
 }
 

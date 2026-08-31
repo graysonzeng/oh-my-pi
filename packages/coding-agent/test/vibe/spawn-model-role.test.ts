@@ -75,6 +75,7 @@ describe("vibe worker spawn model role", () => {
 
 		expect(options.modelOverride).toEqual(["anthropic/sonnet"]);
 		expect(options.modelRole).toBe("task");
+		expect(options.performanceClass).toBe("worker");
 	});
 
 	it("forwards the `smol` role behind the `fast` worker's expanded patterns", async () => {
@@ -87,6 +88,7 @@ describe("vibe worker spawn model role", () => {
 
 		expect(options.modelOverride).toEqual(["fast/hy3"]);
 		expect(options.modelRole).toBe("smol");
+		expect(options.performanceClass).toBe("explore");
 	});
 
 	it("keeps the role identity when a per-agent model override replaces the alias", async () => {

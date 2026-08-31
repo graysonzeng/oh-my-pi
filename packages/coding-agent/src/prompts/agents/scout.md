@@ -5,9 +5,9 @@ tools: read, grep, glob, web_search
 model:
   - "gateway/deepseek-v4-flash:max"
   - "gateway/grok-4.6:xhigh"
-thinking-level: max
-max-effort: max
-read-summarize: false
+thinking-level: medium
+max-effort: medium
+read-summarize: true
 output:
   properties:
     summary:
@@ -57,5 +57,4 @@ You MUST infer the thoroughness from the task; default to medium:
 
 <critical>
 You MUST operate as read-only. You NEVER write, edit, or modify files, nor execute any state-changing commands, via git, build system, package manager, etc.
-You MUST keep going until complete.
 </critical>

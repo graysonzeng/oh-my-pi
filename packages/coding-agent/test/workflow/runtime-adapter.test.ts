@@ -369,13 +369,18 @@ describe("RuntimeAdapter", () => {
 		expect(seenContext).toContain("ctx");
 	});
 
-	it("retries on schema violation when outputStrategy.retryOnSchemaViolation is enabled", async () => {
+	it("retries schema violations with each actual remaining profile cap", async () => {
 		let calls = 0;
+		let now = 10_000;
+		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
 		const contexts: string[] = [];
+		const requestShapes: Array<{ invocationKind: string; maxRuntimeMs: number | undefined }> = [];
 		const adapter = new RuntimeAdapter(async req => {
 			calls += 1;
 			contexts.push(req.context ?? "");
+			requestShapes.push({ invocationKind: req.invocationKind, maxRuntimeMs: req.maxRuntimeMs });
 			if (calls === 1) {
+				now += 1_234;
 				return {
 					result: {
 						id: "bad",
@@ -389,14 +394,20 @@ describe("RuntimeAdapter", () => {
 			...DEFAULT_MODEL_PROFILES.grok_implementer,
 			outputStrategy: {
 				...DEFAULT_MODEL_PROFILES.grok_implementer.outputStrategy,
-				// maxRetries = additional model calls after first → total 1+2=3
 				retryOnSchemaViolation: { enabled: true, maxRetries: 2, includeErrorInRetry: true },
 			},
 		};
-		const result = await adapter.run(baseRequest(undefined, { profile, role: "implementer" }));
-		expect(result.artifact).toBeDefined();
+		try {
+			const result = await adapter.run(baseRequest(undefined, { profile, role: "implementer" }));
+			expect(result.artifact).toBeDefined();
+		} finally {
+			nowSpy.mockRestore();
+		}
 		expect(calls).toBe(2);
-		// Retry prompt comes from static schema-retry template
+		expect(requestShapes).toEqual([
+			{ invocationKind: "task", maxRuntimeMs: profile.maxRuntimeMs },
+			{ invocationKind: "task", maxRuntimeMs: profile.maxRuntimeMs - 1_234 },
+		]);
 		expect(contexts[1]).toMatch(/violated the required output schema|Violations/i);
 		expect(contexts[1]).toMatch(/missing summary/);
 	});

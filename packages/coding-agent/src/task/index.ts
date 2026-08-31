@@ -53,22 +53,6 @@ import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
-const REVIEW_GATE_MAX_RUNTIME_MS = 1_800_000;
-const REVIEW_GATE_AGENTS: Record<string, true> = {
-	reviewer: true,
-	"subagent-sol": true,
-	"sol-xhigh-reviewer": true,
-	"security-reviewer": true,
-};
-
-function resolveTaskMaxRuntimeMs(session: ToolSession, agent: string | undefined): number {
-	const configured = session.settings.get("task.maxRuntimeMs");
-	if (!agent || !REVIEW_GATE_AGENTS[agent]) return configured;
-	// 0 remains unlimited (same public contract as other agents). A stricter
-	// non-zero user cap still wins over the 30-minute reviewer ceiling.
-	if (configured === 0) return 0;
-	return Math.min(configured, REVIEW_GATE_MAX_RUNTIME_MS);
-}
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
 		assignment: assignment.trim(),
@@ -795,10 +779,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			...(params.shadowReview !== undefined ? { shadowReview: params.shadowReview } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-			maxRuntimeMs: resolveTaskMaxRuntimeMs(this.session, params.agent),
 		});
 	}
 
@@ -1625,7 +1609,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-				maxRuntimeMs: resolveTaskMaxRuntimeMs(this.session, params.agent),
 				signal,
 				onProgress: progress => {
 					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };

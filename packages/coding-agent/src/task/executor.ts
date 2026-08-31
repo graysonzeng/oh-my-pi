@@ -37,6 +37,7 @@ import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
+import subagentSoftRuntimeNoticeTemplate from "../prompts/system/subagent-soft-runtime-notice.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
@@ -75,11 +76,11 @@ import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import {
+	EXPLORE_SOFT_REQUEST_BUDGET,
 	emptyReviewMetrics,
-	isReviewerAgentName,
 	REVIEWER_SOFT_REQUEST_BUDGET,
-	resolveReviewerSoftRequestBudget,
-	resolveReviewerSoftRuntimeMs,
+	resolveClassSoftRuntimeMs,
+	type SubagentPerformanceClass,
 	type SubagentReviewMetrics,
 } from "./review-performance";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -107,37 +108,28 @@ const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
 /**
- * Soft per-agent request budgets (assistant requests per run). Crossing the
+ * Soft class request budgets (assistant requests per run). Crossing the
  * budget injects a wrap-up steering notice (`task.softRequestBudgetNotice`,
  * on by default). At 1.5x the budget the free-running turn is stopped and the
  * agent is driven to one forced final `yield` so partial findings come back
  * as a real report; only if it still refuses to yield within
  * {@link BUDGET_STOP_GRACE_REQUESTS} more requests is the run hard-aborted.
- * Entries are ceilings, not fixed values: the `default` key applies to agents
- * without an explicit entry, and the `task.softRequestBudget` setting can only
- * lower an agent's budget, never raise it above its bundled entry (0 disables
- * the guard entirely).
+ * `default` is the worker configured budget. Explore and review ceilings live
+ * in the central performance-class owner. 0 disables the guard entirely.
  */
-export const SOFT_REQUEST_BUDGET: Record<string, number> = {
-	scout: 100,
-	sonic: 100,
-	...REVIEWER_SOFT_REQUEST_BUDGET,
-	default: 200,
-};
+export const SOFT_REQUEST_BUDGET = { default: 200 } as const;
 
 /**
- * Resolves the effective soft request budget for an agent. The configured
- * `task.softRequestBudget` and the agent's bundled entry are both upper
- * bounds, so the tighter one wins; a configured budget of 0 disables the
- * guard regardless of the bundled entry.
+ * Resolves the effective soft request budget for a performance class.
+ * Explore caps at 40, review at 80, worker uses the configured budget.
+ * A configured budget of 0 disables the guard regardless of class.
  */
-export function resolveSoftRequestBudget(agentName: string, configuredBudget: number): number {
+export function resolveSoftRequestBudget(performanceClass: SubagentPerformanceClass, configuredBudget: number): number {
 	const normalized = Math.max(0, Math.trunc(configuredBudget));
 	if (normalized === 0) return 0;
-	if (isReviewerAgentName(agentName)) {
-		return resolveReviewerSoftRequestBudget(agentName, normalized);
-	}
-	return Math.min(normalized, SOFT_REQUEST_BUDGET[agentName] ?? normalized);
+	if (performanceClass === "explore") return Math.min(normalized, EXPLORE_SOFT_REQUEST_BUDGET);
+	if (performanceClass === "review") return Math.min(normalized, REVIEWER_SOFT_REQUEST_BUDGET.reviewer);
+	return normalized;
 }
 
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
@@ -146,6 +138,11 @@ export const BUDGET_STOP_GRACE_REQUESTS = 5;
 /** Steering notice injected when a subagent crosses its soft request budget. */
 export function buildBudgetNotice(requests: number, budget: number): string {
 	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and yield your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to yield whatever you have.`;
+}
+
+/** Advisory wrap-up injected at 75% of the class wall-clock; does not force-stop. */
+export function buildSoftRuntimeNotice(softRuntimeMs: number, maxRuntimeMs: number): string {
+	return prompt.render(subagentSoftRuntimeNoticeTemplate, { softRuntimeMs, maxRuntimeMs });
 }
 
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
@@ -444,6 +441,12 @@ export interface ExecutorOptions {
 	 * watchdog is already suspended for the call's duration.
 	 */
 	maxRuntimeMs?: number;
+	/**
+	 * Structured-policy performance class. Soft request budget, 75% advisory
+	 * wrap-up, and class prompt branches consume this; class wall-clock is
+	 * already folded into {@link maxRuntimeMs} by the policy resolver.
+	 */
+	performanceClass?: SubagentPerformanceClass;
 	/** Include IRC only when the invocation policy permits collaboration. */
 	enableIrc?: boolean;
 	enableLsp?: boolean;
@@ -1030,6 +1033,8 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
+	/** Performance class for 75% advisory wrap-up; omitted disables the timer. */
+	performanceClass?: SubagentPerformanceClass;
 }
 
 /**
@@ -1115,6 +1120,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		performanceClass,
 	} = args;
 	const startTime = Date.now();
 
@@ -1156,6 +1162,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let activeSession: AgentSession | null = null;
 	let yieldCalled = false;
 	let yieldCallPending = false;
+	let terminalYieldCommitted = false;
 	let yieldInvalidatedByAsync = false;
 	let yieldTurnStopRequested = false;
 	let yieldTurnStopPromise: Promise<void> | null = null;
@@ -1173,7 +1180,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let hasUsage = false;
 	let requestStartedAt: number | undefined;
 	let lastRequestIndex = 0;
-	let budgetSteerSent = false;
+	let wrapUpNoticeSent = false;
 	let budgetLimitExceeded = false;
 	let budgetStopRequested = false;
 	let budgetStopAbortPromise: Promise<void> | undefined;
@@ -1245,13 +1252,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// Deliberately not routed through abortActiveSession(): that memoizes its
 	// promise, and a later hard abort (grace exhausted) must be able to abort
 	// the session again.
-	const requestBudgetStop = (kind: "soft_budget" | "runtime_timeout" = "soft_budget") => {
+	const requestBudgetStop = () => {
 		if (budgetStopRequested || abortSent || resolved) return;
 		budgetStopRequested = true;
 		progress.reviewMetrics?.checkpoints.push({
 			atMs: Date.now() - startTime,
 			requests: progress.requests,
-			kind,
+			kind: "soft_budget",
 		});
 		const session = activeSession;
 		budgetStopAbortPromise = session
@@ -1306,19 +1313,38 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// hang escapes the inference-layer watchdog (see openai-completions
 	// `isOpenAICompletionsProgressChunk`). Disabled by default; set
 	// `task.maxRuntimeMs > 0` to cap each subagent's lifetime.
-	let runtimeTimeoutId: NodeJS.Timeout | undefined;
 	let runtimeSoftTimeoutId: NodeJS.Timeout | undefined;
-	const softRuntimeMs = resolveReviewerSoftRuntimeMs(agent.name, maxRuntimeMs);
+	let runtimeTimeoutId: NodeJS.Timeout | undefined;
+	const softRuntimeMs = resolveClassSoftRuntimeMs(performanceClass ?? "worker", maxRuntimeMs);
+	const wrapUpNoticeWouldRace = (): boolean =>
+		resolved || abortSent || budgetStopRequested || terminalYieldCommitted || wrapUpNoticeSent;
+	const sendWrapUpNotice = (notice: string, logLabel: string) => {
+		if (wrapUpNoticeWouldRace()) return;
+		wrapUpNoticeSent = true;
+		const steerSession = activeSession;
+		if (!steerSession) return;
+		void Promise.resolve()
+			.then(() => {
+				if (resolved || abortSent || budgetStopRequested || terminalYieldCommitted || yieldCallPending) return;
+				return steerSession.sendUserMessage(notice, { deliverAs: "steer" });
+			})
+			.catch(err => {
+				logger.warn(logLabel, {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
+	};
 	if (softRuntimeMs > 0) {
 		runtimeSoftTimeoutId = setTimeout(() => {
-			if (resolved || abortSent || budgetStopRequested) return;
-			logger.warn("Subagent reviewer soft runtime checkpoint; wrapping up", {
+			if (wrapUpNoticeWouldRace()) return;
+			logger.warn("Subagent class soft runtime checkpoint; wrapping up", {
 				id,
 				agent: agent.name,
+				performanceClass,
 				softRuntimeMs,
 				maxRuntimeMs,
 			});
-			requestBudgetStop("runtime_timeout");
+			sendWrapUpNotice(buildSoftRuntimeNotice(softRuntimeMs, maxRuntimeMs), "Subagent runtime steer failed");
 		}, softRuntimeMs);
 	}
 	if (maxRuntimeMs > 0) {
@@ -1618,15 +1644,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					}
 
 					// Check if handler wants to terminate the session
-					if (
-						handler.shouldTerminate?.({
-							toolName: event.toolName,
-							toolCallId: event.toolCallId,
-							args: eventArgs,
-							result: event.result,
-							isError: event.isError,
-						})
-					) {
+					const shouldTerminate = handler.shouldTerminate?.({
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+						args: eventArgs,
+						result: event.result,
+						isError: event.isError,
+					});
+					if (shouldTerminate) {
+						if (event.toolName === "yield") terminalYieldCommitted = true;
+
 						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
 							// Terminal yield with owner jobs still pending: park the
 							// run behind the quiescence barrier instead of completing
@@ -1764,22 +1791,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							}
 						} else if (progress.requests >= stopThreshold) {
 							requestBudgetStop();
-						} else if (softRequestBudgetNotice && !budgetSteerSent && progress.requests >= softRequestBudget) {
-							budgetSteerSent = true;
-							const steerSession = activeSession;
-							if (steerSession) {
-								// Build the notice now (the count at crossing time), but send
-								// behind an async boundary: a synchronously-throwing send must
-								// never take down event processing (which escalates to terminate).
-								const notice = buildBudgetNotice(progress.requests, softRequestBudget);
-								void Promise.resolve()
-									.then(() => steerSession.sendUserMessage(notice, { deliverAs: "steer" }))
-									.catch(err => {
-										logger.warn("Subagent budget steer failed", {
-											error: err instanceof Error ? err.message : String(err),
-										});
-									});
-							}
+						} else if (softRequestBudgetNotice && progress.requests >= softRequestBudget) {
+							sendWrapUpNotice(
+								buildBudgetNotice(progress.requests, softRequestBudget),
+								"Subagent budget steer failed",
+							);
 						}
 					}
 				}
@@ -1966,7 +1982,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		},
 		// A soft stop that never escalated still identifies as a budget abort so
 		// the lifecycle can park the agent as resumable instead of killing it.
-		abortKind: () => abortReason ?? (budgetStopRequested ? "budget" : undefined),
+		abortKind: () =>
+			abortReason === "terminate" && terminalYieldCommitted
+				? undefined
+				: (abortReason ?? (budgetStopRequested ? "budget" : undefined)),
 		isAbortedRun: () =>
 			abortReason === "signal" ||
 			abortReason === "shutdown" ||
@@ -2942,7 +2961,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		0,
 		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
 	);
-	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
+	const softRequestBudget = resolveSoftRequestBudget(options.performanceClass ?? "worker", configuredDefaultBudget);
 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
@@ -3008,6 +3027,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		performanceClass: options.performanceClass,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -3347,6 +3367,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 						ircPeers: ircEnabled ? formatIrcPeerRoster(AgentRegistry.global(), id) : "",
 						ircSelfId: ircEnabled ? id : "",
+						exploreClass: options.performanceClass === "explore",
+						reviewClass: options.performanceClass === "review",
 					});
 					return defaultPrompt.length === 0
 						? [subagentPrompt]

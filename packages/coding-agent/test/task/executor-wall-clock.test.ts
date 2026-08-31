@@ -6,7 +6,11 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { resolveSubagentCompletionKind, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import {
+	buildSoftRuntimeNotice,
+	resolveSubagentCompletionKind,
+	runSubprocess,
+} from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
@@ -63,6 +67,59 @@ function createHangingSession(): HangingSessionHandle {
 		session: session as AgentSession,
 		abortCalls: () => abortCount,
 	};
+}
+
+interface SteeredSessionHandle {
+	session: AgentSession;
+	steers: Array<{ text: string; deliverAs: string | undefined }>;
+	promptStarted: Promise<void>;
+}
+
+function createSteeredHangingSession(
+	options: {
+		onPrompt?: (emit: (event: AgentSessionEvent) => void) => void;
+		onSteer?: (emit: (event: AgentSessionEvent) => void) => void | Promise<void>;
+	} = {},
+): SteeredSessionHandle {
+	const { promise: hang, resolve: releaseHang } = Promise.withResolvers<void>();
+	const promptStarted = Promise.withResolvers<void>();
+	let listener: ((event: AgentSessionEvent) => void) | undefined;
+	const steers: Array<{ text: string; deliverAs: string | undefined }> = [];
+	const emit = (event: AgentSessionEvent) => listener?.(event);
+	const session: Partial<AgentSession> = {
+		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
+		state: { messages: [] } as never,
+		agent: { state: { systemPrompt: ["test"] } } as never,
+		extensionRunner: undefined as never,
+		sessionManager: { appendSessionInit: () => {} } as never,
+		getActiveToolNames: () => ["read", "yield"],
+		getEnabledToolNames: () => ["read", "yield"],
+		setActiveToolsByName: async () => {},
+		subscribe: next => {
+			listener = next;
+			return () => {};
+		},
+		prompt: async () => {
+			promptStarted.resolve();
+			options.onPrompt?.(emit);
+			await hang;
+			return true;
+		},
+		waitForIdle: async () => {
+			await hang;
+		},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
+		getLastAssistantMessage: () => undefined,
+		sendUserMessage: async (text, steerOptions) => {
+			steers.push({ text: String(text), deliverAs: steerOptions?.deliverAs });
+			await options.onSteer?.(emit);
+		},
+		abort: async () => releaseHang(),
+		dispose: async () => {},
+	};
+	return { session: session as AgentSession, steers, promptStarted: promptStarted.promise };
 }
 
 function mockCreateAgentSession(session: AgentSession) {
@@ -869,6 +926,161 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		expect(result.aborted).toBe(false);
 		expect(result.exitCode).toBe(0);
 		expect(result.abortReason).toBeUndefined();
+	});
+
+	it("renders both runtime values through the advisory prompt asset", () => {
+		const notice = buildSoftRuntimeNotice(450_000, 600_000);
+		expect(notice).toContain("450000 ms");
+		expect(notice).toContain("600000 ms");
+		expect(notice).toContain("Wrap up now");
+	});
+
+	it("keeps a cooperative yield after the 75% runtime steer completed", async () => {
+		vi.useFakeTimers();
+		try {
+			const settings = Settings.isolated({ "task.maxRuntimeMs": 80, "task.softRequestBudget": 0 });
+			const reviewer = { ...baseAgent, name: "reviewer" };
+			const handle = createSteeredHangingSession({
+				onSteer: emit => {
+					const message = {
+						role: "assistant" as const,
+						content: [
+							{
+								type: "toolCall" as const,
+								id: "tool-runtime-yield",
+								name: "yield",
+								arguments: { result: { data: { verdict: "complete" } } },
+							},
+						],
+						stopReason: "toolUse" as const,
+					};
+					emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+					emit({
+						type: "tool_execution_end",
+						toolCallId: "tool-runtime-yield",
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Result submitted." }],
+							details: { status: "success", data: { verdict: "complete" } },
+						},
+						isError: false,
+					} as AgentSessionEvent);
+				},
+			});
+			mockCreateAgentSession(handle.session);
+
+			const pending = runSubprocess({
+				...baseOptions,
+				agent: reviewer,
+				id: "reviewer-runtime-advisory",
+				settings,
+				maxRuntimeMs: 80,
+				performanceClass: "review",
+			});
+			await handle.promptStarted;
+			vi.advanceTimersByTime(60);
+			for (let i = 0; i < 5; i++) await Promise.resolve();
+			const result = await pending;
+
+			expect(handle.steers).toHaveLength(1);
+			expect(handle.steers[0]?.text).toContain("runtime notice");
+			expect(handle.steers[0]?.deliverAs).toBe("steer");
+			expect(result.completionKind).toBe("completed");
+			expect(result.aborted).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("shares one wrap-up notice between request and runtime thresholds", async () => {
+		vi.useFakeTimers();
+		try {
+			const settings = Settings.isolated({
+				"task.maxRuntimeMs": 120,
+				"task.softRequestBudget": 1,
+				"task.softRequestBudgetNotice": true,
+			});
+			const reviewer = { ...baseAgent, name: "reviewer" };
+			const steerStarted = Promise.withResolvers<(event: AgentSessionEvent) => void>();
+			const releaseSteer = Promise.withResolvers<void>();
+			const handle = createSteeredHangingSession({
+				onPrompt: emit => {
+					emit({
+						type: "message_end",
+						message: { role: "assistant", content: [{ type: "text", text: "working" }] },
+					} as unknown as AgentSessionEvent);
+				},
+				onSteer: async emit => {
+					steerStarted.resolve(emit);
+					await releaseSteer.promise;
+				},
+			});
+			mockCreateAgentSession(handle.session);
+
+			const pending = runSubprocess({
+				...baseOptions,
+				agent: reviewer,
+				id: "reviewer-wrap-up-dedup",
+				settings,
+				maxRuntimeMs: 120,
+				performanceClass: "review",
+			});
+			const emit = await steerStarted.promise;
+			vi.advanceTimersByTime(90);
+			await Promise.resolve();
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-dedup-yield",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { verdict: "complete" } },
+				},
+				isError: false,
+			} as AgentSessionEvent);
+			releaseSteer.resolve();
+			const result = await pending;
+
+			expect(handle.steers).toHaveLength(1);
+			expect(handle.steers[0]?.text).toContain("budget notice");
+			expect(result.completionKind).toBe("completed");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not retry a rejected runtime steer", async () => {
+		vi.useFakeTimers();
+		try {
+			const settings = Settings.isolated({ "task.maxRuntimeMs": 80, "task.softRequestBudget": 0 });
+			const reviewer = { ...baseAgent, name: "reviewer" };
+			const handle = createSteeredHangingSession({
+				onSteer: () => {
+					throw new Error("steer rejected");
+				},
+			});
+			mockCreateAgentSession(handle.session);
+
+			const pending = runSubprocess({
+				...baseOptions,
+				agent: reviewer,
+				id: "reviewer-rejected-steer",
+				settings,
+				maxRuntimeMs: 80,
+				performanceClass: "review",
+			});
+			await handle.promptStarted;
+			vi.advanceTimersByTime(60);
+			for (let i = 0; i < 5; i++) await Promise.resolve();
+			vi.advanceTimersByTime(20);
+			for (let i = 0; i < 5; i++) await Promise.resolve();
+			const result = await pending;
+
+			expect(handle.steers).toHaveLength(1);
+			expect(result.completionKind).toBe("timeout");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("classifies caller abort ahead of a successful-looking yield", () => {

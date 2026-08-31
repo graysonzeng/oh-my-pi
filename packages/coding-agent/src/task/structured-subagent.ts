@@ -35,6 +35,11 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import {
+	resolveClassMaxRuntimeMs,
+	resolveSubagentPerformanceClass,
+	type SubagentPerformanceClass,
+} from "./review-performance";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
@@ -145,6 +150,8 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	performanceClass: SubagentPerformanceClass;
+	effectiveMaxRuntimeMs: number;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -322,6 +329,22 @@ export async function resolveEffectiveSubagentPolicy(
 			`Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".`,
 		);
 	}
+	const performanceClass = resolveSubagentPerformanceClass({
+		agentName,
+		agentShadowReview: effectiveAgent.shadowReview,
+		spawnShadowReview: request.shadowReview,
+	});
+	const freshConfiguredMaxRuntimeMs = request.session.settings.get("task.maxRuntimeMs");
+	let effectiveMaxRuntimeMs: number;
+	if (request.maxRuntimeMs !== undefined) {
+		effectiveMaxRuntimeMs = request.maxRuntimeMs;
+	} else if (request.invocationKind === "eval") {
+		effectiveMaxRuntimeMs = freshConfiguredMaxRuntimeMs;
+	} else if (freshConfiguredMaxRuntimeMs === 0) {
+		effectiveMaxRuntimeMs = 0;
+	} else {
+		effectiveMaxRuntimeMs = Math.min(freshConfiguredMaxRuntimeMs, resolveClassMaxRuntimeMs(performanceClass));
+	}
 	return {
 		discovery,
 		agentName,
@@ -345,6 +368,8 @@ export async function resolveEffectiveSubagentPolicy(
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+		performanceClass,
+		effectiveMaxRuntimeMs,
 	};
 }
 
@@ -448,7 +473,8 @@ function buildExecutorOptions(
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
-		maxRuntimeMs: request.maxRuntimeMs,
+		performanceClass: policy.performanceClass,
+		maxRuntimeMs: policy.effectiveMaxRuntimeMs,
 		restrictToolNames,
 		keepAlive: request.keepAlive,
 		signal: request.signal,

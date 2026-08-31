@@ -1386,3 +1386,170 @@ describe("benchmark quality gate completionKind", () => {
 		expect(gate.reasons.some(reason => reason.includes("missing completionKind"))).toBe(true);
 	});
 });
+
+describe("benchmark quality gate required live firstPassed", () => {
+	const REQUIRED_LIVE_REVIEW_CASE_IDS = [
+		"permission-readonly-review",
+		"review-security-paths",
+		"review-error-handling",
+		"review-state-transition",
+	] as const;
+
+	const liveProvenance = {
+		source: "runtime_observed" as const,
+		provider: "p",
+		model: "m",
+		checkpoint: null,
+		api: null,
+		adapter: null,
+		parser: null,
+	};
+
+	function requiredLiveSuite() {
+		const suite = buildDefaultBenchmarkSuite();
+		const requiredIds: Record<string, true> = Object.fromEntries(
+			REQUIRED_LIVE_REVIEW_CASE_IDS.map(id => [id, true] as const),
+		);
+		const cases = suite.cases.filter(c => requiredIds[c.id]);
+		expect(cases.map(c => c.id).sort()).toEqual([...REQUIRED_LIVE_REVIEW_CASE_IDS].sort());
+		return { ...suite, cases };
+	}
+
+	it("fails live required review cases when any run firstPassed is false, null, or undefined", async () => {
+		const suite = requiredLiveSuite();
+		for (const firstPassed of [false, null, undefined] as const) {
+			const results = await runBenchmarkSuite({
+				suite,
+				runtime: async () => ({
+					passed: true,
+					firstPassed: true,
+					qualityScore: 100,
+					scopeStatus: "adhered",
+					durationMs: 1,
+					completionKind: "completed",
+					runtimeProvenance: liveProvenance,
+					stage: { fallbacks: { value: 0, provenance: "exact" } },
+				}),
+				minRepetitions: 1,
+				liveQualityUnknown: false,
+				provider: "p",
+				model: "m",
+			});
+			for (const run of results) {
+				if (firstPassed === undefined) {
+					const unobserved: { firstPassed?: boolean | null } = run;
+					delete unobserved.firstPassed;
+				} else {
+					run.firstPassed = firstPassed;
+				}
+			}
+			const gate = evaluateBenchmarkQualityGate(
+				buildScorecard(suite, results, { liveQualityUnknown: false, acceptanceMinRepetitions: 1 }),
+			);
+			expect(gate.passed).toBe(false);
+			for (const caseId of REQUIRED_LIVE_REVIEW_CASE_IDS) {
+				expect(gate.reasons.some(reason => reason.includes(caseId) && reason.includes("firstPassed"))).toBe(true);
+			}
+		}
+	});
+
+	it("fails live required review cases when one successful run cannot offset another failed run", async () => {
+		const suite = requiredLiveSuite();
+		const results = await runBenchmarkSuite({
+			suite,
+			runtime: async req => ({
+				passed: true,
+				firstPassed: !(req.variant === "optimized" && req.case.id === "review-security-paths"),
+				qualityScore: 100,
+				scopeStatus: "adhered",
+				durationMs: 1,
+				completionKind: "completed",
+				runtimeProvenance: liveProvenance,
+				stage: { fallbacks: { value: 0, provenance: "exact" } },
+			}),
+			minRepetitions: 1,
+			liveQualityUnknown: false,
+			provider: "p",
+			model: "m",
+		});
+		const gate = evaluateBenchmarkQualityGate(
+			buildScorecard(suite, results, { liveQualityUnknown: false, acceptanceMinRepetitions: 1 }),
+		);
+		expect(gate.passed).toBe(false);
+		expect(
+			gate.reasons.some(
+				reason =>
+					reason.includes("review-security-paths") &&
+					reason.includes("optimized") &&
+					reason.includes("firstPassed"),
+			),
+		).toBe(true);
+		for (const caseId of REQUIRED_LIVE_REVIEW_CASE_IDS) {
+			if (caseId === "review-security-paths") continue;
+			expect(gate.reasons.some(reason => reason.includes(caseId) && reason.includes("firstPassed"))).toBe(false);
+		}
+	});
+
+	it("passes live required review cases when every run firstPassed is true", async () => {
+		const suite = requiredLiveSuite();
+		const results = await runBenchmarkSuite({
+			suite,
+			runtime: async () => ({
+				passed: true,
+				firstPassed: true,
+				qualityScore: 100,
+				scopeStatus: "adhered",
+				durationMs: 1,
+				completionKind: "completed",
+				runtimeProvenance: liveProvenance,
+				stage: { fallbacks: { value: 0, provenance: "exact" } },
+			}),
+			minRepetitions: 1,
+			liveQualityUnknown: false,
+			provider: "p",
+			model: "m",
+		});
+		expect(results.every(run => run.firstPassed === true)).toBe(true);
+		const gate = evaluateBenchmarkQualityGate(
+			buildScorecard(suite, results, { liveQualityUnknown: false, acceptanceMinRepetitions: 1 }),
+		);
+		expect(gate.passed).toBe(true);
+		expect(gate.reasons.some(reason => reason.includes("firstPassed"))).toBe(false);
+	});
+
+	it("does not apply required firstPassed checks when buildScorecard omits liveQualityUnknown", async () => {
+		const suite = requiredLiveSuite();
+		const results = await runBenchmarkSuite({
+			suite,
+			runtime: async () => ({
+				passed: true,
+				firstPassed: false,
+				qualityScore: 100,
+				scopeStatus: "adhered",
+				durationMs: 1,
+			}),
+			minRepetitions: 1,
+		});
+		const gate = evaluateBenchmarkQualityGate(buildScorecard(suite, results));
+		expect(gate.passed).toBe(true);
+		expect(gate.reasons.some(reason => reason.includes("firstPassed"))).toBe(false);
+	});
+
+	it("does not apply required firstPassed checks when liveQualityUnknown is explicitly true", async () => {
+		const suite = requiredLiveSuite();
+		const results = await runBenchmarkSuite({
+			suite,
+			runtime: async () => ({
+				passed: true,
+				firstPassed: false,
+				qualityScore: 100,
+				scopeStatus: "adhered",
+				durationMs: 1,
+			}),
+			minRepetitions: 1,
+		});
+		const gate = evaluateBenchmarkQualityGate(buildScorecard(suite, results, { liveQualityUnknown: true }));
+		expect(gate.passed).toBe(true);
+		expect(gate.reasons.some(reason => reason.includes("firstPassed"))).toBe(false);
+	});
+});

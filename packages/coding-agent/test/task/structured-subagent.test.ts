@@ -38,6 +38,7 @@ function session(
 		isolationMode?: "none" | "worktree";
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
+		maxRuntimeMs?: number;
 	} = {},
 ): ToolSession {
 	return {
@@ -50,6 +51,7 @@ function session(
 			"task.enableLsp": true,
 			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
+			...(options.maxRuntimeMs !== undefined ? { "task.maxRuntimeMs": options.maxRuntimeMs } : {}),
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
@@ -635,6 +637,114 @@ describe("structured subagent primitive", () => {
 		expect(settled.mergeSummary).toContain("/recovery/Worker.patch");
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("classifies performance after fresh discovery and applies task omitted ceilings", async () => {
+		const reviewer = { ...AGENT, name: "reviewer" };
+		mockDiscovery(reviewer);
+		const review = await resolveEffectiveSubagentPolicy(
+			request({ agent: "reviewer", session: session({ maxRuntimeMs: 3_600_000 }) }),
+		);
+		expect(review.performanceClass).toBe("review");
+		expect(review.effectiveMaxRuntimeMs).toBe(1_800_000);
+
+		const unlimited = await resolveEffectiveSubagentPolicy(
+			request({ agent: "reviewer", session: session({ maxRuntimeMs: 0 }) }),
+		);
+		expect(unlimited.effectiveMaxRuntimeMs).toBe(0);
+
+		const stricter = await resolveEffectiveSubagentPolicy(
+			request({ agent: "reviewer", session: session({ maxRuntimeMs: 300_000 }) }),
+		);
+		expect(stricter.effectiveMaxRuntimeMs).toBe(300_000);
+
+		mockDiscovery({ ...AGENT, name: "sonic" });
+		const sonic = await resolveEffectiveSubagentPolicy(
+			request({ agent: "sonic", session: session({ maxRuntimeMs: 3_600_000 }) }),
+		);
+		expect(sonic.performanceClass).toBe("explore");
+		expect(sonic.effectiveMaxRuntimeMs).toBe(600_000);
+
+		mockDiscovery({ ...AGENT, name: "task" });
+		const worker = await resolveEffectiveSubagentPolicy(
+			request({ agent: "task", session: session({ maxRuntimeMs: 3_600_000 }) }),
+		);
+		expect(worker.performanceClass).toBe("worker");
+		expect(worker.effectiveMaxRuntimeMs).toBe(3_600_000);
+	});
+
+	it("keeps explicit caller caps authoritative for task and eval omitted inherits setting", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer" });
+		const explicitZero = await resolveEffectiveSubagentPolicy(
+			request({
+				agent: "reviewer",
+				maxRuntimeMs: 0,
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(explicitZero.effectiveMaxRuntimeMs).toBe(0);
+
+		const belowCeiling = await resolveEffectiveSubagentPolicy(
+			request({
+				agent: "reviewer",
+				maxRuntimeMs: 300_000,
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(belowCeiling.effectiveMaxRuntimeMs).toBe(300_000);
+
+		const aboveCeiling = await resolveEffectiveSubagentPolicy(
+			request({
+				agent: "reviewer",
+				maxRuntimeMs: 2_000_000,
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(aboveCeiling.effectiveMaxRuntimeMs).toBe(2_000_000);
+
+		const evalInherited = await resolveEffectiveSubagentPolicy(
+			request({
+				invocationKind: "eval",
+				agent: "reviewer",
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(evalInherited.performanceClass).toBe("review");
+		expect(evalInherited.effectiveMaxRuntimeMs).toBe(3_600_000);
+		expect(Object.hasOwn(request({ invocationKind: "eval" }), "maxRuntimeMs")).toBe(false);
+
+		mockDiscovery({ ...AGENT, name: "sonic" });
+		const sonicOverride = await resolveEffectiveSubagentPolicy(
+			request({
+				agent: "sonic",
+				maxRuntimeMs: 900_000,
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(sonicOverride.performanceClass).toBe("explore");
+		expect(sonicOverride.effectiveMaxRuntimeMs).toBe(900_000);
+	});
+
+	it("passes performanceClass and effective runtime through executor options", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer" });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({
+				agent: "reviewer",
+				session: session({ maxRuntimeMs: 3_600_000 }),
+				retainArtifacts: true,
+			}),
+		);
+		expect(settled.policy.performanceClass).toBe("review");
+		expect(settled.policy.effectiveMaxRuntimeMs).toBe(1_800_000);
+		expect(dispatched[0]?.performanceClass).toBe("review");
+		expect(dispatched[0]?.maxRuntimeMs).toBe(1_800_000);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 });

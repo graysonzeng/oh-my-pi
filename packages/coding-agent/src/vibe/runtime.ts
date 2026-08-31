@@ -30,6 +30,7 @@ import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
+import { resolveSubagentPerformanceClass } from "../task/review-performance";
 import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
 import type { ToolSession } from "../tools";
 import { formatDuration } from "../tools/render-utils";
@@ -1443,6 +1444,10 @@ export class VibeSessionRegistry {
 			modelRole: record.modelRole,
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
+			performanceClass: resolveSubagentPerformanceClass({
+				agentName: record.agent.name,
+				agentShadowReview: record.agent.shadowReview,
+			}),
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,

@@ -38,3 +38,17 @@ describe("createSubagentSettings stamps tier.xai", () => {
 		expect(child.get("tier.xai")).toBe("priority");
 	});
 });
+
+describe("createSubagentSettings read summary precedence", () => {
+	it("preserves a parent disable when the agent does not force false", () => {
+		const parent = Settings.isolated({ "read.summarize.enabled": false });
+		const child = createSubagentSettings(parent);
+		expect(child.get("read.summarize.enabled")).toBe(false);
+	});
+
+	it("lets an explicit false-only agent override disable a parent default", () => {
+		const parent = Settings.isolated({ "read.summarize.enabled": true });
+		const child = createSubagentSettings(parent, { "read.summarize.enabled": false });
+		expect(child.get("read.summarize.enabled")).toBe(false);
+	});
+});

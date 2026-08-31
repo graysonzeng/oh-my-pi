@@ -519,6 +519,13 @@ export function buildScorecard(
 	};
 }
 
+const REQUIRED_LIVE_REVIEW_CASE_IDS: readonly string[] = [
+	"permission-readonly-review",
+	"review-security-paths",
+	"review-error-handling",
+	"review-state-transition",
+];
+
 /** Compare optimized vs baseline pass rates; never mutates config. */
 export function evaluateBenchmarkQualityGate(
 	scorecard: BenchmarkScorecard,
@@ -567,6 +574,14 @@ export function evaluateBenchmarkQualityGate(
 					reasons.push(
 						`${caseId}: ${summary.variant} run(s) missing runtime provenance (${missingRuntimeIdentity.length}/${summary.runs.length})`,
 					);
+				}
+				if (REQUIRED_LIVE_REVIEW_CASE_IDS.includes(caseId)) {
+					const failedFirstPass = summary.runs.filter(run => run.firstPassed !== true);
+					if (failedFirstPass.length > 0) {
+						reasons.push(
+							`${caseId}: ${summary.variant} run(s) firstPassed is not true (${failedFirstPass.length}/${summary.runs.length})`,
+						);
+					}
 				}
 			}
 			const nonCompletedKind = summary.runs.filter(run => run.completionKind && run.completionKind !== "completed");

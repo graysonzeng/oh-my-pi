@@ -69,6 +69,7 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
+	readSummarize?: boolean,
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -81,6 +82,7 @@ async function createPersistedSession(
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		advisor,
+		readSummarize,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -103,7 +105,7 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, eventBus?: EventBus, settings: Settings = Settings.isolated()) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -117,7 +119,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		session: parentSession,
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
-		settings: Settings.isolated(),
+		settings,
 		enableLsp: true,
 		eventBus,
 	});
@@ -235,6 +237,31 @@ describe("persisted subagent revival", () => {
 		expect(roleAdvised.get("advisor.enabled")).toBe(true);
 		expect(roleAdvised.getModelRole("advisor")).toBeUndefined();
 		expect(unadvised.get("advisor.enabled")).toBe(false);
+	});
+
+	it("keeps read summarization false-only when reviving a bundled profile", async () => {
+		const cwd = makeTempDir("@pi-revive-read-summary-");
+		const forcedFalseFile = await createPersistedSession(cwd, undefined, undefined, undefined, false);
+		const declaredTrueFile = await createPersistedSession(cwd, undefined, undefined, undefined, true);
+		const captured: Settings[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options?.settings) captured.push(options.settings);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const parentEnabled = createFactory(cwd, undefined, Settings.isolated({ "read.summarize.enabled": true }));
+		const falseRef = createRef(forcedFalseFile);
+		const falseReviver = await parentEnabled(falseRef);
+		if (!falseReviver) throw new Error("Expected a persisted reviver");
+		await falseReviver(falseRef);
+
+		const parentDisabled = createFactory(cwd, undefined, Settings.isolated({ "read.summarize.enabled": false }));
+		const trueRef = createRef(declaredTrueFile);
+		const trueReviver = await parentDisabled(trueRef);
+		if (!trueReviver) throw new Error("Expected a persisted reviver");
+		await trueReviver(trueRef);
+
+		expect(captured.map(settings => settings.get("read.summarize.enabled"))).toEqual([false, false]);
 	});
 
 	it("restores the persisted custom model role before reopening the session", async () => {

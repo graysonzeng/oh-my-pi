@@ -31,6 +31,7 @@ import {
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
+import * as structuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -184,6 +185,7 @@ describe("task spawn routing", () => {
 			agents: [reviewer],
 			projectAgentsDir: null,
 		});
+		const policySpy = vi.spyOn(structuredSubagent, "resolveEffectiveSubagentPolicy");
 		const runSpy = vi
 			.spyOn(executorModule, "runSubprocess")
 			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
@@ -198,6 +200,11 @@ describe("task spawn routing", () => {
 		expect(jobId).toBeTruthy();
 		await manager.getJob(jobId!)!.promise;
 		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(1_800_000);
+		expect(
+			policySpy.mock.calls.some(
+				([request]) => request.agent === "reviewer" && !Object.hasOwn(request, "maxRuntimeMs"),
+			),
+		).toBe(true);
 	});
 
 	it("keeps a stricter reviewer maxRuntimeMs below the 30-minute ceiling", async () => {
@@ -211,6 +218,7 @@ describe("task spawn routing", () => {
 			agents: [reviewer],
 			projectAgentsDir: null,
 		});
+		const policySpy = vi.spyOn(structuredSubagent, "resolveEffectiveSubagentPolicy");
 		const runSpy = vi
 			.spyOn(executorModule, "runSubprocess")
 			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
@@ -225,6 +233,11 @@ describe("task spawn routing", () => {
 		expect(jobId).toBeTruthy();
 		await manager.getJob(jobId!)!.promise;
 		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(300_000);
+		expect(
+			policySpy.mock.calls.some(
+				([request]) => request.agent === "reviewer" && !Object.hasOwn(request, "maxRuntimeMs"),
+			),
+		).toBe(true);
 	});
 
 	it("leaves reviewer runtime unlimited when task.maxRuntimeMs is 0", async () => {
@@ -238,6 +251,7 @@ describe("task spawn routing", () => {
 			agents: [reviewer],
 			projectAgentsDir: null,
 		});
+		const policySpy = vi.spyOn(structuredSubagent, "resolveEffectiveSubagentPolicy");
 		const runSpy = vi
 			.spyOn(executorModule, "runSubprocess")
 			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
@@ -252,6 +266,40 @@ describe("task spawn routing", () => {
 		expect(jobId).toBeTruthy();
 		await manager.getJob(jobId!)!.promise;
 		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(0);
+		expect(
+			policySpy.mock.calls.some(
+				([request]) => request.agent === "reviewer" && !Object.hasOwn(request, "maxRuntimeMs"),
+			),
+		).toBe(true);
+	});
+
+	it("applies the explore ceiling to a TaskTool sonic spawn without a request cap", async () => {
+		const sonic: AgentDefinition = {
+			name: "sonic",
+			description: "Fast bounded worker",
+			systemPrompt: "Inspect quickly.",
+			source: "bundled",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [sonic], projectAgentsDir: null });
+		const policySpy = vi.spyOn(structuredSubagent, "resolveEffectiveSubagentPolicy");
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Sonic", { agent: "sonic" }));
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxRuntimeMs": 3_600_000 } }));
+		const result = await tool.execute("tc-sonic-cap", {
+			agent: "sonic",
+			name: "Sonic",
+			task: "Inspect the bounded target.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		if (!jobId) throw new Error("Expected sonic async job");
+		await manager.getJob(jobId)!.promise;
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(600_000);
+		expect(runSpy.mock.calls[0]?.[0].performanceClass).toBe("explore");
+		expect(
+			policySpy.mock.calls.some(([request]) => request.agent === "sonic" && !Object.hasOwn(request, "maxRuntimeMs")),
+		).toBe(true);
 	});
 
 	it("surfaces budget_stop on the parent-facing task summary", async () => {

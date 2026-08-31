@@ -19,6 +19,7 @@ import type { ExecutorOptions } from "../../src/task/executor";
 import * as taskExecutor from "../../src/task/executor";
 import * as isolationRunner from "../../src/task/isolation-runner";
 import { AgentOutputManager } from "../../src/task/output-manager";
+import * as structuredSubagent from "../../src/task/structured-subagent";
 import type { AgentDefinition, AgentProgress, SingleResult, StructuredSubagentOutput } from "../../src/task/types";
 import type { ToolSession } from "../../src/tools";
 
@@ -890,6 +891,34 @@ describe("agent() through eval runtimes", () => {
 		expect(displayAgentEvents.length).toBe(2);
 	});
 
+	it("omits the eval request cap and inherits fresh settings without class ceilings", async () => {
+		mockAgents([taskAgent, reviewerAgent, { ...reviewerAgent, name: "scout", description: "Scout" }]);
+		const observedMaxRuntimeMs: number[] = [];
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			observedMaxRuntimeMs.push(options.maxRuntimeMs ?? -1);
+			return singleResult(options);
+		});
+		const requestSpy = vi.spyOn(structuredSubagent, "runStructuredSubagent");
+
+		for (const [agent, maxRuntimeMs] of [
+			["reviewer", 0],
+			["reviewer", 3_600_000],
+			["scout", 3_600_000],
+		] as const) {
+			await runEvalAgent(
+				{ prompt: "inspect", agent },
+				{ session: makeSession({ settings: Settings.isolated({ "task.maxRuntimeMs": maxRuntimeMs }) }) },
+			);
+		}
+
+		expect(observedMaxRuntimeMs).toEqual([0, 3_600_000, 3_600_000]);
+		expect(
+			requestSpy.mock.calls.every(
+				([request]) => request.invocationKind === "eval" && !Object.hasOwn(request, "maxRuntimeMs"),
+			),
+		).toBe(true);
+	});
+
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-timeout-pause-");
 		const { session } = makeEvalSession(
@@ -938,9 +967,9 @@ describe("agent() through eval runtimes", () => {
 
 		// The bridge paused the watchdog; the subprocess is now blocked in flight.
 		await inFlight;
-		// `agent()` must not pin the wall-clock cap: leaving it unset lets the
-		// executor inherit `task.maxRuntimeMs` exactly like the task tool does.
-		expect(observedMaxRuntimeMs).toBeUndefined();
+		// `agent()` omits a request cap; the fresh policy therefore forwards the
+		// configured 1ms setting unchanged and does not apply a class ceiling.
+		expect(observedMaxRuntimeMs).toBe(1);
 		// Burn far more than the 20ms budget while paused: the watchdog stays armed-off.
 		vi.advanceTimersByTime(1_000);
 		expect(idle.signal.aborted).toBe(false);
