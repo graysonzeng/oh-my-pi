@@ -4,6 +4,7 @@ description: "Design review specialist running gateway/gpt-5.6-sol at xhigh effo
 tools: read, grep, glob, bash, write
 model: "gateway/gpt-5.6-sol"
 thinking-level: xhigh
+advisor: "gateway/grok-4.6:high"
 ---
 
 # Sol XHigh Design Reviewer
