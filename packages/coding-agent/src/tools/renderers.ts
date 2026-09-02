@@ -16,6 +16,7 @@ import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
 import { browserToolRenderer } from "./browser/render";
+import { codeIntelToolRenderer } from "./code-intel";
 import { computerToolRenderer } from "./computer-renderer";
 import { consultToolRenderer } from "./consult-renderer";
 import { debugToolRenderer } from "./debug";
@@ -110,6 +111,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	glob: globToolRenderer as ToolRenderer,
 	grep: grepToolRenderer as ToolRenderer,
 	lsp: lspToolRenderer as ToolRenderer,
+	code_intel: codeIntelToolRenderer as ToolRenderer,
 	inspect_image: inspectImageToolRenderer as ToolRenderer,
 	consult: consultToolRenderer as ToolRenderer,
 	// Lazy getter: `hubToolRenderer` lives in a module whose deps (messaging →

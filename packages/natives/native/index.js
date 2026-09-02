@@ -38,6 +38,11 @@ export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
 export const blockRangeAt = nativeBindings.blockRangeAt;
+export const codeIntelBuildGeneration = nativeBindings.codeIntelBuildGeneration;
+export const codeIntelChunkFile = nativeBindings.codeIntelChunkFile;
+export const codeIntelExtractCalls = nativeBindings.codeIntelExtractCalls;
+export const codeIntelExtractTags = nativeBindings.codeIntelExtractTags;
+export const codeIntelRankGeneration = nativeBindings.codeIntelRankGeneration;
 export const copyToClipboard = nativeBindings.copyToClipboard;
 export const cosineSimilarityPairs = nativeBindings.cosineSimilarityPairs;
 export const countTokens = nativeBindings.countTokens;
@@ -104,6 +109,10 @@ export const AstMatchStrictness = {
 	Relaxed: "relaxed",
 	Signature: "signature",
 	Template: "template",
+};
+export const CodeIntelTagKind = {
+	Def: "def",
+	Ref: "ref",
 };
 export const DiffSide = {
 	Old: "Old",

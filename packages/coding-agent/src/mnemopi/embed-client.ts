@@ -12,7 +12,12 @@ import {
 	spawnWorkerOrUnavailable,
 	type WorkerHandle,
 } from "../subprocess/worker-client";
-import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound } from "./embed-protocol";
+import type {
+	MnemopiEmbedModelId,
+	MnemopiEmbedRole,
+	MnemopiEmbedWorkerInbound,
+	MnemopiEmbedWorkerOutbound,
+} from "./embed-protocol";
 
 /**
  * Parent-side handle for the mnemopi embeddings subprocess. The runtime
@@ -81,7 +86,7 @@ function spawnMnemopiEmbedWorker(): MnemopiEmbedWorkerHandle {
  * and serializing per-batch over IPC would not improve throughput.
  */
 export interface MnemopiSubprocessEmbeddingModel {
-	embed(texts: string[], batchSize?: number): AsyncIterable<number[][]>;
+	embed(texts: string[], batchSize?: number, role?: MnemopiEmbedRole): AsyncIterable<number[][]>;
 }
 
 /**
@@ -148,7 +153,7 @@ export class MnemopiEmbedClient {
 			});
 			return null;
 		}
-		return { embed: (texts, batchSize) => this.#streamEmbed(model, cacheDir, texts, batchSize) };
+		return { embed: (texts, batchSize, role) => this.#streamEmbed(model, cacheDir, texts, batchSize, role) };
 	}
 
 	async terminate(): Promise<void> {
@@ -175,6 +180,7 @@ export class MnemopiEmbedClient {
 		cacheDir: string | undefined,
 		texts: string[],
 		batchSize: number | undefined,
+		role: MnemopiEmbedRole | undefined,
 	): Promise<number[][]> {
 		const worker = this.#ensureWorker();
 		const id = String(++this.#nextRequestId);
@@ -186,7 +192,7 @@ export class MnemopiEmbedClient {
 			// `LocalEmbeddingModel` handle would otherwise hit a fresh
 			// worker's "embed before init" guard. Worker `ensureLoaded` is
 			// idempotent so steady-state embeds pay no extra cost.
-			worker.send({ type: "embed", id, model, cacheDir, texts, batchSize });
+			worker.send({ type: "embed", id, model, cacheDir, texts, batchSize, role });
 			const result = await this.#awaitRequest(promise);
 			if (result instanceof Error) throw result;
 			return result;
@@ -226,8 +232,9 @@ export class MnemopiEmbedClient {
 		cacheDir: string | undefined,
 		texts: string[],
 		batchSize: number | undefined,
+		role: MnemopiEmbedRole | undefined,
 	): AsyncIterable<number[][]> {
-		const vectors = await this.#embed(model, cacheDir, texts, batchSize);
+		const vectors = await this.#embed(model, cacheDir, texts, batchSize, role);
 		// Mnemopi's `collectMatrix` re-batches via async iteration anyway; yield
 		// a single batch carrying the full result so the caller's drain loop
 		// behaves identically to the in-process fastembed iterator (one yield

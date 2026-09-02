@@ -5208,6 +5208,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tree-sitter",
  "uiautomation",
  "windows-sys 0.61.2",
  "winreg 0.56.0",

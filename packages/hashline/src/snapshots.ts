@@ -109,6 +109,15 @@ export abstract class SnapshotStore {
 
 	/** Drop every version history. */
 	abstract clear(): void;
+
+	/**
+	 * Canonical paths currently retained, most-recently used first.
+	 * Code-intel uses this as PageRank seed input (cap 32 at the caller).
+	 * Stores that cannot enumerate return an empty list.
+	 */
+	paths(): string[] {
+		return [];
+	}
 }
 
 // Wide sessions routinely touch far more than a few dozen files; evicting a
@@ -254,5 +263,9 @@ export class InMemorySnapshotStore extends SnapshotStore {
 
 	clear(): void {
 		this.#versions.clear();
+	}
+
+	override paths(): string[] {
+		return [...this.#versions.keys()];
 	}
 }

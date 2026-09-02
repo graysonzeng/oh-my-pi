@@ -34,6 +34,7 @@ const clientLocks = new Map<string, PendingClient>();
 const invalidatedClientKeys = new Set<string>();
 const clientReloadBarriers = new Map<string, Promise<unknown>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
+const applyEditHolds = new Map<string, number>();
 
 /** Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call. */
 const INIT_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
@@ -113,7 +114,7 @@ function stopIdleChecker(): void {
 // Client Capabilities
 // =============================================================================
 
-const CLIENT_CAPABILITIES = {
+export const CLIENT_CAPABILITIES = {
 	textDocument: {
 		synchronization: {
 			didSave: true,
@@ -186,6 +187,9 @@ const CLIENT_CAPABILITIES = {
 		},
 		diagnostic: {
 			dynamicRegistration: true,
+		},
+		callHierarchy: {
+			dynamicRegistration: false,
 		},
 	},
 	window: {
@@ -496,6 +500,15 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
  * Handle workspace/applyEdit requests from the server.
  */
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
+	if ((applyEditHolds.get(client.name) ?? 0) > 0) {
+		await sendResponse(
+			client,
+			message.id,
+			{ applied: false, failureReason: "workspace/applyEdit refused during read-only navigation" },
+			"workspace/applyEdit",
+		);
+		return;
+	}
 	const params = message.params as { edit?: WorkspaceEdit };
 	if (!params?.edit) {
 		await sendResponse(
@@ -513,6 +526,20 @@ async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequ
 	} catch (err) {
 		await sendResponse(client, message.id, { applied: false, failureReason: String(err) }, "workspace/applyEdit");
 	}
+}
+
+/** Hold inbound workspace/applyEdit on a live client for read-only navigation. */
+export function holdLspApplyEdits(client: LspClient): () => void {
+	const key = client.name;
+	applyEditHolds.set(key, (applyEditHolds.get(key) ?? 0) + 1);
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		const next = (applyEditHolds.get(key) ?? 1) - 1;
+		if (next <= 0) applyEditHolds.delete(key);
+		else applyEditHolds.set(key, next);
+	};
 }
 
 function workspaceEditChanges(executed: ExecutedWorkspaceChange[]): {
@@ -1670,6 +1697,7 @@ export async function shutdownAll(): Promise<void> {
 	stopIdleChecker();
 	invalidatedClientKeys.clear();
 	clientReloadBarriers.clear();
+	applyEditHolds.clear();
 	const clientsToShutdown = Array.from(clients.values());
 	clients.clear();
 	// Mid-initialize clients live only in clientLocks (publication is deferred

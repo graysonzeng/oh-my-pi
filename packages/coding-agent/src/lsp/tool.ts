@@ -67,6 +67,9 @@ import {
 	reloadServer,
 } from "./servers";
 import {
+	type CallHierarchyIncomingCall,
+	type CallHierarchyItem,
+	type CallHierarchyOutgoingCall,
 	type CodeAction,
 	type CodeActionContext,
 	type Command,
@@ -1142,7 +1145,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				targetFile &&
 				line !== undefined &&
 				!symbol &&
-				(action === "references" || action === "rename" || action === "definition") &&
+				(action === "references" ||
+					action === "rename" ||
+					action === "definition" ||
+					action === "call_hierarchy") &&
 				isProjectAwareLspServer(serverConfig)
 			) {
 				throw new ToolError(
@@ -1289,6 +1295,63 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								]
 							: contextualLines;
 						output = `Found ${result.length} reference(s):\n${lines.join("\n")}`;
+					}
+					break;
+				}
+
+				case "call_hierarchy": {
+					const direction = (query ?? "both").toLowerCase();
+					if (direction !== "incoming" && direction !== "outgoing" && direction !== "both") {
+						output = "Error: query must be incoming, outgoing, or both";
+						break;
+					}
+					const prepared = (await sendRequest(
+						client,
+						"textDocument/prepareCallHierarchy",
+						{ textDocument: { uri }, position },
+						signal,
+					)) as CallHierarchyItem[] | null;
+					if (!prepared || prepared.length === 0) {
+						output = "No call hierarchy items found";
+						useless = true;
+						break;
+					}
+					const lines: string[] = [];
+					for (const item of prepared) {
+						if (direction === "incoming" || direction === "both") {
+							const incoming =
+								((await sendRequest(client, "callHierarchy/incomingCalls", { item }, signal)) as
+									| CallHierarchyIncomingCall[]
+									| null) ?? [];
+							for (const call of incoming) {
+								const loc: Location = {
+									uri: call.from.uri,
+									range: call.fromRanges[0] ?? call.from.selectionRange,
+								};
+								lines.push(
+									`  ${formatLocation(loc, this.session.cwd)} | ${call.from.name} | called by | reference`,
+								);
+							}
+						}
+						if (direction === "outgoing" || direction === "both") {
+							const outgoing =
+								((await sendRequest(client, "callHierarchy/outgoingCalls", { item }, signal)) as
+									| CallHierarchyOutgoingCall[]
+									| null) ?? [];
+							for (const call of outgoing) {
+								const loc: Location = {
+									uri: call.to.uri,
+									range: call.to.selectionRange,
+								};
+								lines.push(`  ${formatLocation(loc, this.session.cwd)} | ${call.to.name} | calls | reference`);
+							}
+						}
+					}
+					if (lines.length === 0) {
+						output = "No incoming or outgoing calls found";
+						useless = true;
+					} else {
+						output = `Found ${lines.length} call hierarchy result(s):\n${lines.join("\n")}`;
 					}
 					break;
 				}

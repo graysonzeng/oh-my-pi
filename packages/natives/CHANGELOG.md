@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added native `code_intel` extract/build/rank APIs: identifier tags, call-expression captures, PageRank over a committed generation snapshot, and def/window chunks. Identifier tags are a name graph, not a call graph.
+
 ## [17.1.9] - 2026-08-07
 
 ## [18.0.5] - 2026-08-25

@@ -516,6 +516,11 @@ export function getLogsDir(): string {
 	return dirs.rootSubdir("logs", "state");
 }
 
+/** Get the code-intel index root (~/.omp/code-intel). */
+export function getCodeIntelDir(): string {
+	return dirs.rootSubdir("code-intel", "state");
+}
+
 /** Get this process's dated log path (~/.omp/logs/omp.YYYY-MM-DD.PID.log). */
 export function getLogPath(date = new Date(), pid = process.pid): string {
 	return path.join(getLogsDir(), `${APP_NAME}.${date.toISOString().slice(0, 10)}.${pid}.log`);

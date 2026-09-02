@@ -70,6 +70,7 @@ export const PROJECT_INDEXED_ACTIONS: ReadonlySet<string> = new Set([
 	"references",
 	"rename",
 	"hover",
+	"call_hierarchy",
 ]);
 
 const RUST_WORKSPACE_MARKERS = ["Cargo.toml", "rust-analyzer.toml"] as const;

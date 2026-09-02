@@ -254,6 +254,7 @@ Text functions generally return deterministic transformed output; errors are lim
 | `glob`                       | Yes               | Optional                  | directory scans + glob filtering                                     |
 | `fuzzyFind`                  | Yes               | Optional                  | directory scans + fuzzy scoring                                      |
 | `grep` (file/dir path)       | Yes               | No                        | walker discovery + regex search, optional filters/callback           |
+| `codeIntel*`                 | Yes               | No                        | tags / call-expression / PageRank generation snapshots               |
 
 ## End-to-end lifecycle summary
 

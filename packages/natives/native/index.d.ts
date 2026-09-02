@@ -693,6 +693,108 @@ export interface ClipboardImage {
   mimeType: string
 }
 
+/** Build a generation directory: files/tags/chunks/graph. Does not write embeddings. */
+export declare function codeIntelBuildGeneration(options: CodeIntelBuildOptions): Promise<CodeIntelBuildResult>
+
+export interface CodeIntelBuildOptions {
+  root: string
+  destDir: string
+  hidden?: boolean
+  gitignore?: boolean
+  maxFiles?: number
+  signal?: unknown
+  timeoutMs?: number
+}
+
+export interface CodeIntelBuildResult {
+  filesScanned: number
+  tagCount: number
+  chunkCount: number
+  parseErrors: Array<string>
+}
+
+/** A verified call-expression capture (callee name + span). */
+export interface CodeIntelCall {
+  path: string
+  callee: string
+  startLine: number
+  endLine: number
+}
+
+/** A source chunk for embedding / retrieval. */
+export interface CodeIntelChunk {
+  startLine: number
+  endLine: number
+  symbol: string
+  kind: string
+  text: string
+}
+
+/** Chunk one file's content using the same def/window rules as generation. */
+export declare function codeIntelChunkFile(options: CodeIntelChunkOptions): Array<CodeIntelChunk>
+
+export interface CodeIntelChunkOptions {
+  path: string
+  content: string
+}
+
+/** Extract verified call-expression callees from one file. */
+export declare function codeIntelExtractCalls(options: CodeIntelChunkOptions): Array<CodeIntelCall>
+
+export interface CodeIntelExtractOptions {
+  root: string
+  hidden?: boolean
+  gitignore?: boolean
+  maxFiles?: number
+  signal?: unknown
+  timeoutMs?: number
+}
+
+export interface CodeIntelExtractResult {
+  tags: Array<CodeIntelTag>
+  calls: Array<CodeIntelCall>
+  filesScanned: number
+  parseErrors: Array<string>
+}
+
+/** Extract tags and call-expressions from a file or directory (tests / diagnostics). */
+export declare function codeIntelExtractTags(options: CodeIntelExtractOptions): Promise<CodeIntelExtractResult>
+
+/** Ranked symbol/file node from personalized PageRank. */
+export interface CodeIntelRankedNode {
+  path: string
+  symbol: string
+  score: number
+  startLine: number
+  endLine: number
+}
+
+/** Rank a previously built generation by personalized PageRank. Native holds the graph. */
+export declare function codeIntelRankGeneration(options: CodeIntelRankOptions): Array<CodeIntelRankedNode>
+
+export interface CodeIntelRankOptions {
+  generationDir: string
+  seedPaths?: Array<string>
+  seedSymbols?: Array<string>
+  topFiles?: number
+  topSymbols?: number
+}
+
+/** One definition or identifier reference extracted from a source file. */
+export interface CodeIntelTag {
+  path: string
+  name: string
+  kind: CodeIntelTagKind
+  grammar: string
+  startLine: number
+  endLine: number
+}
+
+export declare enum CodeIntelTagKind {
+  Def = 'def',
+  Ref = 'ref'
+}
+
 /** A context line (before or after a match). */
 export interface ContextLine {
   /** 1-indexed line number in the source file. */

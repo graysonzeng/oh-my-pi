@@ -4734,6 +4734,53 @@ describe("lsp regressions", () => {
 			}
 		});
 	});
+
+	it("refuses inbound workspace/applyEdit while a read-only hold is active", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-applyedit-hold-");
+		const target = path.join(tempDir.path(), "victim.ts");
+		await Bun.write(target, "export const intact = true;\n");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = {
+				command: "fake-lsp",
+				args: ["--hold"],
+				fileTypes: [".ts"],
+				rootMarkers: [],
+			};
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const release = lspClient.holdLspApplyEdits(client);
+			try {
+				server.send({
+					jsonrpc: "2.0",
+					id: "apply-1",
+					method: "workspace/applyEdit",
+					params: {
+						edit: {
+							changes: {
+								[fileToUri(target)]: [
+									{
+										range: {
+											start: { line: 0, character: 0 },
+											end: { line: 0, character: 0 },
+										},
+										newText: "mutated\n",
+									},
+								],
+							},
+						},
+					},
+				});
+				const refused = await server.waitFor(message => message.id === "apply-1" && message.method === undefined);
+				expect(refused.result).toMatchObject({ applied: false });
+				expect(await Bun.file(target).text()).toBe("export const intact = true;\n");
+			} finally {
+				release();
+			}
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
 });
 
 describe("expert elixir lsp", () => {

@@ -214,7 +214,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
-	files: ["Editing", "Reading", "Read Summaries", "LSP"],
+	files: ["Editing", "Reading", "Read Summaries", "LSP", "Code Intel"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
 		"Available Tools",
@@ -3904,6 +3904,78 @@ export const SETTINGS_SCHEMA = {
 			group: "LSP",
 			label: "Deduplicate Diagnostics",
 			description: "Suppress post-edit LSP diagnostics already shown for a file; only surface new or changed ones",
+		},
+	},
+
+	"codeIntel.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Code Intel",
+			description: "Enable the code_intel tool for native project understanding without Cursor CCE",
+		},
+	},
+
+	"codeIntel.semantic": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Semantic Index",
+			description: "Use the local embedding worker for unverified similar-chunk candidates",
+		},
+	},
+
+	"codeIntel.depthDefault": {
+		type: "enum",
+		values: ["auto", "focused", "extended"] as const,
+		default: "auto",
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Default Depth",
+			description: "Used when the tool call omits depth. auto infers from relationship words",
+			options: [
+				{ value: "auto", label: "Auto" },
+				{ value: "focused", label: "Focused" },
+				{ value: "extended", label: "Extended" },
+			],
+		},
+	},
+
+	"codeIntel.maxIndexFiles": {
+		type: "number",
+		default: 20000,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Max Index Files",
+			description: "Upper bound on files scanned into the tags generation snapshot",
+		},
+	},
+
+	"codeIntel.maxEmbedFiles": {
+		type: "number",
+		default: 4000,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Max Embed Files",
+			description: "Upper bound on files written into the local embedding matrix",
+		},
+	},
+
+	"codeIntel.timeoutSec": {
+		type: "number",
+		default: 30,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Timeout (seconds)",
+			description: "Per-query budget. Clamped to the code_intel tool range 5–180 seconds",
 		},
 	},
 

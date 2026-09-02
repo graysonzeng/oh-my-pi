@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added native `code_intel`: one query returns a `CCE_SEARCH_RESULT` evidence envelope from grep, tags/PageRank, read-only LSP call hierarchy, and optional local embeddings, without Cursor CCE.
 - Added default-off provider-health and adaptive-thinking latency arms plus ordinary-session work metrics linked to rollout outcomes.
 - Added the `consult` tool: a default-off mid-turn oneshot to a stronger model for strategic guidance, with pinned system/project constraints, execute-time model/credential revalidation, fail-closed secret redaction, and a hard `consult.maxTokens` output budget.
 - Detached subagents now show a compact current/recent tool gist on the Subagents HUD and live `hub wait` / `hub jobs` rows, with home-directory prefixes shortened, without changing settled result/error previews.

@@ -54,6 +54,7 @@ import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
+import { CodeIntelTool } from "./code-intel";
 import { ComputerTool } from "./computer";
 import { ConsultTool } from "./consult";
 import type { ConsultUsage } from "./consult-state";
@@ -98,6 +99,8 @@ export * from "./ast-grep";
 export * from "./bash";
 export * from "./browser";
 export * from "./checkpoint";
+export * from "./code-intel";
+export * from "./code-intel-envelope";
 export * from "./computer";
 export * from "./computer/supervisor";
 export * from "./consult";
@@ -499,6 +502,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
 	lsp: LspTool.createIf,
+	code_intel: CodeIntelTool.createIf,
 	inspect_image: s => new InspectImageTool(s),
 	consult: s => new ConsultTool(s),
 	browser: s => new BrowserTool(s),
@@ -631,6 +635,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			requestedTools.push("ast_grep");
 		}
 		if (
+			requestedTools.includes("grep") &&
+			!requestedTools.includes("code_intel") &&
+			session.settings.get("codeIntel.enabled") !== false
+		) {
+			requestedTools.push("code_intel");
+		}
+		if (
 			requestedTools.includes("edit") &&
 			!requestedTools.includes("ast_edit") &&
 			session.settings.get("astEdit.enabled")
@@ -677,6 +688,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
+		if (name === "code_intel") return session.settings.get("codeIntel.enabled") !== false;
 		if (name === "bash") return session.settings.get("bash.enabled");
 		if (name === "eval") return allowEval;
 		if (name === "debug") return session.settings.get("debug.enabled");
