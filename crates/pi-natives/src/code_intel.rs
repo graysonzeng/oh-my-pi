@@ -88,11 +88,11 @@ pub struct CodeIntelCall {
 
 #[napi(object)]
 pub struct CodeIntelExtractOptions<'env> {
-	pub root:      String,
-	pub hidden:    Option<bool>,
-	pub gitignore: Option<bool>,
-	pub max_files: Option<u32>,
-	pub signal:    Option<Unknown<'env>>,
+	pub root:       String,
+	pub hidden:     Option<bool>,
+	pub gitignore:  Option<bool>,
+	pub max_files:  Option<u32>,
+	pub signal:     Option<Unknown<'env>>,
 	pub timeout_ms: Option<u32>,
 }
 
@@ -180,19 +180,19 @@ struct StoredCall {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Manifest {
-	version:          u32,
-	root:             String,
-	git_head:         Option<String>,
-	embedding_model:  Option<String>,
-	dim:              u32,
-	file_count:       u32,
-	tag_count:        u32,
-	chunk_count:      u32,
-	tags_hash:        String,
-	chunks_hash:      String,
-	embeddings_rows:  u32,
-	embeddings_dim:   u32,
-	graph_hash:       String,
+	version:         u32,
+	root:            String,
+	git_head:        Option<String>,
+	embedding_model: Option<String>,
+	dim:             u32,
+	file_count:      u32,
+	tag_count:       u32,
+	chunk_count:     u32,
+	tags_hash:       String,
+	chunks_hash:     String,
+	embeddings_rows: u32,
+	embeddings_dim:  u32,
+	graph_hash:      String,
 }
 
 struct FileExtraction {
@@ -220,18 +220,26 @@ fn tags_query_source(lang: SupportLang) -> Option<&'static str> {
 (type_identifier) @reference.identifier
 "#
 		},
-		SupportLang::TypeScript | SupportLang::Tsx | SupportLang::JavaScript => {
+		SupportLang::TypeScript | SupportLang::Tsx => {
 			r#"
 (function_declaration name: (identifier) @definition.function)
 (generator_function_declaration name: (identifier) @definition.function)
 (class_declaration name: (type_identifier) @definition.class)
-(class_declaration name: (identifier) @definition.class)
 (method_definition name: (property_identifier) @definition.method)
-(method_definition name: (identifier) @definition.method)
 (interface_declaration name: (type_identifier) @definition.class)
 (type_alias_declaration name: (type_identifier) @definition.class)
 (identifier) @reference.identifier
 (type_identifier) @reference.identifier
+(property_identifier) @reference.identifier
+"#
+		},
+		SupportLang::JavaScript => {
+			r#"
+(function_declaration name: (identifier) @definition.function)
+(generator_function_declaration name: (identifier) @definition.function)
+(class_declaration name: (identifier) @definition.class)
+(method_definition name: (property_identifier) @definition.method)
+(identifier) @reference.identifier
 (property_identifier) @reference.identifier
 "#
 		},
@@ -260,7 +268,16 @@ fn tags_query_source(lang: SupportLang) -> Option<&'static str> {
 (identifier) @reference.identifier
 "#
 		},
-		SupportLang::C | SupportLang::Cpp => {
+		SupportLang::C => {
+			r#"
+(function_definition
+  declarator: (function_declarator declarator: (identifier) @definition.function))
+(struct_specifier name: (type_identifier) @definition.class)
+(identifier) @reference.identifier
+(type_identifier) @reference.identifier
+"#
+		},
+		SupportLang::Cpp => {
 			r#"
 (function_definition
   declarator: (function_declarator declarator: (identifier) @definition.function))
@@ -369,19 +386,23 @@ fn line_starts(source: &str) -> Vec<usize> {
 	starts
 }
 
-fn extract_from_source(path: &str, source: &str, lang: SupportLang) -> std::result::Result<FileExtraction, String> {
+fn extract_from_source(
+	path: &str,
+	source: &str,
+	lang: SupportLang,
+) -> std::result::Result<FileExtraction, String> {
 	let Some(compiled) = compile_queries(lang) else {
 		return Ok(FileExtraction {
-			tags: Vec::new(),
-			calls: Vec::new(),
+			tags:   Vec::new(),
+			calls:  Vec::new(),
 			chunks: chunk_windows(source, path),
 		});
 	};
 	let tree = parse_cached(source, lang).map_err(|err| err.to_string())?;
 	let Some(tree) = tree else {
 		return Ok(FileExtraction {
-			tags: Vec::new(),
-			calls: Vec::new(),
+			tags:   Vec::new(),
+			calls:  Vec::new(),
 			chunks: chunk_windows(source, path),
 		});
 	};
@@ -392,7 +413,7 @@ fn extract_from_source(path: &str, source: &str, lang: SupportLang) -> std::resu
 
 	let mut defs: Vec<CodeIntelTag> = Vec::new();
 	let mut refs: Vec<CodeIntelTag> = Vec::new();
-	let mut def_spans: HashSet<(u32, u32, String)> = HashSet::new();
+	let mut def_name_spans: HashSet<(u32, u32, String)> = HashSet::new();
 	let mut cursor = QueryCursor::new();
 	let mut matches = cursor.matches(&compiled.tags, root, bytes);
 	while let Some(m) = matches.next() {
@@ -403,32 +424,37 @@ fn extract_from_source(path: &str, source: &str, lang: SupportLang) -> std::resu
 			if text.is_empty() || !is_symbol_name(&text) {
 				continue;
 			}
-			let start_line = line_of(node.start_byte(), &starts);
-			let end_line = line_of(node.end_byte().saturating_sub(1), &starts).max(start_line);
-			let tag = CodeIntelTag {
-				path: path.to_string(),
-				name: text.clone(),
-				kind: if name.starts_with("definition.") {
-					CodeIntelTagKind::Def
-				} else {
-					CodeIntelTagKind::Ref
-				},
-				grammar: grammar.clone(),
-				start_line,
-				end_line,
-			};
+			let name_start = line_of(node.start_byte(), &starts);
+			let name_end = line_of(node.end_byte().saturating_sub(1), &starts).max(name_start);
 			if name.starts_with("definition.") {
-				def_spans.insert((start_line, end_line, text));
-				defs.push(tag);
+				def_name_spans.insert((name_start, name_end, text.clone()));
+				let def_node = enclosing_definition_node(node);
+				let start_line = line_of(def_node.start_byte(), &starts);
+				let end_line = line_of(def_node.end_byte().saturating_sub(1), &starts).max(start_line);
+				defs.push(CodeIntelTag {
+					path: path.to_string(),
+					name: text,
+					kind: CodeIntelTagKind::Def,
+					grammar: grammar.clone(),
+					start_line,
+					end_line,
+				});
 			} else {
-				refs.push(tag);
+				refs.push(CodeIntelTag {
+					path:       path.to_string(),
+					name:       text,
+					kind:       CodeIntelTagKind::Ref,
+					grammar:    grammar.clone(),
+					start_line: name_start,
+					end_line:   name_end,
+				});
 			}
 		}
 	}
 
 	let refs = refs
 		.into_iter()
-		.filter(|tag| !def_spans.contains(&(tag.start_line, tag.end_line, tag.name.clone())))
+		.filter(|tag| !def_name_spans.contains(&(tag.start_line, tag.end_line, tag.name.clone())))
 		.collect::<Vec<_>>();
 
 	let mut calls = Vec::new();
@@ -474,34 +500,113 @@ fn is_symbol_name(name: &str) -> bool {
 		&& name.len() <= 128
 }
 
+const DEFINITION_NODE_KINDS: &[&str] = &[
+	"function_item",
+	"struct_item",
+	"enum_item",
+	"trait_item",
+	"mod_item",
+	"impl_item",
+	"function_declaration",
+	"generator_function_declaration",
+	"class_declaration",
+	"method_definition",
+	"interface_declaration",
+	"type_alias_declaration",
+	"function_definition",
+	"class_definition",
+	"method_declaration",
+	"type_spec",
+	"class_specifier",
+	"struct_specifier",
+];
+
+fn enclosing_definition_node(node: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
+	let mut current = node;
+	while let Some(parent) = current.parent() {
+		if DEFINITION_NODE_KINDS.contains(&parent.kind()) {
+			return parent;
+		}
+		current = parent;
+	}
+	node
+}
+
+fn window_ranges(from: u32, to: u32) -> Vec<(u32, u32)> {
+	if from == 0 || to < from {
+		return Vec::new();
+	}
+	let mut ranges = Vec::new();
+	let mut start = from;
+	let step = CHUNK_WINDOW.saturating_sub(CHUNK_OVERLAP).max(1);
+	while start <= to {
+		let end = start.saturating_add(CHUNK_WINDOW.saturating_sub(1)).min(to);
+		if end < start {
+			break;
+		}
+		let range = (start, end);
+		if ranges.last() == Some(&range) {
+			break;
+		}
+		ranges.push(range);
+		if end == to {
+			break;
+		}
+		let next = start.saturating_add(step);
+		if next <= start {
+			let advanced = end.saturating_add(1);
+			if advanced <= start {
+				break;
+			}
+			start = advanced;
+		} else {
+			start = next;
+		}
+	}
+	ranges
+}
+
 fn chunk_from_defs(source: &str, _path: &str, defs: &[CodeIntelTag]) -> Vec<CodeIntelChunk> {
 	if defs.is_empty() {
 		return chunk_windows(source, "");
 	}
 	let lines: Vec<&str> = source.lines().collect();
+	if lines.is_empty() {
+		return Vec::new();
+	}
 	let total = lines.len() as u32;
 	let mut chunks = Vec::new();
 	let mut covered = vec![false; lines.len()];
+	let mut seen: HashSet<(u32, u32, String, String)> = HashSet::new();
 	for def in defs {
-		let start = def.start_line.max(1);
-		let mut end = def.end_line.max(start);
-		if end.saturating_sub(start) + 1 > CHUNK_MAX_DEF_LINES {
-			end = start + CHUNK_MAX_DEF_LINES - 1;
+		let start = def.start_line.max(1).min(total);
+		let end = def.end_line.max(start).min(total);
+		if start > total {
+			continue;
 		}
-		end = end.min(total.max(1));
-		let text = slice_lines(&lines, start, end);
 		for line in start..=end {
 			if let Some(flag) = covered.get_mut((line - 1) as usize) {
 				*flag = true;
 			}
 		}
-		chunks.push(CodeIntelChunk {
-			start_line: start,
-			end_line: end,
-			symbol: def.name.clone(),
-			kind: "def".to_string(),
-			text,
-		});
+		let span_len = end.saturating_sub(start).saturating_add(1);
+		let ranges = if span_len <= CHUNK_MAX_DEF_LINES {
+			vec![(start, end)]
+		} else {
+			window_ranges(start, end)
+		};
+		for (chunk_start, chunk_end) in ranges {
+			if !seen.insert((chunk_start, chunk_end, def.name.clone(), "def".to_string())) {
+				continue;
+			}
+			chunks.push(CodeIntelChunk {
+				start_line: chunk_start,
+				end_line:   chunk_end,
+				symbol:     def.name.clone(),
+				kind:       "def".to_string(),
+				text:       slice_lines(&lines, chunk_start, chunk_end),
+			});
+		}
 	}
 	let mut idx = 1u32;
 	while idx <= total {
@@ -509,19 +614,24 @@ fn chunk_from_defs(source: &str, _path: &str, defs: &[CodeIntelTag]) -> Vec<Code
 			idx += 1;
 			continue;
 		}
-		let start = idx;
-		let mut end = (start + CHUNK_WINDOW - 1).min(total);
-		while end > start && covered.get((end - 1) as usize).copied().unwrap_or(false) {
-			end -= 1;
+		let run_start = idx;
+		let mut run_end = idx;
+		while run_end < total && !covered.get(run_end as usize).copied().unwrap_or(false) {
+			run_end += 1;
 		}
-		chunks.push(CodeIntelChunk {
-			start_line: start,
-			end_line: end,
-			symbol: String::new(),
-			kind: "window".to_string(),
-			text: slice_lines(&lines, start, end),
-		});
-		idx = end + 1;
+		for (chunk_start, chunk_end) in window_ranges(run_start, run_end) {
+			if !seen.insert((chunk_start, chunk_end, String::new(), "window".to_string())) {
+				continue;
+			}
+			chunks.push(CodeIntelChunk {
+				start_line: chunk_start,
+				end_line:   chunk_end,
+				symbol:     String::new(),
+				kind:       "window".to_string(),
+				text:       slice_lines(&lines, chunk_start, chunk_end),
+			});
+		}
+		idx = run_end.saturating_add(1);
 	}
 	chunks
 }
@@ -531,27 +641,16 @@ fn chunk_windows(source: &str, _path: &str) -> Vec<CodeIntelChunk> {
 	if lines.is_empty() {
 		return Vec::new();
 	}
-	let total = lines.len() as u32;
-	let mut chunks = Vec::new();
-	let mut start = 1u32;
-	while start <= total {
-		let end = (start + CHUNK_WINDOW - 1).min(total);
-		chunks.push(CodeIntelChunk {
+	window_ranges(1, lines.len() as u32)
+		.into_iter()
+		.map(|(start, end)| CodeIntelChunk {
 			start_line: start,
-			end_line: end,
-			symbol: String::new(),
-			kind: "window".to_string(),
-			text: slice_lines(&lines, start, end),
-		});
-		if end == total {
-			break;
-		}
-		start = start.saturating_add(CHUNK_WINDOW.saturating_sub(CHUNK_OVERLAP)).max(end);
-		if start <= end {
-			start = end + 1;
-		}
-	}
-	chunks
+			end_line:   end,
+			symbol:     String::new(),
+			kind:       "window".to_string(),
+			text:       slice_lines(&lines, start, end),
+		})
+		.collect()
 }
 
 fn slice_lines(lines: &[&str], start: u32, end: u32) -> String {
@@ -631,20 +730,24 @@ fn extract_tree(
 			Ok(extracted) => {
 				let metadata = fs::metadata(&absolute).ok();
 				stored_files.push(StoredFile {
-					path: display,
-					mtime_ms: metadata
+					path:         display,
+					mtime_ms:     metadata
 						.as_ref()
 						.and_then(|meta| meta.modified().ok())
 						.and_then(|time| {
-							time.duration_since(std::time::UNIX_EPOCH)
+							time
+								.duration_since(std::time::UNIX_EPOCH)
 								.ok()
 								.map(|d| d.as_secs_f64() * 1000.0)
 						})
 						.unwrap_or(0.0),
-					size: metadata.as_ref().map(|meta| meta.len()).unwrap_or(source.len() as u64),
+					size:         metadata
+						.as_ref()
+						.map(|meta| meta.len())
+						.unwrap_or(source.len() as u64),
 					content_hash: content_hash(source.as_bytes()),
-					tag_count: extracted.tags.len() as u32,
-					chunk_ids: Vec::new(),
+					tag_count:    extracted.tags.len() as u32,
+					chunk_ids:    Vec::new(),
 				});
 				extractions.push(extracted);
 			},
@@ -654,11 +757,13 @@ fn extract_tree(
 	Ok((extractions, scanned, parse_errors, stored_files))
 }
 
-/// Extract tags and call-expressions from a file or directory (tests / diagnostics).
+/// Extract tags and call-expressions from a file or directory (tests /
+/// diagnostics).
 #[napi]
-pub fn code_intel_extract_tags(options: CodeIntelExtractOptions<'_>) -> task::Promise<CodeIntelExtractResult> {
-	let CodeIntelExtractOptions { root, hidden, gitignore, max_files, signal, timeout_ms } =
-		options;
+pub fn code_intel_extract_tags(
+	options: CodeIntelExtractOptions<'_>,
+) -> task::Promise<CodeIntelExtractResult> {
+	let CodeIntelExtractOptions { root, hidden, gitignore, max_files, signal, timeout_ms } = options;
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	task::blocking("code_intel_extract_tags", ct, move |ct| {
 		let root = PathBuf::from(root);
@@ -679,18 +784,14 @@ pub fn code_intel_extract_tags(options: CodeIntelExtractOptions<'_>) -> task::Pr
 	})
 }
 
-/// Build a generation directory: files/tags/chunks/graph. Does not write embeddings.
+/// Build a generation directory: files/tags/chunks/graph. Does not write
+/// embeddings.
 #[napi]
-pub fn code_intel_build_generation(options: CodeIntelBuildOptions<'_>) -> task::Promise<CodeIntelBuildResult> {
-	let CodeIntelBuildOptions {
-		root,
-		dest_dir,
-		hidden,
-		gitignore,
-		max_files,
-		signal,
-		timeout_ms,
-	} = options;
+pub fn code_intel_build_generation(
+	options: CodeIntelBuildOptions<'_>,
+) -> task::Promise<CodeIntelBuildResult> {
+	let CodeIntelBuildOptions { root, dest_dir, hidden, gitignore, max_files, signal, timeout_ms } =
+		options;
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	task::blocking("code_intel_build_generation", ct, move |ct| {
 		let root_path = PathBuf::from(&root);
@@ -713,34 +814,34 @@ pub fn code_intel_build_generation(options: CodeIntelBuildOptions<'_>) -> task::
 			for chunk in extracted.chunks {
 				ids.push(chunk_id);
 				chunks.push(StoredChunk {
-					id: chunk_id,
-					path: file.path.clone(),
-					start_line: chunk.start_line,
-					end_line: chunk.end_line,
-					symbol: chunk.symbol,
-					kind: chunk.kind,
-					text_hash: content_hash(chunk.text.as_bytes()),
+					id:           chunk_id,
+					path:         file.path.clone(),
+					start_line:   chunk.start_line,
+					end_line:     chunk.end_line,
+					symbol:       chunk.symbol,
+					kind:         chunk.kind,
+					text_hash:    content_hash(chunk.text.as_bytes()),
 					content_hash: file.content_hash.clone(),
 				});
 				chunk_id += 1;
 			}
 			file.chunk_ids = ids;
 			tags.extend(extracted.tags.into_iter().map(|tag| StoredTag {
-				path: tag.path,
-				name: tag.name,
-				kind: match tag.kind {
+				path:       tag.path,
+				name:       tag.name,
+				kind:       match tag.kind {
 					CodeIntelTagKind::Def => "def".to_string(),
 					CodeIntelTagKind::Ref => "ref".to_string(),
 				},
-				grammar: tag.grammar,
+				grammar:    tag.grammar,
 				start_line: tag.start_line,
-				end_line: tag.end_line,
+				end_line:   tag.end_line,
 			}));
 			calls.extend(extracted.calls.into_iter().map(|call| StoredCall {
-				path: call.path,
-				callee: call.callee,
+				path:       call.path,
+				callee:     call.callee,
 				start_line: call.start_line,
-				end_line: call.end_line,
+				end_line:   call.end_line,
 			}));
 		}
 
@@ -782,9 +883,12 @@ pub fn code_intel_build_generation(options: CodeIntelBuildOptions<'_>) -> task::
 	})
 }
 
-/// Rank a previously built generation by personalized PageRank. Native holds the graph.
+/// Rank a previously built generation by personalized PageRank. Native holds
+/// the graph.
 #[napi]
-pub fn code_intel_rank_generation(options: CodeIntelRankOptions) -> napi::Result<Vec<CodeIntelRankedNode>> {
+pub fn code_intel_rank_generation(
+	options: CodeIntelRankOptions,
+) -> napi::Result<Vec<CodeIntelRankedNode>> {
 	let tags: Vec<StoredTag> = read_jsonl(Path::new(&options.generation_dir).join("tags.jsonl"))?;
 	let top_files = options.top_files.unwrap_or(DEFAULT_TOP_FILES) as usize;
 	let top_symbols = options.top_symbols.unwrap_or(DEFAULT_TOP_SYMBOLS) as usize;
@@ -821,7 +925,8 @@ pub fn code_intel_extract_calls(options: CodeIntelChunkOptions) -> Vec<CodeIntel
 }
 
 fn write_jsonl<T: Serialize>(path: PathBuf, rows: &[T]) -> napi::Result<()> {
-	let mut file = File::create(&path).map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
+	let mut file = File::create(&path)
+		.map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
 	for row in rows {
 		let line = serde_json::to_string(row).map_err(|err| Error::from_reason(err.to_string()))?;
 		writeln!(file, "{line}").map_err(|err| Error::from_reason(err.to_string()))?;
@@ -830,7 +935,8 @@ fn write_jsonl<T: Serialize>(path: PathBuf, rows: &[T]) -> napi::Result<()> {
 }
 
 fn read_jsonl<T: for<'de> Deserialize<'de>>(path: PathBuf) -> napi::Result<Vec<T>> {
-	let file = File::open(&path).map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
+	let file =
+		File::open(&path).map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
 	let reader = BufReader::new(file);
 	let mut rows = Vec::new();
 	for line in reader.lines() {
@@ -858,7 +964,8 @@ fn write_graph_csr(path: PathBuf, tags: &[StoredTag]) -> napi::Result<Vec<u8>> {
 		bytes.extend_from_slice(&src.to_le_bytes());
 		bytes.extend_from_slice(&dst.to_le_bytes());
 	}
-	fs::write(&path, &bytes).map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
+	fs::write(&path, &bytes)
+		.map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
 	Ok(bytes)
 }
 
@@ -1018,10 +1125,7 @@ fn rank_tags(
 		if out.len() >= top_symbols && seen_files.len() > top_files {
 			break;
 		}
-		let (start_line, end_line) = def_span
-			.get(&graph.nodes[idx])
-			.copied()
-			.unwrap_or((1, 1));
+		let (start_line, end_line) = def_span.get(&graph.nodes[idx]).copied().unwrap_or((1, 1));
 		out.push(CodeIntelRankedNode {
 			path: path.to_string(),
 			symbol: symbol.to_string(),
@@ -1079,45 +1183,136 @@ fn gamma() {}
 	fn pagerank_seeds_alpha_ranks_beta_above_unrelated() {
 		let tags = vec![
 			StoredTag {
-				path: "a.rs".into(),
-				name: "alpha".into(),
-				kind: "def".into(),
-				grammar: "rust".into(),
+				path:       "a.rs".into(),
+				name:       "alpha".into(),
+				kind:       "def".into(),
+				grammar:    "rust".into(),
 				start_line: 1,
-				end_line: 3,
+				end_line:   3,
 			},
 			StoredTag {
-				path: "a.rs".into(),
-				name: "beta".into(),
-				kind: "ref".into(),
-				grammar: "rust".into(),
+				path:       "a.rs".into(),
+				name:       "beta".into(),
+				kind:       "ref".into(),
+				grammar:    "rust".into(),
 				start_line: 2,
-				end_line: 2,
+				end_line:   2,
 			},
 			StoredTag {
-				path: "b.rs".into(),
-				name: "beta".into(),
-				kind: "def".into(),
-				grammar: "rust".into(),
+				path:       "b.rs".into(),
+				name:       "beta".into(),
+				kind:       "def".into(),
+				grammar:    "rust".into(),
 				start_line: 1,
-				end_line: 1,
+				end_line:   1,
 			},
 			StoredTag {
-				path: "c.rs".into(),
-				name: "unrelated".into(),
-				kind: "def".into(),
-				grammar: "rust".into(),
+				path:       "c.rs".into(),
+				name:       "unrelated".into(),
+				kind:       "def".into(),
+				grammar:    "rust".into(),
 				start_line: 1,
-				end_line: 1,
+				end_line:   1,
 			},
 		];
 		let ranked = rank_tags(&tags, &[], &["alpha".into()], 8, 16);
-		let beta = ranked.iter().find(|node| node.symbol == "beta").map(|node| node.score);
+		let beta = ranked
+			.iter()
+			.find(|node| node.symbol == "beta")
+			.map(|node| node.score);
 		let unrelated = ranked
 			.iter()
 			.find(|node| node.symbol == "unrelated")
 			.map(|node| node.score)
 			.unwrap_or(0.0);
 		assert!(beta.unwrap_or(0.0) > unrelated);
+	}
+
+	#[test]
+	fn rust_multiline_def_chunk_contains_body() {
+		let source = r#"
+fn alpha() {
+    let value = 41;
+    beta();
+}
+fn beta() {}
+"#;
+		let extracted = extract_from_source("lib.rs", source, SupportLang::Rust).expect("extract");
+		let alpha_def = extracted
+			.tags
+			.iter()
+			.find(|tag| tag.name == "alpha" && matches!(tag.kind, CodeIntelTagKind::Def))
+			.expect("alpha def");
+		assert_eq!(alpha_def.start_line, 2);
+		assert!(alpha_def.end_line >= 4);
+		assert!(
+			!extracted.tags.iter().any(|tag| {
+				tag.name == "alpha"
+					&& matches!(tag.kind, CodeIntelTagKind::Ref)
+					&& tag.start_line == 2
+					&& tag.end_line == 2
+			}),
+			"definition identifier must not be duplicated as a ref"
+		);
+
+		let alpha_chunk = extracted
+			.chunks
+			.iter()
+			.find(|chunk| chunk.symbol == "alpha" && chunk.kind == "def")
+			.expect("alpha chunk");
+		assert!(alpha_chunk.text.contains("let value = 41"));
+		assert!(alpha_chunk.text.contains("beta()"));
+		assert_eq!(alpha_chunk.start_line, alpha_def.start_line);
+		assert_eq!(alpha_chunk.end_line, alpha_def.end_line);
+	}
+	#[test]
+	fn first_batch_languages_extract_definition_bodies() {
+		let fixtures = [
+			("alpha.ts", "function alpha() {\n  return 1;\n}\n", SupportLang::TypeScript),
+			("alpha.tsx", "function alpha() {\n  return 1;\n}\n", SupportLang::Tsx),
+			("alpha.js", "function alpha() {\n  return 1;\n}\n", SupportLang::JavaScript),
+			("alpha.py", "def alpha():\n    return 1\n", SupportLang::Python),
+			("alpha.go", "func alpha() {\n}\n", SupportLang::Go),
+			("Alpha.java", "class Alpha {\n  void alpha() {\n  }\n}\n", SupportLang::Java),
+			("alpha.c", "int alpha() {\n  return 1;\n}\n", SupportLang::C),
+			("alpha.cpp", "int alpha() {\n  return 1;\n}\n", SupportLang::Cpp),
+		];
+		for (path, source, lang) in fixtures {
+			let extracted =
+				extract_from_source(path, source, lang).unwrap_or_else(|err| panic!("{path}: {err}"));
+			let alpha = extracted
+				.tags
+				.iter()
+				.find(|tag| tag.name == "alpha" && matches!(tag.kind, CodeIntelTagKind::Def))
+				.unwrap_or_else(|| panic!("{path}: alpha definition missing"));
+			assert!(alpha.end_line > alpha.start_line, "{path}: definition body span missing");
+			let chunk = extracted
+				.chunks
+				.iter()
+				.find(|chunk| chunk.symbol == "alpha")
+				.unwrap_or_else(|| panic!("{path}: alpha chunk missing"));
+			assert!(chunk.end_line > chunk.start_line, "{path}: definition body chunk missing");
+		}
+	}
+
+	#[test]
+	fn no_definition_file_uses_overlapping_windows() {
+		let source = (1..=120)
+			.map(|line| format!("// line-{line}"))
+			.collect::<Vec<_>>()
+			.join("\n");
+		let extracted = extract_from_source("lib.rs", &source, SupportLang::Rust).expect("extract");
+		assert!(
+			extracted
+				.tags
+				.iter()
+				.all(|tag| !matches!(tag.kind, CodeIntelTagKind::Def))
+		);
+		let ranges: Vec<(u32, u32)> = extracted
+			.chunks
+			.iter()
+			.map(|chunk| (chunk.start_line, chunk.end_line))
+			.collect();
+		assert_eq!(ranges, vec![(1, 80), (41, 120)]);
 	}
 }

@@ -528,9 +528,8 @@ async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequ
 	}
 }
 
-/** Hold inbound workspace/applyEdit on a live client for read-only navigation. */
-export function holdLspApplyEdits(client: LspClient): () => void {
-	const key = client.name;
+/** Increment the inbound workspace/applyEdit hold for a client identity. */
+function acquireApplyEditHold(key: string): () => void {
 	applyEditHolds.set(key, (applyEditHolds.get(key) ?? 0) + 1);
 	let released = false;
 	return () => {
@@ -540,6 +539,16 @@ export function holdLspApplyEdits(client: LspClient): () => void {
 		if (next <= 0) applyEditHolds.delete(key);
 		else applyEditHolds.set(key, next);
 	};
+}
+
+/** Hold inbound workspace/applyEdit on a live client for read-only navigation. */
+export function holdLspApplyEdits(client: LspClient): () => void {
+	return acquireApplyEditHold(client.name);
+}
+
+/** Hold inbound workspace/applyEdit before a configured client process exists. */
+export function holdLspApplyEditsForConfig(config: ServerConfig, cwd: string): () => void {
+	return acquireApplyEditHold(clientKey(config, cwd));
 }
 
 function workspaceEditChanges(executed: ExecutedWorkspaceChange[]): {
@@ -1105,67 +1114,72 @@ export async function getOrCreateClient(
 			}
 		});
 
-		// Start background message reader
-		startMessageReader(client);
-
+		const releaseInitHold = acquireApplyEditHold(key);
 		try {
-			// Send initialize request
-			const initResult = (await sendRequest(
-				client,
-				"initialize",
-				{
-					processId: process.pid,
-					rootUri: fileToUri(cwd),
-					rootPath: cwd,
-					capabilities: CLIENT_CAPABILITIES,
-					initializationOptions: config.initOptions ?? {},
-					workspaceFolders: currentWorkspaceFolders(client),
-				},
-				signal,
-				initTimeoutMs,
-			)) as { capabilities?: unknown };
+			// Start background message reader
+			startMessageReader(client);
 
-			if (!initResult) {
-				throw new Error("Failed to initialize LSP: no response");
+			try {
+				// Send initialize request
+				const initResult = (await sendRequest(
+					client,
+					"initialize",
+					{
+						processId: process.pid,
+						rootUri: fileToUri(cwd),
+						rootPath: cwd,
+						capabilities: CLIENT_CAPABILITIES,
+						initializationOptions: config.initOptions ?? {},
+						workspaceFolders: currentWorkspaceFolders(client),
+					},
+					signal,
+					initTimeoutMs,
+				)) as { capabilities?: unknown };
+
+				if (!initResult) {
+					throw new Error("Failed to initialize LSP: no response");
+				}
+
+				client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
+
+				// Finish the initialize handshake before publishing the client as ready.
+				await sendNotification(client, "initialized", {}, signal);
+				await sendNotification(
+					client,
+					"workspace/didChangeConfiguration",
+					{ settings: config.settings ?? {} },
+					signal,
+				);
+
+				client.status = "ready";
+				// Publish only after init succeeds: pre-init clients are reachable
+				// solely through clientLocks, so concurrent callers (warmup vs first
+				// tool call) wait for init instead of using an unacknowledged client.
+				if (invalidatedClientKeys.has(key)) {
+					throw new Error(`LSP configuration was superseded during initialization: ${config.command}`);
+				}
+				clients.set(key, client);
+				initFailures.delete(key);
+				return client;
+			} catch (err) {
+				// Clean up on initialization failure
+				client.status = "error";
+				if (clients.get(key) === client) clients.delete(key);
+				proc.kill();
+				const message = err instanceof Error ? err.message : String(err);
+				// Negative-cache deterministic failures. Timeouts under a
+				// caller-shortened deadline (warmup/writethrough) and caller-signal
+				// aborts are transient — the server may simply be slow or the user may
+				// have cancelled, so a later call with a fresh deadline should retry.
+				if (!signal?.aborted && !(initTimeoutMs !== undefined && message.includes("timed out"))) {
+					initFailures.set(key, { at: Date.now(), message });
+				}
+				throw err;
+			} finally {
+				if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			}
-
-			client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
-
-			// Finish the initialize handshake before publishing the client as ready.
-			await sendNotification(client, "initialized", {}, signal);
-			await sendNotification(
-				client,
-				"workspace/didChangeConfiguration",
-				{ settings: config.settings ?? {} },
-				signal,
-			);
-
-			client.status = "ready";
-			// Publish only after init succeeds: pre-init clients are reachable
-			// solely through clientLocks, so concurrent callers (warmup vs first
-			// tool call) wait for init instead of using an unacknowledged client.
-			if (invalidatedClientKeys.has(key)) {
-				throw new Error(`LSP configuration was superseded during initialization: ${config.command}`);
-			}
-			clients.set(key, client);
-			initFailures.delete(key);
-			return client;
-		} catch (err) {
-			// Clean up on initialization failure
-			client.status = "error";
-			if (clients.get(key) === client) clients.delete(key);
-			proc.kill();
-			const message = err instanceof Error ? err.message : String(err);
-			// Negative-cache deterministic failures. Timeouts under a
-			// caller-shortened deadline (warmup/writethrough) and caller-signal
-			// aborts are transient — the server may simply be slow or the user may
-			// have cancelled, so a later call with a fresh deadline should retry.
-			if (!signal?.aborted && !(initTimeoutMs !== undefined && message.includes("timed out"))) {
-				initFailures.set(key, { at: Date.now(), message });
-			}
-			throw err;
 		} finally {
-			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
+			releaseInitHold();
 		}
 	})();
 

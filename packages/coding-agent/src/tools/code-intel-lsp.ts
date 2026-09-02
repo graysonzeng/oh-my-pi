@@ -1,9 +1,18 @@
-import { getOrCreateClient, holdLspApplyEdits, sendRequest } from "../lsp/client";
+import { getOrCreateClient, holdLspApplyEditsForConfig, sendRequest } from "../lsp/client";
+import { normalizeLocationResult } from "../lsp/diagnostics";
 import { getConfig, getLspServers } from "../lsp/servers";
-import type { Location, LspClient, ServerConfig } from "../lsp/types";
+import type {
+	CallHierarchyIncomingCall,
+	CallHierarchyItem,
+	CallHierarchyOutgoingCall,
+	Location,
+	LocationLink,
+	LspClient,
+	ServerConfig,
+} from "../lsp/types";
 import { uriToFile } from "../lsp/utils";
 import type { ToolSession } from ".";
-import type { CodeIntelCandidate } from "./code-intel-envelope";
+import type { CodeIntelCandidate, CodeIntelCoverage } from "./code-intel-envelope";
 import { formatPathRelativeToCwd } from "./path-utils";
 
 const ALLOWED_METHODS: Record<string, true> = {
@@ -25,6 +34,9 @@ const FORBIDDEN_METHODS: Record<string, true> = {
 };
 
 export const CODE_INTEL_LSP_INIT_BUDGET_MS = 3000;
+const PREPARED_SYMBOL_CAP = 3;
+const HOP1_CAP = 8;
+const HOP2_CAP = 4;
 
 export function assertCodeIntelLspMethod(method: string): void {
 	if (FORBIDDEN_METHODS[method] || !ALLOWED_METHODS[method]) {
@@ -59,10 +71,74 @@ function toCandidate(
 	};
 }
 
+function locationFromItem(item: CallHierarchyItem): Location {
+	return { uri: item.uri, range: item.selectionRange ?? item.range };
+}
+
+async function collectIncoming(
+	client: LspClient,
+	item: CallHierarchyItem,
+	cwd: string,
+	candidates: CodeIntelCandidate[],
+	cap: number,
+	signal?: AbortSignal,
+): Promise<CallHierarchyItem[]> {
+	const incoming =
+		((await sendReadonly(client, "callHierarchy/incomingCalls", { item }, signal)) as
+			| CallHierarchyIncomingCall[]
+			| null) ?? [];
+	const next: CallHierarchyItem[] = [];
+	for (const call of incoming.slice(0, cap)) {
+		candidates.push(toCandidate(locationFromItem(call.from), cwd, call.from.name, "lsp-call", true));
+		next.push(call.from);
+	}
+	return next;
+}
+
+async function collectOutgoing(
+	client: LspClient,
+	item: CallHierarchyItem,
+	cwd: string,
+	candidates: CodeIntelCandidate[],
+	cap: number,
+	signal?: AbortSignal,
+): Promise<CallHierarchyItem[]> {
+	const outgoing =
+		((await sendReadonly(client, "callHierarchy/outgoingCalls", { item }, signal)) as
+			| CallHierarchyOutgoingCall[]
+			| null) ?? [];
+	const next: CallHierarchyItem[] = [];
+	for (const call of outgoing.slice(0, cap)) {
+		candidates.push(toCandidate(locationFromItem(call.to), cwd, call.to.name, "lsp-call"));
+		next.push(call.to);
+	}
+	return next;
+}
+
+async function traverseVerifiedCalls(
+	client: LspClient,
+	roots: CallHierarchyItem[],
+	cwd: string,
+	candidates: CodeIntelCandidate[],
+	signal?: AbortSignal,
+): Promise<void> {
+	for (const item of roots) {
+		const incomingHop1 = await collectIncoming(client, item, cwd, candidates, HOP1_CAP, signal);
+		for (const nested of incomingHop1) {
+			await collectIncoming(client, nested, cwd, candidates, HOP2_CAP, signal);
+		}
+		const outgoingHop1 = await collectOutgoing(client, item, cwd, candidates, HOP1_CAP, signal);
+		for (const nested of outgoingHop1) {
+			await collectOutgoing(client, nested, cwd, candidates, HOP2_CAP, signal);
+		}
+	}
+}
+
 export async function codeIntelLspLookup(options: {
 	session: ToolSession;
 	tokens: string[];
 	relation: boolean;
+	coverage: CodeIntelCoverage;
 	signal?: AbortSignal;
 }): Promise<{ candidates: CodeIntelCandidate[]; gaps: string[] }> {
 	if (options.session.settings.get("lsp.enabled") === false) {
@@ -77,20 +153,23 @@ export async function codeIntelLspLookup(options: {
 	const candidates: CodeIntelCandidate[] = [];
 	const gaps: string[] = [];
 	const started: Array<[string, ServerConfig, LspClient]> = [];
-	for (const [name, server] of servers.slice(0, 3)) {
-		try {
-			const client = await getOrCreateClient(server, cwd, CODE_INTEL_LSP_INIT_BUDGET_MS, options.signal);
-			started.push([name, server, client]);
-		} catch {
-			gaps.push(`lsp ${name} skipped (init budget ${CODE_INTEL_LSP_INIT_BUDGET_MS}ms)`);
-		}
-	}
-	if (started.length === 0) {
-		return { candidates: [], gaps: gaps.length > 0 ? gaps : ["lsp unavailable"] };
-	}
-
-	const releases = started.map(([, , client]) => holdLspApplyEdits(client));
+	const releases: Array<() => void> = [];
+	const traverse = options.coverage === "extended" && options.relation;
 	try {
+		for (const [name, server] of servers.slice(0, 3)) {
+			releases.push(holdLspApplyEditsForConfig(server, cwd));
+			try {
+				const client = await getOrCreateClient(server, cwd, CODE_INTEL_LSP_INIT_BUDGET_MS, options.signal);
+				started.push([name, server, client]);
+			} catch {
+				gaps.push(`lsp ${name} skipped (init budget ${CODE_INTEL_LSP_INIT_BUDGET_MS}ms)`);
+			}
+		}
+		if (started.length === 0) {
+			return { candidates: [], gaps: gaps.length > 0 ? gaps : ["lsp unavailable"] };
+		}
+
+		const preparedRoots: Array<{ client: LspClient; item: CallHierarchyItem }> = [];
 		for (const token of options.tokens.slice(0, 4)) {
 			for (const [, , client] of started) {
 				try {
@@ -117,53 +196,30 @@ export async function codeIntelLspLookup(options: {
 						for (const loc of (refs ?? []).slice(0, 20)) {
 							candidates.push(toCandidate(loc, cwd, name, "lsp-reference"));
 						}
-						if (!options.relation) continue;
+						const implementations = normalizeLocationResult(
+							(await sendReadonly(
+								client,
+								"textDocument/implementation",
+								{
+									textDocument: { uri: symbol.location.uri },
+									position: symbol.location.range.start,
+								},
+								options.signal,
+							)) as Location | Location[] | LocationLink | LocationLink[] | null,
+						);
+						for (const loc of implementations.slice(0, 20)) {
+							candidates.push(toCandidate(loc, cwd, name, "lsp-reference"));
+						}
+						if (!traverse || preparedRoots.length >= PREPARED_SYMBOL_CAP) continue;
 						const prepared = (await sendReadonly(
 							client,
 							"textDocument/prepareCallHierarchy",
 							{ textDocument: { uri: symbol.location.uri }, position: symbol.location.range.start },
 							options.signal,
-						)) as Array<{ name: string; uri: string; selectionRange: Location["range"] }> | null;
-						for (const item of (prepared ?? []).slice(0, 3)) {
-							const incoming =
-								((await sendReadonly(
-									client,
-									"callHierarchy/incomingCalls",
-									{ item },
-									options.signal,
-								)) as Array<{
-									from: { name: string; uri: string; selectionRange: Location["range"] };
-								}> | null) ?? [];
-							for (const call of incoming.slice(0, 12)) {
-								candidates.push(
-									toCandidate(
-										{ uri: call.from.uri, range: call.from.selectionRange },
-										cwd,
-										call.from.name,
-										"lsp-call",
-										true,
-									),
-								);
-							}
-							const outgoing =
-								((await sendReadonly(
-									client,
-									"callHierarchy/outgoingCalls",
-									{ item },
-									options.signal,
-								)) as Array<{
-									to: { name: string; uri: string; selectionRange: Location["range"] };
-								}> | null) ?? [];
-							for (const call of outgoing.slice(0, 12)) {
-								candidates.push(
-									toCandidate(
-										{ uri: call.to.uri, range: call.to.selectionRange },
-										cwd,
-										call.to.name,
-										"lsp-call",
-									),
-								);
-							}
+						)) as CallHierarchyItem[] | null;
+						for (const item of prepared ?? []) {
+							if (preparedRoots.length >= PREPARED_SYMBOL_CAP) break;
+							preparedRoots.push({ client, item });
 						}
 					}
 				} catch {
@@ -171,6 +227,23 @@ export async function codeIntelLspLookup(options: {
 				}
 			}
 		}
+
+		if (traverse) {
+			const byClient = new Map<LspClient, CallHierarchyItem[]>();
+			for (const root of preparedRoots) {
+				const items = byClient.get(root.client) ?? [];
+				items.push(root.item);
+				byClient.set(root.client, items);
+			}
+			for (const [client, items] of byClient) {
+				try {
+					await traverseVerifiedCalls(client, items, cwd, candidates, options.signal);
+				} catch {
+					// Skip this server's hierarchy; locate results already recorded.
+				}
+			}
+		}
+
 		return { candidates, gaps };
 	} finally {
 		for (const release of releases) release();

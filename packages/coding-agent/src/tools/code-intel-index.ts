@@ -8,7 +8,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { mmrRerankIndices, vectorIndexTopK } from "@oh-my-pi/pi-natives";
-import { getCodeIntelDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getCodeIntelDir, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { canonicalProjectDir } from "../launch/paths";
 import type { MnemopiSubprocessEmbeddingModel } from "../mnemopi/embed-client";
@@ -20,15 +20,17 @@ import {
 	resolveCodeIntelEmbedModel,
 	tryInitializeLocalEmbed,
 } from "./code-intel-embed";
-import {
-	type CodeIntelRankedNode,
-	codeIntelBuildGeneration,
-	codeIntelRankGeneration,
-	hasCodeIntelNatives,
-	NATIVE_CODE_INTEL_MISSING,
-} from "./code-intel-natives";
+import type { CodeIntelRankedNode } from "./code-intel-natives";
+import * as codeIntelNatives from "./code-intel-natives";
 
 export const MANIFEST_VERSION = 1;
+
+/** Native manifest v1: xxHash64 of UTF-8 bytes, seed `CINTHASH`. */
+const CODE_INTEL_CONTENT_HASH_SEED = 0x4349_4e54_4841_5348n;
+
+export function codeIntelContentHash(content: string): string {
+	return Bun.hash.xxHash64(content, CODE_INTEL_CONTENT_HASH_SEED).toString(16).padStart(16, "0");
+}
 
 export type CodeIntelIndexState = "ready" | "warming" | "disabled" | "unavailable";
 
@@ -105,6 +107,7 @@ interface StoredChunk {
 }
 
 const owners = new Map<string, CodeIntelIndex>();
+const METADATA_SWEEP_LIMIT = 64;
 
 export async function codeIntelProjectKey(root: string): Promise<string> {
 	const canonical = await canonicalProjectDir(root);
@@ -183,15 +186,10 @@ async function passageText(root: string, chunk: StoredChunk): Promise<string> {
 	return `${chunk.kind} ${chunk.symbol}\n${chunk.path}`;
 }
 
-async function readJsonl<T>(filePath: string): Promise<T[]> {
+async function readJsonl<T>(filePath: string, signal?: AbortSignal): Promise<T[]> {
 	try {
-		const text = await Bun.file(filePath).text();
-		const rows: T[] = [];
-		for (const line of text.split("\n")) {
-			if (!line.trim()) continue;
-			rows.push(JSON.parse(line) as T);
-		}
-		return rows;
+		const text = await untilAborted(signal, Bun.file(filePath).text());
+		return Bun.JSONL.parse(text) as T[];
 	} catch (error) {
 		if (isEnoent(error)) return [];
 		throw error;
@@ -214,7 +212,12 @@ export class CodeIntelIndex {
 	#state: CodeIntelIndexState = "unavailable";
 	#gap: string | undefined;
 	#warm: Promise<void> | null = null;
-	#dirty = new Set<string>();
+	#invalidationEpoch = 0;
+	#builtEpoch = 0;
+	#fileHashes: Map<string, string> | null = null;
+	#fileHashGenerationId: string | null = null;
+	#storedFiles: StoredFile[] | null = null;
+	#metadataSweepCursor = 0;
 	#embedHandle: MnemopiSubprocessEmbeddingModel | null = null;
 	#embedModel: string | null = null;
 
@@ -224,8 +227,8 @@ export class CodeIntelIndex {
 		this.#indexHome = getCodeIntelDir();
 	}
 
-	invalidate(filePath: string): void {
-		this.#dirty.add(path.resolve(filePath));
+	invalidate(_filePath: string): void {
+		this.#invalidationEpoch += 1;
 		if (this.#current || this.#state === "warming" || this.#state === "ready") {
 			this.#state = this.#current ? this.#state : "warming";
 			this.warm();
@@ -244,37 +247,38 @@ export class CodeIntelIndex {
 		};
 	}
 
-	async ensureReady(): Promise<CodeIntelIndexStatus> {
-		if (!hasCodeIntelNatives()) {
+	async ensureReady(signal?: AbortSignal): Promise<CodeIntelIndexStatus> {
+		if (!codeIntelNatives.hasCodeIntelNatives()) {
 			this.#state = "unavailable";
-			this.#gap = NATIVE_CODE_INTEL_MISSING;
+			this.#gap = codeIntelNatives.NATIVE_CODE_INTEL_MISSING;
 			return this.status();
 		}
-		await this.#loadCurrent();
-		if (this.#current && this.#manifest) {
-			this.#state = this.#manifest.embeddingsRows > 0 && this.#embedHandle ? "ready" : "warming";
-		} else {
-			this.#state = "warming";
-		}
+		await this.#loadCurrent(signal);
+		await this.#sweepExternalChanges(signal);
 		this.warm();
+		this.#applyReadyState();
 		return this.status();
 	}
 
 	warm(): void {
-		if (!hasCodeIntelNatives()) return;
+		if (!codeIntelNatives.hasCodeIntelNatives()) return;
 		if (this.#warm) return;
-		const needsBuild = !this.#current || this.#dirty.size > 0;
+		const needsBuild = !this.#current || this.#invalidationEpoch > this.#builtEpoch;
 		const needsAttach =
+			this.#settings.get("codeIntel.semantic") !== false &&
 			!!this.#current &&
 			!!this.#manifest?.embeddingModel &&
 			(this.#manifest.embeddingsRows ?? 0) > 0 &&
 			this.#embedHandle === null;
-		if (!needsBuild && !needsAttach) return;
+		if (!needsBuild && !needsAttach) {
+			this.#applyReadyState();
+			return;
+		}
 		if (!this.#current) this.#state = "warming";
 		this.#scheduleWarm();
 	}
 
-	/** Test-only: await the in-flight warm, including a dirty-chained rebuild. */
+	/** Test-only: await the in-flight warm, including an epoch-chained rebuild. */
 	async waitUntilWarm(): Promise<void> {
 		while (this.#warm) await this.#warm;
 	}
@@ -284,16 +288,24 @@ export class CodeIntelIndex {
 		seedSymbols?: string[];
 		topFiles?: number;
 		topSymbols?: number;
+		signal?: AbortSignal;
 	}): Promise<CodeIntelRankedNode[]> {
-		const generationDir = await this.#committedDir();
-		if (!generationDir) return [];
+		const generation = await this.#committedGeneration(options.signal);
+		if (!generation) return [];
+		options.signal?.throwIfAborted();
 		try {
-			return codeIntelRankGeneration({
-				generationDir,
+			const nodes = codeIntelNatives.codeIntelRankGeneration({
+				generationDir: generation.dir,
 				seedPaths: options.seedPaths,
 				seedSymbols: options.seedSymbols,
 				topFiles: options.topFiles,
 				topSymbols: options.topSymbols,
+			});
+			options.signal?.throwIfAborted();
+			const hashes = await this.#loadFileHashes(generation.dir, generation.id, options.signal);
+			return nodes.map(node => {
+				const contentHash = hashes.get(node.path);
+				return contentHash ? { ...node, contentHash } : { ...node };
 			});
 		} catch (error) {
 			logger.debug("code-intel rank failed", {
@@ -309,11 +321,11 @@ export class CodeIntelIndex {
 		signal?: AbortSignal;
 	}): Promise<Array<{ path: string; startLine: number; endLine: number; symbol: string; score: number }>> {
 		if (options.signal?.aborted) return [];
-		const generationDir = await this.#committedDir();
-		const manifest = this.#manifest;
+		const generation = await this.#committedGeneration(options.signal);
+		const manifest = generation?.manifest;
 		const handle = this.#embedHandle;
 		if (
-			!generationDir ||
+			!generation ||
 			!manifest ||
 			!handle ||
 			manifest.embeddingsRows === 0 ||
@@ -328,8 +340,8 @@ export class CodeIntelIndex {
 		try {
 			[queryRows, ledger, matrix] = await Promise.all([
 				collectEmbedMatrix(handle, [options.query], "query", 1, options.signal),
-				readJsonl<StoredChunk>(path.join(generationDir, "embeddings.jsonl")),
-				Bun.file(path.join(generationDir, "embeddings.f32")).arrayBuffer(),
+				readJsonl<StoredChunk>(path.join(generation.dir, "embeddings.jsonl"), options.signal),
+				untilAborted(options.signal, Bun.file(path.join(generation.dir, "embeddings.f32")).arrayBuffer()),
 			]);
 		} catch (error) {
 			if (options.signal?.aborted) return [];
@@ -369,26 +381,122 @@ export class CodeIntelIndex {
 		});
 	}
 
+	#applyReadyState(): void {
+		if (this.#warm) {
+			if (!this.#current) {
+				this.#state = "warming";
+				return;
+			}
+			if (this.#settings.get("codeIntel.semantic") === false) return;
+			if ((this.#manifest?.embeddingsRows ?? 0) === 0 || !this.#embedHandle) {
+				this.#state = "warming";
+			}
+			return;
+		}
+		if (!this.#current || !this.#manifest) {
+			this.#state = "unavailable";
+			return;
+		}
+		if (this.#settings.get("codeIntel.semantic") === false) {
+			this.#state = "ready";
+			return;
+		}
+		if ((this.#manifest.embeddingsRows ?? 0) > 0 && this.#embedHandle) {
+			this.#state = "ready";
+			return;
+		}
+		this.#state = "unavailable";
+		if ((this.#manifest.embeddingsRows ?? 0) === 0 && !this.#gap) {
+			this.#gap = "semantic unavailable";
+		}
+	}
+
+	async #loadFileHashes(
+		generationDir: string,
+		generationId: string,
+		signal?: AbortSignal,
+	): Promise<Map<string, string>> {
+		if (this.#fileHashes && this.#storedFiles && this.#fileHashGenerationId === generationId) return this.#fileHashes;
+		const files = await readJsonl<StoredFile>(path.join(generationDir, "files.jsonl"), signal);
+		const hashes = new Map<string, string>();
+		for (const file of files) hashes.set(file.path, file.content_hash);
+		this.#fileHashes = hashes;
+		this.#storedFiles = files;
+		this.#fileHashGenerationId = generationId;
+		this.#metadataSweepCursor %= Math.max(1, files.length);
+		return hashes;
+	}
+
+	async #sweepExternalChanges(signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted();
+		const files = this.#storedFiles;
+		if (
+			!this.#current ||
+			this.#fileHashGenerationId !== this.#current ||
+			!files ||
+			files.length === 0 ||
+			this.#warm ||
+			this.#invalidationEpoch > this.#builtEpoch
+		)
+			return;
+		const count = Math.min(METADATA_SWEEP_LIMIT, files.length);
+		const start = this.#metadataSweepCursor;
+		const selected = Array.from({ length: count }, (_, offset) => files[(start + offset) % files.length]!);
+		const changed = (
+			await Promise.all(
+				selected.map(async file => {
+					signal?.throwIfAborted();
+					try {
+						const metadata = await untilAborted(signal, fs.stat(path.resolve(this.#root, file.path)));
+						return (
+							metadata.size !== file.size ||
+							(file.mtime_ms > 0 && Math.abs(metadata.mtimeMs - file.mtime_ms) > 1)
+						);
+					} catch (error) {
+						if (signal?.aborted) throw error;
+						return isEnoent(error);
+					}
+				}),
+			)
+		).some(Boolean);
+		this.#metadataSweepCursor = (start + count) % files.length;
+		if (changed) {
+			this.#invalidationEpoch += 1;
+			this.#gap = "workspace changed; rebuilding code-intel index";
+		}
+	}
+
 	#scheduleWarm(): void {
 		if (this.#warm) return;
+		let failed = false;
 		const running = this.#warmWork()
 			.catch(error => {
+				failed = true;
 				logger.debug("code-intel warm failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-				this.#state = this.#current ? "ready" : "unavailable";
 				this.#gap = error instanceof Error ? error.message : String(error);
 			})
 			.finally(() => {
 				if (this.#warm === running) this.#warm = null;
-				if (this.#dirty.size > 0 && hasCodeIntelNatives() && !this.#warm) this.#scheduleWarm();
+				if (
+					!failed &&
+					this.#invalidationEpoch > this.#builtEpoch &&
+					codeIntelNatives.hasCodeIntelNatives() &&
+					!this.#warm
+				) {
+					this.#scheduleWarm();
+				} else {
+					this.#applyReadyState();
+				}
 			});
 		this.#warm = running;
 	}
 
 	async #warmWork(): Promise<void> {
-		if (!this.#current || this.#dirty.size > 0) {
-			await this.#buildNext();
+		const startedEpoch = this.#invalidationEpoch;
+		if (!this.#current || this.#invalidationEpoch > this.#builtEpoch) {
+			await this.#buildNext(startedEpoch);
 			return;
 		}
 		await this.#attachEmbedHandle();
@@ -405,7 +513,6 @@ export class CodeIntelIndex {
 		}
 		this.#embedHandle = handle;
 		this.#embedModel = model;
-		this.#state = "ready";
 	}
 
 	async #projectDir(): Promise<string> {
@@ -414,21 +521,27 @@ export class CodeIntelIndex {
 		return path.join(this.#indexHome, this.#projectKey);
 	}
 
-	async #loadCurrent(): Promise<void> {
+	async #loadCurrent(signal?: AbortSignal): Promise<void> {
 		const projectDir = await this.#projectDir();
 		try {
-			const id = (await Bun.file(path.join(projectDir, "CURRENT")).text()).trim();
+			const id = (await untilAborted(signal, Bun.file(path.join(projectDir, "CURRENT")).text())).trim();
 			if (!id || id.endsWith(".tmp")) return;
 			const generationDir = path.join(projectDir, "generations", id);
-			const raw = (await Bun.file(path.join(generationDir, "manifest.json")).json()) as NativeManifest;
+			const raw = (await untilAborted(
+				signal,
+				Bun.file(path.join(generationDir, "manifest.json")).json(),
+			)) as NativeManifest;
 			const manifest = normalizeManifest(raw, this.#root);
 			if (manifest.version !== MANIFEST_VERSION) {
 				this.#gap = `unknown generation version ${manifest.version}`;
 				return;
 			}
 			if (manifest.embeddingsRows > 0) {
-				const ledger = await readJsonl<StoredChunk>(path.join(generationDir, "embeddings.jsonl"));
-				const matrix = await Bun.file(path.join(generationDir, "embeddings.f32")).arrayBuffer();
+				const ledger = await readJsonl<StoredChunk>(path.join(generationDir, "embeddings.jsonl"), signal);
+				const matrix = await untilAborted(
+					signal,
+					Bun.file(path.join(generationDir, "embeddings.f32")).arrayBuffer(),
+				);
 				const floats = new Float32Array(matrix);
 				if (
 					ledger.length !== manifest.embeddingsRows ||
@@ -443,7 +556,9 @@ export class CodeIntelIndex {
 			}
 			this.#current = id;
 			this.#manifest = manifest;
+			await this.#loadFileHashes(generationDir, id, signal);
 		} catch (error) {
+			if (signal?.aborted) throw error;
 			if (!isEnoent(error)) {
 				logger.debug("code-intel current load failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -452,19 +567,23 @@ export class CodeIntelIndex {
 		}
 	}
 
-	async #committedDir(): Promise<string | null> {
-		if (!this.#current) await this.#loadCurrent();
-		if (!this.#current) return null;
-		return path.join(await this.#projectDir(), "generations", this.#current);
+	async #committedGeneration(
+		signal?: AbortSignal,
+	): Promise<{ id: string; dir: string; manifest: CodeIntelManifest } | null> {
+		if (!this.#current || !this.#manifest) await this.#loadCurrent(signal);
+		const id = this.#current;
+		const manifest = this.#manifest;
+		if (!id || !manifest) return null;
+		return { id, dir: path.join(await this.#projectDir(), "generations", id), manifest };
 	}
 
-	async #buildNext(): Promise<void> {
+	async #buildNext(startedEpoch: number): Promise<void> {
 		const projectDir = await this.#projectDir();
 		const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
 		const tmpDir = path.join(projectDir, "generations", `${id}.tmp`);
 		await fs.mkdir(tmpDir, { recursive: true });
 		const maxFiles = this.#settings.get("codeIntel.maxIndexFiles") ?? 20_000;
-		const built = await codeIntelBuildGeneration({
+		const built = await codeIntelNatives.codeIntelBuildGeneration({
 			root: this.#root,
 			destDir: tmpDir,
 			maxFiles,
@@ -498,9 +617,15 @@ export class CodeIntelIndex {
 		await atomicWriteText(path.join(projectDir, "CURRENT"), `${id}\n`);
 		this.#current = id;
 		this.#manifest = manifest;
-		this.#state = "ready";
-		this.#gap = undefined;
-		this.#dirty.clear();
+		this.#builtEpoch = startedEpoch;
+		this.#fileHashes = null;
+		this.#fileHashGenerationId = null;
+		this.#storedFiles = null;
+		this.#metadataSweepCursor = 0;
+		if (this.#settings.get("codeIntel.semantic") === false || manifest.embeddingsRows > 0) {
+			this.#gap = undefined;
+		}
+		await this.#loadFileHashes(finalDir, id);
 		logger.debug("code-intel generation published", {
 			id,
 			files: built.filesScanned,

@@ -101,6 +101,11 @@ export function evidenceKey(path: string, startLine: number, endLine: number): s
 	return `${path.replaceAll("\\", "/")}:${startLine}-${endLine}`;
 }
 
+/** Fold CR/LF so each model-visible wire scalar stays on one field/bullet line. */
+export function foldWireScalar(value: string): string {
+	return value.replace(/\r\n?|\n/g, " ");
+}
+
 export function toEvidenceLine(candidate: CodeIntelCandidate, incoming = false): CodeIntelEvidenceLine | null {
 	if (candidate.provenance === "semantic-candidate") return null;
 	const relationship = relationshipForProvenance(candidate.provenance, incoming || candidate.incoming === true);
@@ -124,13 +129,14 @@ export function renderCodeIntelEnvelope(envelope: CodeIntelEnvelope): string {
 			: envelope.evidence
 					.map(
 						line =>
-							`  - ${line.path}:${line.startLine}-${line.endLine} | ${line.symbol} | ${line.relationship} | ${line.kind}`,
+							`  - ${foldWireScalar(line.path)}:${line.startLine}-${line.endLine} | ${foldWireScalar(line.symbol)} | ${foldWireScalar(line.relationship)} | ${line.kind}`,
 					)
 					.join("\n");
-	const gapsBlock = envelope.gaps.length === 0 ? "" : `\n${envelope.gaps.map(gap => `  - ${gap}`).join("\n")}`;
+	const gapsBlock =
+		envelope.gaps.length === 0 ? "" : `\n${envelope.gaps.map(gap => `  - ${foldWireScalar(gap)}`).join("\n")}`;
 	return [
 		CCE_MARKER,
-		`intent: ${envelope.intent}`,
+		`intent: ${foldWireScalar(envelope.intent)}`,
 		`coverage: ${envelope.coverage}`,
 		`evidence:`,
 		evidenceBlock,

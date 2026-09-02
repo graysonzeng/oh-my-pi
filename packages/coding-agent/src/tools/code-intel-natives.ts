@@ -20,6 +20,7 @@ export interface CodeIntelRankedNode {
 	score: number;
 	startLine: number;
 	endLine: number;
+	contentHash?: string;
 }
 
 export interface CodeIntelChunk {

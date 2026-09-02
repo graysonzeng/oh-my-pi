@@ -6,6 +6,7 @@ import {
 	type CodeIntelEvidenceLine,
 	canEmitCallEdge,
 	evidenceKey,
+	foldWireScalar,
 	kindForProvenance,
 	strongerKind,
 	toEvidenceLine,
@@ -249,10 +250,10 @@ export function buildEnvelope(options: {
 			: "medium";
 	return {
 		envelope: {
-			intent: options.query.trim(),
+			intent: foldWireScalar(options.query.trim()),
 			coverage: options.coverage,
 			evidence,
-			gaps,
+			gaps: gaps.map(foldWireScalar),
 			confidence,
 			found,
 		},

@@ -47,6 +47,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { codeIntelLspLookup } from "@oh-my-pi/pi-coding-agent/tools/code-intel-lsp";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -4777,6 +4778,282 @@ describe("lsp regressions", () => {
 				release();
 			}
 		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("refuses workspace/applyEdit during initialize so the file stays unchanged", async () => {
+		const tempDir = TempDir.createSync("@omp-code-intel-init-hold-");
+		const target = path.join(tempDir.path(), "victim.ts");
+		await Bun.write(target, "export const intact = true;\n");
+		const config: ServerConfig = {
+			command: "fake-lsp",
+			args: ["--code-intel-init-hold"],
+			fileTypes: [".ts"],
+			rootMarkers: [],
+		};
+		configCache.set(tempDir.path(), { servers: { fake: config } });
+		try {
+			const server = installFakeLsp((message, fake) => {
+				if (message.method === "initialize") {
+					fake.send({
+						jsonrpc: "2.0",
+						id: "apply-init",
+						method: "workspace/applyEdit",
+						params: {
+							edit: {
+								changes: {
+									[fileToUri(target)]: [
+										{
+											range: {
+												start: { line: 0, character: 0 },
+												end: { line: 0, character: 0 },
+											},
+											newText: "mutated\n",
+										},
+									],
+								},
+							},
+						},
+					});
+					fake.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "workspace/symbol") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: [] });
+				} else if (message.method === "shutdown") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					fake.exit(0);
+				}
+			});
+			await codeIntelLspLookup({
+				session: makeLspSession(tempDir.path()),
+				tokens: ["intact"],
+				relation: false,
+				coverage: "focused",
+			});
+			const refused = await server.waitFor(message => message.id === "apply-init" && message.method === undefined);
+			expect(refused.result).toMatchObject({ applied: false });
+			expect(await Bun.file(target).text()).toBe("export const intact = true;\n");
+		} finally {
+			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("focused coverage locates symbols without call-hierarchy requests", async () => {
+		const tempDir = TempDir.createSync("@omp-code-intel-focused-");
+		const source = path.join(tempDir.path(), "alpha.ts");
+		await Bun.write(source, "export function alpha() {}\n");
+		const uri = fileToUri(source);
+		const range = { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } };
+		const config: ServerConfig = {
+			command: "fake-lsp",
+			args: ["--code-intel-focused"],
+			fileTypes: [".ts"],
+			rootMarkers: [],
+		};
+		configCache.set(tempDir.path(), { servers: { fake: config } });
+		try {
+			const server = installFakeLsp((message, fake) => {
+				if (message.method === "initialize") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "workspace/symbol") {
+					fake.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [{ name: "alpha", location: { uri, range } }],
+					});
+				} else if (message.method === "textDocument/references") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: [{ uri, range }] });
+				} else if (message.method === "textDocument/implementation") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: [] });
+				} else if (message.method === "shutdown") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					fake.exit(0);
+				}
+			});
+			const result = await codeIntelLspLookup({
+				session: makeLspSession(tempDir.path()),
+				tokens: ["alpha"],
+				relation: true,
+				coverage: "focused",
+			});
+			expect(
+				result.candidates.some(
+					candidate => candidate.symbol === "alpha" && candidate.provenance === "lsp-reference",
+				),
+			).toBe(true);
+			expect(server.received.some(message => message.method === "textDocument/prepareCallHierarchy")).toBe(false);
+			expect(server.received.some(message => message.method === "callHierarchy/incomingCalls")).toBe(false);
+			expect(server.received.some(message => message.method === "callHierarchy/outgoingCalls")).toBe(false);
+		} finally {
+			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("extended coverage includes a verified second-hop incoming call", async () => {
+		const tempDir = TempDir.createSync("@omp-code-intel-extended-");
+		const alphaPath = path.join(tempDir.path(), "alpha.ts");
+		const betaPath = path.join(tempDir.path(), "beta.ts");
+		const gammaPath = path.join(tempDir.path(), "gamma.ts");
+		await Bun.write(alphaPath, "export function alpha() {}\n");
+		await Bun.write(betaPath, "export function beta() { alpha(); }\n");
+		await Bun.write(gammaPath, "export function gamma() { beta(); }\n");
+		const alphaUri = fileToUri(alphaPath);
+		const betaUri = fileToUri(betaPath);
+		const gammaUri = fileToUri(gammaPath);
+		const alphaRange = { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } };
+		const betaRange = { start: { line: 0, character: 16 }, end: { line: 0, character: 20 } };
+		const gammaRange = { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } };
+		const alphaItem = {
+			name: "alpha",
+			kind: 12,
+			uri: alphaUri,
+			range: alphaRange,
+			selectionRange: alphaRange,
+		};
+		const betaItem = {
+			name: "beta",
+			kind: 12,
+			uri: betaUri,
+			range: betaRange,
+			selectionRange: betaRange,
+		};
+		const gammaItem = {
+			name: "gamma",
+			kind: 12,
+			uri: gammaUri,
+			range: gammaRange,
+			selectionRange: gammaRange,
+		};
+		const config: ServerConfig = {
+			command: "fake-lsp",
+			args: ["--code-intel-extended"],
+			fileTypes: [".ts"],
+			rootMarkers: [],
+		};
+		configCache.set(tempDir.path(), { servers: { fake: config } });
+		try {
+			const server = installFakeLsp((message, fake) => {
+				if (message.method === "initialize") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "workspace/symbol") {
+					fake.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [{ name: "alpha", location: { uri: alphaUri, range: alphaRange } }],
+					});
+				} else if (
+					message.method === "textDocument/references" ||
+					message.method === "textDocument/implementation"
+				) {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: [] });
+				} else if (message.method === "textDocument/prepareCallHierarchy") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: [alphaItem] });
+				} else if (message.method === "callHierarchy/incomingCalls") {
+					const item = (message.params as { item?: { name?: string } } | undefined)?.item;
+					const from = item?.name === "alpha" ? betaItem : item?.name === "beta" ? gammaItem : undefined;
+					fake.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: from ? [{ from, fromRanges: [from.selectionRange] }] : [],
+					});
+				} else if (message.method === "callHierarchy/outgoingCalls") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: [] });
+				} else if (message.method === "shutdown") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					fake.exit(0);
+				}
+			});
+			const result = await codeIntelLspLookup({
+				session: makeLspSession(tempDir.path()),
+				tokens: ["alpha"],
+				relation: true,
+				coverage: "extended",
+			});
+			expect(
+				result.candidates.some(
+					candidate =>
+						candidate.symbol === "beta" && candidate.provenance === "lsp-call" && candidate.incoming === true,
+				),
+			).toBe(true);
+			expect(
+				result.candidates.some(
+					candidate =>
+						candidate.symbol === "gamma" && candidate.provenance === "lsp-call" && candidate.incoming === true,
+				),
+			).toBe(true);
+			expect(server.received.some(message => message.method === "textDocument/prepareCallHierarchy")).toBe(true);
+		} finally {
+			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("returns implementation locations as lsp-reference after workspace symbols", async () => {
+		const tempDir = TempDir.createSync("@omp-code-intel-impl-");
+		const iface = path.join(tempDir.path(), "iface.ts");
+		const impl = path.join(tempDir.path(), "impl.ts");
+		await Bun.write(iface, "export interface Runner { run(): void }\n");
+		await Bun.write(impl, "export class NodeRunner { run() {} }\n");
+		const ifaceUri = fileToUri(iface);
+		const implUri = fileToUri(impl);
+		const ifaceRange = { start: { line: 0, character: 17 }, end: { line: 0, character: 23 } };
+		const implRange = { start: { line: 0, character: 13 }, end: { line: 0, character: 23 } };
+		const config: ServerConfig = {
+			command: "fake-lsp",
+			args: ["--code-intel-impl"],
+			fileTypes: [".ts"],
+			rootMarkers: [],
+		};
+		configCache.set(tempDir.path(), { servers: { fake: config } });
+		try {
+			installFakeLsp((message, fake) => {
+				if (message.method === "initialize") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "workspace/symbol") {
+					fake.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [{ name: "Runner", location: { uri: ifaceUri, range: ifaceRange } }],
+					});
+				} else if (message.method === "textDocument/references") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: [] });
+				} else if (message.method === "textDocument/implementation") {
+					fake.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [{ targetUri: implUri, targetRange: implRange, targetSelectionRange: implRange }],
+					});
+				} else if (message.method === "shutdown") {
+					fake.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					fake.exit(0);
+				}
+			});
+			const result = await codeIntelLspLookup({
+				session: makeLspSession(tempDir.path()),
+				tokens: ["Runner"],
+				relation: false,
+				coverage: "focused",
+			});
+			expect(
+				result.candidates.some(
+					candidate =>
+						candidate.symbol === "Runner" &&
+						candidate.provenance === "lsp-reference" &&
+						candidate.path.replaceAll("\\", "/").endsWith("impl.ts"),
+				),
+			).toBe(true);
+		} finally {
+			configCache.delete(tempDir.path());
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
