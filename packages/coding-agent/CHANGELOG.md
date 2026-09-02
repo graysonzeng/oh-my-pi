@@ -19,6 +19,7 @@
 - Added independent `xai` service-tier family (`tier.xai`: none \| priority) so `/fast` and `set_fast_mode` work on xAI-capable Grok text models without merging into OpenAI or inventing a Fireworks-style provider knob. OpenRouter Grok can enable without marking `fastModeActive` until forwarding is verified.
 
 ### Changed
+- Default agent guidance now verifies referenced files/URLs and version-sensitive facts, preserves unknown identifiers instead of inventing them, and ends tool-driven parent turns with the requested answer.
 - Reviewer delegation now preflights an exact mandatory late reviewer with useful read-only repository work, reuses the checked agent over IRC after verification, and avoids duplicate final reviews during fallback.
 - Review orchestration now defaults routine reviewers to medium effort, caps agent-level escalation at `xhigh`, pins one shared diff evidence snapshot, and bounds parallel fan-out to disjoint file/contract scopes.
 - Canonical `skill://<name>` full-text reads now stub a second identical view; unknown skills stay fail-closed with a `rule://` hint and no SKILL.md scan; `adaptive-delivery` is routed as a rule.
