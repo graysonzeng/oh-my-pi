@@ -3,16 +3,21 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { OPENAI_CURATED_FALLBACK_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { applyGeneratedModelPolicies } from "../scripts/generated-policies";
 
 const DAYBREAK_EFFORTS = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 
-describe("OpenAI Daybreak and GPT-5.6 models", () => {
-	test("curates the documented aliases and Cyber snapshot with standard API pricing", () => {
-		const byId = Object.fromEntries(OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS.map(model => [model.id, model]));
-		expect(Object.keys(byId)).toEqual(["daybreak-blue-latest", "daybreak-red-latest", "gpt-5.6-cyber"]);
+describe("OpenAI Daybreak, GPT-5.6, and GPT-6 models", () => {
+	test("curates the documented aliases, Cyber snapshot, and GPT-6 Astra with standard API pricing", () => {
+		const byId = Object.fromEntries(OPENAI_CURATED_FALLBACK_MODELS.map(model => [model.id, model]));
+		expect(Object.keys(byId)).toEqual([
+			"daybreak-blue-latest",
+			"daybreak-red-latest",
+			"gpt-5.6-cyber",
+			"gpt-6-astra",
+		]);
 		expect(byId["daybreak-blue-latest"]).toMatchObject({
 			name: "Daybreak Blue",
 			cost: {
@@ -38,6 +43,25 @@ describe("OpenAI Daybreak and GPT-5.6 models", () => {
 				maxTokens: 128_000,
 			});
 		}
+		expect(byId["gpt-6-astra"]).toMatchObject({
+			name: "GPT-6 Astra",
+			cost: {
+				input: 10,
+				output: 50,
+				cacheRead: 1,
+				cacheWrite: 12.5,
+				longContext: {
+					inputThreshold: 272_000,
+					input: 20,
+					output: 75,
+					cacheRead: 2,
+					cacheWrite: 25,
+				},
+			},
+			contextWindow: 1_050_000,
+			maxTokens: 128_000,
+			thinking: { requiresEffort: true },
+		});
 	});
 
 	test("bakes off support and long-context pricing onto every first-party GPT-5.6 alias", () => {
@@ -64,7 +88,9 @@ describe("OpenAI Daybreak and GPT-5.6 models", () => {
 	});
 
 	test("exposes off and every GPT-5.6 wire effort on all Daybreak IDs", () => {
-		const generated: ModelSpec<Api>[] = OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS.map(model => ({
+		const generated: ModelSpec<Api>[] = OPENAI_CURATED_FALLBACK_MODELS.filter(
+			model => model.id !== "gpt-6-astra",
+		).map(model => ({
 			...model,
 			cost: { ...model.cost },
 		}));
@@ -82,5 +108,42 @@ describe("OpenAI Daybreak and GPT-5.6 models", () => {
 			expect(model.applyPatchToolType).toBe("freeform");
 			expect(model.supportsComputerUse).toBe(true);
 		}
+	});
+
+	test("bakes GPT-6 Astra as a first-party Responses model with mandatory reasoning", () => {
+		const generated: ModelSpec<Api>[] = OPENAI_CURATED_FALLBACK_MODELS.filter(
+			model => model.id === "gpt-6-astra",
+		).map(model => ({
+			...model,
+			cost: { ...model.cost },
+		}));
+		applyGeneratedModelPolicies(generated);
+
+		const spec = generated[0];
+		expect(spec).toBeDefined();
+		const model = buildModel(spec as ModelSpec<"openai-responses">);
+		expect(getSupportedEfforts(model)).toEqual(DAYBREAK_EFFORTS);
+		expect(model.thinking?.requiresEffort).toBe(true);
+		expect(model.compat.reasoningDisableMode).not.toBe("none-effort");
+		expect(model.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 20,
+			output: 75,
+			cacheRead: 2,
+			cacheWrite: 25,
+		});
+		expect(model.applyPatchToolType).toBe("freeform");
+		expect(model.supportsComputerUse).toBe(true);
+
+		const bundled = getBundledModel<"openai-responses">("openai", "gpt-6-astra");
+		expect(bundled.thinking?.requiresEffort).toBe(true);
+		expect(bundled.applyPatchToolType).toBe("freeform");
+		expect(bundled.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 20,
+			output: 75,
+			cacheRead: 2,
+			cacheWrite: 25,
+		});
 	});
 });

@@ -10,6 +10,7 @@ import {
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
+import { parseOpenAIModel, semverGte } from "../identity/classify";
 import {
 	anthropicModelSupportsThinking,
 	isDeepseekV4FlashModelId,
@@ -24,7 +25,11 @@ import {
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
-import { OPENAI_GPT_56_CYBER_STANDARD_COST, OPENAI_GPT_56_SOL_STANDARD_COST } from "../openai-pricing";
+import {
+	OPENAI_GPT_6_ASTRA_STANDARD_COST,
+	OPENAI_GPT_56_CYBER_STANDARD_COST,
+	OPENAI_GPT_56_SOL_STANDARD_COST,
+} from "../openai-pricing";
 import type {
 	Api,
 	FetchImpl,
@@ -911,6 +916,15 @@ export const OPENAI_GPT_56_LONG_CONTEXT_COSTS = {
 	},
 } as const satisfies Readonly<Record<"luna" | "sol" | "terra", LongContextTokenCost>>;
 
+/** GPT-6 Astra long-context rates: 2x input/cache and 1.5x output above 272K. */
+export const OPENAI_GPT_6_ASTRA_LONG_CONTEXT_COST = {
+	inputThreshold: 272_000,
+	input: 20,
+	output: 75,
+	cacheRead: 2,
+	cacheWrite: 25,
+} as const satisfies LongContextTokenCost;
+
 export interface OpenAIModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -930,11 +944,11 @@ export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): Mo
 }
 
 /**
- * Daybreak models are approval-gated first-party Responses models that are not
- * yet present in stencil.so. Seed the documented aliases and current Cyber
- * snapshot so fresh installs expose them without credentialed discovery.
+ * First-party Responses models that are live on the API but not yet present in
+ * stencil.so. Seed the documented Daybreak aliases, current Cyber snapshot, and
+ * GPT-6 Astra so fresh installs expose them without credentialed discovery.
  */
-export const OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS: readonly ModelSpec<"openai-responses">[] = [
+export const OPENAI_CURATED_FALLBACK_MODELS: readonly ModelSpec<"openai-responses">[] = [
 	{
 		id: "daybreak-blue-latest",
 		name: "Daybreak Blue",
@@ -973,6 +987,26 @@ export const OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS: readonly ModelSpec<"openai
 		cost: OPENAI_GPT_56_CYBER_STANDARD_COST,
 		contextWindow: 400_000,
 		maxTokens: 128_000,
+	},
+	{
+		id: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: OPENAI_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			...OPENAI_GPT_6_ASTRA_STANDARD_COST,
+			longContext: OPENAI_GPT_6_ASTRA_LONG_CONTEXT_COST,
+		},
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			requiresEffort: true,
+		},
 	},
 ];
 
@@ -5728,18 +5762,20 @@ export interface GithubCopilotModelManagerConfig {
 }
 
 const COPILOT_ANTHROPIC_MODEL_PATTERN = /^claude-(haiku|sonnet|opus|fable|mythos)-\d/;
-const isCopilotResponsesModelId = (modelId: string): boolean =>
-	modelId === "grok-4.5" ||
-	modelId === "grok-4.6" ||
-	modelId.startsWith("gpt-5") ||
-	modelId.startsWith("oswe") ||
-	modelId.startsWith("mai-");
+const isCopilotResponsesModelId = (modelId: string): boolean => {
+	if (modelId === "grok-4.5" || modelId === "grok-4.6" || modelId.startsWith("oswe") || modelId.startsWith("mai-")) {
+		return true;
+	}
+	const parsed = parseOpenAIModel(modelId);
+	return parsed !== null && semverGte(parsed.version, "5");
+};
 const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
 	"grok-4.5",
 	"grok-4.5-1m",
 	"grok-4.6",
 	"grok-4.6-1m",
 	"mai-code-1-flash-picker",
+	"gpt-6-astra",
 ];
 
 function inferCopilotApi(modelId: string): Api {

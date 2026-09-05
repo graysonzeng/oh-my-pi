@@ -388,6 +388,8 @@ export interface AgentDefinition {
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
 	readSummarize?: boolean;
+	/** When `false`, the spawned session does not apply model-family tool-output truncation. */
+	outputTruncation?: boolean;
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;
 	/** Opt-in code-review shadow cohort. Only `"code"` is recognized. */

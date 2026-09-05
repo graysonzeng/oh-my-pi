@@ -42,7 +42,7 @@ export type VibeCli = "fast" | "good";
 
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
- * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
+ * carries `gateway/deepseek-v4-flash:max` then `gateway/grok-4.6:high`, and `task`
  * carries `model: "@task"` (inherits the session's strong model).
  * Resolution goes through {@link resolveAgentModelSelection} exactly like a
  * `task` spawn, so `task.agentModelOverrides` and model-role settings apply.

@@ -22,6 +22,7 @@ import { isOllamaCloudOutputCapped, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS } from "../sr
 import {
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	applyXaiResponsesThinkingPolicy,
+	OPENAI_GPT_6_ASTRA_LONG_CONTEXT_COST,
 	OPENAI_GPT_56_LONG_CONTEXT_COSTS,
 	resolveWaferServerlessThinkingFormat,
 } from "../src/provider-models/openai-compat";
@@ -157,6 +158,7 @@ const OPENAI_GPT_5_6_LONG_CONTEXT_COST_BY_MODEL_ID: Readonly<Record<string, Long
 	"gpt-5.6-luna": OPENAI_GPT_56_LONG_CONTEXT_COSTS.luna,
 	"gpt-5.6-sol": OPENAI_GPT_56_LONG_CONTEXT_COSTS.sol,
 	"gpt-5.6-terra": OPENAI_GPT_56_LONG_CONTEXT_COSTS.terra,
+	"gpt-6-astra": OPENAI_GPT_6_ASTRA_LONG_CONTEXT_COST,
 };
 
 const OPENAI_NONE_EFFORT_MODEL_IDS: Record<string, true> = {
@@ -223,7 +225,8 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	}
 	if (model.provider === "openrouter" && model.thinking?.requiresEffort === true) return;
 	const requiresProviderAuthoredEffort =
-		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
+		(model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7")) ||
+		(model.provider === "openai" && bareModelId(model.id) === "gpt-6-astra");
 	const thinking = resolveModelThinking({ ...model, thinking: undefined }, buildCompat(model));
 	if (thinking) {
 		model.thinking = requiresProviderAuthoredEffort ? { ...thinking, requiresEffort: true } : thinking;
@@ -502,7 +505,7 @@ function inferGeneratedApplyPatchToolType(
 	model: ModelSpec<Api>,
 	parsedModel: ParsedModel,
 ): ModelSpec<Api>["applyPatchToolType"] {
-	if (parsedModel.family !== "openai" || parsedModel.version.major !== 5) {
+	if (parsedModel.family !== "openai" || parsedModel.version.major < 5) {
 		return undefined;
 	}
 	if (model.provider === "openai" && model.api === "openai-responses") {

@@ -49,6 +49,7 @@ function makeHugeText(): string {
 async function createSession(opts?: {
 	saveArtifact?: (content: string, toolType: string) => Promise<string | undefined>;
 	appendCustomEntry?: SessionManager["appendCustomEntry"];
+	outputTruncationEnabled?: boolean;
 }) {
 	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!bundled) throw new Error("missing model");
@@ -69,6 +70,7 @@ async function createSession(opts?: {
 		settings: Settings.isolated({
 			"compaction.enabled": false,
 			"modelOptimization.enabled": true,
+			"modelOptimization.outputTruncation.enabled": opts?.outputTruncationEnabled ?? true,
 		}),
 		modelRegistry,
 		reconcileModelOptimization: async () => buildResolvedModelOptimization(profile),
@@ -196,6 +198,20 @@ describe("ordinary session afterToolCall optimization", () => {
 		try {
 			const original = makeHugeText();
 			const result = await session.agent.afterToolCall!(toolCtx(original, "call-err", true));
+			expect(result).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps original text when session output truncation is disabled even if the family profile clamps", async () => {
+		const { session } = await createSession({
+			saveArtifact: async () => "1",
+			outputTruncationEnabled: false,
+		});
+		try {
+			const original = makeHugeText();
+			const result = await session.agent.afterToolCall!(toolCtx(original, "call-no-trunc"));
 			expect(result).toBeUndefined();
 		} finally {
 			await session.dispose();

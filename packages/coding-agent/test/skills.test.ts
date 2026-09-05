@@ -2,7 +2,11 @@ import { beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
+import {
+	type Skill as CapabilitySkill,
+	MAX_SKILL_DESCRIPTION_CHARS,
+	skillCapability,
+} from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
@@ -141,6 +145,25 @@ describe("skills", () => {
 			const names = skills.map(skill => skill.name);
 
 			expect(names).toEqual(expectedFixtureSkillOrder);
+		});
+
+		it("warns when a description exceeds the listing budget without truncating it", async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-desc-"));
+			try {
+				const skillDir = path.join(tempDir, "wide-trigger");
+				await fs.mkdir(skillDir);
+				const description = "x".repeat(MAX_SKILL_DESCRIPTION_CHARS + 1);
+				await fs.writeFile(
+					path.join(skillDir, "SKILL.md"),
+					["---", "name: wide-trigger", `description: ${description}`, "---", "", "# Wide"].join("\n"),
+				);
+				const { skills, warnings } = await loadSkillsFromDir({ dir: tempDir, source: "test" });
+				expect(skills).toHaveLength(1);
+				expect(skills[0].description).toBe(description);
+				expect(warnings.some(warning => warning.message.includes(String(MAX_SKILL_DESCRIPTION_CHARS)))).toBe(true);
+			} finally {
+				await removeWithRetries(tempDir);
+			}
 		});
 
 		it("should return empty for non-existent directory", async () => {

@@ -8,5 +8,5 @@ User-authored skills separate; tool NEVER edits them.
 - `action: "delete"` — fails if skill absent.
 
 `name`: kebab-case (lowercase letters, digits, hyphens).
-`description`: specific; drives discovery.
+`description`: one line, ≤160 characters. What the skill does and when it applies; add a "Not for …" exclusion when nearby tasks would otherwise trigger it. Drives discovery; keep it short so it is not diluted in the skill list.
 No frontmatter in `body`; generated from `name` and `description`.

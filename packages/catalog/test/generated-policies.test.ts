@@ -175,6 +175,23 @@ describe("generated model policies", () => {
 		expect(models[4]?.cost.longContext).toBeUndefined();
 	});
 
+	it("applies GPT-6 Astra long-context pricing and mandatory reasoning on first-party Responses", () => {
+		const models: ModelSpec<Api>[] = [
+			createSpec({ id: "gpt-6-astra", api: "openai-responses", provider: "openai" }),
+			createSpec({ id: "gpt-6-astra", api: "openai-completions", provider: "openrouter" }),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking?.requiresEffort).toBe(true);
+		expect(models[0]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 20, output: 75 });
+		expect(models[0]?.applyPatchToolType).toBe("freeform");
+		expect(models[0]?.compat).toBeUndefined();
+		expect(models[1]?.thinking?.requiresEffort).not.toBe(true);
+		expect(models[1]?.cost.longContext).toBeUndefined();
+		expect(models[1]?.applyPatchToolType).toBeUndefined();
+	});
+
 	it("floors GPT-5.6 Codex-transport context windows at 1M (openai/codex#38917)", () => {
 		const models: ModelSpec<Api>[] = [
 			// Codex discovery/registry still reports the stale 272000 for these.
@@ -549,6 +566,7 @@ describe("generated model policies", () => {
 	it("sets freeform apply_patch metadata for first-party GPT-5 Responses models", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({ id: "gpt-5.4", api: "openai-responses", provider: "openai" }),
+			createSpec({ id: "gpt-6-astra", api: "openai-responses", provider: "openai" }),
 			createSpec({ id: "gpt-5.3-codex-spark", api: "openai-codex-responses", provider: "openai-codex" }),
 			createSpec({
 				id: "gpt-5.3-codex-spark",
@@ -568,8 +586,9 @@ describe("generated model policies", () => {
 
 		expect(models[0]?.applyPatchToolType).toBe("freeform");
 		expect(models[1]?.applyPatchToolType).toBe("freeform");
-		expect(models[2]?.applyPatchToolType).toBeUndefined();
+		expect(models[2]?.applyPatchToolType).toBe("freeform");
 		expect(models[3]?.applyPatchToolType).toBeUndefined();
+		expect(models[4]?.applyPatchToolType).toBeUndefined();
 	});
 
 	it("strips paid xAI Responses effort dials for off-allowlist reasoners", () => {

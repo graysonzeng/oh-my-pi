@@ -52,3 +52,23 @@ describe("createSubagentSettings read summary precedence", () => {
 		expect(child.get("read.summarize.enabled")).toBe(false);
 	});
 });
+
+describe("createSubagentSettings output truncation precedence", () => {
+	it("preserves a parent disable when the agent does not force false", () => {
+		const parent = Settings.isolated({ "modelOptimization.outputTruncation.enabled": false });
+		const child = createSubagentSettings(parent);
+		expect(child.get("modelOptimization.outputTruncation.enabled")).toBe(false);
+	});
+
+	it("lets an explicit false-only agent override disable a parent default", () => {
+		const parent = Settings.isolated({ "modelOptimization.outputTruncation.enabled": true });
+		const child = createSubagentSettings(parent, { "modelOptimization.outputTruncation.enabled": false });
+		expect(child.get("modelOptimization.outputTruncation.enabled")).toBe(false);
+	});
+
+	it("keeps family-profile default on when the agent omits the override", () => {
+		const parent = Settings.isolated();
+		const child = createSubagentSettings(parent);
+		expect(child.get("modelOptimization.outputTruncation.enabled")).toBe(true);
+	});
+});

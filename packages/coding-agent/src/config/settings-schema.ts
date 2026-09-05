@@ -5217,6 +5217,17 @@ export const SETTINGS_SCHEMA = {
 				"Optional map of model optimization profiles by id (empty uses built-in claude/gpt-5/grok/glm/luna/terra/sol family profiles). Same id overrides a built-in. Does not accept workflow role profiles.",
 		},
 	},
+	"modelOptimization.outputTruncation.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Model",
+			label: "Tool Output Truncation",
+			description:
+				"When enabled, ordinary sessions apply model-family tool-output byte/line clamps. Subagents may disable this with frontmatter `output-truncation: false` without changing the family profile.",
+		},
+	},
 
 	// Latency optimization arms (design A §6.2) — independently rollbackable. Defaults since the
 	// 2026-08-07 quality gate: the low-risk fail-open bash pair, plus the high-benefit ordinary-session

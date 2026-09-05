@@ -4,7 +4,7 @@ description: MUST be used for exploratory codebase research, rapid code analysis
 tools: read, grep, glob, ast_grep, code_intel, web_search
 model:
   - "gateway/deepseek-v4-flash:max"
-  - "gateway/grok-4.6:xhigh"
+  - "gateway/grok-4.6:high"
 thinking-level: medium
 max-effort: medium
 read-summarize: true

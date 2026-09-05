@@ -2939,6 +2939,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		settings,
 		{
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			...(agent.outputTruncation === false ? { "modelOptimization.outputTruncation.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
 			...(options.strictModelIdentity ? { "retry.modelFallback": false } : undefined),
@@ -3510,6 +3511,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
+				outputTruncation: agent.outputTruncation,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,

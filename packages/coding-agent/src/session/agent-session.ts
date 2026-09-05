@@ -3689,11 +3689,10 @@ export class AgentSession {
 			latencyArms.arms.context_optimization && this.#activeModelOptimization.profile !== undefined;
 		const readDedupeEnabled = modelOptimizationActive && latencyArms.arms.read_dedupe && ctx.toolCall.name === "read";
 		const toolStrategy = this.#activeModelOptimization.profile?.toolStrategy as SessionToolStrategy | undefined;
-		if (
-			!readDedupeEnabled &&
-			!toolStrategy?.outputTruncation?.enabled &&
-			!toolStrategy?.resultSummarization?.enabled
-		) {
+		const outputTruncationEnabled =
+			this.settings.get("modelOptimization.outputTruncation.enabled") !== false &&
+			toolStrategy?.outputTruncation?.enabled === true;
+		if (!readDedupeEnabled && !outputTruncationEnabled && !toolStrategy?.resultSummarization?.enabled) {
 			return undefined;
 		}
 		const originalContent = ctx.result.content;
@@ -3709,12 +3708,17 @@ export class AgentSession {
 		const artifact: ToolOutputArtifactAdapter = {
 			saveRaw: async (toolName, fullText) => this.sessionManager.saveArtifact(fullText, toolName),
 		};
+		const effectiveToolStrategy: SessionToolStrategy | undefined = outputTruncationEnabled
+			? toolStrategy
+			: toolStrategy
+				? { ...toolStrategy, outputTruncation: { enabled: false, rules: [] } }
+				: undefined;
 		let detailed: { text: string; receipt?: ToolOptimizationReceiptV1 };
 		try {
 			detailed = await processToolOutputDetailedAsync(
 				originalText,
 				ctx.toolCall.name,
-				toolStrategy,
+				effectiveToolStrategy,
 				ctx.args,
 				artifact,
 			);

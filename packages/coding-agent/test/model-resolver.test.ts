@@ -1043,14 +1043,31 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["anthropic/claude-sonnet-4-6", "zai/glm-5.2:high"]);
 	});
 
-	test("uses default for unconfigured smol, slow, and designer agent roles before priority defaults", () => {
+	test("uses default for unconfigured slow and designer agent roles before priority defaults", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "local/llama" },
 		});
 
-		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["local/llama"]);
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["local/llama"]);
 		expect(resolveAgentModelPatterns({ agentModel: "@designer", settings })).toEqual(["local/llama"]);
+	});
+
+	test("uses flash then grok-4.6 high for unset smol and tiny even when default is configured", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "local/llama" },
+		});
+		const smol = resolveAgentModelPatterns({ agentModel: "@smol", settings });
+
+		expect(smol.slice(0, 2)).toEqual(["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"]);
+		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(smol);
+	});
+
+	test("keeps an explicit smol override ahead of the flash then grok chain", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "local/llama", smol: "fast/hy3" },
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["fast/hy3"]);
 	});
 
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
@@ -1058,7 +1075,11 @@ describe("resolveAgentModelPatterns", () => {
 			modelRoles: { default: "@slow", slow: "anthropic/claude-sonnet-4-5" },
 		});
 
-		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings }).slice(0, 2)).toEqual([
+			"gateway/deepseek-v4-flash:max",
+			"gateway/grok-4.6:high",
+		]);
 	});
 
 	test("prefers configured designer role override over priority defaults", () => {

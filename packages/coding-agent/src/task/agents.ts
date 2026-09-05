@@ -69,7 +69,7 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		frontmatter: {
 			name: "sonic",
 			description: "Low-reasoning agent for strictly mechanical updates or data collection only",
-			model: "@smol",
+			model: ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"],
 			thinkingLevel: Effort.Medium,
 		},
 		template: taskMd,

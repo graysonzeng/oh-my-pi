@@ -16,6 +16,14 @@ export const OPENAI_GPT_56_CYBER_STANDARD_COST = {
 	cacheWrite: 15.625,
 } as const satisfies TokenCost;
 
+/** Standard GPT-6 Astra rates from the published API pricing table. */
+export const OPENAI_GPT_6_ASTRA_STANDARD_COST = {
+	input: 10,
+	output: 50,
+	cacheRead: 1,
+	cacheWrite: 12.5,
+} as const satisfies TokenCost;
+
 /** Resolve standard rates for Codex-prefixed Daybreak aliases. */
 export function resolveOpenAIDaybreakStandardCost(modelId: string): TokenCost | undefined {
 	switch (modelId) {

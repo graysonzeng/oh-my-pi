@@ -35,7 +35,7 @@ const SCOUT_P90_MS = 8 * 60_000;
 const REVIEWER_P50_MS = 12 * 60_000;
 const REVIEWER_P90_MS = 20 * 60_000;
 
-const SCOUT_MODEL_CHAIN = ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:xhigh"] as const;
+const SCOUT_MODEL_CHAIN = ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"] as const;
 const REVIEWER_MODEL_CHAIN = ["gateway/gpt-5.6-sol", "gateway/claude-opus-5", "@task"] as const;
 
 const SCOUT_ASSIGNMENT =

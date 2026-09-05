@@ -680,7 +680,8 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("Read matching `skill://<name>` or `rule://<name>` before proceeding.");
 		expect(text).toContain("Choose at most ONE primary routing/lifecycle skill");
 		expect(text).toContain("do NOT bulk-read the index");
-
+		expect(text).toContain("do not read skill bodies");
+		expect(text).toContain("Path-matched domain rules still load");
 		expect(text).toContain("<skills>");
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
@@ -705,6 +706,7 @@ describe("system prompt tool inventory", () => {
 		});
 		const text = systemPrompt.join("\n\n");
 		expect(text).not.toContain("Read matching `skill://<name>` or `rule://<name>` before proceeding.");
+		expect(text).not.toContain("<skills>");
 		expect(text).toContain("Load domain rules only when working in a known target path");
 		expect(text).toContain("<domain-rules>");
 		expect(text).toContain("- typescript (**/*.ts): TypeScript constraints");

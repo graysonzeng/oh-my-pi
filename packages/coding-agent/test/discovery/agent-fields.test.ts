@@ -160,6 +160,31 @@ describe("parseAgentFields", () => {
 	test("returns undefined readSummarize when field absent", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc" })?.readSummarize).toBeUndefined();
 	});
+
+	test("parses outputTruncation from boolean frontmatter", () => {
+		expect(parseAgentFields({ name: "scout", description: "desc", outputTruncation: false })?.outputTruncation).toBe(
+			false,
+		);
+		expect(parseAgentFields({ name: "scout", description: "desc", outputTruncation: true })?.outputTruncation).toBe(
+			true,
+		);
+	});
+
+	test("parses outputTruncation from string frontmatter", () => {
+		expect(
+			parseAgentFields({ name: "scout", description: "desc", outputTruncation: "false" })?.outputTruncation,
+		).toBe(false);
+	});
+
+	test("ignores invalid outputTruncation values", () => {
+		expect(
+			parseAgentFields({ name: "scout", description: "desc", outputTruncation: "nope" })?.outputTruncation,
+		).toBeUndefined();
+	});
+
+	test("returns undefined outputTruncation when field absent", () => {
+		expect(parseAgentFields({ name: "scout", description: "desc" })?.outputTruncation).toBeUndefined();
+	});
 	test("parses prewalk from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: true })?.prewalk).toBe(true);
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: false })?.prewalk).toBe(false);

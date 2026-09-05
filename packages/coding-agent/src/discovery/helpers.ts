@@ -244,6 +244,8 @@ export interface ParsedAgentFields {
 	maxEffort?: Effort;
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
+	/** When `false`, the spawned session skips model-family tool-output clamps. */
+	outputTruncation?: boolean;
 	blocking?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
@@ -306,6 +308,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const model = parseModelList(frontmatter.model);
 	const blocking = parseBoolean(frontmatter.blocking);
 	const readSummarize = parseBoolean(frontmatter.readSummarize);
+	const outputTruncation = parseBoolean(frontmatter.outputTruncation);
 	// prewalk: true → hand off to the default prewalk target; "<pattern>" → custom target.
 	let prewalk: boolean | string | undefined = parseBoolean(frontmatter.prewalk);
 	if (prewalk === undefined && typeof frontmatter.prewalk === "string") {
@@ -334,6 +337,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		blocking,
 		autoloadSkills,
 		readSummarize,
+		outputTruncation,
 		prewalk,
 		shadowReview,
 		advisor,

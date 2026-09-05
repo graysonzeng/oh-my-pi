@@ -87,6 +87,7 @@ export function createPersistedSubagentReviverFactory(
 		// createSubagentSettings default).
 		const subagentSettings = createSubagentSettings(ctx.settings, {
 			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			...(init.outputTruncation === false ? { "modelOptimization.outputTruncation.enabled": false } : undefined),
 			...(init.advisor
 				? {
 						"advisor.enabled": true,

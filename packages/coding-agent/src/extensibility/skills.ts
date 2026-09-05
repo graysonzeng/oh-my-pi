@@ -6,7 +6,7 @@ import {
 	MANAGED_SKILLS_PROVIDER_ID,
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
-import { skillCapability } from "../capability/skill";
+import { skillCapability, skillDescriptionOverBudgetMessage } from "../capability/skill";
 import type { SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
@@ -81,6 +81,12 @@ export function isNameClaimedByAuthoredSkill(name: string): boolean {
 	);
 }
 
+function descriptionBudgetWarning(skill: Pick<Skill, "name" | "description" | "filePath">): SkillWarning | undefined {
+	const message = skillDescriptionOverBudgetMessage(skill.name, skill.description);
+	if (!message) return undefined;
+	return { skillPath: skill.filePath, message };
+}
+
 export interface LoadSkillsFromDirOptions {
 	/** Directory to scan for skills */
 	dir: string;
@@ -102,19 +108,22 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 		},
 	);
 
-	return {
-		skills: result.items.map(capSkill => ({
-			name: capSkill.name,
-			description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
-			filePath: capSkill.path,
-			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-			source: options.source,
-			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-			_source: capSkill._source,
-		})),
-		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
-	};
+	const skills = result.items.map(capSkill => ({
+		name: capSkill.name,
+		description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
+		filePath: capSkill.path,
+		baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
+		source: options.source,
+		...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+		hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+		_source: capSkill._source,
+	}));
+	const warnings: SkillWarning[] = (result.warnings ?? []).map(message => ({ skillPath: options.dir, message }));
+	for (const skill of skills) {
+		const warning = descriptionBudgetWarning(skill);
+		if (warning) warnings.push(warning);
+	}
+	return { skills, warnings };
 }
 
 export interface LoadSkillsOptions extends SkillsSettings {
@@ -394,9 +403,18 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const skills = Array.from(skillMap.values());
 	// Deterministic ordering for prompt stability (case-insensitive, then exact name, then path).
 	skills.sort((a, b) => compareSkillOrder(a.name, a.filePath, b.name, b.filePath));
+	const descriptionWarnings: SkillWarning[] = [];
+	for (const skill of skills) {
+		const warning = descriptionBudgetWarning(skill);
+		if (warning) descriptionWarnings.push(warning);
+	}
 	return {
 		skills,
-		warnings: [...(result.warnings ?? []).map(w => ({ skillPath: "", message: w })), ...collisionWarnings],
+		warnings: [
+			...(result.warnings ?? []).map(w => ({ skillPath: "", message: w })),
+			...collisionWarnings,
+			...descriptionWarnings,
+		],
 	};
 }
 

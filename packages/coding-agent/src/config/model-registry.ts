@@ -2572,6 +2572,7 @@ export interface ProviderConfigInput {
 	models?: Array<{
 		id: string;
 		name: string;
+		requestModelId?: string;
 		api?: Api;
 		baseUrl?: string;
 		reasoning: boolean;
