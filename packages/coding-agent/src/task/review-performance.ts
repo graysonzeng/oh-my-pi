@@ -33,20 +33,48 @@ export interface ResolveSubagentPerformanceClassInput {
 
 export interface SubagentRequestPhase {
 	index: number;
+	/**
+	 * Monitor wall-clock (`Date.now()`) at the assistant `message_start` —
+	 * the harness's start->end interval, NOT the provider's request duration.
+	 * Provider timing lives in `ttftMs`/`generationMs`.
+	 */
 	startedAtMs: number;
+	/** Monitor wall-clock start->end interval (`Date.now()`). NOT provider duration. */
 	durationMs: number;
 	queueMs?: number;
+	/** Provider time-to-first-token (ms); written only when finite and >= 0. */
 	ttftMs?: number;
+	/**
+	 * Provider generation time = `message.duration - message.ttft` (ms). Written
+	 * only when both are finite and `duration >= ttft`; never a fallback to the
+	 * monitor `durationMs`.
+	 */
 	generationMs?: number;
 	inputTokens?: number;
 	cacheReadTokens?: number;
 	outputTokens?: number;
+	/**
+	 * Provider `Usage.totalTokens` — the provider's token total (input + output
+	 * + cache + any orchestration tokens already counted in that field). NOT
+	 * prompt/context-window usage and NOT bytes.
+	 */
+	contextTokens?: number;
+	/** Legacy field. No producer writes it this cycle; old history may carry it. */
 	contextBytes?: number;
 }
 
 export interface SubagentToolPhase {
 	name: string;
-	durationMs: number;
+	/**
+	 * Present only for a matched non-empty `toolCallId` start/end pair. Omitted
+	 * (never 0) for unmatched phases — unknown end, empty/missing id, or a
+	 * start left over at `finish()` (cancel/error/abort).
+	 */
+	durationMs?: number;
+	/** Non-empty tool call id when the event carried one; omitted for empty/missing ids. */
+	toolCallId?: string;
+	/** True when no paired start could be matched (cancel/error/abort remnants). */
+	unmatched?: true;
 	originalBytes?: number;
 	visibleBytes?: number;
 }
@@ -61,6 +89,12 @@ export interface SubagentReviewMetrics {
 	requestPhases: SubagentRequestPhase[];
 	toolPhases: SubagentToolPhase[];
 	checkpoints: SubagentCheckpointMetrics[];
+	/**
+	 * Wall-clock (`Date.now()`) wait for the `task.maxConcurrency` semaphore
+	 * (`acquiredAt - invokedAt`). This is the harness's spawn queue — NOT a
+	 * provider queue. Omitted when the spawn site did not capture both epochs.
+	 */
+	spawnQueueMs?: number;
 	shadowWaitMs?: number;
 	shadowChildCount?: number;
 }

@@ -15,7 +15,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Read-only research MUST run on `scout` (faster model).{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
 - **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} spin a read-only scout only when affected files are genuinely unknown.{{/if}}
-- **Overlap:** Parallelize independent ownership. Concurrent work MUST stay on disjoint surfaces. While a subagent job is running, its declared target files are mid-run state — not success or failure evidence — and MUST NOT be overwritten by main or peers until delivery or cancellation. Waiting is allowed when blocked on those owned files. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
+- **Overlap:** Parallelize independent ownership. Concurrent work MUST stay on disjoint surfaces. While a subagent job is running, its declared target files are mid-run state — not success or failure evidence — and NEVER be overwritten by main or peers until delivery or cancellation. Waiting is allowed when blocked on those owned files. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
   1. Every task MUST skip validation (build/lint/tests) — validating mid-flight blocks agents on each other's edits.
   2. Decide cross-task contracts up front (e.g. the interface A implements and B consumes) and state them in the {{#if batchEnabled}}batch `context`{{else}}task{{/if}}, not left for agents to negotiate.
 
@@ -61,6 +61,8 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 # Communication
 Subagents start blank — no conversation history.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{/if}}
 Pass large payloads via `local://<path>` URIs, NEVER inline text.
+{{#if ircEnabled}}- NEVER ping an agent still running without new information; only send necessary recovery after a confirmed stall, park, or interrupt.{{/if}}
+- Reuse still-valid {{#if batchEnabled}}batch `context` / {{/if}}`local://` evidence instead of redundant re-exploration; re-read when it is stale, conflicts with current files, was truncated, after a tool-failure strategy change, or for independent acceptance.
 
 # Format Contracts
 {{#if batchEnabled}}

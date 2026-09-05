@@ -1188,6 +1188,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
+	// Tool metrics pair by non-empty toolCallId so concurrent calls never merge
+	// into one phase. Entries are popped on a matching end; anything still open
+	// at finish() is an unmatched remnant (cancel/error/abort).
+	const openToolMetrics = new Map<string, { name: string; startedAtMs: number }>();
 
 	const abortActiveSession = (): Promise<void> => {
 		const session = activeSession;
@@ -1578,6 +1582,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				}
 				progress.currentToolArgs = extractToolArgsPreview(startArgs);
 				progress.currentToolStartMs = now;
+				// Metrics pair tools by non-empty `toolCallId` so concurrent calls
+				// never merge into one phase (the HUD single slot above is not a
+				// metrics source). Empty/missing ids are recorded unmatched at once
+				// and never enter the map — anonymous calls cannot combine.
+				const startToolCallId = "toolCallId" in event ? event.toolCallId : "";
+				if (startToolCallId.length > 0) {
+					openToolMetrics.set(startToolCallId, { name: event.toolName, startedAtMs: now });
+				} else {
+					progress.reviewMetrics?.toolPhases.push({ name: event.toolName, unmatched: true });
+				}
 				const intent = event.intent?.trim();
 				if (intent) {
 					progress.lastIntent = intent;
@@ -1603,12 +1617,31 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					if (progress.recentTools.length > 5) {
 						progress.recentTools.pop();
 					}
-					if (progress.currentToolStartMs !== undefined) {
+				}
+				// Metrics: pop the paired start by non-empty `toolCallId`. An end
+				// without a registered start, or an empty/missing id, is recorded
+				// unmatched (cancel/error/abort) with `durationMs` omitted — already
+				// paired durations survive `isError`. The HUD single slot above
+				// remains a renderer surface, not a metrics source.
+				const endToolCallId = "toolCallId" in event ? event.toolCallId : "";
+				if (endToolCallId.length > 0) {
+					const open = openToolMetrics.get(endToolCallId);
+					if (open) {
+						openToolMetrics.delete(endToolCallId);
 						progress.reviewMetrics?.toolPhases.push({
-							name: progress.currentTool,
-							durationMs: Math.max(0, now - progress.currentToolStartMs),
+							name: open.name,
+							durationMs: Math.max(0, now - open.startedAtMs),
+							toolCallId: endToolCallId,
+						});
+					} else {
+						progress.reviewMetrics?.toolPhases.push({
+							name: event.toolName,
+							toolCallId: endToolCallId,
+							unmatched: true,
 						});
 					}
+				} else {
+					progress.reviewMetrics?.toolPhases.push({ name: event.toolName, unmatched: true });
 				}
 				progress.currentTool = undefined;
 				progress.currentToolArgs = undefined;
@@ -1752,15 +1785,48 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 								: isRecord(event.message) && isRecord(event.message.usage)
 									? event.message.usage
 									: undefined;
+						// Provider-clock timing from the assistant message, if the
+						// provider supplied finite values. These are NOT monitor
+						// `Date.now()` intervals (startedAtMs/durationMs below).
+						const assistantMsg = event.message;
+						const providerDuration =
+							assistantMsg && "duration" in assistantMsg && typeof assistantMsg.duration === "number"
+								? assistantMsg.duration
+								: undefined;
+						const providerTtft =
+							assistantMsg && "ttft" in assistantMsg && typeof assistantMsg.ttft === "number"
+								? assistantMsg.ttft
+								: undefined;
 						progress.reviewMetrics?.requestPhases.push({
 							index: lastRequestIndex,
 							startedAtMs: requestStartedAt,
 							durationMs,
-							generationMs: durationMs,
+							// startedAtMs/durationMs remain monitor wall-clock
+							// (Date.now() start->end) — NOT provider duration.
+							// ttftMs needs finite >= 0; generationMs needs both finite
+							// with duration >= ttft and is never a fallback to the
+							// monitor durationMs above.
+							ttftMs:
+								providerTtft !== undefined && Number.isFinite(providerTtft) && providerTtft >= 0
+									? providerTtft
+									: undefined,
+							generationMs:
+								providerDuration !== undefined &&
+								Number.isFinite(providerDuration) &&
+								providerTtft !== undefined &&
+								Number.isFinite(providerTtft) &&
+								providerTtft >= 0 &&
+								providerDuration >= providerTtft
+									? providerDuration - providerTtft
+									: undefined,
 							inputTokens: usageRecord ? getNumberField(usageRecord, "input") : undefined,
 							cacheReadTokens: usageRecord ? getNumberField(usageRecord, "cacheRead") : undefined,
 							outputTokens: usageRecord ? getNumberField(usageRecord, "output") : undefined,
-							contextBytes: usageRecord ? getNumberField(usageRecord, "totalTokens") : undefined,
+							// `contextTokens` is the provider's `Usage.totalTokens`
+							// (input+output+cache+orchestration tokens already counted
+							// there) — not prompt/context-window usage, not bytes.
+							// `contextBytes` is intentionally not written this cycle.
+							contextTokens: usageRecord ? getNumberField(usageRecord, "totalTokens") : undefined,
 						});
 						requestStartedAt = undefined;
 					}
@@ -2027,6 +2093,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				clearTimeout(progressTimeoutId);
 				progressTimeoutId = null;
 			}
+			// Flush tool metrics remnants: a start that never saw its end
+			// (cancel/error/abort mid-tool) becomes an unmatched phase so the
+			// public metrics don't silently drop it. Duration stays omitted.
+			for (const [toolCallId, open] of openToolMetrics) {
+				progress.reviewMetrics?.toolPhases.push({ name: open.name, toolCallId, unmatched: true });
+			}
+			openToolMetrics.clear();
 		},
 	};
 }
@@ -3767,6 +3840,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			options.invokedAt !== undefined && options.acquiredAt !== undefined
 				? Math.round(options.acquiredAt - options.invokedAt)
 				: undefined;
+		// Surface the spawn semaphore wait on the public metrics (top-level only
+		// — never per request-phase `queueMs`, which stays unused to avoid
+		// double-counting the same wait). Omitted when the spawn site captured
+		// no epochs; this is harness queueing time, not a provider queue.
+		if (queueMs !== undefined) {
+			progress.reviewMetrics.spawnQueueMs = queueMs;
+		}
 		const preRunMs = options.acquiredAt !== undefined ? Math.round(startTime - options.acquiredAt) : undefined;
 		const setupToFirstChatMs = span(perfStart, firstChatDispatchAt);
 		const invokeToFirstChatMs =
