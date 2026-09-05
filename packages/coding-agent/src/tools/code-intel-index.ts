@@ -1,14 +1,17 @@
 /**
  * Generation snapshot owner for code-intel.
  *
- * Queries read a committed CURRENT generation. Warm writes the next
- * generation into `<id>.tmp` and atomically publishes CURRENT. A crashed
- * `.tmp` directory is never CURRENT.
+ * Queries read a committed CURRENT generation. Warm builds the native
+ * generation in `<id>.tmp.<pid>`, atomically publishes it as CURRENT, then
+ * streams a semantic snapshot into `<id>.semantic.tmp.<pid>` and publishes it
+ * atomically as `<id>/semantic`. A crashed staging dir is never CURRENT, and
+ * native queries stay available even when the semantic phase fails.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { mmrRerankIndices, vectorIndexTopK } from "@oh-my-pi/pi-natives";
 import { getCodeIntelDir, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import type { Settings } from "../config/settings";
 import { canonicalProjectDir } from "../launch/paths";
 import type { MnemopiSubprocessEmbeddingModel } from "../mnemopi/embed-client";
@@ -22,6 +25,7 @@ import {
 } from "./code-intel-embed";
 import type { CodeIntelRankedNode } from "./code-intel-natives";
 import * as codeIntelNatives from "./code-intel-natives";
+import { EMBED_DEFAULT_LIMITS, streamEmbedPassages } from "./code-intel-stream";
 
 export const MANIFEST_VERSION = 1;
 
@@ -108,6 +112,9 @@ interface StoredChunk {
 
 const owners = new Map<string, CodeIntelIndex>();
 const METADATA_SWEEP_LIMIT = 64;
+const NATIVE_BUILD_MIN_TIMEOUT_MS = 10 * 60 * 1000;
+/** Staging dirs `generations/<id>.tmp.<pid>` and `<id>.semantic.tmp.<pid>` carry a pid suffix for orphan attribution. */
+const TMP_ORPHAN_PATTERN = /\.tmp\.(\d+)(?:\.[a-f0-9-]+)?$/;
 
 export async function codeIntelProjectKey(root: string): Promise<string> {
 	const canonical = await canonicalProjectDir(root);
@@ -167,25 +174,6 @@ function normalizeManifest(raw: NativeManifest, fallbackRoot: string): CodeIntel
 	};
 }
 
-function sliceSourceLines(source: string, startLine: number, endLine: number): string {
-	const lines = source.split("\n");
-	const from = Math.max(0, startLine - 1);
-	const to = Math.min(lines.length, Math.max(from + 1, endLine));
-	return lines.slice(from, to).join("\n");
-}
-
-async function passageText(root: string, chunk: StoredChunk): Promise<string> {
-	const absolute = path.resolve(root, chunk.path);
-	try {
-		const source = await Bun.file(absolute).text();
-		const body = sliceSourceLines(source, chunk.start_line, chunk.end_line).trim();
-		if (body) return `${chunk.kind} ${chunk.symbol}\n${chunk.path}\n${body}`;
-	} catch {
-		// File vanished between generation and embed; fall back to metadata.
-	}
-	return `${chunk.kind} ${chunk.symbol}\n${chunk.path}`;
-}
-
 async function readJsonl<T>(filePath: string, signal?: AbortSignal): Promise<T[]> {
 	try {
 		const text = await untilAborted(signal, Bun.file(filePath).text());
@@ -202,6 +190,20 @@ async function atomicWriteText(targetPath: string, content: string): Promise<voi
 	await replaceFileAtomically(tempPath, targetPath);
 }
 
+/** Cross-process build/publish lock file path; `withFileLock` creates `${path}.lock`. */
+function buildLockPath(projectDir: string): string {
+	return path.join(projectDir, ".code-intel-build");
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+}
+
 export class CodeIntelIndex {
 	readonly #root: string;
 	readonly #settings: Settings;
@@ -212,6 +214,7 @@ export class CodeIntelIndex {
 	#state: CodeIntelIndexState = "unavailable";
 	#gap: string | undefined;
 	#warm: Promise<void> | null = null;
+	#warmAbort: AbortController | null = null;
 	#invalidationEpoch = 0;
 	#builtEpoch = 0;
 	#fileHashes: Map<string, string> | null = null;
@@ -261,21 +264,42 @@ export class CodeIntelIndex {
 	}
 
 	warm(): void {
+		if (this.#settings.get("codeIntel.enabled") === false) {
+			this.#warmAbort?.abort();
+			this.#state = "disabled";
+			return;
+		}
 		if (!codeIntelNatives.hasCodeIntelNatives()) return;
 		if (this.#warm) return;
-		const needsBuild = !this.#current || this.#invalidationEpoch > this.#builtEpoch;
+		if (!this.#current || !this.#manifest) {
+			this.#state = "warming";
+			this.#scheduleWarm();
+			return;
+		}
+		const needsBuild = this.#invalidationEpoch > this.#builtEpoch;
+		const needsSemantic =
+			this.#settings.get("codeIntel.semantic") !== false && (this.#manifest.embeddingsRows ?? 0) === 0;
 		const needsAttach =
 			this.#settings.get("codeIntel.semantic") !== false &&
-			!!this.#current &&
-			!!this.#manifest?.embeddingModel &&
+			!!this.#manifest.embeddingModel &&
 			(this.#manifest.embeddingsRows ?? 0) > 0 &&
 			this.#embedHandle === null;
-		if (!needsBuild && !needsAttach) {
+		if (!needsBuild && !needsAttach && !needsSemantic) {
 			this.#applyReadyState();
 			return;
 		}
-		if (!this.#current) this.#state = "warming";
 		this.#scheduleWarm();
+	}
+
+	/**
+	 * Abort an in-flight warm and wait for it to settle. A native snapshot that
+	 * was already published stays queryable; staging dirs and the build lock
+	 * are released before this resolves. The shared embed worker is never
+	 * terminated.
+	 */
+	async cancelWarm(): Promise<void> {
+		this.#warmAbort?.abort();
+		if (this.#warm) await this.#warm.catch(() => undefined);
 	}
 
 	/** Test-only: await the in-flight warm, including an epoch-chained rebuild. */
@@ -340,8 +364,11 @@ export class CodeIntelIndex {
 		try {
 			[queryRows, ledger, matrix] = await Promise.all([
 				collectEmbedMatrix(handle, [options.query], "query", 1, options.signal),
-				readJsonl<StoredChunk>(path.join(generation.dir, "embeddings.jsonl"), options.signal),
-				untilAborted(options.signal, Bun.file(path.join(generation.dir, "embeddings.f32")).arrayBuffer()),
+				readJsonl<StoredChunk>(path.join(generation.dir, "semantic", "embeddings.jsonl"), options.signal),
+				untilAborted(
+					options.signal,
+					Bun.file(path.join(generation.dir, "semantic", "embeddings.f32")).arrayBuffer(),
+				),
 			]);
 		} catch (error) {
 			if (options.signal?.aborted) return [];
@@ -382,6 +409,10 @@ export class CodeIntelIndex {
 	}
 
 	#applyReadyState(): void {
+		if (this.#settings.get("codeIntel.enabled") === false) {
+			this.#state = "disabled";
+			return;
+		}
 		if (this.#warm) {
 			if (!this.#current) {
 				this.#state = "warming";
@@ -468,9 +499,28 @@ export class CodeIntelIndex {
 
 	#scheduleWarm(): void {
 		if (this.#warm) return;
+		const abort = new AbortController();
+		this.#warmAbort = abort;
+		const semanticEnabled = this.#settings.get("codeIntel.semantic") !== false;
+		let lastTick = performance.now();
+		let maxDelayMs = 0;
+		let peakRss = process.memoryUsage().rss;
+		const monitor = setInterval(() => {
+			const now = performance.now();
+			maxDelayMs = Math.max(maxDelayMs, now - lastTick - 250);
+			lastTick = now;
+			peakRss = Math.max(peakRss, process.memoryUsage().rss);
+			if (
+				this.#settings.get("codeIntel.enabled") === false ||
+				(semanticEnabled && this.#settings.get("codeIntel.semantic") === false)
+			)
+				abort.abort();
+		}, 250);
+		monitor.unref();
 		let failed = false;
-		const running = this.#warmWork()
+		const running = this.#warmWork(abort.signal)
 			.catch(error => {
+				if (abort.signal.aborted) return;
 				failed = true;
 				logger.debug("code-intel warm failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -478,9 +528,13 @@ export class CodeIntelIndex {
 				this.#gap = error instanceof Error ? error.message : String(error);
 			})
 			.finally(() => {
+				clearInterval(monitor);
+				logger.debug("code-intel warm settled", { peakRss, maxDelayMs, aborted: abort.signal.aborted });
 				if (this.#warm === running) this.#warm = null;
+				if (this.#warmAbort === abort) this.#warmAbort = null;
 				if (
 					!failed &&
+					!abort.signal.aborted &&
 					this.#invalidationEpoch > this.#builtEpoch &&
 					codeIntelNatives.hasCodeIntelNatives() &&
 					!this.#warm
@@ -493,20 +547,36 @@ export class CodeIntelIndex {
 		this.#warm = running;
 	}
 
-	async #warmWork(): Promise<void> {
+	async #warmWork(signal: AbortSignal): Promise<void> {
+		// Load the committed snapshot first so a warm-only caller (semantic
+		// layer with no ensureReady) reuses it instead of rebuilding native.
+		if (!this.#current || !this.#manifest) await this.#loadCurrent(signal);
+		if (signal.aborted) return;
 		const startedEpoch = this.#invalidationEpoch;
 		if (!this.#current || this.#invalidationEpoch > this.#builtEpoch) {
 			await this.#buildNext(startedEpoch);
-			return;
 		}
-		await this.#attachEmbedHandle();
+		if (this.#settings.get("codeIntel.semantic") !== false && this.#embedHandle === null) {
+			await this.#attachEmbedHandle(signal);
+		}
+		if (signal.aborted) return;
+		if (
+			this.#settings.get("codeIntel.semantic") !== false &&
+			this.#current &&
+			this.#manifest &&
+			(this.#manifest.embeddingsRows ?? 0) === 0
+		) {
+			await this.#embedSemanticForCurrent();
+		}
 	}
 
-	async #attachEmbedHandle(): Promise<void> {
+	async #attachEmbedHandle(signal: AbortSignal): Promise<void> {
 		const model = this.#manifest?.embeddingModel;
 		if (!model || (this.#manifest?.embeddingsRows ?? 0) === 0) return;
 		if (this.#embedHandle && this.#embedModel === model) return;
-		const handle = await tryInitializeLocalEmbed(model);
+		const handle = await untilAborted(signal, tryInitializeLocalEmbed(model));
+		signal.throwIfAborted();
+		if (this.#manifest?.embeddingModel !== model) return;
 		if (!handle) {
 			this.#gap = "semantic unavailable";
 			return;
@@ -523,47 +593,76 @@ export class CodeIntelIndex {
 
 	async #loadCurrent(signal?: AbortSignal): Promise<void> {
 		const projectDir = await this.#projectDir();
+		const previous = this.#manifest;
 		try {
 			const id = (await untilAborted(signal, Bun.file(path.join(projectDir, "CURRENT")).text())).trim();
-			if (!id || id.endsWith(".tmp")) return;
+			if (!/^[a-z0-9]+-[a-f0-9]+$/.test(id)) return;
 			const generationDir = path.join(projectDir, "generations", id);
-			const raw = (await untilAborted(
-				signal,
-				Bun.file(path.join(generationDir, "manifest.json")).json(),
-			)) as NativeManifest;
-			const manifest = normalizeManifest(raw, this.#root);
+			const raw = await untilAborted(signal, Bun.file(path.join(generationDir, "manifest.json")).json());
+			const manifest = normalizeManifest(raw as NativeManifest, this.#root);
 			if (manifest.version !== MANIFEST_VERSION) {
 				this.#gap = `unknown generation version ${manifest.version}`;
 				return;
 			}
-			if (manifest.embeddingsRows > 0) {
-				const ledger = await readJsonl<StoredChunk>(path.join(generationDir, "embeddings.jsonl"), signal);
-				const matrix = await untilAborted(
-					signal,
-					Bun.file(path.join(generationDir, "embeddings.f32")).arrayBuffer(),
-				);
-				const floats = new Float32Array(matrix);
-				if (
-					ledger.length !== manifest.embeddingsRows ||
-					manifest.embeddingsDim <= 0 ||
-					floats.length !== ledger.length * manifest.embeddingsDim
-				) {
-					manifest.embeddingsRows = 0;
-					manifest.embeddingsDim = 0;
-					manifest.embeddingModel = null;
-					this.#gap = "semantic generation ledger mismatch";
-				}
-			}
+			// A complete semantic directory is committed separately from native data.
+			manifest.embeddingModel = null;
+			manifest.dim = 0;
+			manifest.embeddingsRows = 0;
+			manifest.embeddingsDim = 0;
+			const semantic = await this.#readSemanticManifest(generationDir, manifest, signal);
+			if (this.#manifest !== previous) return;
 			this.#current = id;
-			this.#manifest = manifest;
+			this.#manifest = semantic ?? manifest;
+			if (this.#embedModel !== this.#manifest.embeddingModel) {
+				this.#embedHandle = null;
+				this.#embedModel = null;
+			}
 			await this.#loadFileHashes(generationDir, id, signal);
 		} catch (error) {
 			if (signal?.aborted) throw error;
-			if (!isEnoent(error)) {
-				logger.debug("code-intel current load failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
+			if (!isEnoent(error)) logger.debug("code-intel current load failed", { error: String(error) });
+		}
+	}
+
+	async #readSemanticManifest(
+		generationDir: string,
+		native: CodeIntelManifest,
+		signal?: AbortSignal,
+	): Promise<CodeIntelManifest | null> {
+		try {
+			const dir = path.join(generationDir, "semantic");
+			const manifest = (await untilAborted(
+				signal,
+				Bun.file(path.join(dir, "manifest.json")).json(),
+			)) as CodeIntelManifest;
+			const matrix = await fs.stat(path.join(dir, "embeddings.f32"));
+			const ledger = await fs.stat(path.join(dir, "embeddings.jsonl"));
+			if (
+				manifest.version !== MANIFEST_VERSION ||
+				!manifest.embeddingModel ||
+				manifest.tagsHash !== native.tagsHash ||
+				manifest.chunksHash !== native.chunksHash ||
+				!Number.isSafeInteger(manifest.embeddingsRows) ||
+				manifest.embeddingsRows <= 0 ||
+				manifest.embeddingsRows > EMBED_DEFAULT_LIMITS.maxChunks ||
+				!Number.isSafeInteger(manifest.embeddingsDim) ||
+				manifest.embeddingsDim <= 0 ||
+				matrix.size !== manifest.embeddingsRows * manifest.embeddingsDim * 4 ||
+				ledger.size === 0
+			) {
+				throw new Error("semantic generation ledger mismatch");
 			}
+			return {
+				...native,
+				embeddingModel: manifest.embeddingModel,
+				dim: manifest.embeddingsDim,
+				embeddingsRows: manifest.embeddingsRows,
+				embeddingsDim: manifest.embeddingsDim,
+			};
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			if (!isEnoent(error)) this.#gap = String(error);
+			return null;
 		}
 	}
 
@@ -579,96 +678,189 @@ export class CodeIntelIndex {
 
 	async #buildNext(startedEpoch: number): Promise<void> {
 		const projectDir = await this.#projectDir();
+		await fs.mkdir(projectDir, { recursive: true });
+		const previousGeneration = this.#current;
+		const signal = this.#warmAbort?.signal;
 		const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
-		const tmpDir = path.join(projectDir, "generations", `${id}.tmp`);
-		await fs.mkdir(tmpDir, { recursive: true });
-		const maxFiles = this.#settings.get("codeIntel.maxIndexFiles") ?? 20_000;
-		const built = await codeIntelNatives.codeIntelBuildGeneration({
-			root: this.#root,
-			destDir: tmpDir,
-			maxFiles,
-		});
-		const gitHead = await git.head.sha(this.#root).catch(() => null);
-		const manifestPath = path.join(tmpDir, "manifest.json");
-		const raw = (await Bun.file(manifestPath).json()) as NativeManifest;
-		const manifest = normalizeManifest(raw, this.#root);
-		manifest.gitHead = gitHead;
-		if (this.#settings.get("codeIntel.semantic") !== false) {
-			await this.#maybeEmbed(tmpDir, manifest);
-		}
-		if (manifest.version !== MANIFEST_VERSION) {
-			throw new Error(`unknown generation version ${manifest.version}`);
-		}
-		if (manifest.embeddingsRows > 0) {
-			const ledger = await readJsonl<StoredChunk>(path.join(tmpDir, "embeddings.jsonl"));
-			const matrix = await Bun.file(path.join(tmpDir, "embeddings.f32")).arrayBuffer();
-			const floats = new Float32Array(matrix);
-			if (
-				ledger.length !== manifest.embeddingsRows ||
-				manifest.embeddingsDim <= 0 ||
-				floats.length !== ledger.length * manifest.embeddingsDim
-			) {
-				throw new Error("code-intel embeddings ledger failed publish validation");
-			}
-		}
-		await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 		const finalDir = path.join(projectDir, "generations", id);
-		await fs.rename(tmpDir, finalDir);
-		await atomicWriteText(path.join(projectDir, "CURRENT"), `${id}\n`);
-		this.#current = id;
-		this.#manifest = manifest;
-		this.#builtEpoch = startedEpoch;
-		this.#fileHashes = null;
-		this.#fileHashGenerationId = null;
-		this.#storedFiles = null;
-		this.#metadataSweepCursor = 0;
-		if (this.#settings.get("codeIntel.semantic") === false || manifest.embeddingsRows > 0) {
-			this.#gap = undefined;
-		}
-		await this.#loadFileHashes(finalDir, id);
-		logger.debug("code-intel generation published", {
-			id,
-			files: built.filesScanned,
-			tags: built.tagCount,
-			chunks: built.chunkCount,
+		const tmpDir = path.join(projectDir, "generations", `${id}.tmp.${process.pid}`);
+		const maxFiles = this.#settings.get("codeIntel.maxIndexFiles") ?? 20_000;
+		const timeoutMs = Math.max(
+			(this.#settings.get("codeIntel.timeoutSec") ?? 30) * 1000,
+			NATIVE_BUILD_MIN_TIMEOUT_MS,
+		);
+		await withFileLock(buildLockPath(projectDir), async () => {
+			signal?.throwIfAborted();
+			await this.#loadCurrent(signal);
+			if (this.#current && this.#current !== previousGeneration && startedEpoch === this.#builtEpoch) {
+				this.#builtEpoch = startedEpoch;
+				return;
+			}
+			await this.#cleanupOrphanTmp(projectDir);
+			await fs.mkdir(tmpDir, { recursive: true });
+			let published = false;
+			try {
+				const built = await codeIntelNatives.codeIntelBuildGeneration({
+					root: this.#root,
+					destDir: tmpDir,
+					maxFiles,
+					signal: this.#warmAbort?.signal,
+					timeoutMs,
+				});
+				signal?.throwIfAborted();
+				const gitHead = await git.head.sha(this.#root).catch(() => null);
+				const manifestPath = path.join(tmpDir, "manifest.json");
+				const raw = (await Bun.file(manifestPath).json()) as NativeManifest;
+				const manifest = normalizeManifest(raw, this.#root);
+				manifest.gitHead = gitHead;
+				if (manifest.version !== MANIFEST_VERSION) {
+					throw new Error(`unknown generation version ${manifest.version}`);
+				}
+				signal?.throwIfAborted();
+				await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+				await fs.rename(tmpDir, finalDir);
+				await atomicWriteText(path.join(projectDir, "CURRENT"), `${id}\n`);
+				published = true;
+				this.#current = id;
+				this.#manifest = manifest;
+				this.#builtEpoch = startedEpoch;
+				this.#fileHashes = null;
+				this.#fileHashGenerationId = null;
+				this.#storedFiles = null;
+				this.#metadataSweepCursor = 0;
+				this.#embedHandle = null;
+				this.#embedModel = null;
+				this.#gap = built.parseErrors.length > 0 ? built.parseErrors.join("; ") : undefined;
+				await this.#loadFileHashes(finalDir, id);
+				logger.debug("code-intel generation published", {
+					id,
+					files: built.filesScanned,
+					tags: built.tagCount,
+					chunks: built.chunkCount,
+				});
+			} finally {
+				// Only reached after the native promise settled (signal/timeout
+				// handed to the native side) so the tmp dir is never removed
+				// while native may still be writing to it.
+				if (!published) await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+			}
 		});
 	}
 
-	async #maybeEmbed(generationDir: string, manifest: CodeIntelManifest): Promise<void> {
+	/**
+	 * Streams chunk passages into a staged semantic snapshot and publishes it
+	 * atomically with its model/dimension manifest inside `<id>/semantic`.
+	 * Failure keeps the published native generation
+	 * queryable; the next warm retries the semantic phase without redoing
+	 * native, because warm() loads the committed snapshot first.
+	 */
+	async #embedSemanticForCurrent(): Promise<void> {
+		const currentId = this.#current;
+		const native = this.#manifest;
+		if (!currentId || !native || this.#settings.get("codeIntel.semantic") === false) return;
 		const resolution = resolveCodeIntelEmbedModel(this.#settings);
 		if (!resolution.ok) {
 			this.#gap = resolution.reason;
 			return;
 		}
-		const handle = await tryInitializeLocalEmbed(resolution.model);
-		if (!handle) {
-			this.#gap = "semantic unavailable";
-			return;
+		const signal = AbortSignal.any([
+			...(this.#warmAbort ? [this.#warmAbort.signal] : []),
+			AbortSignal.timeout(NATIVE_BUILD_MIN_TIMEOUT_MS),
+		]);
+		const projectDir = await this.#projectDir();
+		const generationDir = path.join(projectDir, "generations", currentId);
+		const stagingDir = path.join(
+			projectDir,
+			"generations",
+			`${currentId}.semantic.tmp.${process.pid}.${crypto.randomUUID()}`,
+		);
+		const started = performance.now();
+		try {
+			await withFileLock(path.join(generationDir, ".semantic-build"), async () => {
+				signal.throwIfAborted();
+				let semantic = await this.#readSemanticManifest(generationDir, native, signal);
+				const model = semantic?.embeddingModel ?? resolution.model;
+				const handle = await untilAborted(signal, tryInitializeLocalEmbed(model));
+				if (!handle) {
+					this.#gap = "semantic unavailable";
+					return;
+				}
+				if (!semantic) {
+					await fs.rm(stagingDir, { recursive: true, force: true });
+					await fs.mkdir(stagingDir, { recursive: true });
+					logger.debug("code-intel semantic started", { id: currentId, rss: process.memoryUsage().rss });
+					const outcome = await streamEmbedPassages({
+						root: this.#root,
+						chunksPath: path.join(generationDir, "chunks.jsonl"),
+						handle,
+						limits: {
+							...EMBED_DEFAULT_LIMITS,
+							maxEmbedFiles: this.#settings.get("codeIntel.maxEmbedFiles") ?? EMBED_DEFAULT_LIMITS.maxEmbedFiles,
+						},
+						matrixPath: path.join(stagingDir, "embeddings.f32"),
+						ledgerPath: path.join(stagingDir, "embeddings.jsonl"),
+						signal,
+					});
+					signal.throwIfAborted();
+					if (outcome.rows === 0) {
+						this.#gap = "semantic index contains no passages";
+						return;
+					}
+					semantic = {
+						...native,
+						embeddingModel: model,
+						dim: outcome.dim,
+						embeddingsRows: outcome.rows,
+						embeddingsDim: outcome.dim,
+					};
+					await Bun.write(path.join(stagingDir, "manifest.json"), JSON.stringify(semantic));
+					// Invalid or legacy incomplete semantic data is not reader-visible.
+					await fs.rm(path.join(generationDir, "semantic"), { recursive: true, force: true });
+					signal.throwIfAborted();
+					await fs.rename(stagingDir, path.join(generationDir, "semantic"));
+					logger.debug("code-intel semantic published", {
+						id: currentId,
+						...outcome,
+						durationMs: performance.now() - started,
+						rss: process.memoryUsage().rss,
+					});
+				}
+				if (this.#current === currentId) {
+					this.#manifest = semantic;
+					this.#embedHandle = handle;
+					this.#embedModel = model;
+					this.#gap = undefined;
+				}
+			});
+		} catch (error) {
+			this.#gap = signal.aborted
+				? "semantic build cancelled or timed out"
+				: error instanceof Error
+					? error.message
+					: String(error);
+			logger.debug("code-intel semantic embed failed", { error: this.#gap, rss: process.memoryUsage().rss });
+		} finally {
+			await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
 		}
-		const chunks = await readJsonl<StoredChunk>(path.join(generationDir, "chunks.jsonl"));
-		const maxEmbedFiles = this.#settings.get("codeIntel.maxEmbedFiles") ?? 4000;
-		const files = await readJsonl<StoredFile>(path.join(generationDir, "files.jsonl"));
-		const allowed = new Set(files.slice(0, maxEmbedFiles).map(file => file.path));
-		const selected = chunks.filter(chunk => allowed.has(chunk.path));
-		if (selected.length === 0) return;
-		const texts = await Promise.all(selected.map(chunk => passageText(this.#root, chunk)));
-		const rows = await collectEmbedMatrix(handle, texts, "passage");
-		if (rows.length !== selected.length) return;
-		const dim = rows[0]?.length ?? 0;
-		if (dim <= 0) return;
-		const matrix = new Float32Array(selected.length * dim);
-		for (let i = 0; i < selected.length; i++) {
-			matrix.set(Float32Array.from(rows[i]!), i * dim);
+	}
+
+	/** Remove confirmed-orphan staging dirs. Only ever called while holding the build lock. */
+	async #cleanupOrphanTmp(projectDir: string): Promise<void> {
+		const generationDir = path.join(projectDir, "generations");
+		let entries: string[];
+		try {
+			entries = await fs.readdir(generationDir);
+		} catch (error) {
+			if (isEnoent(error)) return;
+			throw error;
 		}
-		await Bun.write(path.join(generationDir, "embeddings.f32"), matrix);
-		const ledgerPath = path.join(generationDir, "embeddings.jsonl");
-		await Bun.write(`${ledgerPath}.tmp`, `${selected.map(chunk => JSON.stringify(chunk)).join("\n")}\n`);
-		await replaceFileAtomically(`${ledgerPath}.tmp`, ledgerPath);
-		manifest.embeddingModel = resolution.model;
-		manifest.dim = dim;
-		manifest.embeddingsRows = selected.length;
-		manifest.embeddingsDim = dim;
-		this.#embedHandle = handle;
-		this.#embedModel = resolution.model;
+		for (const name of entries) {
+			const match = TMP_ORPHAN_PATTERN.exec(name);
+			if (!match) continue;
+			const pid = Number(match[1]);
+			if (pid > 0 && !isProcessAlive(pid)) {
+				await fs.rm(path.join(generationDir, name), { recursive: true, force: true }).catch(() => undefined);
+			}
+		}
 	}
 }

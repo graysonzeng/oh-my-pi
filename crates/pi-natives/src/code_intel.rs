@@ -1,4 +1,4 @@
-//! Code-intelligence tags, name-cooccurrence graph, PageRank, chunking,
+//! Code-intelligence tags, name-cooccurrence graph, `PageRank`, chunking,
 //! and generation snapshot I/O.
 //!
 //! Identifier tags are a name graph, not a call graph. Call edges are a
@@ -7,7 +7,7 @@
 use std::{
 	collections::{HashMap, HashSet},
 	fs::{self, File},
-	io::{BufRead, BufReader, Write},
+	io::{BufRead, BufReader, BufWriter, Write},
 	path::{Path, PathBuf},
 	sync::LazyLock,
 };
@@ -18,6 +18,7 @@ use napi_derive::napi;
 use pi_ast::{SupportLang, parse_cache::parse_cached};
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
+use xxhash_rust::xxh64::Xxh64;
 
 use crate::{iofs, task};
 
@@ -32,6 +33,13 @@ const CHUNK_WINDOW: u32 = 80;
 const CHUNK_OVERLAP: u32 = 40;
 const HASH_SEED: u64 = 0x4349_4e54_4841_5348;
 const MANIFEST_VERSION: u32 = 1;
+
+// Resource budgets and cancellation granularity for generation builds.
+const MAX_GRAPH_EDGES: u64 = 50_000_000;
+const GRAPH_HEARTBEAT_TAGS: usize = 4096;
+const GRAPH_WRITE_HEARTBEAT_PAIRS: u64 = 65_536;
+const JSONL_HEARTBEAT_ROWS: usize = 1024;
+const PAGERANK_HEARTBEAT_ITERS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[napi(string_enum)]
@@ -54,7 +62,7 @@ pub struct CodeIntelTag {
 	pub end_line:   u32,
 }
 
-/// Ranked symbol/file node from personalized PageRank.
+/// Ranked symbol/file node from personalized `PageRank`.
 #[derive(Clone, Debug)]
 #[napi(object)]
 pub struct CodeIntelRankedNode {
@@ -138,7 +146,7 @@ pub struct CodeIntelChunkOptions {
 	pub content: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct StoredTag {
 	path:       String,
 	name:       String,
@@ -206,10 +214,10 @@ struct CompiledQueries {
 	calls: Option<Query>,
 }
 
-fn tags_query_source(lang: SupportLang) -> Option<&'static str> {
+const fn tags_query_source(lang: SupportLang) -> Option<&'static str> {
 	Some(match lang {
 		SupportLang::Rust => {
-			r#"
+			r"
 (function_item name: (identifier) @definition.function)
 (struct_item name: (type_identifier) @definition.class)
 (enum_item name: (type_identifier) @definition.class)
@@ -218,10 +226,10 @@ fn tags_query_source(lang: SupportLang) -> Option<&'static str> {
 (impl_item type: (type_identifier) @definition.class)
 (identifier) @reference.identifier
 (type_identifier) @reference.identifier
-"#
+"
 		},
 		SupportLang::TypeScript | SupportLang::Tsx => {
-			r#"
+			r"
 (function_declaration name: (identifier) @definition.function)
 (generator_function_declaration name: (identifier) @definition.function)
 (class_declaration name: (type_identifier) @definition.class)
@@ -231,54 +239,54 @@ fn tags_query_source(lang: SupportLang) -> Option<&'static str> {
 (identifier) @reference.identifier
 (type_identifier) @reference.identifier
 (property_identifier) @reference.identifier
-"#
+"
 		},
 		SupportLang::JavaScript => {
-			r#"
+			r"
 (function_declaration name: (identifier) @definition.function)
 (generator_function_declaration name: (identifier) @definition.function)
 (class_declaration name: (identifier) @definition.class)
 (method_definition name: (property_identifier) @definition.method)
 (identifier) @reference.identifier
 (property_identifier) @reference.identifier
-"#
+"
 		},
 		SupportLang::Python => {
-			r#"
+			r"
 (function_definition name: (identifier) @definition.function)
 (class_definition name: (identifier) @definition.class)
 (identifier) @reference.identifier
-"#
+"
 		},
 		SupportLang::Go => {
-			r#"
+			r"
 (function_declaration name: (identifier) @definition.function)
 (method_declaration name: (field_identifier) @definition.method)
 (type_spec name: (type_identifier) @definition.class)
 (identifier) @reference.identifier
 (field_identifier) @reference.identifier
 (type_identifier) @reference.identifier
-"#
+"
 		},
 		SupportLang::Java => {
-			r#"
+			r"
 (method_declaration name: (identifier) @definition.method)
 (class_declaration name: (identifier) @definition.class)
 (interface_declaration name: (identifier) @definition.class)
 (identifier) @reference.identifier
-"#
+"
 		},
 		SupportLang::C => {
-			r#"
+			r"
 (function_definition
   declarator: (function_declarator declarator: (identifier) @definition.function))
 (struct_specifier name: (type_identifier) @definition.class)
 (identifier) @reference.identifier
 (type_identifier) @reference.identifier
-"#
+"
 		},
 		SupportLang::Cpp => {
-			r#"
+			r"
 (function_definition
   declarator: (function_declarator declarator: (identifier) @definition.function))
 (function_definition
@@ -288,48 +296,48 @@ fn tags_query_source(lang: SupportLang) -> Option<&'static str> {
 (struct_specifier name: (type_identifier) @definition.class)
 (identifier) @reference.identifier
 (type_identifier) @reference.identifier
-"#
+"
 		},
 		_ => return None,
 	})
 }
 
-fn calls_query_source(lang: SupportLang) -> Option<&'static str> {
+const fn calls_query_source(lang: SupportLang) -> Option<&'static str> {
 	Some(match lang {
 		SupportLang::Rust => {
-			r#"
+			r"
 (call_expression function: (identifier) @call.name)
 (call_expression function: (field_expression field: (field_identifier) @call.name))
-"#
+"
 		},
 		SupportLang::TypeScript | SupportLang::Tsx | SupportLang::JavaScript => {
-			r#"
+			r"
 (call_expression function: (identifier) @call.name)
 (call_expression function: (member_expression property: (property_identifier) @call.name))
-"#
+"
 		},
 		SupportLang::Python => {
-			r#"
+			r"
 (call function: (identifier) @call.name)
 (call function: (attribute attribute: (identifier) @call.name))
-"#
+"
 		},
 		SupportLang::Go => {
-			r#"
+			r"
 (call_expression function: (identifier) @call.name)
 (call_expression function: (selector_expression field: (field_identifier) @call.name))
-"#
+"
 		},
 		SupportLang::Java => {
-			r#"
+			r"
 (method_invocation name: (identifier) @call.name)
-"#
+"
 		},
 		SupportLang::C | SupportLang::Cpp => {
-			r#"
+			r"
 (call_expression function: (identifier) @call.name)
 (call_expression function: (field_expression field: (field_identifier) @call.name))
-"#
+"
 		},
 		_ => return None,
 	})
@@ -701,13 +709,15 @@ fn collect_source_files(
 		.collect())
 }
 
+type ExtractedTree = (Vec<FileExtraction>, u32, Vec<String>, Vec<StoredFile>);
+
 fn extract_tree(
 	root: &Path,
 	hidden: bool,
 	gitignore: bool,
 	max_files: usize,
 	ct: &task::CancelToken,
-) -> napi::Result<(Vec<FileExtraction>, u32, Vec<String>, Vec<StoredFile>)> {
+) -> napi::Result<ExtractedTree> {
 	let files = collect_source_files(root, hidden, gitignore, max_files, ct)?;
 	let mut extractions = Vec::new();
 	let mut parse_errors = Vec::new();
@@ -743,8 +753,7 @@ fn extract_tree(
 						.unwrap_or(0.0),
 					size:         metadata
 						.as_ref()
-						.map(|meta| meta.len())
-						.unwrap_or(source.len() as u64),
+						.map_or(source.len() as u64, |meta| meta.len()),
 					content_hash: content_hash(source.as_bytes()),
 					tag_count:    extracted.tags.len() as u32,
 					chunk_ids:    Vec::new(),
@@ -777,6 +786,7 @@ pub fn code_intel_extract_tags(
 		let mut tags = Vec::new();
 		let mut calls = Vec::new();
 		for extracted in extractions {
+			ct.heartbeat()?;
 			tags.extend(extracted.tags);
 			calls.extend(extracted.calls);
 		}
@@ -810,6 +820,7 @@ pub fn code_intel_build_generation(
 		let mut chunks = Vec::new();
 		let mut chunk_id = 0u32;
 		for (extracted, file) in extractions.into_iter().zip(stored_files.iter_mut()) {
+			ct.heartbeat()?;
 			let mut ids = Vec::new();
 			for chunk in extracted.chunks {
 				ids.push(chunk_id);
@@ -845,11 +856,11 @@ pub fn code_intel_build_generation(
 			}));
 		}
 
-		write_jsonl(dest.join("files.jsonl"), &stored_files)?;
-		write_jsonl(dest.join("tags.jsonl"), &tags)?;
-		write_jsonl(dest.join("chunks.jsonl"), &chunks)?;
-		write_jsonl(dest.join("calls.jsonl"), &calls)?;
-		let graph_bytes = write_graph_csr(dest.join("graph.csr"), &tags)?;
+		write_jsonl(dest.join("files.jsonl"), &stored_files, &ct)?;
+		write_jsonl(dest.join("tags.jsonl"), &tags, &ct)?;
+		write_jsonl(dest.join("chunks.jsonl"), &chunks, &ct)?;
+		write_jsonl(dest.join("calls.jsonl"), &calls, &ct)?;
+		let graph_hash = write_graph_csr(dest.join("graph.csr"), &tags, &ct, MAX_GRAPH_EDGES)?;
 		let tags_json = serde_json::to_vec(&tags).unwrap_or_default();
 		let chunks_json = serde_json::to_vec(&chunks).unwrap_or_default();
 		let manifest = Manifest {
@@ -865,7 +876,7 @@ pub fn code_intel_build_generation(
 			chunks_hash: content_hash(&chunks_json),
 			embeddings_rows: 0,
 			embeddings_dim: 0,
-			graph_hash: content_hash(&graph_bytes),
+			graph_hash,
 		};
 		let manifest_path = dest.join("manifest.json");
 		fs::write(
@@ -883,7 +894,7 @@ pub fn code_intel_build_generation(
 	})
 }
 
-/// Rank a previously built generation by personalized PageRank. Native holds
+/// Rank a previously built generation by personalized `PageRank`. Native holds
 /// the graph.
 #[napi]
 pub fn code_intel_rank_generation(
@@ -892,23 +903,24 @@ pub fn code_intel_rank_generation(
 	let tags: Vec<StoredTag> = read_jsonl(Path::new(&options.generation_dir).join("tags.jsonl"))?;
 	let top_files = options.top_files.unwrap_or(DEFAULT_TOP_FILES) as usize;
 	let top_symbols = options.top_symbols.unwrap_or(DEFAULT_TOP_SYMBOLS) as usize;
-	Ok(rank_tags(
+	rank_tags(
 		&tags,
 		options.seed_paths.as_deref().unwrap_or(&[]),
 		options.seed_symbols.as_deref().unwrap_or(&[]),
 		top_files,
 		top_symbols,
-	))
+		&task::CancelToken::default(),
+	)
 }
 
 /// Chunk one file's content using the same def/window rules as generation.
 #[napi]
 pub fn code_intel_chunk_file(options: CodeIntelChunkOptions) -> Vec<CodeIntelChunk> {
 	let lang = SupportLang::from_path(Path::new(&options.path));
-	if let Some(lang) = lang {
-		if let Ok(extracted) = extract_from_source(&options.path, &options.content, lang) {
-			return extracted.chunks;
-		}
+	if let Some(lang) = lang
+		&& let Ok(extracted) = extract_from_source(&options.path, &options.content, lang)
+	{
+		return extracted.chunks;
 	}
 	chunk_windows(&options.content, &options.path)
 }
@@ -924,13 +936,25 @@ pub fn code_intel_extract_calls(options: CodeIntelChunkOptions) -> Vec<CodeIntel
 		.unwrap_or_default()
 }
 
-fn write_jsonl<T: Serialize>(path: PathBuf, rows: &[T]) -> napi::Result<()> {
-	let mut file = File::create(&path)
+fn write_jsonl<T: Serialize>(
+	path: PathBuf,
+	rows: &[T],
+	ct: &task::CancelToken,
+) -> napi::Result<()> {
+	ct.heartbeat()?;
+	let file = File::create(&path)
 		.map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
-	for row in rows {
+	let mut writer = BufWriter::new(file);
+	for (idx, row) in rows.iter().enumerate() {
+		if idx % JSONL_HEARTBEAT_ROWS == 0 {
+			ct.heartbeat()?;
+		}
 		let line = serde_json::to_string(row).map_err(|err| Error::from_reason(err.to_string()))?;
-		writeln!(file, "{line}").map_err(|err| Error::from_reason(err.to_string()))?;
+		writeln!(writer, "{line}").map_err(|err| Error::from_reason(err.to_string()))?;
 	}
+	writer
+		.flush()
+		.map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
 	Ok(())
 }
 
@@ -949,40 +973,100 @@ fn read_jsonl<T: for<'de> Deserialize<'de>>(path: PathBuf) -> napi::Result<Vec<T
 	Ok(rows)
 }
 
-fn write_graph_csr(path: PathBuf, tags: &[StoredTag]) -> napi::Result<Vec<u8>> {
-	let graph = build_graph(tags);
-	let mut bytes = Vec::new();
-	bytes.extend_from_slice(b"CIGR");
-	bytes.extend_from_slice(&(graph.nodes.len() as u32).to_le_bytes());
-	bytes.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
+fn write_hashed(writer: &mut impl Write, hasher: &mut Xxh64, bytes: &[u8]) -> napi::Result<()> {
+	writer
+		.write_all(bytes)
+		.map_err(|err| Error::from_reason(err.to_string()))?;
+	hasher.update(bytes);
+	Ok(())
+}
+
+/// Stream `graph.csr` in the existing CIGR format (magic, node count, edge
+/// count, node strings, then src/dst u32 pairs) without materializing the
+/// full edge list in memory. Duplicate occurrences are expanded back into
+/// individual pairs so the on-disk format and `PageRank` weight semantics are
+/// unchanged; the returned value is the content hash of the exact bytes
+/// written (streamed, so hashing costs no extra memory). `max_edges` is
+/// enforced by the shared `build_graph` before any (ref, def) pair is
+/// enumerated, so over-budget builds are rejected here before a file is
+/// created.
+fn write_graph_csr(
+	path: PathBuf,
+	tags: &[StoredTag],
+	ct: &task::CancelToken,
+	max_edges: u64,
+) -> napi::Result<String> {
+	let graph = build_graph(tags, ct, max_edges)?;
+	let edge_count = graph.total_weight;
+	let Ok(edge_count) = u32::try_from(edge_count) else {
+		return Err(Error::from_reason(
+			"graph edge count exceeds u32; generation too large".to_string(),
+		));
+	};
+	ct.heartbeat()?;
+	let file = File::create(&path)
+		.map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
+	let mut writer = BufWriter::new(file);
+	let mut hasher = Xxh64::new(HASH_SEED);
+	let mut header = Vec::with_capacity(12);
+	header.extend_from_slice(b"CIGR");
+	header.extend_from_slice(&(graph.nodes.len() as u32).to_le_bytes());
+	header.extend_from_slice(&edge_count.to_le_bytes());
+	write_hashed(&mut writer, &mut hasher, &header)?;
 	for node in &graph.nodes {
 		let encoded = node.as_bytes();
-		bytes.extend_from_slice(&(encoded.len() as u16).to_le_bytes());
-		bytes.extend_from_slice(encoded);
+		write_hashed(&mut writer, &mut hasher, &(encoded.len() as u16).to_le_bytes())?;
+		write_hashed(&mut writer, &mut hasher, encoded)?;
 	}
-	for &(src, dst) in &graph.edges {
-		bytes.extend_from_slice(&src.to_le_bytes());
-		bytes.extend_from_slice(&dst.to_le_bytes());
+	let mut pair = [0u8; 8];
+	let mut expanded = 0u64;
+	for &(src, dst, weight) in &graph.edges {
+		for _ in 0..weight {
+			pair[..4].copy_from_slice(&src.to_le_bytes());
+			pair[4..].copy_from_slice(&dst.to_le_bytes());
+			write_hashed(&mut writer, &mut hasher, &pair)?;
+			expanded += 1;
+			if expanded.is_multiple_of(GRAPH_WRITE_HEARTBEAT_PAIRS) {
+				ct.heartbeat()?;
+			}
+		}
 	}
-	fs::write(&path, &bytes)
+	writer
+		.flush()
 		.map_err(|err| Error::from_reason(format!("{}: {err}", path.display())))?;
-	Ok(bytes)
+	Ok(format!("{:016x}", hasher.digest()))
 }
 
 struct NameGraph {
-	nodes: Vec<String>,
-	edges: Vec<(u32, u32)>,
+	nodes:        Vec<String>,
+	/// Occurrence-weighted unique (src, dst) pairs in deterministic
+	/// first-occurrence order. `weight` counts every (ref, def) occurrence
+	/// mapped to this pair, so `PageRank` sees exactly the multi-reference
+	/// weight of the un-merged expansion while memory stays bounded by unique
+	/// pairs (no refs-per-name × defs-per-name blowup).
+	edges:        Vec<(u32, u32, u32)>,
+	/// Raw expanded edge count (sum of weights); used for the build budget.
+	total_weight: u64,
 }
 
 fn node_key(path: &str, name: &str) -> String {
 	format!("{path}#{name}")
 }
 
-fn build_graph(tags: &[StoredTag]) -> NameGraph {
+fn build_graph(
+	tags: &[StoredTag],
+	ct: &task::CancelToken,
+	max_edges: u64,
+) -> napi::Result<NameGraph> {
+	ct.heartbeat()?;
 	let mut defs_by_name: HashMap<&str, Vec<&StoredTag>> = HashMap::new();
+	let mut ref_count: HashMap<&str, u64> = HashMap::new();
 	let mut node_index: HashMap<String, u32> = HashMap::new();
 	let mut nodes = Vec::new();
-	for tag in tags {
+	for (idx, tag) in tags.iter().enumerate() {
+		if idx % GRAPH_HEARTBEAT_TAGS == 0 {
+			ct.heartbeat()?;
+		}
 		if tag.kind != "def" {
 			continue;
 		}
@@ -993,18 +1077,55 @@ fn build_graph(tags: &[StoredTag]) -> NameGraph {
 			nodes.push(key);
 		}
 	}
-	for tag in tags {
+	for (idx, tag) in tags.iter().enumerate() {
+		if idx % GRAPH_HEARTBEAT_TAGS == 0 {
+			ct.heartbeat()?;
+		}
 		if tag.kind != "ref" {
 			continue;
 		}
+		*ref_count.entry(tag.name.as_str()).or_default() += 1;
 		let key = node_key(&tag.path, &tag.name);
 		if !node_index.contains_key(&key) {
 			node_index.insert(key.clone(), nodes.len() as u32);
 			nodes.push(key);
 		}
 	}
-	let mut edges = Vec::new();
-	for tag in tags {
+	// Budget gate before any (ref, def) pair is enumerated. An upper bound of
+	// the expanded edge count is sum over names of refs(name) * def_tags(name);
+	// it also covers candidate self-edges the src != dst filter later drops,
+	// so the real count is always <= this bound. Products and the running
+	// total use checked arithmetic; overflow means the graph is far beyond any
+	// buildable size and is rejected explicitly. Enumerating pairs only after
+	// this gate bounds both time and the unique-pair map by `max_edges`, which
+	// also protects the rank path (build_graph is shared).
+	let mut putative_total: u64 = 0;
+	for (name, refs) in &ref_count {
+		let Some(defs) = defs_by_name.get(*name) else {
+			continue;
+		};
+		let product = refs.checked_mul(defs.len() as u64).ok_or_else(|| {
+			Error::from_reason(format!(
+				"graph edge budget exceeded: refs x defs for '{name}' overflows"
+			))
+		})?;
+		putative_total = putative_total.checked_add(product).ok_or_else(|| {
+			Error::from_reason("graph edge budget exceeded: expanded edge count overflows".to_string())
+		})?;
+	}
+	if putative_total > max_edges {
+		return Err(Error::from_reason(format!(
+			"graph edge budget exceeded: up to {putative_total} candidate edges > limit {max_edges}; \
+			 generation too large to build reliably"
+		)));
+	}
+	let mut edges: Vec<(u32, u32, u32)> = Vec::new();
+	let mut edge_pos: HashMap<(u32, u32), usize> = HashMap::new();
+	let mut total_weight: u64 = 0;
+	for (idx, tag) in tags.iter().enumerate() {
+		if idx % GRAPH_HEARTBEAT_TAGS == 0 {
+			ct.heartbeat()?;
+		}
 		if tag.kind != "ref" {
 			continue;
 		}
@@ -1016,12 +1137,76 @@ fn build_graph(tags: &[StoredTag]) -> NameGraph {
 				if let Some(&dst) = node_index.get(&node_key(&def.path, &def.name))
 					&& src != dst
 				{
-					edges.push((src, dst));
+					// Bounded by the budget gate above, so plain accumulation
+					// is exact and cannot overflow.
+					total_weight += 1;
+					if let Some(&pos) = edge_pos.get(&(src, dst)) {
+						edges[pos].2 += 1;
+					} else {
+						edge_pos.insert((src, dst), edges.len());
+						edges.push((src, dst, 1));
+					}
 				}
 			}
 		}
 	}
-	NameGraph { nodes, edges }
+	Ok(NameGraph { nodes, edges, total_weight })
+}
+
+/// Weighted `PageRank`: node rank flows in proportion to `weight / total
+/// weight`, which reproduces the multi-edge semantics of the un-merged
+/// adjacency exactly (each (ref, def) occurrence moves the same unit of
+/// rank) while keeping memory proportional to unique edges. Dangling nodes
+/// are folded into one uniform share instead of an O(n) sprinkle per node,
+/// bounding each iteration at O(n + edges).
+fn pagerank_rank(
+	outbound: &[Vec<(u32, u32)>],
+	n: usize,
+	personal: &[f64],
+	ct: &task::CancelToken,
+) -> napi::Result<Vec<f64>> {
+	ct.heartbeat()?;
+	let mut outbound_total = vec![0u64; n];
+	for (src, targets) in outbound.iter().enumerate() {
+		for &(_, weight) in targets {
+			outbound_total[src] += u64::from(weight);
+		}
+	}
+	let mut rank = personal.to_vec();
+	for iter in 0..PAGERANK_MAX_ITERS {
+		if iter % PAGERANK_HEARTBEAT_ITERS == 0 {
+			ct.heartbeat()?;
+		}
+		let mut next = vec![0.0f64; n];
+		let mut dangling_sum = 0.0;
+		for (src, targets) in outbound.iter().enumerate() {
+			if targets.is_empty() {
+				dangling_sum += rank[src];
+				continue;
+			}
+			let share = rank[src] / outbound_total[src] as f64;
+			for &(dst, weight) in targets {
+				next[dst as usize] = share.mul_add(f64::from(weight), next[dst as usize]);
+			}
+		}
+		if dangling_sum > 0.0 {
+			let dangling_share = dangling_sum / n as f64;
+			for item in &mut next {
+				*item += dangling_share;
+			}
+		}
+		let mut delta = 0.0;
+		for i in 0..n {
+			let value = (1.0 - PAGERANK_DAMPING).mul_add(personal[i], PAGERANK_DAMPING * next[i]);
+			delta += (value - rank[i]).abs();
+			rank[i] = value;
+		}
+		if delta < PAGERANK_EPSILON {
+			break;
+		}
+	}
+	ct.heartbeat()?;
+	Ok(rank)
 }
 
 fn rank_tags(
@@ -1030,16 +1215,17 @@ fn rank_tags(
 	seed_symbols: &[String],
 	top_files: usize,
 	top_symbols: usize,
-) -> Vec<CodeIntelRankedNode> {
-	let graph = build_graph(tags);
+	ct: &task::CancelToken,
+) -> napi::Result<Vec<CodeIntelRankedNode>> {
+	let graph = build_graph(tags, ct, MAX_GRAPH_EDGES)?;
 	if graph.nodes.is_empty() {
-		return Vec::new();
+		return Ok(Vec::new());
 	}
 	let n = graph.nodes.len();
-	let mut outbound: Vec<Vec<u32>> = vec![Vec::new(); n];
-	for &(src, dst) in &graph.edges {
+	let mut outbound: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
+	for &(src, dst, weight) in &graph.edges {
 		if (src as usize) < n && (dst as usize) < n {
-			outbound[src as usize].push(dst);
+			outbound[src as usize].push((dst, weight));
 		}
 	}
 	let mut personal = vec![0.0f64; n];
@@ -1072,32 +1258,7 @@ fn rank_tags(
 		}
 	}
 
-	let mut rank = personal.clone();
-	for _ in 0..PAGERANK_MAX_ITERS {
-		let mut next = vec![0.0f64; n];
-		for (src, targets) in outbound.iter().enumerate() {
-			if targets.is_empty() {
-				let share = rank[src] / n as f64;
-				for item in &mut next {
-					*item += share;
-				}
-			} else {
-				let share = rank[src] / targets.len() as f64;
-				for &dst in targets {
-					next[dst as usize] += share;
-				}
-			}
-		}
-		let mut delta = 0.0;
-		for i in 0..n {
-			let value = PAGERANK_DAMPING * next[i] + (1.0 - PAGERANK_DAMPING) * personal[i];
-			delta += (value - rank[i]).abs();
-			rank[i] = value;
-		}
-		if delta < PAGERANK_EPSILON {
-			break;
-		}
-	}
+	let rank = pagerank_rank(&outbound, n, &personal, ct)?;
 
 	let mut def_span: HashMap<String, (u32, u32)> = HashMap::new();
 	for tag in tags {
@@ -1137,7 +1298,7 @@ fn rank_tags(
 			break;
 		}
 	}
-	out
+	Ok(out)
 }
 
 #[cfg(test)]
@@ -1215,7 +1376,8 @@ fn gamma() {}
 				end_line:   1,
 			},
 		];
-		let ranked = rank_tags(&tags, &[], &["alpha".into()], 8, 16);
+		let ranked = rank_tags(&tags, &[], &["alpha".into()], 8, 16, &task::CancelToken::default())
+			.expect("rank");
 		let beta = ranked
 			.iter()
 			.find(|node| node.symbol == "beta")
@@ -1314,5 +1476,359 @@ fn beta() {}
 			.map(|chunk| (chunk.start_line, chunk.end_line))
 			.collect();
 		assert_eq!(ranges, vec![(1, 80), (41, 120)]);
+	}
+
+	fn tag(path: &str, name: &str, kind: &str) -> StoredTag {
+		StoredTag {
+			path:       path.into(),
+			name:       name.into(),
+			kind:       kind.into(),
+			grammar:    "rust".into(),
+			start_line: 1,
+			end_line:   1,
+		}
+	}
+
+	/// Reference replica of the pre-optimization expansion: one unweighted
+	/// edge per (ref, def) occurrence, duplicates included.
+	fn build_graph_raw(tags: &[StoredTag]) -> (Vec<String>, Vec<(u32, u32)>) {
+		let mut defs_by_name: HashMap<&str, Vec<&StoredTag>> = HashMap::new();
+		let mut node_index: HashMap<String, u32> = HashMap::new();
+		let mut nodes = Vec::new();
+		for tag in tags {
+			if tag.kind != "def" {
+				continue;
+			}
+			defs_by_name.entry(tag.name.as_str()).or_default().push(tag);
+			let key = node_key(&tag.path, &tag.name);
+			if !node_index.contains_key(&key) {
+				node_index.insert(key.clone(), nodes.len() as u32);
+				nodes.push(key);
+			}
+		}
+		for tag in tags {
+			if tag.kind != "ref" {
+				continue;
+			}
+			let key = node_key(&tag.path, &tag.name);
+			if !node_index.contains_key(&key) {
+				node_index.insert(key.clone(), nodes.len() as u32);
+				nodes.push(key);
+			}
+		}
+		let mut edges = Vec::new();
+		for tag in tags {
+			if tag.kind != "ref" {
+				continue;
+			}
+			let Some(&src) = node_index.get(&node_key(&tag.path, &tag.name)) else {
+				continue;
+			};
+			if let Some(defs) = defs_by_name.get(tag.name.as_str()) {
+				for def in defs {
+					if let Some(&dst) = node_index.get(&node_key(&def.path, &def.name))
+						&& src != dst
+					{
+						edges.push((src, dst));
+					}
+				}
+			}
+		}
+		(nodes, edges)
+	}
+
+	fn expand_weighted(graph: &NameGraph) -> Vec<(u32, u32)> {
+		let mut out = Vec::new();
+		for &(src, dst, weight) in &graph.edges {
+			for _ in 0..weight {
+				out.push((src, dst));
+			}
+		}
+		out
+	}
+
+	#[test]
+	fn weighted_graph_matches_raw_edge_expansion() {
+		let tags = vec![
+			tag("a.rs", "hot", "def"),
+			tag("a.rs", "hot", "ref"),
+			tag("a.rs", "hot", "ref"),
+			tag("b.rs", "hot", "def"),
+			tag("b.rs", "hot", "def"),
+			tag("c.rs", "hot", "ref"),
+			tag("c.rs", "hot", "ref"),
+			tag("c.rs", "hot", "ref"),
+			tag("c.rs", "cold", "def"),
+			tag("a.rs", "cold", "ref"),
+		];
+		let ct = task::CancelToken::default();
+		let graph = build_graph(&tags, &ct, 100).expect("build");
+		let (raw_nodes, raw_edges) = build_graph_raw(&tags);
+		assert_eq!(graph.nodes, raw_nodes, "node identity and order must be unchanged");
+		assert_eq!(graph.total_weight, raw_edges.len() as u64, "expanded edge count");
+		let expanded = expand_weighted(&graph);
+		assert_eq!(expanded.len(), raw_edges.len());
+		let mut count: HashMap<(u32, u32), i64> = HashMap::new();
+		for pair in &expanded {
+			*count.entry(*pair).or_default() += 1;
+		}
+		for pair in &raw_edges {
+			*count.entry(*pair).or_default() -= 1;
+		}
+		assert!(
+			count.values().all(|&v| v == 0),
+			"weighted merge must preserve every (ref, def) occurrence: {count:?}"
+		);
+	}
+
+	#[test]
+	fn duplicate_defs_in_one_file_keep_multi_reference_weight() {
+		let tags = vec![
+			tag("a.rs", "dup", "def"),
+			tag("a.rs", "dup", "def"),
+			tag("b.rs", "dup", "def"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+		];
+		let ct = task::CancelToken::default();
+		let graph = build_graph(&tags, &ct, 100).expect("build");
+		// a.rs defines dup twice targeting the same node, so every ref to dup
+		// expands to two occurrences of the same (src, dst) pair. Simple
+		// unique-dst dedupe would halve this weight and change PageRank.
+		let a_idx = graph.nodes.iter().position(|n| n == "a.rs#dup").unwrap() as u32;
+		let b_idx = graph.nodes.iter().position(|n| n == "b.rs#dup").unwrap() as u32;
+		let c_idx = graph.nodes.iter().position(|n| n == "c.rs#dup").unwrap() as u32;
+		let w_a = graph
+			.edges
+			.iter()
+			.find(|&&(src, dst, _)| src == c_idx && dst == a_idx)
+			.map(|&(_, _, w)| w)
+			.unwrap_or(0);
+		let w_b = graph
+			.edges
+			.iter()
+			.find(|&&(src, dst, _)| src == c_idx && dst == b_idx)
+			.map(|&(_, _, w)| w)
+			.unwrap_or(0);
+		assert_eq!(w_a, 6, "3 refs x 2 def tags in a.rs (same node)");
+		assert_eq!(w_b, 3, "3 refs x 1 def tag in b.rs");
+		assert_eq!(graph.total_weight, 9);
+	}
+
+	#[test]
+	fn duplicate_defs_in_one_file_keep_rank_weight_not_deduped() {
+		let tags = vec![
+			tag("a.rs", "dup", "def"),
+			tag("a.rs", "dup", "def"),
+			tag("b.rs", "dup", "def"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+		];
+		let ct = task::CancelToken::default();
+		let ranked = rank_tags(&tags, &["c.rs".into()], &[], 8, 16, &ct).expect("rank");
+		let score_a = ranked
+			.iter()
+			.find(|node| node.path == "a.rs" && node.symbol == "dup")
+			.map(|node| node.score)
+			.unwrap_or(0.0);
+		let score_b = ranked
+			.iter()
+			.find(|node| node.path == "b.rs" && node.symbol == "dup")
+			.map(|node| node.score)
+			.unwrap_or(0.0);
+		// 3 refs from c.rs split 2/3 toward a.rs and 1/3 toward b.rs; naive
+		// dedupe would flatten both to 1/2 and change the ranking.
+		assert!(
+			score_a > score_b * 1.3,
+			"duplicate def weight must survive ranking: a={score_a} b={score_b}"
+		);
+	}
+
+	#[test]
+	fn pagerank_weighted_matches_raw_edge_semantics() {
+		let tags = vec![
+			tag("x.rs", "mux", "ref"),
+			tag("x.rs", "other", "ref"),
+			tag("y.rs", "mux", "def"),
+			tag("y2.rs", "mux", "def"),
+			tag("z.rs", "other", "def"),
+			tag("a.rs", "dup", "def"),
+			tag("a.rs", "dup", "def"),
+			tag("b.rs", "dup", "def"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+		];
+		let ct = task::CancelToken::default();
+		let graph = build_graph(&tags, &ct, 100).expect("build");
+		let n = graph.nodes.len();
+		let mut weighted_out: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
+		for &(src, dst, weight) in &graph.edges {
+			weighted_out[src as usize].push((dst, weight));
+		}
+		// Legacy adjacency: one unweighted entry per occurrence, duplicates
+		// included.
+		let (_, raw_edges) = build_graph_raw(&tags);
+		let mut raw_out: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
+		for &(src, dst) in &raw_edges {
+			raw_out[src as usize].push((dst, 1));
+		}
+		let personal = vec![1.0 / n as f64; n];
+		let weighted_rank = pagerank_rank(&weighted_out, n, &personal, &ct).expect("weighted");
+		let raw_rank = pagerank_rank(&raw_out, n, &personal, &ct).expect("raw");
+		for (i, (w, r)) in weighted_rank.iter().zip(raw_rank.iter()).enumerate() {
+			assert!((w - r).abs() < 1e-9, "node {i}: weighted rank {w} diverges from raw {r}");
+		}
+	}
+
+	#[test]
+	fn pagerank_all_dangling_nodes_stays_uniform() {
+		let ct = task::CancelToken::default();
+		let n = 4usize;
+		let personal = vec![0.25; n];
+		let rank = pagerank_rank(&vec![Vec::new(); n], n, &personal, &ct).expect("rank");
+		for value in rank {
+			assert!(
+				(value - 0.25).abs() < 1e-12,
+				"uniform teleport expected for fully dangling graph: {value}"
+			);
+		}
+	}
+
+	#[test]
+	fn write_jsonl_roundtrips_and_reports_io_errors() {
+		let ct = task::CancelToken::default();
+		let pid = std::process::id();
+		let nanos = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos();
+		let dir = std::env::temp_dir().join(format!("omp-ci-jsonl-{pid}-{nanos}"));
+		fs::create_dir_all(&dir).expect("mkdir");
+		let path = dir.join("tags.jsonl");
+		let tags =
+			vec![tag("a.rs", "alpha", "def"), tag("b.rs", "beta", "ref"), tag("c.rs", "gamma", "def")];
+		write_jsonl(path.clone(), &tags, &ct).expect("write");
+		let back = read_jsonl::<StoredTag>(path.clone()).expect("read");
+		assert_eq!(back, tags);
+		let empty = dir.join("empty.jsonl");
+		write_jsonl(empty.clone(), &Vec::<StoredTag>::new(), &ct).expect("write empty");
+		assert_eq!(fs::read_to_string(&empty).expect("read empty"), "");
+		let missing = dir.join("nope").join("tags.jsonl");
+		let err = write_jsonl(missing, &tags, &ct).expect_err("missing parent must fail");
+		assert!(err.to_string().contains("nope"), "error must name the path: {err}");
+		let mut cancelled = task::CancelToken::default();
+		let abort = cancelled.emplace_abort_token();
+		abort.abort(task::AbortReason::User);
+		let err = write_jsonl(dir.join("cancelled.jsonl"), &tags, &cancelled).expect_err("cancel");
+		assert!(err.to_string().contains("Aborted"), "cancellation error: {err}");
+		fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
+	fn graph_csr_budget_rejects_and_hash_matches_file_bytes() {
+		let ct = task::CancelToken::default();
+		let tags = vec![
+			tag("a.rs", "dup", "def"),
+			tag("a.rs", "dup", "def"),
+			tag("b.rs", "dup", "def"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+		];
+		let pid = std::process::id();
+		let nanos = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos();
+		let dir = std::env::temp_dir().join(format!("omp-ci-csr-{pid}-{nanos}"));
+		fs::create_dir_all(&dir).expect("mkdir");
+		// Total expanded weight is 9 (3 refs x 3 def tags); a 4-edge budget
+		// must reject explicitly instead of truncating.
+		let err = write_graph_csr(dir.join("too-many.csr"), &tags, &ct, 4)
+			.expect_err("over-budget build must fail");
+		assert!(err.to_string().contains("budget"), "error must explain the budget: {err}");
+		let path_a = dir.join("graph-a.csr");
+		let path_b = dir.join("graph-b.csr");
+		let hash_a = write_graph_csr(path_a.clone(), &tags, &ct, 100).expect("write a");
+		let hash_b = write_graph_csr(path_b.clone(), &tags, &ct, 100).expect("write b");
+		assert_eq!(hash_a, hash_b, "identical input must hash identically");
+		let bytes = fs::read(&path_a).expect("read csr");
+		assert_eq!(&bytes[..4], b"CIGR", "magic preserved");
+		assert_eq!(hash_a, content_hash(&bytes), "streamed hash == one-shot hash");
+		let node_count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+		let edge_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+		assert_eq!(edge_count, 9, "expanded pairs are written in full");
+		let mut cursor = 12usize;
+		let mut nodes = Vec::new();
+		for _ in 0..node_count {
+			let len = u16::from_le_bytes(bytes[cursor..cursor + 2].try_into().unwrap()) as usize;
+			cursor += 2;
+			nodes.push(String::from_utf8(bytes[cursor..cursor + len].to_vec()).unwrap());
+			cursor += len;
+		}
+		assert_eq!(nodes, vec!["a.rs#dup", "b.rs#dup", "c.rs#dup"]);
+		let mut pairs = Vec::new();
+		for _ in 0..edge_count {
+			let src = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+			let dst = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap());
+			pairs.push((src, dst));
+			cursor += 8;
+		}
+		assert_eq!(cursor, bytes.len(), "no trailing bytes");
+		let a_idx = nodes.iter().position(|n| n == "a.rs#dup").unwrap() as u32;
+		let b_idx = nodes.iter().position(|n| n == "b.rs#dup").unwrap() as u32;
+		let c_idx = nodes.iter().position(|n| n == "c.rs#dup").unwrap() as u32;
+		assert_eq!(
+			pairs
+				.iter()
+				.filter(|&&(s, d)| s == c_idx && d == a_idx)
+				.count(),
+			6
+		);
+		assert_eq!(
+			pairs
+				.iter()
+				.filter(|&&(s, d)| s == c_idx && d == b_idx)
+				.count(),
+			3
+		);
+		fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
+	fn build_graph_rejects_over_budget_before_enumeration() {
+		let tags = vec![
+			tag("a.rs", "dup", "def"),
+			tag("a.rs", "dup", "def"),
+			tag("b.rs", "dup", "def"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+			tag("c.rs", "dup", "ref"),
+		];
+		let ct = task::CancelToken::default();
+		// refs("dup") x def_tags("dup") = 3 x 3 = 9 > 4, so the gate rejects
+		// before any unique (src, dst) pair map is allocated; build_graph is
+		// shared by build and rank, so this protects both paths.
+		let err = build_graph(&tags, &ct, 4)
+			.err()
+			.expect("over-budget build must fail");
+		assert!(err.to_string().contains("budget"), "error must explain the budget: {err}");
+		let graph = build_graph(&tags, &ct, 100).expect("within budget");
+		assert_eq!(graph.total_weight, 9);
+	}
+
+	#[test]
+	fn build_graph_respects_cancellation() {
+		let tags = vec![tag("a.rs", "hot", "def"), tag("b.rs", "hot", "ref")];
+		let mut ct = task::CancelToken::default();
+		let abort = ct.emplace_abort_token();
+		abort.abort(task::AbortReason::User);
+		let err = build_graph(&tags, &ct, 100)
+			.err()
+			.expect("cancelled build must fail");
+		assert!(err.to_string().contains("Aborted"), "cancellation error: {err}");
 	}
 }

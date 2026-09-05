@@ -693,7 +693,10 @@ export interface ClipboardImage {
   mimeType: string
 }
 
-/** Build a generation directory: files/tags/chunks/graph. Does not write embeddings. */
+/**
+ * Build a generation directory: files/tags/chunks/graph. Does not write
+ * embeddings.
+ */
 export declare function codeIntelBuildGeneration(options: CodeIntelBuildOptions): Promise<CodeIntelBuildResult>
 
 export interface CodeIntelBuildOptions {
@@ -757,10 +760,13 @@ export interface CodeIntelExtractResult {
   parseErrors: Array<string>
 }
 
-/** Extract tags and call-expressions from a file or directory (tests / diagnostics). */
+/**
+ * Extract tags and call-expressions from a file or directory (tests /
+ * diagnostics).
+ */
 export declare function codeIntelExtractTags(options: CodeIntelExtractOptions): Promise<CodeIntelExtractResult>
 
-/** Ranked symbol/file node from personalized PageRank. */
+/** Ranked symbol/file node from personalized `PageRank`. */
 export interface CodeIntelRankedNode {
   path: string
   symbol: string
@@ -769,7 +775,10 @@ export interface CodeIntelRankedNode {
   endLine: number
 }
 
-/** Rank a previously built generation by personalized PageRank. Native holds the graph. */
+/**
+ * Rank a previously built generation by personalized `PageRank`. Native holds
+ * the graph.
+ */
 export declare function codeIntelRankGeneration(options: CodeIntelRankOptions): Array<CodeIntelRankedNode>
 
 export interface CodeIntelRankOptions {
