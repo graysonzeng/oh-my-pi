@@ -289,7 +289,7 @@ describe("runSubprocess reviewMetrics contract (real SDK session path)", () => {
 		}
 	});
 
-	it("real cancellation: aborts the run and keeps the paired duration of the interrupted tool", async () => {
+	it("real cancellation: aborts the run and records the interrupted tool without a fake duration", async () => {
 		const controller = new AbortController();
 		let cancelled = false;
 		const { result } = await runContract(
@@ -312,14 +312,19 @@ describe("runSubprocess reviewMetrics contract (real SDK session path)", () => {
 		expect(result.aborted).toBe(true);
 		expect(result.abortReason).toBeTruthy();
 		const phases = toolPhasesOf(result);
-		const cancelledTool = phases.find(phase => phase.toolCallId === "cancel-slow" || phase.name === "bash");
+		const cancelledTool =
+			phases.find(phase => phase.toolCallId === "cancel-slow") ?? phases.find(phase => phase.name === "bash");
 		expect(cancelledTool).toBeDefined();
+		const serialized = JSON.parse(JSON.stringify(cancelledTool)) as Record<string, unknown>;
 		if (cancelledTool?.unmatched === true) {
 			expect(cancelledTool.durationMs).toBeUndefined();
+			expect(serialized).not.toHaveProperty("durationMs");
 		} else {
+			expect(cancelledTool?.unmatched).toBeUndefined();
 			expect(cancelledTool?.durationMs).toBeTypeOf("number");
+			expect(Number.isFinite(cancelledTool?.durationMs)).toBe(true);
+			expect(serialized).toHaveProperty("durationMs");
 		}
-		expect(() => JSON.stringify(result.reviewMetrics)).not.toThrow();
 	});
 
 	it("abnormal empty toolCallId from the real dispatcher is unmatched without durationMs", async () => {

@@ -120,9 +120,8 @@ interface JobOutcome {
 	error?: string;
 	completionKind?: SingleResult["completionKind"];
 	/**
-	 * reviewMetrics.spawnQueueMs when the metrics producer writes it — the
-	 * real task-semaphore queue wait (invokedAt → acquiredAt). Optional and
-	 * never synthesized here; absent until the sibling producer lands.
+	 * reviewMetrics.spawnQueueMs — the real task-semaphore queue wait
+	 * (`invokedAt` → `acquiredAt`). Never synthesized in this file.
 	 */
 	spawnQueueMs?: number;
 }
@@ -373,12 +372,9 @@ if (!BENCH_MODE) {
 				expect(job.requests).toBeGreaterThanOrEqual(1);
 				expect(job.ok).toBe(true);
 			}
-			// The queued job (second spawn) really waited: spawnQueueMs is the
-			// task-semaphore wait and must be non-zero whenever the producer writes it.
-			if (batch.spawnQueueMsPresent) {
-				const waited = batch.spawnQueueMsSamples.filter(value => value > 0);
-				expect(waited.length).toBeGreaterThanOrEqual(1);
-			}
+			// The queued job (second spawn) really waited on the task semaphore.
+			expect(batch.spawnQueueMsPresent).toBe(true);
+			expect(batch.spawnQueueMsSamples.filter(value => value > 0).length).toBeGreaterThanOrEqual(1);
 		});
 
 		it("cap 2: two gated first-entries prove real provider concurrency ≤ cap and all four tasks deliver", {
@@ -416,12 +412,9 @@ if (!BENCH_MODE) {
 			expect(batch.providerEntries).toBe(CALLS_PER_WORKER * 4);
 			// Provider utilization peaked at exactly the two concurrently-held entries.
 			expect(batch.providerPeak).toBe(2);
-			// The two spawns that queued behind the held permits really waited: their
-			// spawnQueueMs reflects the real semaphore wait whenever the producer writes it.
-			if (batch.spawnQueueMsPresent) {
-				const waited = batch.spawnQueueMsSamples.filter(value => value > 0);
-				expect(waited.length).toBeGreaterThanOrEqual(2);
-			}
+			// The two spawns that queued behind the held permits really waited.
+			expect(batch.spawnQueueMsPresent).toBe(true);
+			expect(batch.spawnQueueMsSamples.filter(value => value > 0).length).toBeGreaterThanOrEqual(2);
 		});
 	});
 }

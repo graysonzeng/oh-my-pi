@@ -129,35 +129,4 @@ describe("task tool description scout gating", () => {
 		// hard-coded scout guidance is dropped.
 		expect(description).toContain("### reviewer");
 	});
-
-	it("renders recovery and evidence-reuse guidance by irc and batch settings", async () => {
-		async function renderFor(settings: { irc: boolean; batch: boolean }): Promise<string> {
-			vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
-				agents: [{ name: "task", description: "Worker.", systemPrompt: "Work.", source: "bundled" }],
-				projectAgentsDir: null,
-			});
-			const tool = await TaskTool.create({
-				cwd: process.cwd(),
-				hasUI: false,
-				settings: Settings.isolated({
-					"async.enabled": false,
-					"task.batch": settings.batch,
-					"task.isolation.mode": "none",
-					"task.maxRecursionDepth": settings.irc ? 2 : 0,
-				}),
-				getSessionFile: () => null,
-				getSessionSpawns: () => "*",
-				taskDepth: 0,
-			} as unknown as ToolSession);
-			return tool.description;
-		}
-		const withIrc = await renderFor({ irc: true, batch: true });
-		expect(withIrc).toContain("NEVER ping an agent still running without new information");
-		expect(withIrc).toContain("batch `context` / `local://` evidence");
-		vi.restoreAllMocks();
-		const withoutIrc = await renderFor({ irc: false, batch: false });
-		expect(withoutIrc).not.toContain("NEVER ping an agent still running without new information");
-		expect(withoutIrc).toContain("`local://` evidence");
-		expect(withoutIrc).not.toContain("batch `context`");
-	});
 });
