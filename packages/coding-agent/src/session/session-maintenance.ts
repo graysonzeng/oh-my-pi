@@ -8,6 +8,7 @@ import {
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
+	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	AGGRESSIVE_SHAKE_CONFIG,
@@ -43,16 +44,24 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
+	type PruneConfig,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CodexCompactionContext,
+	Context,
+	Message,
+	Model,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
@@ -65,6 +74,9 @@ import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import type { NonMessageTokenSource } from "../modes/utils/context-usage";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
+import STRUCTURED_ASSISTANT_SUMMARY_PROMPT from "../prompts/compaction/structured-assistant-summary.md" with {
+	type: "text",
+};
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
@@ -73,6 +85,7 @@ import {
 	type CompactionMethod,
 	canUseRemoteCompaction,
 	DEFAULT_COMPACTION_METHOD_ORDER,
+	type EngineCompactionMethod,
 	resolveCompactionMethodOrder,
 	resolveMethodSettings,
 	resolveSpeculationMethod,
@@ -87,9 +100,20 @@ import {
 import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
-import type { SessionManager, SessionManagerStateSnapshot } from "./session-manager";
+import {
+	type SessionManager,
+	type SessionManagerStateSnapshot,
+	SessionPersistenceIndeterminateError,
+} from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
+import {
+	type AssistantSummaryInput,
+	type AssistantSummaryOutput,
+	parseAssistantSummaries,
+	prepareStructuredCompaction,
+	type StructuredCompactionPatch,
+} from "./structured-compaction";
 
 export type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
@@ -186,6 +210,51 @@ const PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8_000;
  * still-warm prefix is busted by the flush. 90 min leaves margin over the 1h TTL.
  */
 const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
+/** Name of the bounded original-content recovery tool registered by the tools slice. */
+const READ_OMITTED_CONTENT_TOOL = "read_omitted_content";
+
+/** Absolute ceiling for one batch of structured assistant summaries. */
+const STRUCTURED_BATCH_OUTPUT_CAP_TOKENS = 4096;
+
+/** Reasons a live maintenance pass may run the structured method. */
+type StructuredReason = "overflow" | "threshold" | "idle" | "incomplete" | "manual";
+/**
+ * Internal marker thrown when a structured patch is rejected at commit
+ * (stale prefix CAS, authorization veto, or budget failure) with NOTHING
+ * applied. The current reason decides recompute-vs-fallback; no history
+ * event or provider reset accompanies it.
+ */
+class StructuredPatchRejectedError extends Error {
+	constructor() {
+		super("Structured compaction patch rejected; nothing applied");
+		this.name = "StructuredPatchRejectedError";
+	}
+}
+/**
+ * Capture-time authorization snapshot for one structured patch: the model
+ * identity and budget settings that shaped preparation. The synchronous
+ * commit re-validate compares the LIVE values against this snapshot, so a
+ * model switch or budget reconfiguration invalidates the patch even when the
+ * prefix CAS (message contents) still matches.
+ */
+interface StructuredPatchSnapshot {
+	sessionId: string;
+	modelProvider: string;
+	modelId: string;
+	modelApi: Model["api"];
+	modelBaseUrl: string;
+	modelContextWindow: Model["contextWindow"];
+	modelMaxTokens: Model["maxTokens"];
+	modelTokenizer: Model["tokenizer"];
+	modelInput: string;
+	budget: {
+		thresholdPercent: number;
+		thresholdTokens: number;
+		reserveTokens: number | undefined;
+		keepRecentTokens: number;
+		methodOrder: CompactionMethod[];
+	};
+}
 
 /**
  * Hysteresis band for the post-maintenance "did we actually create headroom?"
@@ -204,17 +273,29 @@ const COMPACTION_RECOVERY_BAND = 0.8;
  *  occupancy stays under this ceiling (≥10% headroom) and reported usage stays within the window (#9235). */
 const PAYLOAD_REJECTION_OCCUPANCY_CEILING = 0.9;
 
-/** A speculation-produced compaction result, ready to commit at threshold. */
-interface ArmedSpeculation {
-	result: CompactionResult;
-	action: "context-full" | "handoff" | "remote";
-	method: CompactionMethod;
-	codexCompaction?: CodexCompactionContext;
-	/** Last branch entry covered by the speculated summary's source snapshot. */
-	snapshotLeafId: string;
-	/** Context size when speculation started; drives refresh-on-growth. */
-	contextTokensAtStart: number;
-}
+/** Discriminated union of speculation-produced, ready-to-commit payloads. */
+export type ArmedSpeculation =
+	| {
+			kind: "compaction";
+			result: CompactionResult;
+			action: "context-full" | "handoff" | "remote";
+			method: EngineCompactionMethod;
+			codexCompaction?: CodexCompactionContext;
+			/** Last branch entry covered by the speculated summary's source snapshot. */
+			snapshotLeafId: string;
+			/** Context size when speculation started; drives refresh-on-growth. */
+			contextTokensAtStart: number;
+	  }
+	| {
+			kind: "structured";
+			/** Prepared in-place rewrite plus the helper's savings estimate. */
+			patch: StructuredCompactionPatch;
+			method: "structured";
+			/** Last branch entry covered by the patch's source snapshot. */
+			snapshotLeafId: string;
+			/** Context size when speculation started; drives refresh-on-growth. */
+			contextTokensAtStart: number;
+	  };
 
 /** One background speculative-compaction run and (once resolved) its armed result. */
 interface SpeculationRun {
@@ -365,6 +446,11 @@ export class SessionMaintenance {
 	#speculation: SpeculationRun | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
 	readonly #host: SessionMaintenanceHost;
+	/**
+	 * Prepare-time authorization snapshots keyed by patch identity (the patch
+	 * object flows unchanged from preparation to commit).
+	 */
+	readonly #structuredPatchContext = new WeakMap<StructuredCompactionPatch, StructuredPatchSnapshot>();
 
 	get #model(): Model | undefined {
 		return this.#host.model();
@@ -434,6 +520,677 @@ export class SessionMaintenance {
 		const planMatcher = createPlanReadMatcher(() => this.#host.planReferencePath());
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
+	/**
+	 * Whether the session's live, filtered tool set exposes the bounded
+	 * original-content recovery tool. This is the authorization gate for the
+	 * `structured` method: recovery data is only as good as the current tool
+	 * subset allows, and both omission and armed-commit are refused when the
+	 * tool is dynamically removed (design §5.1/§5.3).
+	 */
+	#structuredRecoveryToolAvailable(): boolean {
+		return this.#host.agent.state.tools.some(tool => tool.name === READ_OMITTED_CONTENT_TOOL);
+	}
+
+	/**
+	 * First-omission ownership gate: while `structured` is configured and the
+	 * recovery tool is actually callable, the per-turn stale/ordinary prune
+	 * passes must NOT destructively overwrite tool results before structured
+	 * sees them — structured performs the first omission itself and preserves
+	 * the original content. Shared by the success-pass, idle and tool-loop
+	 * pre-prune call sites. When structured is absent or recovery is
+	 * unavailable, existing prune maintenance behavior is unchanged.
+	 */
+	#structuredOwnsFirstOmission(): boolean {
+		const settings = this.#host.settings.getGroup("compaction");
+		if (!settings.enabled) return false;
+		return (
+			resolveCompactionMethodOrder(settings.methodOrder).includes("structured") &&
+			this.#structuredRecoveryToolAvailable()
+		);
+	}
+
+	/**
+	 * Structured sub-configuration of the shared tool-output prune engine:
+	 * addressable recording (original content saved before replacement, entry
+	 * ID kept in the notice, savings measured from that notice), no
+	 * useless/superseded exceptions, no per-turn cache-warm suffix limit
+	 * (formal compaction rebuilds the provider cache anyway), plan/skill/tool
+	 * protections plus the recovery tool itself — its results must never be
+	 * re-elided destructively.
+	 */
+	#structuredPruneConfig(keepBoundaryId: string | undefined): PruneConfig {
+		return this.#withPlanProtection({
+			...DEFAULT_PRUNE_CONFIG,
+			addressable: true,
+			pruneUseless: false,
+			keepBoundaryId,
+			protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools, READ_OMITTED_CONTENT_TOOL],
+		});
+	}
+
+	/**
+	 * Overflow/incomplete passes exclude the doomed failed assistant turn from
+	 * BOTH arms: the retry prompt will not include it, so its tokens must not
+	 * gate whether a patch can close the gap against the retry-fit target.
+	 * The same exclusion applies at prepare time and inside the commit
+	 * validate, so the budget math never counts a turn that is dropped before
+	 * the retry.
+	 */
+	#structuredCurrentTokens(reason: StructuredReason, triggerContextTokens?: number): number {
+		const contextWindow = this.#model?.contextWindow ?? 0;
+		const excluded = this.#structuredExcludedAssistant(reason);
+		const storedTokens = Math.max(
+			0,
+			this.#estimateStoredContextTokens() -
+				(excluded ? this.#tokenizer.countMessage(excluded, { excludeEncryptedReasoning: true }) : 0),
+		);
+		if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {
+			const providerTokens = Math.max(
+				0,
+				triggerContextTokens - (excluded ? this.#tokenizer.countMessage(excluded) : 0),
+			);
+			return compactionContextTokens(providerTokens, storedTokens);
+		}
+		const providerTokens = Math.max(
+			0,
+			(this.#host.getContextUsage({ contextWindow })?.tokens ?? 0) -
+				(excluded ? this.#tokenizer.countMessage(excluded) : 0),
+		);
+		return compactionContextTokens(providerTokens, storedTokens);
+	}
+
+	/**
+	 * The failed assistant turn a recovery (overflow/incomplete) pass will drop
+	 * before retrying: the last live assistant message whose stop reason
+	 * matches the recovery class. Undefined for non-recovery reasons.
+	 */
+	#structuredExcludedAssistant(reason: StructuredReason): AssistantMessage | undefined {
+		if (reason !== "overflow" && reason !== "incomplete") return undefined;
+		const messages = this.#host.messages();
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (message.role !== "assistant") continue;
+			const assistant = message as AssistantMessage;
+			if (assistant.stopReason === "error" || (reason === "incomplete" && assistant.stopReason === "length")) {
+				return assistant;
+			}
+			return undefined;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Reason-specific post-commit target for structured patches. Threshold and
+	 * tool-loop passes must land at or below the recovery band so the existing
+	 * headroom check can auto-continue; overflow/incomplete (retry fit),
+	 * manual and idle passes only need the visible request to fit the usable
+	 * window (contextWindow − reserve). These are deliberately distinct from
+	 * each other just like the existing recovery-band vs retry-fit split.
+	 */
+	#structuredTargetTokens(reason: StructuredReason): number {
+		const contextWindow = this.#model?.contextWindow ?? 0;
+		const settings = this.#host.settings.getGroup("compaction");
+		if (reason === "threshold") {
+			const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+			return Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
+		}
+		return Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, settings));
+	}
+
+	/**
+	 * Prepare a structured patch against the live reason budget: deterministic
+	 * elision first, assistant-entry summaries only when deterministic savings
+	 * cannot reach the target. Returns undefined when no usable candidate
+	 * exists; throws on abort or requested-summary failure (callers own the
+	 * fallback policy). The helper's savings are not completion evidence — the
+	 * whole patch is revalidated on the live request at commit.
+	 */
+	async #prepareStructuredPatch(
+		reason: StructuredReason,
+		triggerContextTokens: number | undefined,
+		signal: AbortSignal,
+	): Promise<StructuredCompactionPatch | undefined> {
+		const model = this.#model;
+		if (!model) return undefined;
+		const snapshot = this.#structuredCaptureSnapshot();
+		if (!snapshot) return undefined;
+		const branch = this.#host.sessionManager.getBranch();
+		const keepBoundaryId = getLatestCompactionEntry(branch)?.firstKeptEntryId;
+		const currentTokens = this.#structuredCurrentTokens(reason, triggerContextTokens);
+		const targetTokens = this.#structuredTargetTokens(reason);
+		const patch = await prepareStructuredCompaction({
+			entries: branch,
+			tokenizer: this.#tokenizer,
+			pruneConfig: this.#structuredPruneConfig(keepBoundaryId),
+			targetTokens,
+			currentTokens,
+			signal,
+			summarize: (entries, entriesSignal) => this.#summarizeStructuredEntries(entries, entriesSignal),
+		});
+		// Authorize the exact patch object at commit: model identity and budget
+		// settings are captured NOW so the commit validate can reject a later
+		// model switch or reconfiguration even when the prefix CAS matches.
+		if (patch) this.#structuredPatchContext.set(patch, snapshot);
+		return patch;
+	}
+
+	/**
+	 * Synchronous full re-validation run INSIDE the commit CAS while the
+	 * serialized owner is held (after the prefix compare). Nothing is memoized
+	 * before the owner: the current provider-anchored budget, per-replacement
+	 * deltas on the CURRENT branch (so entries appended while queued are
+	 * counted), the prepare-time model/budget snapshot, and the current tool
+	 * authorization are all recalculated synchronously here. Per-replacement
+	 * deltas are summed signed — a replacement that grew its visible content
+	 * counts against the gain instead of being silently clamped. The failed
+	 * assistant turn excluded from recovery budgets (overflow/incomplete) is
+	 * excluded here too. Side-effect free; the atomic batch may call this
+	 * exactly once after its serialized compare.
+	 */
+	#structuredCommitValid(patch: StructuredCompactionPatch, reason: StructuredReason): boolean {
+		const settings = this.#host.settings.getGroup("compaction");
+		if (!settings.enabled || !this.#model) return false;
+		if (!resolveCompactionMethodOrder(settings.methodOrder).includes("structured")) return false;
+		if (!this.#structuredRecoveryToolAvailable()) return false;
+		const snapshot = this.#structuredPatchContext.get(patch);
+		if (!snapshot || !this.#structuredSnapshotStillCurrent(snapshot)) return false;
+		const targetTokens = this.#structuredTargetTokens(reason);
+		const currentTokens = this.#structuredCurrentTokens(reason);
+		const branch = this.#host.sessionManager.getBranch();
+		let saved = 0;
+		for (const replacement of patch.rewrite.replacements) {
+			const entry = branch.find(entry => entry.id === replacement.id);
+			if (entry?.type !== "message") continue;
+			saved +=
+				this.#tokenizer.countMessage(entry.message, { excludeEncryptedReasoning: true }) -
+				this.#tokenizer.countMessage(replacement.message, { excludeEncryptedReasoning: true });
+		}
+		return saved > 0 && currentTokens - saved <= targetTokens;
+	}
+
+	/**
+	 * Capture the model identity and budget settings that shape one patch.
+	 * Undefined when no model is active — such a patch must never be built.
+	 */
+	#structuredCaptureSnapshot(): StructuredPatchSnapshot | undefined {
+		const model = this.#model;
+		if (!model) return undefined;
+		const settings = this.#host.settings.getGroup("compaction");
+		return {
+			sessionId: this.#host.sessionId(),
+			modelProvider: model.provider,
+			modelId: model.id,
+			modelApi: model.api,
+			modelBaseUrl: model.baseUrl,
+			modelContextWindow: model.contextWindow,
+			modelMaxTokens: model.maxTokens,
+			modelTokenizer: model.tokenizer,
+			modelInput: model.input.join("\u0000"),
+			budget: {
+				thresholdPercent: settings.thresholdPercent,
+				thresholdTokens: settings.thresholdTokens,
+				reserveTokens: settings.reserveTokens,
+				keepRecentTokens: settings.keepRecentTokens,
+				methodOrder: [...settings.methodOrder],
+			},
+		};
+	}
+
+	/**
+	 * Whether the live model identity and budget settings still match a
+	 * patch's capture-time snapshot (order-sensitive for `methodOrder`).
+	 */
+	#structuredSnapshotStillCurrent(snapshot: StructuredPatchSnapshot): boolean {
+		if (snapshot.sessionId !== this.#host.sessionId()) return false;
+		const model = this.#model;
+		if (!model) return false;
+		if (model.provider !== snapshot.modelProvider || model.id !== snapshot.modelId) return false;
+		if (
+			model.api !== snapshot.modelApi ||
+			model.baseUrl !== snapshot.modelBaseUrl ||
+			model.contextWindow !== snapshot.modelContextWindow ||
+			model.maxTokens !== snapshot.modelMaxTokens ||
+			model.tokenizer !== snapshot.modelTokenizer ||
+			model.input.join("\u0000") !== snapshot.modelInput
+		)
+			return false;
+		const settings = this.#host.settings.getGroup("compaction");
+		const budget = snapshot.budget;
+		return (
+			settings.thresholdPercent === budget.thresholdPercent &&
+			settings.thresholdTokens === budget.thresholdTokens &&
+			settings.reserveTokens === budget.reserveTokens &&
+			settings.keepRecentTokens === budget.keepRecentTokens &&
+			settings.methodOrder.join("\u0000") === budget.methodOrder.join("\u0000")
+		);
+	}
+
+	/**
+	 * First candidate in the compaction model chain with usable credentials;
+	 * undefined when none can serve.
+	 */
+	async #firstUsableStructuredCandidate(candidates: Model[], signal: AbortSignal): Promise<Model | undefined> {
+		const settings = this.#host.settings.getGroup("compaction");
+		for (const candidate of candidates) {
+			signal.throwIfAborted();
+			if (
+				(candidate.maxTokens ?? STRUCTURED_BATCH_OUTPUT_CAP_TOKENS) <= 0 ||
+				candidate.contextWindow === null ||
+				candidate.contextWindow - resolveBudgetReserveTokens(candidate.contextWindow, settings) <= 0
+			)
+				continue;
+			try {
+				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
+				signal.throwIfAborted();
+				if (apiKey) return candidate;
+			} catch {
+				signal.throwIfAborted();
+			}
+		}
+		return undefined;
+	}
+
+	#structuredSystemPrompt(maxOutputTokens: number): string {
+		return prompt.render(STRUCTURED_ASSISTANT_SUMMARY_PROMPT, { maxOutputTokens });
+	}
+
+	#structuredSummaryContext(batch: readonly AssistantSummaryInput[], maxTokens: number): Context {
+		const input = this.#host.obfuscateTextForProvider(JSON.stringify({ entries: batch }));
+		if (input === undefined) throw new Error("Structured summary input is unavailable");
+		return {
+			systemPrompt: [this.#structuredSystemPrompt(maxTokens)],
+			messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+			tools: [],
+		};
+	}
+
+	async #summarizeStructuredEntries(
+		entries: readonly AssistantSummaryInput[],
+		signal: AbortSignal,
+	): Promise<readonly AssistantSummaryOutput[]> {
+		if (entries.length === 0) return [];
+		const candidates = this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
+		const windowModel = await this.#firstUsableStructuredCandidate(candidates, signal);
+		if (!windowModel) throw this.#buildCompactionAuthError();
+		const tokenizer = new Tokenizer(windowModel);
+		const settings = this.#host.settings.getGroup("compaction");
+		const contextWindow = windowModel.contextWindow ?? 0;
+		const outputLimit = windowModel.maxTokens ?? STRUCTURED_BATCH_OUTPUT_CAP_TOKENS;
+		const usableWindow = contextWindow - resolveBudgetReserveTokens(contextWindow, settings);
+		if (usableWindow <= 0) return [];
+		const fits = (context: Context, outputCap: number): boolean =>
+			tokenizer.countTokens(context.systemPrompt ?? []) + tokenizer.countMessages(context.messages) + outputCap <=
+			usableWindow;
+		const outputs: AssistantSummaryOutput[] = [];
+		let batch: AssistantSummaryInput[] = [];
+		let batchInputTokens = 0;
+		const flush = async (): Promise<void> => {
+			if (batch.length === 0) return;
+			outputs.push(...(await this.#summarizeStructuredBatch(batch, signal)));
+			batch = [];
+			batchInputTokens = 0;
+		};
+		for (const entry of entries) {
+			signal.throwIfAborted();
+			const entryTokens = tokenizer.countTokens(entry.text);
+			const singleCap = Math.min(STRUCTURED_BATCH_OUTPUT_CAP_TOKENS, outputLimit, Math.floor(entryTokens / 4));
+			// Individually oversized sources are skipped, never truncated and
+			// represented as if the model summarized their complete text.
+			if (singleCap <= 0 || !fits(this.#structuredSummaryContext([entry], singleCap), singleCap)) continue;
+			if (batch.length > 0) {
+				const cap = Math.min(
+					STRUCTURED_BATCH_OUTPUT_CAP_TOKENS,
+					outputLimit,
+					Math.floor((batchInputTokens + entryTokens) / 4),
+				);
+				if (!fits(this.#structuredSummaryContext([...batch, entry], cap), cap)) await flush();
+			}
+			batch.push(entry);
+			batchInputTokens += entryTokens;
+		}
+		await flush();
+		return outputs;
+	}
+
+	async #summarizeStructuredBatch(
+		batch: readonly AssistantSummaryInput[],
+		signal: AbortSignal,
+	): Promise<readonly AssistantSummaryOutput[]> {
+		const settings = this.#host.settings.getGroup("compaction");
+		let lastError: unknown;
+		for (const candidate of this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable())) {
+			signal.throwIfAborted();
+			try {
+				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
+				signal.throwIfAborted();
+				if (!apiKey) continue;
+				const tokenizer = new Tokenizer(candidate);
+				const inputTokens = tokenizer.countTokens(batch.map(entry => entry.text));
+				const cap = Math.min(
+					STRUCTURED_BATCH_OUTPUT_CAP_TOKENS,
+					candidate.maxTokens ?? STRUCTURED_BATCH_OUTPUT_CAP_TOKENS,
+					Math.floor(inputTokens / 4),
+				);
+				const contextWindow = candidate.contextWindow ?? 0;
+				const usableWindow = contextWindow - resolveBudgetReserveTokens(contextWindow, settings);
+				if (cap <= 0 || usableWindow <= 0) continue;
+				const context = this.#structuredSummaryContext(batch, cap);
+				const requestTokens =
+					tokenizer.countTokens(context.systemPrompt ?? []) + tokenizer.countMessages(context.messages);
+				if (requestTokens + cap > usableWindow) continue;
+				const text = await this.#structuredOneShot(candidate, context, cap, signal);
+				signal.throwIfAborted();
+				return parseAssistantSummaries(text, batch, tokenizer, cap);
+			} catch (error) {
+				if (signal.aborted) throw error;
+				lastError = error;
+			}
+		}
+		if (lastError !== undefined) throw lastError;
+		throw this.#buildCompactionAuthError();
+	}
+
+	async #structuredOneShot(model: Model, context: Context, maxTokens: number, signal: AbortSignal): Promise<string> {
+		const stream = await this.#host.sideStreamFn(model, context, {
+			apiKey: this.#host.modelRegistry.resolver(model, this.#host.sessionId()),
+			sessionId: `${this.#host.sessionId()}:struct:${Snowflake.next()}`,
+			promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
+			preferWebsockets: this.#host.preferWebsockets,
+			providerSessionState: this.#host.providerSessionState,
+			disableReasoning: true,
+			maxTokens,
+			signal,
+		});
+		let completed: string | undefined;
+		for await (const event of stream) {
+			if (event.type === "error") {
+				signal.throwIfAborted();
+				throw new Error(event.error.errorMessage || "Structured summary request failed");
+			}
+			if (event.type === "done") {
+				if (event.reason !== "stop")
+					throw new Error("Structured summary request did not complete within its output budget");
+				completed = event.message.content
+					.filter(block => block.type === "text")
+					.map(block => block.text)
+					.join("");
+			}
+		}
+		if (completed === undefined) throw new Error("Structured summary stream ended without a completed response");
+		return completed;
+	}
+	/**
+	 * Rebuild the live agent context and provider sessions after an applied
+	 * structured rewrite: same post-rewrite bookkeeping as the shake tail, with
+	 * exactly one provider rebase/reset for the committed history.
+	 */
+	#syncAfterStructuredRewrite(): void {
+		const sessionContext = this.#host.buildDisplaySessionContext();
+		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.rebaseAfterCompaction();
+		this.#host.resetAdvisorRuntimes("structured-compaction");
+		this.#host.syncTodoPhasesFromBranch();
+		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+	}
+
+	/**
+	 * Account for the committed patch using its immutable preimages. Live
+	 * entries already contain the replacements here; comparing them would
+	 * incorrectly report zero savings and leave the provider anchor stale.
+	 */
+	#recordStructuredRewrite(patch: StructuredCompactionPatch): number {
+		let removed = 0;
+		for (const replacement of patch.rewrite.replacements) {
+			const entry = patch.rewrite.prefix.find(entry => entry.id === replacement.id);
+			if (entry?.type !== "message") continue;
+			const before = this.#tokenizer.countMessage(entry.message, { excludeEncryptedReasoning: true });
+			const after = this.#tokenizer.countMessage(replacement.message, { excludeEncryptedReasoning: true });
+			removed += before - after;
+		}
+		if (removed > 0) this.#host.recordAnchoredHistoryRewrite(removed);
+		return removed;
+	}
+
+	/**
+	 * Shared auto-maintenance commit tail for a structured patch: applies the
+	 * in-place message rewrite through the serialized owner (prefix CAS,
+	 * synchronous authorization/budget validate, preimage rollback + repair on
+	 * failure), syncs committed history and agent messages, rebases/resets the
+	 * provider session exactly once, then runs the reason-specific progress
+	 * guard (retry fit / recovery band with the tiered dead-end rescue),
+	 * emits `auto_compaction_end`, and schedules the follow-up turn.
+	 *
+	 * Commit facts are separate from caller cancellation: a commit that lands
+	 * even though the caller aborted after application still synchronizes
+	 * history/provider and truthfully propagates `historyRewritten: true`
+	 * before terminating cancelled with no success notification, fallback,
+	 * auto-resume or retry. A rejected patch (stale CAS, veto, or budget)
+	 * returns `"rejected"` with nothing applied. Indeterminate persistence
+	 * failure retains the latch, never claims commit success or consistency,
+	 * and does NOT advance to another method.
+	 */
+	async #commitStructuredAutoResult(args: {
+		patch: StructuredCompactionPatch;
+		reason: "overflow" | "threshold" | "idle" | "incomplete";
+		willRetry: boolean;
+		generation: number;
+		shouldAutoContinue: boolean;
+		terminalTextAnswer: boolean;
+		suppressContinuation: boolean;
+		fallbackFromShake: boolean;
+		detachPostCommit: boolean;
+		autoCompactionSignal: AbortSignal;
+		onCommitted: () => void;
+	}): Promise<CompactionCheckResult | "rejected"> {
+		const { patch, reason, willRetry, detachPostCommit, autoCompactionSignal } = args;
+		// The usage anchor is message metadata too. Keep its update and the
+		// provider/message synchronization inside the same mutation lease.
+		return await this.#host.sessionManager.runExclusive<CompactionCheckResult | "rejected">(
+			async () => {
+				let committed = false;
+				try {
+					committed = await this.#host.sessionManager.runExclusive(
+						() =>
+							this.#host.sessionManager.rewriteMessageEntriesAtomically(
+								patch.rewrite,
+								// Fully synchronous re-validation INSIDE the owner after the
+								// CAS prefix compare: current budget, signed real deltas,
+								// tool authorization, and the prepare-time model/budget
+								// snapshot are recomputed, never memoized before admission.
+								() => this.#structuredCommitValid(patch, reason),
+							),
+						{ signal: autoCompactionSignal },
+					);
+				} catch (error) {
+					if (error instanceof SessionPersistenceIndeterminateError) {
+						// Latch retained, consistency pending: rethrow so the existing
+						// stop path handles it. No commit claim, no success/fallback end
+						// event, no method advance — only existing recovery may restore
+						// consistency before new attempts.
+						throw error;
+					}
+					throw error; // outer runner handles abort/admission and fallback
+				}
+				if (!committed) {
+					// Stale/rejected patch: nothing applied — no history event, no
+					// rewritten flag, no provider reset. The current reason decides
+					// recompute-vs-fallback in the caller.
+					return "rejected";
+				}
+				args.onCommitted();
+				// From here on the commit facts stand: any ordinary abort (caller or
+				// post-commit step), extension callback, or postcheck failure must still
+				// terminate with `historyRewritten: true` and NEVER fall back,
+				// auto-resume, or retry on top of the committed rewrite — the marker is
+				// set before these steps so the outer runner cannot advance. Only an
+				// indeterminate persistence error propagates (the stop path owns it).
+				try {
+					this.#recordStructuredRewrite(patch);
+					this.#syncAfterStructuredRewrite();
+					// Post-apply abort: commit facts are separate from caller
+					// cancellation. History/provider are already synchronized above;
+					// report the committed rewrite truthfully and terminate cancelled
+					// with no success event, fallback, auto-resume or retry.
+					if (autoCompactionSignal.aborted) {
+						await this.#emitLifecycleEvent(
+							{
+								type: "auto_compaction_end",
+								action: "structured",
+								result: undefined,
+								aborted: true,
+								willRetry: false,
+							},
+							detachPostCommit,
+						);
+						return { ...COMPACTION_CHECK_NONE, historyRewritten: true };
+					}
+
+					let continuationScheduled = false;
+					let noProgressDeadEnd = false;
+					let retryFits = false;
+					let hasHeadroom = false;
+
+					if (willRetry) {
+						const messages = this.#host.agent.state.messages;
+						const lastMsg = messages[messages.length - 1];
+						if (lastMsg?.role === "assistant") {
+							const lastAssistant = lastMsg as AssistantMessage;
+							const shouldDrop =
+								lastAssistant.stopReason === "error" ||
+								(reason === "incomplete" && lastAssistant.stopReason === "length");
+							if (shouldDrop) {
+								this.#host.agent.replaceMessages(messages.slice(0, -1));
+								this.#host.rebaseAfterCompaction();
+							}
+						}
+						retryFits = this.#compactionCreatedRetryFit();
+						if (!retryFits) {
+							retryFits = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+								skipElide: args.fallbackFromShake,
+								hasProgress: () => this.#compactionCreatedRetryFit(),
+							});
+						}
+						if (!retryFits) noProgressDeadEnd = true;
+					} else if (reason !== "idle") {
+						hasHeadroom = this.#compactionCreatedHeadroom();
+						if (!hasHeadroom) {
+							hasHeadroom = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+								skipElide: args.fallbackFromShake,
+								hasProgress: () => this.#compactionCreatedHeadroom(),
+							});
+						}
+						if (!hasHeadroom) noProgressDeadEnd = true;
+					}
+
+					const deadEndWarning = noProgressDeadEnd
+						? compactionDeadEndWarning("clear large tool output")
+						: undefined;
+					if (deadEndWarning) {
+						const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+						if (stampEntry) {
+							stampEntry.warning = deadEndWarning;
+							await this.#host.sessionManager.runExclusive(() => this.#host.sessionManager.rewriteEntries());
+						}
+					}
+
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action: "structured",
+							result: undefined,
+							aborted: false,
+							willRetry,
+						},
+						detachPostCommit,
+					);
+
+					if (retryFits) {
+						this.#host.scheduleAgentContinue({ delayMs: 100, generation: args.generation });
+						continuationScheduled = true;
+					} else {
+						continuationScheduled = this.#host.scheduleCompactionContinuation({
+							generation: args.generation,
+							autoContinue: hasHeadroom && args.shouldAutoContinue,
+							terminalTextAnswer: args.terminalTextAnswer,
+							suppressContinuation: args.suppressContinuation,
+						});
+					}
+
+					if (deadEndWarning) {
+						this.#host.emitNotice("warning", deadEndWarning, "compaction");
+					}
+					const base = continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+					return {
+						...base,
+						historyRewritten: true,
+						...(noProgressDeadEnd ? { automaticContinuationBlocked: true } : {}),
+					};
+				} catch (error) {
+					if (error instanceof SessionPersistenceIndeterminateError) throw error;
+					// An ordinary post-commit failure (extension callback, notice,
+					// scheduling, rebuild): the committed history stands. Terminate with
+					// the rewritten flag — no fallback, auto-resume, or retry — and a
+					// warning so the pass never claims a version of history it did not
+					// commit.
+					logger.warn("Structured post-commit lifecycle failed; committed history stands", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+					try {
+						await this.#emitLifecycleEvent(
+							{
+								type: "auto_compaction_end",
+								action: "structured",
+								result: undefined,
+								aborted: autoCompactionSignal.aborted,
+								willRetry: false,
+								errorMessage: "Structured compaction committed, but its post-commit lifecycle failed.",
+							},
+							detachPostCommit,
+						);
+					} catch (emitError) {
+						logger.warn("Structured post-commit end event emit failed", {
+							error: emitError instanceof Error ? emitError.message : String(emitError),
+						});
+					}
+					return { ...COMPACTION_CHECK_NONE, historyRewritten: true, automaticContinuationBlocked: true };
+				}
+			},
+			{ signal: autoCompactionSignal },
+		);
+	}
+	/**
+	 * Manual structured commit: same serialized owner/CAS/validate/publish
+	 * semantics as the auto tail, but no lifecycle events and no follow-up
+	 * scheduling — the caller returns a normal manual result. Indeterminate
+	 * failure surfaces the persistence error (latch retained); a rejected or
+	 * stale patch throws {@link StructuredPatchRejectedError} with nothing
+	 * applied so the manual fallback can advance to the next method. The
+	 * post-commit message/provider synchronization is the caller's, AFTER it
+	 * marks the commit so no sync failure can trigger a method fallback.
+	 */
+	async #commitManualStructured(patch: StructuredCompactionPatch, signal: AbortSignal): Promise<boolean> {
+		let committed = false;
+		try {
+			committed = await this.#host.sessionManager.runExclusive(
+				() =>
+					this.#host.sessionManager.rewriteMessageEntriesAtomically(patch.rewrite, () =>
+						this.#structuredCommitValid(patch, "manual"),
+					),
+				{ signal },
+			);
+		} catch (error) {
+			if (error instanceof SessionPersistenceIndeterminateError) {
+				// Latch retained, consistency pending: keep the error's class so
+				// the existing stop path can discriminate it — no wrapping.
+				throw error;
+			}
+			throw error;
+		}
+		if (!committed) {
+			throw new StructuredPatchRejectedError();
+		}
+		return true;
+	}
 
 	/**
 	 * Deep-clone a SessionManager snapshot so in-place prune mutations can roll
@@ -463,7 +1220,7 @@ export class SessionMaintenance {
 				error: String(error),
 				prunedCount: result.prunedCount,
 			});
-			this.#host.sessionManager.restoreState(rollback);
+			await this.#host.sessionManager.restoreState(rollback);
 			const restored = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(restored.messages);
 			this.#host.resetAdvisorRuntimes();
@@ -479,22 +1236,35 @@ export class SessionMaintenance {
 	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const rollback = this.#capturePruneRollbackSnapshot();
-		const branchEntries = this.#host.sessionManager.getBranch();
-		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
-		const result = pruneToolOutputs(
-			branchEntries,
-			this.#tokenizer,
-			this.#withPlanProtection({
-				...DEFAULT_PRUNE_CONFIG,
-				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
-				// Cache-stable boundary: never re-write the warm, already-sent prefix
-				// (deep stale/age victims) or summarized-away entries every turn.
-				keepBoundaryId,
-				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
-			}),
-		);
-		return await this.#commitPrunedHistory(result, rollback);
+		// Per-turn destructive passes enter the serialized mutation owner before
+		// their first live mutation and re-read the branch after admission: a
+		// queued operation must never apply a mutable reference captured before
+		// admission (contract §5.2.6).
+		return await this.#host.sessionManager.runExclusive(async () => {
+			// Re-check the first-omission ownership INSIDE the owner: the gate
+			// decided before queueing; permission/config may have changed while
+			// waiting, and a destructive prune must not punch through it.
+			if (this.#structuredOwnsFirstOmission()) return undefined;
+			const rollback = this.#capturePruneRollbackSnapshot();
+			const branchEntries = this.#host.sessionManager.getBranch();
+			const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+			const result = pruneToolOutputs(
+				branchEntries,
+				this.#tokenizer,
+				this.#withPlanProtection({
+					...DEFAULT_PRUNE_CONFIG,
+					pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
+					// Cache-stable boundary: never re-write the warm, already-sent prefix
+					// (deep stale/age victims) or summarized-away entries every turn.
+					keepBoundaryId,
+					cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+					// Recovery-tool results carry restored original content; they must
+					// never be re-elided destructively by per-turn passes.
+					protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools, READ_OMITTED_CONTENT_TOOL],
+				}),
+			);
+			return await this.#commitPrunedHistory(result, rollback);
+		});
 	}
 
 	/**
@@ -513,23 +1283,32 @@ export class SessionMaintenance {
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
-		const rollback = this.#capturePruneRollbackSnapshot();
-		const branchEntries = this.#host.sessionManager.getBranch();
-		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
-		const result = pruneSupersededToolResults(
-			branchEntries,
-			this.#tokenizer,
-			this.#withPlanProtection({
-				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
-				pruneUseless: dropUseless,
-				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
-				// Never re-write summarized-away entries; only flush the whole sent
-				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
-				keepBoundaryId,
-				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
-			}),
-		);
-		return await this.#commitPrunedHistory(result, rollback);
+		// Serialized owner before the first live mutation; re-read after admission
+		// (contract §5.2.6). Recovery-tool results are protected from destructive
+		// re-elision like every other prune entrypoint.
+		return await this.#host.sessionManager.runExclusive(async () => {
+			// Re-check the first-omission ownership INSIDE the owner, same as the
+			// ordinary prune pass: structured may have become visible while this
+			// stale pass waited on the queue.
+			if (this.#structuredOwnsFirstOmission()) return undefined;
+			const rollback = this.#capturePruneRollbackSnapshot();
+			const branchEntries = this.#host.sessionManager.getBranch();
+			const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+			const result = pruneSupersededToolResults(
+				branchEntries,
+				this.#tokenizer,
+				this.#withPlanProtection({
+					supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
+					pruneUseless: dropUseless,
+					protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools, READ_OMITTED_CONTENT_TOOL],
+					// Never re-write summarized-away entries; only flush the whole sent
+					// region once the cache is genuinely cold (idle exceeds the 1h TTL).
+					keepBoundaryId,
+					idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+				}),
+			);
+			return await this.#commitPrunedHistory(result, rollback);
+		});
 	}
 
 	/**
@@ -545,41 +1324,46 @@ export class SessionMaintenance {
 	 * skips the disk rewrite.
 	 */
 	async dropImages(): Promise<{ removed: number }> {
-		const branchEntries = this.#host.sessionManager.getBranch();
-		let removed = 0;
-		for (const entry of branchEntries) {
-			if (entry.type === "message") {
-				removed += stripImagesFromMessage(entry.message);
-				continue;
-			}
-			if (entry.type === "custom_message" && typeof entry.content !== "string") {
-				const kept: typeof entry.content = [];
-				let dropped = 0;
-				for (const part of entry.content) {
-					if (part.type === "image") {
-						dropped++;
-					} else {
-						kept.push(part);
+		// Serialized mutation owner before the first live mutation; the branch is
+		// re-read after admission (contract §5.2.6). AgentSession.dropImages
+		// delegates here, so this lease covers the public entrypoint.
+		return await this.#host.sessionManager.runExclusive(async () => {
+			const branchEntries = this.#host.sessionManager.getBranch();
+			let removed = 0;
+			for (const entry of branchEntries) {
+				if (entry.type === "message") {
+					removed += stripImagesFromMessage(entry.message);
+					continue;
+				}
+				if (entry.type === "custom_message" && typeof entry.content !== "string") {
+					const kept: typeof entry.content = [];
+					let dropped = 0;
+					for (const part of entry.content) {
+						if (part.type === "image") {
+							dropped++;
+						} else {
+							kept.push(part);
+						}
+					}
+					if (dropped > 0) {
+						if (kept.length === 0) {
+							kept.push({ type: "text", text: "[image removed]" });
+						}
+						entry.content = kept;
+						removed += dropped;
 					}
 				}
-				if (dropped > 0) {
-					if (kept.length === 0) {
-						kept.push({ type: "text", text: "[image removed]" });
-					}
-					entry.content = kept;
-					removed += dropped;
-				}
 			}
-		}
-		if (removed === 0) {
-			return { removed: 0 };
-		}
-		await this.#host.sessionManager.rewriteEntries();
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("drop-images");
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
-		return { removed };
+			if (removed === 0) {
+				return { removed: 0 };
+			}
+			await this.#host.sessionManager.rewriteEntries();
+			const sessionContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.resetAdvisorRuntimes("drop-images");
+			this.#host.closeCodexProviderSessionsForHistoryRewrite();
+			return { removed };
+		});
 	}
 
 	/**
@@ -597,106 +1381,138 @@ export class SessionMaintenance {
 	 * No-op (zero counts) when nothing is eligible.
 	 */
 	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+		// A cancelled shake must never enter a mutation path — including the
+		// image delegate, which has no signal of its own. Direct maintenance
+		// callers (agent-session also wraps) get the same cancellation here.
+		opts.signal?.throwIfAborted();
 		if (mode === "images") {
 			const { removed } = await this.#host.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
 		}
 
 		if (mode === "thinking") {
-			const branchEntries = this.#host.sessionManager.getBranch();
-			let removed = 0;
-			for (const entry of branchEntries) {
-				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-				const message = entry.message;
-				const kept = message.content.filter(
-					block => block.type !== "thinking" && block.type !== "redactedThinking",
-				);
-				const dropped = message.content.length - kept.length;
-				if (dropped === 0) continue;
-				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
-				message.content = kept;
-				invalidateMessageCache(message);
-				removed += dropped;
-			}
-			if (removed === 0) {
-				return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: 0, tokensFreed: 0 };
-			}
-			await this.#host.sessionManager.rewriteEntries();
-			const sessionContext = this.#host.buildDisplaySessionContext();
-			this.#host.agent.replaceMessages(sessionContext.messages);
-			this.#host.resetAdvisorRuntimes("shake");
-			this.#host.closeCodexProviderSessionsForHistoryRewrite();
-			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
+			// Serialized mutation owner before the first live mutation
+			// (contract §5.2.6); re-read the branch after admission.
+			return await this.#host.sessionManager.runExclusive(
+				async () => {
+					const branchEntries = this.#host.sessionManager.getBranch();
+					let removed = 0;
+					for (const entry of branchEntries) {
+						if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+						const message = entry.message;
+						const kept = message.content.filter(
+							block => block.type !== "thinking" && block.type !== "redactedThinking",
+						);
+						const dropped = message.content.length - kept.length;
+						if (dropped === 0) continue;
+						// Provider serializers omit empty assistant turns, so don't invent model-authored text.
+						message.content = kept;
+						invalidateMessageCache(message);
+						removed += dropped;
+					}
+					if (removed === 0) {
+						return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: 0, tokensFreed: 0 };
+					}
+					await this.#host.sessionManager.rewriteEntries();
+					const sessionContext = this.#host.buildDisplaySessionContext();
+					this.#host.agent.replaceMessages(sessionContext.messages);
+					this.#host.resetAdvisorRuntimes("shake");
+					this.#host.closeCodexProviderSessionsForHistoryRewrite();
+					return {
+						mode,
+						toolResultsDropped: 0,
+						blocksDropped: 0,
+						thinkingBlocksDropped: removed,
+						tokensFreed: 0,
+					};
+				},
+				{ signal: opts.signal },
+			);
 		}
 
-		const branchEntries = this.#host.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
-		const config = this.#withPlanProtection({
-			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
-			// Skip entries summarized away by the latest compaction — shaking them
-			// only churns persisted history with no prompt/cache effect. The cut is
-			// unconditional on the wire (see `buildSessionContext`), so a compaction
-			// the active model cannot replay still hides its prefix from the prompt.
-			keepBoundaryId: latestCompaction?.firstKeptEntryId,
-		});
-		const regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
-		if (regions.length === 0) {
-			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
-		}
+		// Elide: serialized mutation owner before the first live mutation; the
+		// branch is re-read and regions re-collected after admission so a queued
+		// operation never applies a pre-admission mutable reference (contract
+		// §5.2.6). The artifact offload write is non-mutating and runs before
+		// the owner to keep the exclusive window focused on apply + publish.
+		const prepare = (): Promise<ShakeResult> | ShakeResult =>
+			this.#host.sessionManager.runExclusive(
+				async () => {
+					const branchEntries = this.#host.sessionManager.getBranch();
+					const latestCompaction = getLatestCompactionEntry(branchEntries);
+					const config = this.#withPlanProtection({
+						...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
+						// Skip entries summarized away by the latest compaction — shaking
+						// them only churns persisted history with no prompt/cache effect.
+						// The cut is unconditional on the wire (see `buildSessionContext`),
+						// so a compaction the active model cannot replay still hides its
+						// prefix from the prompt.
+						keepBoundaryId: latestCompaction?.firstKeptEntryId,
+					});
+					const regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
+					if (regions.length === 0) {
+						return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+					}
 
-		const artifactId = await this.#saveShakeArtifact(regions);
-		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
+					const artifactId = await this.#saveShakeArtifact(regions);
+					const replacements = regions.map((region, index) =>
+						this.#shakeElidePlaceholder(region, index, artifactId),
+					);
 
-		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
-		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
-		let anchorIndex = -1;
-		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
-			const entry = branchEntries[index];
-			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
-			anchorIndex = index;
-			break;
-		}
-		const entryIndexes = new Map(branchEntries.map((entry, index) => [entry, index]));
+					const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+					const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+					let anchorIndex = -1;
+					for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+						const entry = branchEntries[index];
+						if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+						anchorIndex = index;
+						break;
+					}
+					const entryIndexes = new Map(branchEntries.map((entry, index) => [entry, index]));
 
-		let toolResultsDropped = 0;
-		let blocksDropped = 0;
-		let originalTokens = 0;
-		let replacementTokens = 0;
-		let anchoredTokensRemoved = 0;
-		const items = regions.map((region, index) => {
-			if (region.kind === "toolResult") toolResultsDropped++;
-			else blocksDropped++;
-			originalTokens += region.tokens;
-			const replacement = replacements[index];
-			const replacementTokenCount = replacement.length > 0 ? this.#tokenizer.countTokens(replacement) : 0;
-			replacementTokens += replacementTokenCount;
-			const entryIndex = entryIndexes.get(region.entry) ?? -1;
-			if (
-				entryIndex >= 0 &&
-				entryIndex < anchorIndex &&
-				(!hasRemoteReplacementHistory || entryIndex > compactionIndex)
-			) {
-				anchoredTokensRemoved += Math.max(0, region.tokens - replacementTokenCount);
-			}
-			return { region, replacement };
-		});
+					let toolResultsDropped = 0;
+					let blocksDropped = 0;
+					let originalTokens = 0;
+					let replacementTokens = 0;
+					let anchoredTokensRemoved = 0;
+					const items = regions.map((region, index) => {
+						if (region.kind === "toolResult") toolResultsDropped++;
+						else blocksDropped++;
+						originalTokens += region.tokens;
+						const replacement = replacements[index];
+						const replacementTokenCount = replacement.length > 0 ? this.#tokenizer.countTokens(replacement) : 0;
+						replacementTokens += replacementTokenCount;
+						const entryIndex = entryIndexes.get(region.entry) ?? -1;
+						if (
+							entryIndex >= 0 &&
+							entryIndex < anchorIndex &&
+							(!hasRemoteReplacementHistory || entryIndex > compactionIndex)
+						) {
+							anchoredTokensRemoved += Math.max(0, region.tokens - replacementTokenCount);
+						}
+						return { region, replacement };
+					});
 
-		applyShakeRegions(items);
-		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
+					applyShakeRegions(items);
+					this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 
-		await this.#host.sessionManager.rewriteEntries();
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("shake");
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+					await this.#host.sessionManager.rewriteEntries();
+					const sessionContext = this.#host.buildDisplaySessionContext();
+					this.#host.agent.replaceMessages(sessionContext.messages);
+					this.#host.resetAdvisorRuntimes("shake");
+					this.#host.closeCodexProviderSessionsForHistoryRewrite();
 
-		return {
-			mode,
-			toolResultsDropped,
-			blocksDropped,
-			tokensFreed: Math.max(0, originalTokens - replacementTokens),
-			artifactId,
-		};
+					return {
+						mode,
+						toolResultsDropped,
+						blocksDropped,
+						tokensFreed: Math.max(0, originalTokens - replacementTokens),
+						artifactId,
+					};
+				},
+				{ signal: opts.signal },
+			);
+		return await prepare();
 	}
 
 	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {
@@ -803,6 +1619,17 @@ export class SessionMaintenance {
 					}
 					continue;
 				}
+				if (method === "structured") {
+					// Structured is a non-focus, preservation-first method: it never
+					// accepts focus instructions (the protocol has no place for them)
+					// and requires the recovery tool on the real tool list.
+					if (!customInstructions && !options?.internalGuidance && this.#structuredRecoveryToolAvailable()) {
+						selectedMethod = method;
+						selectedMethodIndex = index;
+						break;
+					}
+					continue;
+				}
 				if (method === "soft") {
 					selectedMethod = method;
 					selectedMethodIndex = index;
@@ -811,6 +1638,93 @@ export class SessionMaintenance {
 			}
 			if (!selectedMethod) {
 				throw new Error("No configured compaction method can run manually.");
+			}
+
+			// Structured owns its own preparation and commit: it never consumes
+			// the checkpoint engine's summary or focus instructions. Extensions
+			// that intercept compaction run first with exact veto semantics
+			// (cancel → cancelled, replacement → committed as a normal entry);
+			// an approval proceeds with the structured patch. A rejected or
+			// failed patch advances to the next configured method through the
+			// shared catch below (methodAttempted enables that fallback).
+			if (selectedMethod === "structured") {
+				methodAttempted = true;
+				const hook = await this.#structuredBeforeCompactHook(
+					this.#host.sessionManager.getBranch(),
+					customInstructions,
+					compactionAbortController.signal,
+				);
+				if (hook.kind === "cancel") throw new CompactionCancelledError();
+				if (hook.kind === "replaced") {
+					await this.#commitCompactionEntry({
+						summary: hook.summary,
+						shortSummary: hook.shortSummary,
+						firstKeptEntryId: hook.firstKeptEntryId,
+						tokensBefore: hook.tokensBefore,
+						details: hook.details,
+						fromExtension: true,
+						preserveData: hook.preserveData,
+						method: undefined,
+						codexCompaction: undefined,
+						advisorResetReason: "compact",
+					});
+					const replacedResult: CompactionResult = {
+						summary: hook.summary,
+						firstKeptEntryId: hook.firstKeptEntryId,
+						tokensBefore: hook.tokensBefore,
+						details: hook.details,
+						preserveData: hook.preserveData,
+					};
+					options?.onComplete?.(replacedResult);
+					return replacedResult;
+				}
+				let patch: StructuredCompactionPatch | undefined;
+				let removed = 0;
+				try {
+					patch = await this.#prepareStructuredPatch("manual", undefined, compactionAbortController.signal);
+					if (!patch) {
+						throw new Error("Structured compaction found no usable candidate (nothing recoverable to elide).");
+					}
+					if (!(await this.#commitManualStructured(patch, compactionAbortController.signal))) {
+						throw new StructuredPatchRejectedError();
+					}
+					// Commit facts stand: mark BEFORE the post-commit sync so a
+					// sync/rebuild failure can never advance to another method.
+					compactionCommitted = true;
+					removed = this.#recordStructuredRewrite(patch);
+					this.#syncAfterStructuredRewrite();
+				} catch (error) {
+					if (compactionAbortController.signal.aborted) {
+						throw new CompactionCancelledError(undefined, {
+							cause: compactionAbortController.signal.reason,
+						});
+					}
+					throw error;
+				}
+				if (compactionAbortController.signal.aborted) {
+					// Applied and synchronized, then cancelled: the commit facts
+					// stand, but the caller sees a normal cancelled outcome —
+					// never a success result.
+					throw new CompactionCancelledError(undefined, {
+						cause: compactionAbortController.signal.reason,
+					});
+				}
+				// The manual result is normal summary display data, not a
+				// checkpoint entry: firstKeptEntryId points at the first
+				// visible entry (the latest compaction boundary when one exists)
+				// and tokensBefore is the real pre-commit request total — no
+				// placeholder values.
+				const branchEntries = this.#host.sessionManager.getBranch();
+				const latestCompaction = getLatestCompactionEntry(branchEntries);
+				const displayFirstKeptEntryId = latestCompaction?.firstKeptEntryId ?? branchEntries[0]?.id ?? "";
+				const compactionResult: CompactionResult = {
+					summary: `Structured compaction: elided ${patch.rewrite.replacements.length} message${patch.rewrite.replacements.length === 1 ? "" : "s"}, freeing ~${removed.toLocaleString("en-US")} token${removed === 1 ? "" : "s"}; original content recoverable via read_omitted_content.`,
+					firstKeptEntryId: displayFirstKeptEntryId,
+					tokensBefore: this.#structuredCurrentTokens("manual"),
+					details: { kind: "structured" },
+				};
+				options?.onComplete?.(compactionResult);
+				return compactionResult;
 			}
 
 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
@@ -1255,13 +2169,13 @@ export class SessionMaintenance {
 		}
 		const model = this.#model;
 		if (!model) return;
-		const method = resolveSpeculationMethod(model, settings);
+		const method = resolveSpeculationMethod(model, settings, this.#structuredRecoveryToolAvailable());
 		if (!method) return;
 		this.#startSpeculationRun(contextTokens, method);
 	}
 
 	/** Install and launch one background speculation run for `method`. */
-	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
+	#startSpeculationRun(contextTokens: number, method: "structured" | "remote" | "handoff" | "soft"): void {
 		const controller = new AbortController();
 		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
 		this.#speculation = run;
@@ -1300,7 +2214,7 @@ export class SessionMaintenance {
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
 		const model = this.#model;
 		if (!model) return false;
-		const method = resolveSpeculationMethod(model, settings);
+		const method = resolveSpeculationMethod(model, settings, this.#structuredRecoveryToolAvailable());
 		if (!method) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const graceCapTokens = Math.min(
@@ -1320,7 +2234,7 @@ export class SessionMaintenance {
 	/** Produce and arm one speculative compaction result off a branch snapshot. */
 	async #runSpeculation(
 		run: SpeculationRun,
-		method: "remote" | "handoff" | "soft",
+		method: "structured" | "remote" | "handoff" | "soft",
 		contextTokens: number,
 	): Promise<void> {
 		const clear = () => {
@@ -1328,89 +2242,111 @@ export class SessionMaintenance {
 		};
 		const model = this.#model;
 		if (!model) return clear();
-		const settings = this.#host.settings.getGroup("compaction");
-		const effectiveSettings = resolveMethodSettings(settings, method);
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
-		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
-		if (!preparation) return clear();
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
-		if (method === "handoff") {
-			const generated = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
-				autoTriggered: true,
-				signal,
-			});
-			if (!generated) return clear();
-			const { summary, details } = handoffSummaryFromDocument(generated.document, preparation);
+		if (method === "structured") {
+			// Structured speculation never enters the checkpoint engine: it
+			// prepares an in-place rewrite off the branch snapshot
+			// (deterministic elision plus optional per-entry summaries) against
+			// the threshold recovery-band target; the real pass commits it
+			// through the serialized owner with its own live budget recheck.
+			const patch = await this.#prepareStructuredPatch("threshold", undefined, signal);
+			if (!patch) return clear();
 			armed = {
-				result: {
-					summary,
-					shortSummary: undefined,
-					firstKeptEntryId: preparation.firstKeptEntryId,
-					tokensBefore: preparation.tokensBefore,
-					details,
-				},
-				action: "handoff",
+				kind: "structured",
+				patch,
 				method,
 				snapshotLeafId,
 				contextTokensAtStart: contextTokens,
 			};
 		} else {
-			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined);
-			// No hookCompaction is passed above, so "fromHook" is unreachable;
-			// the guard just narrows the union.
-			if (compactionPrep.kind === "fromHook") return clear();
-			const candidates = this.#getCompactionModelCandidates(
-				this.#host.modelRegistry.getAvailable(),
-				method === "remote" && !effectiveSettings.remoteEndpoint
-					? candidate =>
-							candidate.provider === model.provider &&
-							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
-					: undefined,
-			);
-			if (candidates.length === 0) return clear();
-			const codexCompaction = createCodexCompactionContext({
-				trigger: "auto",
-				reason: "context_limit",
-				phase: "standalone_turn",
-			});
-			const result = await this.#compactWithFallbackModel(
-				preparation,
-				undefined,
-				signal,
-				{
-					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
-					extraContext: compactionPrep.hookContext,
-					remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+			// Engine methods only — method is narrowed away from "structured"
+			// here, so resolveMethodSettings can never see it (type-enforced).
+			const settings = this.#host.settings.getGroup("compaction");
+			const effectiveSettings = resolveMethodSettings(settings, method);
+			const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
+			if (!preparation) return clear();
+			if (method === "handoff") {
+				const generated = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
+					autoTriggered: true,
+					signal,
+				});
+				if (!generated) return clear();
+				const { summary, details } = handoffSummaryFromDocument(generated.document, preparation);
+				armed = {
+					kind: "compaction",
+					result: {
+						summary,
+						shortSummary: undefined,
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details,
+					},
+					action: "handoff",
+					method,
+					snapshotLeafId,
+					contextTokensAtStart: contextTokens,
+				};
+			} else {
+				const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined);
+				// No hookCompaction is passed above, so "fromHook" is unreachable;
+				// the guard just narrows the union.
+				if (compactionPrep.kind === "fromHook") return clear();
+				const candidates = this.#getCompactionModelCandidates(
+					this.#host.modelRegistry.getAvailable(),
+					method === "remote" && !effectiveSettings.remoteEndpoint
+						? candidate =>
+								candidate.provider === model.provider &&
+								shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+						: undefined,
+				);
+				if (candidates.length === 0) return clear();
+				const codexCompaction = createCodexCompactionContext({
+					trigger: "auto",
+					reason: "context_limit",
+					phase: "standalone_turn",
+				});
+				const result = await this.#compactWithFallbackModel(
+					preparation,
+					undefined,
+					signal,
+					{
+						promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
+						extraContext: compactionPrep.hookContext,
+						remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+						codexCompaction,
+						// Isolate from the live turn: remote compaction transports
+						// key sticky provider sessions by sessionId, and a
+						// speculation overlapping the live stream must never
+						// interleave with it.
+						sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
+						preferWebsockets: false,
+					},
+					candidates,
+				);
+				armed = {
+					kind: "compaction",
+					result: {
+						...result,
+						preserveData: mergeLlmCompactionPreserveData(compactionPrep.preserveData, result.preserveData),
+					},
+					action: method === "remote" ? "remote" : "context-full",
+					method,
 					codexCompaction,
-					// Isolate from the live turn: remote compaction transports key
-					// sticky provider sessions by sessionId, and a speculation
-					// overlapping the live stream must never interleave with it.
-					sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
-					preferWebsockets: false,
-				},
-				candidates,
-			);
-			armed = {
-				result: {
-					...result,
-					preserveData: mergeLlmCompactionPreserveData(compactionPrep.preserveData, result.preserveData),
-				},
-				action: method === "remote" ? "remote" : "context-full",
-				method,
-				codexCompaction,
-				snapshotLeafId,
-				contextTokensAtStart: contextTokens,
-			};
+					snapshotLeafId,
+					contextTokensAtStart: contextTokens,
+				};
+			}
 		}
 		if (signal.aborted || this.#speculation !== run) return;
 		run.armed = armed;
 		logger.debug("Speculative compaction armed", {
 			method,
 			snapshotLeafId,
-			tokensBefore: armed.result.tokensBefore,
+			kind: armed.kind,
 		});
 	}
 
@@ -1423,6 +2359,15 @@ export class SessionMaintenance {
 	#armedSpeculationValid(armed: ArmedSpeculation): boolean {
 		const model = this.#model;
 		if (!model) return false;
+		if (armed.kind === "structured") {
+			// A structured patch is committable only while the recovery tool is
+			// still on the real tool list AND the prepare-time model/budget
+			// snapshot still matches (a model switch or reconfiguration while
+			// the patch waited invalidates it). The full prefix CAS and live
+			// budget recheck run synchronously at commit.
+			const snapshot = this.#structuredPatchContext.get(armed.patch);
+			return this.#structuredRecoveryToolAvailable() && !!snapshot && this.#structuredSnapshotStillCurrent(snapshot);
+		}
 		const settings = this.#host.settings.getGroup("compaction");
 		if (
 			armed.result.preserveData &&
@@ -1457,6 +2402,66 @@ export class SessionMaintenance {
 		if (settings.asyncEnabled === false) return undefined;
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return undefined;
 		return this.#armedSpeculationValid(run.armed) ? run.armed : undefined;
+	}
+	/**
+	 * Run the `session_before_compact` extension hook for a structured pass
+	 * against the branch (read-only engine preparation; never a fabricated
+	 * checkpoint summary). Extensions that intercept compaction keep exact
+	 * veto semantics: `cancel` TERMINATES the pass (never silently diverting it
+	 * to another method), a returned replacement compaction commits via the
+	 * existing hook machinery, and an approval (or no handlers) lets the
+	 * structured pass proceed.
+	 */
+	async #structuredBeforeCompactHook(
+		pathEntries: SessionEntry[],
+		customInstructions: string | undefined,
+		signal: AbortSignal,
+	): Promise<
+		| { kind: "cancel" }
+		| {
+				kind: "replaced";
+				summary: string;
+				shortSummary: string | undefined;
+				firstKeptEntryId: string;
+				tokensBefore: number;
+				details: unknown;
+				preserveData: Record<string, unknown> | undefined;
+		  }
+		| { kind: "continue" }
+	> {
+		if (!this.#host.extensionRunner?.hasHandlers("session_before_compact")) return { kind: "continue" };
+		const model = this.#model;
+		if (!model) return { kind: "continue" };
+		const preparation = prepareCompaction(
+			pathEntries,
+			resolveMethodSettings(this.#host.settings.getGroup("compaction"), "soft"),
+			model,
+			this.#tokenizer,
+		);
+		if (!preparation) return { kind: "continue" };
+		const result = (await this.#host.extensionRunner.emit({
+			type: "session_before_compact",
+			preparation,
+			branchEntries: pathEntries,
+			customInstructions,
+			signal,
+		})) as SessionBeforeCompactResult | undefined;
+		if (result?.cancel) return { kind: "cancel" };
+		if (result?.compaction) {
+			const prep = await this.#prepareCompactionFromHooks(preparation, result.compaction);
+			if (prep.kind === "fromHook") {
+				return {
+					kind: "replaced",
+					summary: prep.summary,
+					shortSummary: prep.shortSummary,
+					firstKeptEntryId: prep.firstKeptEntryId,
+					tokensBefore: prep.tokensBefore,
+					details: prep.details,
+					preserveData: prep.preserveData,
+				};
+			}
+		}
+		return { kind: "continue" };
 	}
 
 	/**
@@ -1952,8 +2957,10 @@ export class SessionMaintenance {
 
 		// Stale-result pass runs every turn, before any threshold gating: it is
 		// cheap (bails when no candidate) and independent of the compaction
-		// setting.
-		const supersedeResult = await this.#pruneStaleToolResults();
+		// setting. When `structured` owns the first omission, the per-turn pass
+		// must NOT destructively overwrite tool results before structured sees
+		// them — recovery-tool results are protected at every entrypoint.
+		const supersedeResult = this.#structuredOwnsFirstOmission() ? undefined : await this.#pruneStaleToolResults();
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || !hasConfiguredCompactionMethod(compactionSettings))
@@ -1962,7 +2969,9 @@ export class SessionMaintenance {
 		// Case 4: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
-		const pruneResult = await this.#pruneToolOutputs();
+		// Same first-omission gate as the stale pass: structured performs the
+		// first omission itself and preserves the original content.
+		const pruneResult = this.#structuredOwnsFirstOmission() ? undefined : await this.#pruneToolOutputs();
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,
@@ -2887,7 +3896,9 @@ export class SessionMaintenance {
 						? this.#model?.input.includes("image") === true
 						: candidate === "handoff"
 							? reason !== "overflow"
-							: true;
+							: candidate === "structured"
+								? this.#structuredRecoveryToolAvailable()
+								: true;
 			if (!available) continue;
 			method = candidate;
 			methodIndex = index;
@@ -2902,9 +3913,8 @@ export class SessionMaintenance {
 		// Snapcompact is local and instant, so an armed LLM summary (possible
 		// only when settings/model changed since arming) never overrides it.
 		const claimedSpec = this.#claimArmedSpeculation();
-		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
+		const armedSpec = method === "snapcompact" || method === "shake" ? undefined : claimedSpec;
 
-		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;
 		// Shake runs inline (cheap, no remote LLM). If it cannot recover enough
 		// context, resume from the next configured method instead of hardcoding a
@@ -2957,15 +3967,18 @@ export class SessionMaintenance {
 			};
 		}
 
-		const action: "context-full" | "handoff" | "snapcompact" | "remote" =
-			armedSpec?.action ??
-			(method === "remote"
-				? "remote"
-				: method === "snapcompact"
-					? "snapcompact"
-					: method === "handoff"
-						? "handoff"
-						: "context-full");
+		const action: "context-full" | "handoff" | "snapcompact" | "remote" | "structured" =
+			method === "structured"
+				? "structured"
+				: armedSpec?.kind === "compaction"
+					? armedSpec.action
+					: method === "remote"
+						? "remote"
+						: method === "snapcompact"
+							? "snapcompact"
+							: method === "handoff"
+								? "handoff"
+								: "context-full";
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
 		const autoCompactionAbortController = new AbortController();
@@ -2980,31 +3993,136 @@ export class SessionMaintenance {
 			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
 			const startEvent = { type: "auto_compaction_start" as const, reason, action };
 			await this.#emitLifecycleEvent(startEvent, false);
-			if (armedSpec) {
-				// A background speculation already produced this compaction's
-				// summary; splice it in instead of paying for a blocking
-				// summarization. tokensBefore reflects the live trigger size when
-				// known — the armed value measured the smaller prefix at compute
-				// time.
-				logger.debug("Applying armed speculative compaction", {
-					method: armedSpec.method,
-					action,
+			if (method === "structured") {
+				// A stale engine summary armed while structured leads (or replaced
+				// settings) is discarded with no rewrite.
+				if (armedSpec?.kind === "compaction") {
+					logger.debug("Discarding armed speculative compaction; pass resolves to structured", {
+						method: armedSpec.method,
+					});
+				}
+				const structuredArm = armedSpec?.kind === "structured" ? armedSpec : undefined;
+				if (structuredArm) {
+					// A background speculation already prepared this in-place
+					// rewrite; commit it without re-summarizing.
+					logger.debug("Applying armed structured speculation", {
+						method: structuredArm.method,
+						action,
+						reason,
+					});
+					const outcome = await this.#commitStructuredAutoResult({
+						patch: structuredArm.patch,
+						reason,
+						willRetry,
+						generation,
+						shouldAutoContinue,
+						terminalTextAnswer,
+						suppressContinuation,
+						fallbackFromShake,
+						detachPostCommit: options.detachPostCommit === true,
+						autoCompactionSignal,
+						onCommitted: () => {
+							compactionCommitted = true;
+						},
+					});
+					if (outcome === "rejected") {
+						await this.#emitLifecycleEvent(
+							{
+								type: "auto_compaction_end",
+								action,
+								result: undefined,
+								aborted: false,
+								willRetry: false,
+								errorMessage:
+									"Armed structured patch rejected (stale or under budget); trying the next preferred compaction method.",
+							},
+							options.detachPostCommit === true,
+						);
+						return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+							...options,
+							methodIndex: methodIndex + 1,
+						});
+					}
+					return outcome;
+				}
+				// Extensions that intercept compaction keep exact veto semantics:
+				// the hook runs against the branch and may cancel (terminating
+				// the pass — never silently diverting it) or replace the
+				// compaction entirely.
+				const hook = await this.#structuredBeforeCompactHook(
+					this.#host.sessionManager.getBranch(),
+					undefined,
+					autoCompactionSignal,
+				);
+				if (hook.kind === "cancel") {
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						},
+						options.detachPostCommit === true,
+					);
+					return COMPACTION_CHECK_NONE;
+				}
+				if (hook.kind === "replaced") {
+					return await this.#commitAutoCompactionResult({
+						summary: hook.summary,
+						shortSummary: hook.shortSummary,
+						firstKeptEntryId: hook.firstKeptEntryId,
+						tokensBefore: hook.tokensBefore,
+						details: hook.details,
+						preserveData: hook.preserveData,
+						fromExtension: true,
+						codexCompaction: undefined,
+						method: undefined,
+						action: "context-full",
+						reason,
+						willRetry,
+						generation,
+						shouldAutoContinue,
+						terminalTextAnswer,
+						suppressContinuation,
+						fallbackFromShake,
+						detachPostCommit: options.detachPostCommit === true,
+						autoCompactionSignal,
+						onCommitted: () => {
+							compactionCommitted = true;
+						},
+					});
+				}
+				// Real pass: prepare against the live reason budget and commit
+				// through the serialized owner. A stale/under-budget patch and an
+				// empty candidate set both advance to the next configured method
+				// with no history change.
+				const patch = await this.#prepareStructuredPatch(
 					reason,
-				});
-				return await this.#commitAutoCompactionResult({
-					summary: armedSpec.result.summary,
-					shortSummary: armedSpec.result.shortSummary,
-					firstKeptEntryId: armedSpec.result.firstKeptEntryId,
-					tokensBefore: options.triggerContextTokens ?? armedSpec.result.tokensBefore,
-					details: armedSpec.result.details,
-					preserveData: armedSpec.result.preserveData,
-					fromExtension: false,
-					codexCompaction: armedSpec.codexCompaction,
-					method: armedSpec.method,
-					providerReplayThroughEntryId: armedSpec.result.preserveData?.openaiRemoteCompaction
-						? armedSpec.snapshotLeafId
-						: undefined,
-					action,
+					options.triggerContextTokens,
+					autoCompactionSignal,
+				);
+				if (!patch) {
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: false,
+							willRetry: false,
+							skipped: true,
+							errorMessage:
+								"Structured compaction found no usable candidate; trying the next preferred compaction method.",
+						},
+						options.detachPostCommit === true,
+					);
+					return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+						...options,
+						methodIndex: methodIndex + 1,
+					});
+				}
+				const commitOutcome = await this.#commitStructuredAutoResult({
+					patch,
 					reason,
 					willRetry,
 					generation,
@@ -3018,7 +4136,78 @@ export class SessionMaintenance {
 						compactionCommitted = true;
 					},
 				});
+				if (commitOutcome === "rejected") {
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: false,
+							willRetry: false,
+							errorMessage:
+								"Structured patch rejected (stale or under budget); trying the next preferred compaction method.",
+						},
+						options.detachPostCommit === true,
+					);
+					return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+						...options,
+						methodIndex: methodIndex + 1,
+					});
+				}
+				return commitOutcome;
 			}
+			if (action === "structured") throw new Error("Structured compaction cannot use the checkpoint commit path");
+			if (armedSpec) {
+				// A background speculation already produced this compaction's
+				// summary; splice it in instead of paying for a blocking
+				// summarization. tokensBefore reflects the live trigger size when
+				// known — the armed value measured the smaller prefix at compute
+				// time. A structured arm resolved here is stale (a non-structured
+				// method now leads); discard it and continue with the selected
+				// method's own machinery.
+				if (armedSpec.kind === "structured") {
+					logger.debug("Discarding stale armed structured patch; pass resolves to a non-structured method", {
+						method,
+					});
+				} else {
+					logger.debug("Applying armed speculative compaction", {
+						method: armedSpec.method,
+						action,
+						reason,
+					});
+					return await this.#commitAutoCompactionResult({
+						summary: armedSpec.result.summary,
+						shortSummary: armedSpec.result.shortSummary,
+						firstKeptEntryId: armedSpec.result.firstKeptEntryId,
+						tokensBefore: options.triggerContextTokens ?? armedSpec.result.tokensBefore,
+						details: armedSpec.result.details,
+						preserveData: armedSpec.result.preserveData,
+						fromExtension: false,
+						codexCompaction: armedSpec.codexCompaction,
+						method: armedSpec.method,
+						providerReplayThroughEntryId: armedSpec.result.preserveData?.openaiRemoteCompaction
+							? armedSpec.snapshotLeafId
+							: undefined,
+						action,
+						reason,
+						willRetry,
+						generation,
+						shouldAutoContinue,
+						terminalTextAnswer,
+						suppressContinuation,
+						fallbackFromShake,
+						detachPostCommit: options.detachPostCommit === true,
+						autoCompactionSignal,
+						onCommitted: () => {
+							compactionCommitted = true;
+						},
+					});
+				}
+			}
+			// Structured never reaches the checkpoint engine; method is narrowed
+			// to an engine method here, so resolveMethodSettings can never see
+			// "structured" (type-enforced by EngineCompactionMethod).
+			const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 
 			if (!this.#model) {
 				await this.#emitLifecycleEvent(
@@ -3138,7 +4327,9 @@ export class SessionMaintenance {
 						const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 						if (stampEntry) {
 							stampEntry.warning = deadEndWarning;
-							await this.#host.sessionManager.rewriteEntries();
+							// The stamp mutates a live entry and publishes; serialize it
+							// behind any pending publish/repair like every rewrite.
+							await this.#host.sessionManager.runExclusive(() => this.#host.sessionManager.rewriteEntries());
 						}
 					}
 					// A successful frame rescue rewrote history and activated a new
@@ -3625,6 +4816,14 @@ export class SessionMaintenance {
 				);
 				return COMPACTION_CHECK_NONE;
 			}
+			if (error instanceof SessionPersistenceIndeterminateError) {
+				// Latch retained and consistency pending: propagate the
+				// indeterminate persistence error to the existing stop path.
+				// Never emit a success/fallback end event and never advance to
+				// another method — only existing recovery may restore
+				// consistency before new attempts.
+				throw error;
+			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const contextErrorMessage =
 				reason === "overflow"
@@ -3824,11 +5023,13 @@ export class SessionMaintenance {
 			// stays explained even after the notice row scrolls away. Stamp
 			// the branch's LATEST compaction entry — a frame rescue may have
 			// superseded `savedCompactionEntry` with a rebuilt one, and the
-			// collapsed transcript badges only the active entry.
+			// collapsed transcript badges only the active entry. The stamp
+			// mutates a live entry and publishes; serialize it behind any
+			// pending publish/repair like every rewrite.
 			const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch()) ?? savedCompactionEntry;
 			if (stampEntry) {
 				stampEntry.warning = deadEndWarning;
-				await this.#host.sessionManager.rewriteEntries();
+				await this.#host.sessionManager.runExclusive(() => this.#host.sessionManager.rewriteEntries());
 			}
 		}
 

@@ -1939,15 +1939,17 @@ export class EventController {
 						? "Idle "
 						: "";
 		const actionLabel =
-			event.action === "remote"
-				? "Auto server compaction"
-				: event.action === "handoff"
-					? "Auto-handoff"
-					: event.action === "shake"
-						? "Auto-shake"
-						: event.action === "snapcompact"
-							? "Auto-snapcompact"
-							: "Auto context-full maintenance";
+			event.action === "structured"
+				? "Auto-structured compaction"
+				: event.action === "remote"
+					? "Auto server compaction"
+					: event.action === "handoff"
+						? "Auto-handoff"
+						: event.action === "shake"
+							? "Auto-shake"
+							: event.action === "snapcompact"
+								? "Auto-snapcompact"
+								: "Auto context-full maintenance";
 		this.ctx.autoCompactionLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
@@ -1972,20 +1974,23 @@ export class EventController {
 		const isRemoteAction = event.action === "remote";
 		const isShakeAction = event.action === "shake";
 		const isSnapcompactAction = event.action === "snapcompact";
+		const isStructuredAction = event.action === "structured";
 		if (event.aborted) {
 			this.ctx.showStatus(
-				isHandoffAction
-					? "Auto-handoff cancelled"
-					: isRemoteAction
-						? "Auto server compaction cancelled"
-						: isShakeAction
-							? "Auto-shake cancelled"
-							: isSnapcompactAction
-								? "Auto-snapcompact cancelled"
-								: "Auto context-full maintenance cancelled",
+				isStructuredAction
+					? "Auto-structured compaction cancelled"
+					: isHandoffAction
+						? "Auto-handoff cancelled"
+						: isRemoteAction
+							? "Auto server compaction cancelled"
+							: isShakeAction
+								? "Auto-shake cancelled"
+								: isSnapcompactAction
+									? "Auto-snapcompact cancelled"
+									: "Auto context-full maintenance cancelled",
 			);
-		} else if (isShakeAction) {
-			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
+		} else if (isShakeAction || isStructuredAction) {
+			// In-place methods produce no checkpoint CompactionResult; rebuild on success.
 			// The fallback path (`errorMessage` set, `skipped` false) means shake reclaimed
 			// some tokens before deciding the threshold still wasn't cleared — rebuild so
 			// the chat reflects the dropped regions even though a context-full pass follows.
@@ -2001,7 +2006,7 @@ export class EventController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
-				this.ctx.showStatus("Auto-shake completed");
+				this.ctx.showStatus(isStructuredAction ? "Auto-structured compaction completed" : "Auto-shake completed");
 			}
 		} else if (event.result) {
 			this.ctx.lastAssistantUsage = undefined;

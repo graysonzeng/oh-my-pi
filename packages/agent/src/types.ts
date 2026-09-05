@@ -576,6 +576,41 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined> | AfterToolCallResult | undefined;
 	/**
+	 * Serialized final admission for tool results, invoked on the existing
+	 * tool-result emission path once per accepted result — after tool execution
+	 * and the `afterToolCall` hook, but before the result joins the
+	 * accepted-but-not-yet-merged batch and before it is emitted into the
+	 * stream. Both ordered and unordered writeback converge here, so a serial
+	 * check counts the actual next provider request: current context, results
+	 * already accepted in this pending batch, and this candidate.
+	 *
+	 * May return a replacement {@link AgentToolResult} — e.g. a recovery page
+	 * shortened at a UTF-8 boundary with the visible continuation cursor
+	 * regenerated from the bytes actually delivered, or an image denied with a
+	 * bounded description that retains the undelivered position. `undefined`
+	 * accepts the executed result unchanged. Regeneration must never advance
+	 * past bytes or images that were not actually delivered, and must never
+	 * falsify an EOF. The final admitted result (including any metadata
+	 * envelope) must itself fit; if even a bounded form cannot fit, return
+	 * {@link ADMIT_TOOL_RESULT_TERMINAL}: the loop stops the run before any
+	 * next provider request instead of dispatching an oversized request or
+	 * advancing the cursor, and the host's existing request-budget
+	 * recovery/stop path handles the over-budget request.
+	 *
+	 * Returning {@link ADMIT_TOOL_RESULT_TERMINAL} is the admission-specific
+	 * cannot-fit signal, distinct from an ordinary tool error, which follows
+	 * the normal tool-error result convention. A non-terminal throw surfaces
+	 * as a tool-error result and does not abort the rest of the batch.
+	 */
+	admitToolResult?: (
+		admission: ToolResultAdmission,
+		signal?: AbortSignal,
+	) =>
+		| Promise<AgentToolResult | typeof ADMIT_TOOL_RESULT_TERMINAL | undefined>
+		| AgentToolResult
+		| typeof ADMIT_TOOL_RESULT_TERMINAL
+		| undefined;
+	/**
 	 * Opt-in OpenTelemetry instrumentation. Passing `{}` enables the loop's
 	 * GenAI-semantic-convention spans (`invoke_agent`, `chat`, `execute_tool`)
 	 * using the global tracer provider. Leaving this field undefined disables
@@ -681,6 +716,39 @@ export interface AfterToolCallContext {
 	/** Current agent context at the time the tool call is finalized. */
 	context: AgentContext;
 }
+
+/**
+ * Context passed to the loop's serialized tool-result admission
+ * ({@link AgentLoopConfig.admitToolResult}).
+ */
+export interface ToolResultAdmission {
+	/** The tool call whose result is being admitted. */
+	toolCall: { id: string; name: string };
+	/** The executed tool result before any admission overrides are applied. */
+	result: AgentToolResult<any>;
+	/** Whether the executed tool result is currently treated as an error. */
+	isError: boolean;
+	/** Current agent context at the time of emission (batch results not yet merged). */
+	context: AgentContext;
+	/**
+	 * Tool results already accepted in this pending batch but not yet merged
+	 * into `context.messages`. Ordered and unordered writeback both feed this
+	 * array, so a serial admission here counts the actual next provider request.
+	 */
+	pendingBatch: readonly ToolResultMessage[];
+}
+
+/**
+ * Terminal outcome of {@link AgentLoopConfig.admitToolResult}: the pending
+ * recovery result cannot fit the next provider request in ANY emitted form
+ * (not even a metadata-only same-cursor page). The loop must not dispatch the
+ * next provider request and must not emit the un-fit candidate or a fabricated
+ * error in its place: it stops with the completed batch persisted, and the
+ * host's existing request-budget recovery/stop path takes over. Returning this
+ * sentinel is the admission-specific cannot-fit signal — distinct from an
+ * ordinary tool error, which follows the normal tool-error result convention.
+ */
+export const ADMIT_TOOL_RESULT_TERMINAL: unique symbol = Symbol("pi-agent.admit-tool-result-terminal");
 
 /**
  * Extensible interface for custom app messages.

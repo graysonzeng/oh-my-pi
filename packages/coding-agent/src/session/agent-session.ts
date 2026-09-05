@@ -21,6 +21,7 @@ import { isPromise } from "node:util/types";
 
 import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import {
+	ADMIT_TOOL_RESULT_TERMINAL,
 	type AfterToolCallContext,
 	type AfterToolCallResult,
 	type Agent,
@@ -43,6 +44,7 @@ import {
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
 	type ToolChoiceDirective,
+	type ToolResultAdmission,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
@@ -50,6 +52,8 @@ import {
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
 	generateBranchSummary,
+	resolveBudgetReserveTokens,
+	type SessionEntry,
 	type ShakeConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
@@ -78,6 +82,10 @@ import type {
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	isOpenAICompletionsVisionSupported,
+	normalizeAnthropicImageMediaType,
+} from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -98,6 +106,7 @@ import {
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
+import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { countRecentToolResultErrors } from "../auto-thinking/classifier";
@@ -397,6 +406,14 @@ import {
 	USER_INTERRUPT_LABEL,
 } from "./messages";
 import { ModelControls, type ModelControlsHost } from "./model-controls";
+import {
+	cutUtf8Prefix,
+	formatOmittedContentEnvelope,
+	isOmittedContentEnvelopeBlock,
+	OMITTED_CONTENT_META_PREFIX,
+	OMITTED_CONTENT_META_SUFFIX,
+	utf8ByteLength,
+} from "./omitted-content";
 import { isPrewalkPlanNudge, PrewalkCoordinator, type PrewalkCoordinatorHost } from "./prewalk";
 import {
 	isAdvisorCard,
@@ -547,6 +564,287 @@ function cloneMessageEndNotification(message: AgentMessage): AgentMessage {
 
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 
+/** Wire name of the structured-compaction recovery tool admitted by the loop. */
+export const READ_OMITTED_CONTENT_TOOL_NAME = "read_omitted_content";
+
+/**
+ * Structured metadata carried on `read_omitted_content` results (tool-side
+ * authoritative continuation state; the loop re-derives it after shortening).
+ */
+export interface RecoveryPageDetails {
+	kind: "text" | "image" | "description" | "deferred";
+	/** Index of the original content block being recovered. */
+	block: number;
+	/** UTF-8 byte offset within that block where the page starts. */
+	offset: number;
+	/** UTF-8 byte length of the original text page (text pages only). */
+	originalBytes?: number;
+	/** Byte size of the original image (image pages only). */
+	imageBytes?: number;
+	/** True only when the last original data page has been fully delivered. */
+	eof: boolean;
+}
+
+/**
+ * Parse the model-visible continuation envelope of a recovery page. The
+ * envelope is the explicitly delimited last text block
+ * (`<omitted_content_meta>{"next":...}</omitted_content_meta>`). Returns the
+ * next cursor, `"eof"`, or `undefined` when no valid envelope is present.
+ */
+export function parseRecoveryEnvelope(
+	content: readonly (TextContent | ImageContent)[],
+): { block: number; offset: number } | "eof" | undefined {
+	// The tool appends exactly one metadata envelope as the LAST block; the
+	// original data may itself look like an envelope, so only the final block
+	// is ever parsed as the visible cursor.
+	const last = content[content.length - 1];
+	if (last?.type !== "text" || !isOmittedContentEnvelopeBlock(last)) return undefined;
+	const text = last.text.slice(
+		OMITTED_CONTENT_META_PREFIX.length,
+		last.text.length - OMITTED_CONTENT_META_SUFFIX.length,
+	);
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(parsed) || Object.keys(parsed).length !== 1 || !("next" in parsed)) return undefined;
+	const next = (parsed as { next?: unknown }).next;
+	if (next === null) return "eof";
+	if (isRecord(next) && typeof next.block === "number" && typeof next.offset === "number") {
+		return { block: next.block, offset: next.offset };
+	}
+	return undefined;
+}
+
+/**
+ * Read the structured recall metadata mirrored on a recovery result's details.
+ * Absent when the result is not a `read_omitted_content` page.
+ */
+export function recallDetailsOf(result: AgentToolResult): RecoveryPageDetails | undefined {
+	const details = result.details;
+	if (!isRecord(details) || !isRecord(details.recall)) return undefined;
+	const recall = details.recall;
+	const kind = recall.kind;
+	if (kind !== "text" && kind !== "image" && kind !== "description" && kind !== "deferred") return undefined;
+	if (typeof recall.block !== "number" || typeof recall.offset !== "number") return undefined;
+	return {
+		kind,
+		block: recall.block,
+		offset: recall.offset,
+		originalBytes: typeof recall.originalBytes === "number" ? recall.originalBytes : undefined,
+		imageBytes: typeof recall.imageBytes === "number" ? recall.imageBytes : undefined,
+		eof: recall.eof === true,
+	};
+}
+
+function trimOneCodePoint(text: string): string {
+	if (text.length === 0) return "";
+	let index = text.length - 1;
+	while (index > 0 && (text.charCodeAt(index) & 0xfc00) === 0xdc00) index--;
+	return text.slice(0, index);
+}
+
+function countImagesInContent(content: readonly { type: string }[]): number {
+	let count = 0;
+	for (const block of content) {
+		if (block.type === "image") count++;
+	}
+	return count;
+}
+
+function countImagesInMessage(message: AgentMessage): number {
+	if (typeof message !== "object" || message === null || !("content" in message)) return 0;
+	const content = message.content;
+	if (!Array.isArray(content)) return 0;
+	return countImagesInContent(content);
+}
+
+function countImagesInMessages(messages: readonly AgentMessage[]): number {
+	let count = 0;
+	for (const message of messages) count += countImagesInMessage(message);
+	return count;
+}
+
+function recoveryImagesSupported(model: Model, content: readonly (TextContent | ImageContent)[]): boolean {
+	if (!model.input.includes("image")) return false;
+	if (model.api === "openai-completions" && !isOpenAICompletionsVisionSupported(model as Model<"openai-completions">))
+		return false;
+	return (
+		model.api !== "anthropic-messages" ||
+		content.every(block => block.type !== "image" || normalizeAnthropicImageMediaType(block.mimeType) !== undefined)
+	);
+}
+
+function boundedImageDescription(image: ImageContent | undefined): string {
+	if (!image) return "[image omitted: provider image budget]";
+	const mime = image.mimeType.slice(0, 120) || "image";
+	const kilobytes = Math.max(1, Math.round((image.data.length * 3) / 4 / 1024));
+	return `[image omitted: provider image budget — ${mime}, ≈${kilobytes} KB; request with image:true when the budget allows]`;
+}
+
+/**
+ * Metadata-only recovery page: the visible continuation envelope with the
+ * cursor at the UNDELIVERED position (no original data delivered, no cursor
+ * advance). Used when the original page cannot fit but the envelope alone
+ * does. The `details.recall` mirrors the retained position (`kind: "deferred"`,
+ * same block/offset) so consumers never mistake it for delivered data.
+ */
+function metadataOnlyRecoveryPage(result: AgentToolResult, details: RecoveryPageDetails): AgentToolResult {
+	return {
+		...result,
+		content: [{ type: "text", text: formatOmittedContentEnvelope({ block: details.block, offset: details.offset }) }],
+		details: {
+			...(isRecord(result.details) ? result.details : {}),
+			recall: { ...details, kind: "deferred", eof: false },
+		},
+	};
+}
+
+/**
+ * Serialized final admission for a `read_omitted_content` result at the loop's
+ * tool-result emission point. Pure decision: given a counter for the candidate
+ * content and the remaining budget after the current context, the already
+ * accepted-but-not-yet-merged batch, and non-message tokens, returns a
+ * replacement result, `undefined` to accept the executed page unchanged, or
+ * {@link ADMIT_TOOL_RESULT_TERMINAL} when the page cannot fit ANY emitted form.
+ *
+ * Shortening regenerates the visible continuation cursor (and its details
+ * mirror) from the bytes actually delivered; a denied image retains the
+ * undelivered image position; EOF is never falsified. When even a
+ * metadata-only same-cursor page cannot fit, the run must stop before the
+ * next provider request (the host's existing request-budget recovery/stop
+ * path takes over) instead of emitting an un-fit candidate or a fabricated
+ * error.
+ */
+export function admitRecoveryToolResult(
+	result: AgentToolResult,
+	count: (content: readonly (TextContent | ImageContent)[]) => { tokens: number; images: number },
+	budget: { remainingTokens: number; remainingImages: number },
+): AgentToolResult | typeof ADMIT_TOOL_RESULT_TERMINAL | undefined {
+	const details = recallDetailsOf(result);
+	const fits = (content: readonly (TextContent | ImageContent)[]): boolean => {
+		const used = count(content);
+		return used.tokens <= budget.remainingTokens && used.images <= budget.remainingImages;
+	};
+	if (fits(result.content)) return undefined;
+	if (!details) {
+		// No cursor metadata to regenerate from (e.g. an error result): never
+		// emit an un-fit page — stop so the request-budget recovery path runs.
+		return ADMIT_TOOL_RESULT_TERMINAL;
+	}
+	if (details.kind === "deferred") {
+		// Even the existing metadata-only page cannot fit: stop.
+		return ADMIT_TOOL_RESULT_TERMINAL;
+	}
+
+	if (details.kind === "text") {
+		// Layout is [original data block, metadata envelope]; the envelope is
+		// always the LAST block, the original data the FIRST — original bytes may
+		// themselves look like an envelope, so positioning is by index only.
+		const envelopeIndex = result.content.length - 1;
+		if (result.content.length < 2 || result.content[0].type !== "text") {
+			return fallbackRecoveryPage(result, details, fits);
+		}
+		const dataText = (result.content[0] as TextContent).text;
+		const envelopeBlock = result.content[envelopeIndex] as TextContent;
+		// Binary search the longest byte prefix that still fits with the envelope.
+		const fullBytes = utf8ByteLength(dataText);
+		let best: string | undefined;
+		let lo = 1;
+		let hi = fullBytes;
+		while (lo <= hi) {
+			const mid = Math.floor((lo + hi) / 2);
+			const truncated = cutUtf8Prefix(dataText, mid);
+			// An empty prefix would deliver no data; it only counts as a fit
+			// when at least one code point is delivered.
+			if (truncated === "") {
+				lo = mid + 1;
+			} else if (!fits([{ type: "text", text: truncated }, envelopeBlock])) {
+				hi = mid - 1;
+			} else {
+				best = truncated;
+				lo = mid + 1;
+			}
+		}
+		if (best === undefined) return fallbackRecoveryPage(result, details, fits);
+		// Envelope size changes with the offset digits; trim until exact fit.
+		let pageText = best;
+		let envelope: TextContent = {
+			type: "text",
+			text: formatOmittedContentEnvelope({
+				block: details.block,
+				offset: details.offset + utf8ByteLength(pageText),
+			}),
+		};
+		let content: (TextContent | ImageContent)[] = [{ type: "text", text: pageText }, envelope];
+		while (!fits(content)) {
+			pageText = trimOneCodePoint(pageText);
+			if (pageText === "") return fallbackRecoveryPage(result, details, fits);
+			envelope = {
+				type: "text",
+				text: formatOmittedContentEnvelope({
+					block: details.block,
+					offset: details.offset + utf8ByteLength(pageText),
+				}),
+			};
+			content = [{ type: "text", text: pageText }, envelope];
+		}
+		// The page's start boundary and the ACTUALLY delivered bytes are the
+		// truthful cursor state; the visible envelope carries the continuation
+		// (start + delivered bytes, still inside this block — never EOF).
+		const deliveredBytes = utf8ByteLength(pageText);
+		return {
+			...result,
+			content,
+			details: {
+				...(isRecord(result.details) ? result.details : {}),
+				recall: { ...details, kind: "text", offset: details.offset, originalBytes: deliveredBytes, eof: false },
+			},
+		};
+	}
+
+	if (details.kind === "image") {
+		const image = result.content.find(block => block.type === "image");
+		// The denied page rebuilds the envelope at the SAME image position —
+		// the original envelope may point at EOF or the next block and must
+		// never advance past the undelivered image.
+		const envelope: TextContent = {
+			type: "text",
+			text: formatOmittedContentEnvelope({ block: details.block, offset: details.offset }),
+		};
+		const denied: AgentToolResult = {
+			...result,
+			content: [{ type: "text", text: boundedImageDescription(image) }, envelope],
+			details: {
+				...(isRecord(result.details) ? result.details : {}),
+				recall: { ...details, kind: "description", offset: details.offset, eof: false },
+			},
+		};
+		if (fits(denied.content)) return denied;
+		return fallbackRecoveryPage(result, details, fits);
+	}
+
+	// Already a bounded description (no original data) that cannot fit: keep
+	// the undelivered position via a metadata-only page, or stop.
+	return fallbackRecoveryPage(result, details, fits);
+}
+
+/**
+ * When a recovery page cannot fit in any data-bearing form, emit a
+ * metadata-only page that retains the undelivered position; if even that
+ * cannot fit, signal the loop to stop before the next provider request.
+ */
+function fallbackRecoveryPage(
+	result: AgentToolResult,
+	details: RecoveryPageDetails,
+	fits: (content: readonly (TextContent | ImageContent)[]) => boolean,
+): AgentToolResult | typeof ADMIT_TOOL_RESULT_TERMINAL {
+	const metadataOnly = metadataOnlyRecoveryPage(result, details);
+	if (fits(metadataOnly.content)) return metadataOnly;
+	return ADMIT_TOOL_RESULT_TERMINAL;
+}
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1534,7 +1832,9 @@ export class AgentSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
-			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
+			discardAssistantTurn: async message => {
+				await this.#recovery.discardAssistantTurn(message);
+			},
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
@@ -1575,6 +1875,11 @@ export class AgentSession {
 		// time so a block/revision lands before concurrency resolution,
 		// tool_execution_start, and the wrapper's approval gate.
 		this.agent.beforeToolCall = (ctx, signal) => this.#beforeToolCall(ctx, signal);
+		// Serialized final tool-result admission: enforces the recovery-page
+		// budget against the actual next provider request (current context plus
+		// results already accepted in this pending batch), regenerating the
+		// visible cursor when the page must be shortened or an image denied.
+		this.agent.admitToolResult = (admission, signal) => this.#admitToolResult(admission, signal);
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
@@ -3663,6 +3968,13 @@ export class AgentSession {
 	}
 
 	async #afterToolCall(ctx: AfterToolCallContext): Promise<AfterToolCallResult | undefined> {
+		if (ctx.toolCall.name === READ_OMITTED_CONTENT_TOOL_NAME) {
+			// Recovery pages have their own byte/next-request budget admission;
+			// the generic summary/truncate/TTSR optimizers must never rewrite
+			// the original data or the visible cursor envelope. The serialized
+			// final admission is the only allowed shortening point.
+			return undefined;
+		}
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -3680,6 +3992,74 @@ export class AgentSession {
 			optimized ? { ...ctx, result: { ...ctx.result, content: optimized.content ?? ctx.result.content } } : ctx,
 		);
 		return ttsr ?? optimized;
+	}
+
+	/**
+	 * Serialized final admission for `read_omitted_content` results at the
+	 * loop's emission point (ordered and unordered writeback converge on it).
+	 * Re-checks the page against the actual next provider request — current
+	 * context, results already accepted in this pending batch, and this
+	 * candidate including its visible cursor envelope — and defers to the
+	 * shared pure admission when the page must be shortened (UTF-8 boundary,
+	 * cursor regenerated from delivered bytes) or an image denied (bounded
+	 * description, same position). A page that can never fit degrades to the
+	 * minimal deferred form so no oversized request is dispatched and no
+	 * cursor is advanced; the host's existing request-budget recovery/stop
+	 * path handles the over-budget request.
+	 */
+	async #admitToolResult(
+		admission: ToolResultAdmission,
+		_signal?: AbortSignal,
+	): Promise<AgentToolResult | typeof ADMIT_TOOL_RESULT_TERMINAL | undefined> {
+		if (admission.toolCall.name !== READ_OMITTED_CONTENT_TOOL_NAME) return undefined;
+		const model = this.agent.state.model;
+		const contextWindow = model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return ADMIT_TOOL_RESULT_TERMINAL;
+		const result: AgentToolResult = this.isRecoveryToolAuthorized()
+			? admission.result
+			: {
+					content: [{ type: "text", text: "read_omitted_content: not authorized in the current tool set" }],
+					isError: true,
+				};
+		const tokenizer = this.agent.tokenizer;
+		let pendingTokens = 0;
+		let pendingImages = 0;
+		for (const message of admission.pendingBatch) {
+			pendingTokens += tokenizer.countMessage(message);
+			pendingImages += countImagesInMessage(message);
+		}
+		const compactionSettings = this.settings.getGroup("compaction");
+		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
+		// getContextUsage follows agent.state.messages, which may already hold
+		// emitted results that the loop has not merged into admission.context.
+		// Translate that anchor back to the loop context before adding the pending
+		// batch once; otherwise the second page pays for the first page twice.
+		const contextTokens = tokenizer.countMessages(admission.context.messages);
+		const liveTokens = tokenizer.countMessages(this.agent.state.messages);
+		const anchoredContextTokens = (this.getContextUsage({ contextWindow })?.tokens ?? 0) + contextTokens - liveTokens;
+		const baseTokens = Math.max(anchoredContextTokens, computeNonMessageTokens(this, tokenizer) + contextTokens);
+		const remainingTokens = fitBudget - baseTokens - pendingTokens;
+		// Images are counted against the provider image limit AND the model's
+		// actual input capability: a text-only model has no image budget at all.
+		const modelSupportsImages = recoveryImagesSupported(model, result.content);
+		const remainingImages = modelSupportsImages
+			? providerImageBudget(model.provider) - countImagesInMessages(admission.context.messages) - pendingImages
+			: 0;
+		const count = (content: readonly (TextContent | ImageContent)[]): { tokens: number; images: number } => {
+			const candidateMessage: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: admission.toolCall.id,
+				toolName: admission.toolCall.name,
+				content: content as ToolResultMessage["content"], // Tokenizer only reads this view.
+				isError: false,
+				timestamp: 0,
+			};
+			return { tokens: tokenizer.countMessage(candidateMessage), images: countImagesInContent(content) };
+		};
+		return (
+			admitRecoveryToolResult(result, count, { remainingTokens, remainingImages }) ??
+			(result === admission.result ? undefined : result)
+		);
 	}
 
 	async #optimizeOrdinaryToolResult(ctx: AfterToolCallContext): Promise<AfterToolCallResult | undefined> {
@@ -4738,72 +5118,77 @@ export class AgentSession {
 		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
 		const droppedCount = this.agent.state.messages.length;
 
-		// Tear down the same per-turn runtime state that newSession() resets across
-		// a conversation boundary, so work scheduled from the pre-reset turn cannot
-		// re-enter the cleared context:
-		//   - bump #promptGeneration + drain post-prompt tasks so an already-queued
-		//     post-prompt continuation (recovery can be scheduled after agent_end
-		//     while isStreaming is false) sees a stale generation and skips
-		//     (mirrors abort()).
-		//   - cancel this agent's async bash/task jobs so their completions can't
-		//     re-deliver stale tool output into the cleared conversation
-		//     (mirrors newSession()).
-		this.#promptGeneration++;
-		await this.#cancelPostPromptTasks();
-		this.#cancelOwnAsyncJobs();
+		// The whole reset — including the reset boundary append and the live
+		// transcript drop — runs under the session mutation owner, so it queues
+		// in front of any pending publish/repair instead of hitting the
+		// boundary guard mid-flight.
+		await this.sessionManager.runExclusive(async () => {
+			// Tear down the same per-turn runtime state that newSession() resets across
+			// a conversation boundary, so work scheduled from the pre-reset turn cannot
+			// re-enter the cleared context:
+			//   - bump #promptGeneration + drain post-prompt tasks so an already-queued
+			//     post-prompt continuation (recovery can be scheduled after agent_end
+			//     while isStreaming is false) sees a stale generation and skips
+			//     (mirrors abort()).
+			//   - cancel this agent's async bash/task jobs so their completions can't
+			//     re-deliver stale tool output into the cleared conversation
+			//     (mirrors newSession()).
+			this.#promptGeneration++;
+			await this.#cancelPostPromptTasks();
+			this.#cancelOwnAsyncJobs();
 
-		// Drop the conversation: messages, queued steers/follow-ups, pending tool
-		// calls, and error state. agent.reset() keeps the model and system prompt.
-		this.agent.reset();
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		// Reset the session_stop continuation chain: the queued continuation
-		// message is gone with the conversation, but the counters would otherwise
-		// carry over, so the next post-reset turn is reported to hooks as part of
-		// the old chain and can hit SESSION_STOP_CONTINUATION_CAP early (mirrors
-		// abort()/newSession()).
-		this.#resetSessionStopContinuationState();
+			// Drop the conversation: messages, queued steers/follow-ups, pending tool
+			// calls, and error state. agent.reset() keeps the model and system prompt.
+			this.agent.reset();
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+			// Reset the session_stop continuation chain: the queued continuation
+			// message is gone with the conversation, but the counters would otherwise
+			// carry over, so the next post-reset turn is reported to hooks as part of
+			// the old chain and can hit SESSION_STOP_CONTINUATION_CAP early (mirrors
+			// abort()/newSession()).
+			this.#resetSessionStopContinuationState();
 
-		// Drop checkpoint/rewind runtime state and deferred tool directives
-		// alongside the messages that carried them: the checkpoint tool result is
-		// gone from agent.state, so an intact #checkpointState would otherwise
-		// force a rewind onto the pre-reset transcript on the next turn (mirrors
-		// newSession()).
-		this.#clearCheckpointRuntimeState();
-		this.#clearSessionScopedToolState();
+			// Drop checkpoint/rewind runtime state and deferred tool directives
+			// alongside the messages that carried them: the checkpoint tool result is
+			// gone from agent.state, so an intact #checkpointState would otherwise
+			// force a rewind onto the pre-reset transcript on the next turn (mirrors
+			// newSession()).
+			this.#clearCheckpointRuntimeState();
+			this.#clearSessionScopedToolState();
 
-		// Rotate provider-side session state so a provider that keeps conversation
-		// history server-side starts a brand-new exchange rather than resuming the
-		// context we just dropped (mirrors freshSession()).
-		this.#closeAllProviderSessions("reset context");
-		this.#freshProviderSessionId = Bun.randomUUIDv7();
-		this.#syncAgentSessionId();
-		this.#memory.rekeyForCurrentSessionId();
-		this.agent.appendOnlyContext?.invalidateForModelChange();
+			// Rotate provider-side session state so a provider that keeps conversation
+			// history server-side starts a brand-new exchange rather than resuming the
+			// context we just dropped (mirrors freshSession()).
+			this.#closeAllProviderSessions("reset context");
+			this.#freshProviderSessionId = Bun.randomUUIDv7();
+			this.#syncAgentSessionId();
+			this.#memory.rekeyForCurrentSessionId();
+			this.agent.appendOnlyContext?.invalidateForModelChange();
 
-		// Re-arm the approved-plan reference: the reset dropped the plan-approved
-		// prompt/reference from agent.state, so mark it unsent (preserving the
-		// path — the plan file on disk is still the active plan) to let
-		// #buildPlanReferenceMessage re-read and re-inject it on the next turn.
-		// Mirrors the sent-flag reset newSession() and compaction perform after a
-		// history rewrite (issue #1246).
-		this.#planReferenceSent = false;
+			// Re-arm the approved-plan reference: the reset dropped the plan-approved
+			// prompt/reference from agent.state, so mark it unsent (preserving the
+			// path — the plan file on disk is still the active plan) to let
+			// #buildPlanReferenceMessage re-read and re-inject it on the next turn.
+			// Mirrors the sent-flag reset newSession() and compaction perform after a
+			// history rewrite (issue #1246).
+			this.#planReferenceSent = false;
 
-		// Re-prime the advisors across the conversation boundary and undo any
-		// memory promotion so the next turn rebuilds from the base system prompt.
-		this.#advisors.resetSessionState();
-		await this.#memory.resetContextForNewTranscript();
+			// Re-prime the advisors across the conversation boundary and undo any
+			// memory promotion so the next turn rebuilds from the base system prompt.
+			this.#advisors.resetSessionState();
+			await this.#memory.resetContextForNewTranscript();
 
-		// Record a durable boundary on the persisted branch. The collapsed live
-		// transcript and the model-context rebuild start emission after the latest
-		// boundary, so a rebuild across a `/clear` (theme change, focus attach,
-		// on-disk record and the plain `transcript:true` export path keep the full
-		// pre-reset history.
-		this.sessionManager.appendResetBoundary();
+			// Record a durable boundary on the persisted branch. The collapsed live
+			// transcript and the model-context rebuild start emission after the latest
+			// boundary, so a rebuild across a `/clear` (theme change, focus attach,
+			// on-disk record and the plain `transcript:true` export path keep the full
+			// pre-reset history.
+			this.sessionManager.appendResetBoundary();
 
-		resetCapabilities();
-		await this.refreshBaseSystemPrompt();
-
+			resetCapabilities();
+			await this.refreshBaseSystemPrompt();
+		});
 		return { droppedCount };
 	}
 
@@ -4819,6 +5204,63 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model | undefined {
 		return this.agent.state.model;
+	}
+
+	/**
+	 * Whether `read_omitted_content` is currently part of the live enabled tool
+	 * set. The recovery tool and compaction commits re-confirm this at every
+	 * use; a dynamically removed tool refuses new recall and armed commits.
+	 */
+	isRecoveryToolAuthorized(): boolean {
+		// The ACTUAL tool surface the next provider call would see: mounted
+		// tools, explicit subsets, and code-mode surfaces all shape
+		// `agent.state.tools`. The logical enabled list alone is not
+		// authoritative for dynamic removal or whitelist changes.
+		return this.agent.state.tools.some(tool => tool.name === READ_OMITTED_CONTENT_TOOL_NAME);
+	}
+
+	/**
+	 * Current branch entries for `read_omitted_content`, or `undefined` when
+	 * the session cannot serve recall right now. Callers must treat the result
+	 * as read-only.
+	 */
+	currentRecoveryEntries(): readonly SessionEntry[] | undefined {
+		if (this.isDisposed) return undefined;
+		return this.sessionManager.getBranch();
+	}
+
+	/**
+	 * Conservative pre-emission fit check for a recovery page (`fits` callback
+	 * the tool consults at execute time). Counts the current live context plus
+	 * this candidate including its visible envelope against the current model's
+	 * usable window and image budget. The loop's serialized final admission is
+	 * authoritative over this pre-check and includes the whole pending batch.
+	 */
+	fitsRecoveryResult(content: readonly (TextContent | ImageContent)[]): boolean {
+		const model = this.agent.state.model;
+		const contextWindow = model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+		const tokenizer = this.agent.tokenizer;
+		const compactionSettings = this.settings.getGroup("compaction");
+		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
+		const candidateMessage: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "",
+			toolName: READ_OMITTED_CONTENT_TOOL_NAME,
+			content: content as ToolResultMessage["content"], // Tokenizer only reads this view.
+			isError: false,
+			timestamp: 0,
+		};
+		// Same provider-anchored accounting as the emission admission: the
+		// current context cost comes from the live usage anchor (provider
+		// usage or the local estimate, whichever is higher), which already
+		// includes non-message tokens.
+		const anchoredContextTokens = this.getContextUsage({ contextWindow })?.tokens ?? 0;
+		if (anchoredContextTokens + tokenizer.countMessage(candidateMessage) > fitBudget) return false;
+		const modelSupportsImages = recoveryImagesSupported(model, content);
+		if (!modelSupportsImages && countImagesInContent(content) > 0) return false;
+		const usedImages = countImagesInMessages(this.agent.state.messages) + countImagesInContent(content);
+		return usedImages <= providerImageBudget(model.provider);
 	}
 
 	/**
@@ -5436,19 +5878,27 @@ export class AgentSession {
 	get compactionSpeculation(): "idle" | "running" | "armed" {
 		return this.#maintenance.speculationState;
 	}
-	/** Strip image content from the current branch and persist the rewrite. */
+	/**
+	 * Strip image content from the current branch and persist the rewrite.
+	 * Queues on the session mutation owner so the first live mutation defers
+	 * behind any pending publish/repair; the maintenance implementation's own
+	 * owner acquisition is reentrant inside this wrapper.
+	 */
 	dropImages(): Promise<{ removed: number }> {
-		return this.#maintenance.dropImages();
+		return this.sessionManager.runExclusive(() => this.#maintenance.dropImages());
 	}
 
-	/** Reduce stored context with the selected shake strategy. */
+	/**
+	 * Reduce stored context with the selected shake strategy. Queue semantics
+	 * mirror {@link dropImages}.
+	 */
 	shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
-		return this.#maintenance.shake(mode, opts);
+		return this.sessionManager.runExclusive(() => this.#maintenance.shake(mode, opts));
 	}
 
 	/** Compact the active session history. */
 	compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
-		return this.#maintenance.compact(customInstructions, options);
+		return this.sessionManager.runExclusive(() => this.#maintenance.compact(customInstructions, options));
 	}
 
 	/** Cancel active manual, automatic, and handoff maintenance, preserving an optional source reason. */
@@ -8415,16 +8865,16 @@ export class AgentSession {
 		if (!checkpointState) {
 			return;
 		}
-		this.#bash.withBranchTransition(() => {
+		await this.#bash.withBranchTransition(async () => {
 			try {
-				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
+				await this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
 					startedAt: checkpointState.startedAt,
 				});
 			} catch (error) {
 				logger.warn("Rewind branch checkpoint missing, falling back to root", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
+				await this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
 			}
 		});
 
@@ -9277,7 +9727,7 @@ export class AgentSession {
 			}
 			return true;
 		} catch (error) {
-			this.sessionManager.restoreState(previousSessionState);
+			await this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
@@ -9404,7 +9854,7 @@ export class AgentSession {
 					await this.sessionManager.newSession({ parentSession: previousSessionFile });
 					if (title) await this.sessionManager.setSessionName(title, titleSource);
 				} else {
-					this.sessionManager.createBranchedSession(selectedEntry.parentId);
+					await this.sessionManager.createBranchedSession(selectedEntry.parentId);
 				}
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
@@ -9529,7 +9979,7 @@ export class AgentSession {
 				if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 					throw new Error("Cannot branch /btw: session changed since /btw started");
 				}
-				this.sessionManager.createBranchedSession(leafId);
+				await this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
@@ -9842,26 +10292,30 @@ export class AgentSession {
 			newLeafId = targetId;
 		}
 
-		// Switch leaf (with or without summary)
-		// Summary is attached at the navigation target position (newLeafId), not the old branch
+		// Switch leaf (with or without summary). The whole leaf transition runs
+		// under the session mutation owner so a pending publish/repair serializes
+		// in front of it instead of interleaving mid-navigation; individual
+		// branch/resetLeaf/branchWithSummary calls are reentrant inside it.
 		const bashTransition = this.#bash.beginSessionTransition();
 		let summaryEntry: BranchSummaryEntry | undefined;
 		let branchTransitioned = false;
 		try {
-			if (summaryText) {
-				// Create summary at target position (can be null for root)
-				const summaryId = this.sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-				);
-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
-			} else if (newLeafId === null) {
-				this.sessionManager.resetLeaf();
-			} else {
-				this.sessionManager.branch(newLeafId);
-			}
+			await this.sessionManager.runExclusive(async () => {
+				if (summaryText) {
+					// Create summary at target position (can be null for root)
+					const summaryId = await this.sessionManager.branchWithSummary(
+						newLeafId,
+						summaryText,
+						summaryDetails,
+						fromExtension,
+					);
+					summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+				} else if (newLeafId === null) {
+					await this.sessionManager.resetLeaf();
+				} else {
+					await this.sessionManager.branch(newLeafId);
+				}
+			});
 			this.#bash.markSessionTransition(bashTransition);
 			branchTransitioned = true;
 		} finally {

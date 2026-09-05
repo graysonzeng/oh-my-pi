@@ -54,10 +54,15 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
 function shouldExternalizeImagePayload(
 	value: unknown,
 	key: string | undefined,
+	recoveryElement: boolean,
 ): value is { data: string; mimeType?: string } {
 	if (!isImageDataPayload(value)) return false;
 	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
-	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images";
+	return (
+		(key === TEXT_CONTENT_KEY && isImageBlock(value)) ||
+		key === "images" ||
+		(key === "omittedOriginal" && recoveryElement)
+	);
 }
 
 /** True for a non-empty string — marks signature/encrypted fields whose block must persist verbatim. */
@@ -78,7 +83,44 @@ function isNonEmptyString(value: unknown): value is string {
  * synchronous blob-store path (`fs.writeFileSync`), so blob bytes are in the
  * kernel page cache before the JSONL line referencing them is written.
  */
-function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string): unknown {
+/**
+ * Descent stage for the verified `ToolResultMessage.omittedOriginal` recovery
+ * array. Exemption is scoped to exactly one layer: a real message entry
+ * (`type: "message"` with a nested toolResult `message`) whose `omittedOriginal`
+ * IS a Text/Image content array, and among those elements only the DIRECT
+ * `text` property of a `type: "text"` block. Nested text or metadata anywhere
+ * else — including inside those same blocks — uses the generic truncation rules.
+ * `role` alone never authorizes an exemption; the full entry structure and the
+ * content-array check are required.
+ */
+type OmittedOriginalStage = "entry" | "generic" | "toolResultMessage" | "recoveryElement" | "directText";
+
+/** The full structural gate: a real message entry => toolResult message => recovery array exists. */
+export function isToolResultMessageWithRecovery(value: unknown): boolean {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"role" in value &&
+		value.role === "toolResult" &&
+		"omittedOriginal" in value &&
+		Array.isArray(value.omittedOriginal) &&
+		value.omittedOriginal.every(
+			block =>
+				block !== null &&
+				typeof block === "object" &&
+				!Array.isArray(block) &&
+				((block.type === "text" && typeof block.text === "string") ||
+					(isImageBlock(block) && typeof block.mimeType === "string")),
+		)
+	);
+}
+
+function truncateForPersistence(
+	obj: unknown,
+	blobStore: BlobStore,
+	key?: string,
+	stage: OmittedOriginalStage = "generic",
+): unknown {
 	if (obj === null || obj === undefined) return obj;
 	if (
 		typeof obj === "object" &&
@@ -91,7 +133,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	) {
 		return { ...obj, result: externalizeImageDataSync(blobStore, obj.result) };
 	}
-	if (shouldExternalizeImagePayload(obj, key)) {
+	if (shouldExternalizeImagePayload(obj, key, stage === "recoveryElement")) {
 		return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
 	}
 	// Signed content is bound to its exact bytes: a truncated `thinking`/`text`/
@@ -133,6 +175,11 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			return externalizeImageDataUrlSync(blobStore, obj);
 		}
 		if (obj.length > MAX_PERSIST_CHARS) {
+			// Exact-restoration originals: only the DIRECT `text` field of a
+			// text block inside the VERIFIED ToolResultMessage.omittedOriginal
+			// array is exempt — the stage is granted at exactly that layer and
+			// never propagates into nested structures or same-named carriers.
+			if (stage === "directText" && key === "text") return obj;
 			// Defensive: signature keys normally sit on blocks the guard above returns
 			// verbatim, but if one is reached here (unknown carrier shape), preserve it —
 			// truncation produces an invalid signature the API rejects, and clearing
@@ -151,7 +198,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		const result: unknown[] = new Array(obj.length);
 		for (let i = 0; i < obj.length; i++) {
 			const item = obj[i];
-			const newItem = truncateForPersistence(item, blobStore, key);
+			const newItem = truncateForPersistence(item, blobStore, key, stage);
 			if (newItem !== item) changed = true;
 			result[i] = newItem;
 		}
@@ -168,7 +215,32 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 				changed = true;
 				continue;
 			}
-			const newValue = truncateForPersistence(value, blobStore, childKey);
+			let childStage: OmittedOriginalStage = "generic";
+			if (
+				stage === "entry" &&
+				"type" in obj &&
+				obj.type === "message" &&
+				childKey === "message" &&
+				isToolResultMessageWithRecovery(value)
+			) {
+				// A real message entry whose nested message is a toolResult with
+				// a recovery array: descend into the message as verified.
+				childStage = "toolResultMessage";
+			} else if (stage === "toolResultMessage") {
+				// Inside the verified toolResult message: only the recovery
+				// content ARRAY descends as exact; every other payload field
+				// (content, details, visibility metadata, …) keeps generic rules.
+				childStage = childKey === "omittedOriginal" && Array.isArray(value) ? "recoveryElement" : "generic";
+			} else if (stage === "recoveryElement") {
+				// A Text|Image block element: only its own `text` property is
+				// exact; any nested structure (extra metadata, …) reverts to
+				// generic truncation.
+				childStage =
+					childKey === "text" && "type" in obj && obj.type === "text" && typeof value === "string"
+						? "directText"
+						: "generic";
+			}
+			const newValue = truncateForPersistence(value, blobStore, childKey, childStage);
 			if (newValue !== value) changed = true;
 			entries.push([childKey, newValue]);
 		}
@@ -289,5 +361,5 @@ function stripReplayedReasoningSignatures(entry: FileEntry): FileEntry {
 }
 
 export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): FileEntry {
-	return truncateForPersistence(stripReplayedReasoningSignatures(entry), blobStore) as FileEntry;
+	return truncateForPersistence(stripReplayedReasoningSignatures(entry), blobStore, undefined, "entry") as FileEntry;
 }

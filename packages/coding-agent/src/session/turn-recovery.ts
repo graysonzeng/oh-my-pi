@@ -206,7 +206,7 @@ export interface TurnRecoveryHost {
 			terminalTextAnswer?: boolean;
 		},
 	): Promise<RecoveryCompactionResult>;
-	withBashBranchTransition<T>(operation: () => T): T;
+	withBashBranchTransition<T>(operation: () => T | Promise<T>): Promise<T>;
 }
 
 /** Construction-time retry state restored from model selection. */
@@ -711,7 +711,7 @@ export class TurnRecovery {
 
 		if (this.#acceptTerminalEmptyStopForPrompt && assistantMessage.stopReason === "stop") {
 			this.#acceptTerminalEmptyStopForPrompt = false;
-			this.#discardAcceptedTerminalEmptyStop(assistantMessage);
+			await this.#discardAcceptedTerminalEmptyStop(assistantMessage);
 			this.#emptyStopRetryCount = 0;
 			return undefined;
 		}
@@ -918,7 +918,7 @@ export class TurnRecovery {
 	 */
 	async #dropPersistedAssistantTurn(assistantMessage: AssistantMessage): Promise<string | undefined> {
 		await this.#host.waitForSessionMessagePersistence(assistantMessage);
-		return this.discardAssistantTurn(assistantMessage);
+		return await this.discardAssistantTurn(assistantMessage);
 	}
 
 	/**
@@ -955,6 +955,14 @@ export class TurnRecovery {
 	): Promise<RecoveryCompactionResult> {
 		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		await this.dropPersistedAssistantTurn(assistantMessage);
+		// A runAutoCompaction rejection (abort, veto, or persistence failure —
+		// including SessionPersistenceIndeterminateError, whose latch must not
+		// be disturbed by appending the old turn) propagates untouched: nothing
+		// here may infer "not committed" from checkpoint presence, because a
+		// structured rewrite commits without creating any compaction entry.
+		// The `historyRewritten: true` fact after a post-commit abort/failure
+		// is carried by the returned result (maintenance contract) — a throw
+		// never masks a real commit.
 		const result = await this.#host.runAutoCompaction(reason, true, false, allowDefer, {
 			autoContinue: options.autoContinue,
 			triggerContextTokens: options.triggerContextTokens,
@@ -979,7 +987,7 @@ export class TurnRecovery {
 		this.#host.agent.appendMessage(assistantMessage);
 	}
 
-	#discardAcceptedTerminalEmptyStop(assistantMessage: AssistantMessage): void {
+	async #discardAcceptedTerminalEmptyStop(assistantMessage: AssistantMessage): Promise<void> {
 		const branch = this.#host.sessionManager.getBranch();
 		const branchEntry = branch
 			.slice()
@@ -1003,11 +1011,11 @@ export class TurnRecovery {
 
 		if (!branchEntry) return;
 		const targetParentId = prunePrompt ? parentEntry.parentId : branchEntry.parentId;
-		this.#host.withBashBranchTransition(() => {
+		await this.#host.withBashBranchTransition(async () => {
 			if (targetParentId === null) {
-				this.#host.sessionManager.resetLeaf();
+				await this.#host.sessionManager.resetLeaf();
 			} else {
-				this.#host.sessionManager.branch(targetParentId);
+				await this.#host.sessionManager.branch(targetParentId);
 			}
 		});
 		this.#host.sessionManager.appendCustomEntry("accepted-terminal-empty-stop");
@@ -1020,7 +1028,7 @@ export class TurnRecovery {
 	 * the Gemini header-runaway interrupt, which must not replay a partial,
 	 * loop-fueling thinking block.
 	 */
-	discardAssistantTurn(assistantMessage: AssistantMessage): string | undefined {
+	async discardAssistantTurn(assistantMessage: AssistantMessage): Promise<string | undefined> {
 		this.removeAssistantMessageFromActiveContext(assistantMessage);
 
 		const branch = this.#host.sessionManager.getBranch();
@@ -1044,11 +1052,11 @@ export class TurnRecovery {
 		if (!branchEntry) {
 			return undefined;
 		}
-		this.#host.withBashBranchTransition(() => {
+		await this.#host.withBashBranchTransition(async () => {
 			if (branchEntry.parentId === null) {
-				this.#host.sessionManager.resetLeaf();
+				await this.#host.sessionManager.resetLeaf();
 			} else {
-				this.#host.sessionManager.branch(branchEntry.parentId);
+				await this.#host.sessionManager.branch(branchEntry.parentId);
 			}
 		});
 		return branchEntry.id;

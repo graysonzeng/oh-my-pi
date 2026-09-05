@@ -166,12 +166,17 @@ export class BashRunner {
 		for (const { target, message } of pending) await this.#appendOwnedMessage(target, message);
 	}
 
-	/** Runs a leaf rewrite while retaining in-flight bash on its originating branch. */
-	withBranchTransition<T>(mutate: () => T): T {
+	/**
+	 * Runs a leaf rewrite while retaining in-flight bash on its originating
+	 * branch. The mutation may be asynchronous (mutations now queue on the
+	 * session mutation owner), so the transition window is held until it
+	 * settles.
+	 */
+	async withBranchTransition<T>(mutate: () => T | Promise<T>): Promise<T> {
 		const transition = this.beginSessionTransition();
 		let transitioned = false;
 		try {
-			const result = mutate();
+			const result = await mutate();
 			this.markSessionTransition(transition);
 			transitioned = true;
 			return result;

@@ -525,6 +525,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// freshness proxy (anchorIndex >= cutoffCount), so that stale anchor
 		// out-ranked the rebased estimate and reported a ~2.6x phantom overflow —
 		// tripping the "freed too little context" guard / frame-rescue path.
+		// This regression needs a checkpoint summary, not another available maintenance method.
+		session.settings.set("compaction.methodOrder", ["soft"]);
+		session.settings.set("compaction.thresholdTokens", 180_000);
+		session.settings.set("compaction.thresholdPercent", -1);
 		seedPriorTurns();
 		activateOngoingGoal("stale-anchor");
 		const gate = Promise.withResolvers<void>();
@@ -535,14 +539,14 @@ describe("AgentSession auto-compaction progress guard", () => {
 		});
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 
-		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
-		session.subscribe(event => {
-			if (event.type === "auto_compaction_end") onCompactionDone();
-		});
-
 		// Hold a request in flight so the pending snapshot survives the compaction.
 		const inFlight = session.prompt("x".repeat(600_000));
 		await firstPromptCall.promise;
+		// Ignore any maintenance completed before this request actually started.
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end" && event.result) onCompactionDone();
+		});
 
 		// Mid-run compaction fires and rebases the pending snapshot to the summary.
 		const trigger = highUsageAssistant();

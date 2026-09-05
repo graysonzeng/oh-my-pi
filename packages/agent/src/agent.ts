@@ -61,10 +61,21 @@ import { EventLoopKeepalive } from "./utils/yield";
  * Default convertToLlm: Keep only LLM-compatible replay messages.
  */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter((m): m is Message => {
-		if (m.role === "assistant") return !isProviderRefusalMessage(m);
-		return m.role === "user" || m.role === "toolResult";
-	});
+	const converted: Message[] = [];
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			if (!isProviderRefusalMessage(message)) converted.push(message);
+		} else if (message.role === "user") {
+			converted.push(message);
+		} else if (message.role === "toolResult") {
+			if (message.omittedOriginal === undefined) converted.push(message);
+			else {
+				const { omittedOriginal: _omittedOriginal, ...visible } = message;
+				converted.push(visible);
+			}
+		}
+	}
+	return converted;
 }
 
 function refreshToolChoiceForActiveTools(
@@ -324,6 +335,13 @@ export interface AgentOptions {
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
 
 	/**
+	 * Serialized final admission for tool results, at the loop's emission point
+	 * on both ordered and unordered writeback. See
+	 * {@link AgentLoopConfig.admitToolResult} for full semantics.
+	 */
+	admitToolResult?: AgentLoopConfig["admitToolResult"];
+
+	/**
 	 * Called once an assistant message is finalized, before it reaches the
 	 * context, the UI, or tool dispatch. May mutate the message in place (text +
 	 * tool-call arguments). See {@link AgentLoopConfig.transformAssistantMessage}.
@@ -455,6 +473,12 @@ export class Agent {
 	 */
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
 	/**
+	 * Serialized final admission for tool results, invoked at the loop's
+	 * emission point on both ordered and unordered writeback. Reassign at any
+	 * time to swap the implementation. See {@link AgentLoopConfig.admitToolResult}.
+	 */
+	admitToolResult?: AgentLoopConfig["admitToolResult"];
+	/**
 	 * Hook invoked once an assistant message is finalized, before context append,
 	 * UI emission, and tool dispatch. Reassign at any time to swap the implementation.
 	 */
@@ -516,6 +540,7 @@ export class Agent {
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
 		this.beforeToolCall = opts.beforeToolCall;
 		this.afterToolCall = opts.afterToolCall;
+		this.admitToolResult = opts.admitToolResult;
 		this.transformAssistantMessage = opts.transformAssistantMessage;
 		this.#telemetry = opts.telemetry;
 		this.#appendOnlyContext = opts.appendOnlyContext;
@@ -1495,6 +1520,9 @@ export class Agent {
 			appendOnlyContext: this.#appendOnlyContext,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
+			admitToolResult: this.admitToolResult
+				? (admission, signal) => this.admitToolResult?.(admission, signal)
+				: undefined,
 			transformAssistantMessage: this.transformAssistantMessage
 				? (message, signal) => this.transformAssistantMessage?.(message, signal)
 				: undefined,

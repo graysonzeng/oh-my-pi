@@ -93,6 +93,19 @@ describe("collectShakeRegions — tool results", () => {
 		expect(regions).toHaveLength(0);
 	});
 
+	test("keeps recalled original pages while shaking other eligible output in every preset", () => {
+		const recalled = messageEntry(toolResultMessage("read_omitted_content", "original page ".repeat(2_000)));
+		const ordinary = messageEntry(toolResultMessage("bash", "disposable output ".repeat(2_000)));
+		for (const preset of [DEFAULT_SHAKE_CONFIG, AGGRESSIVE_SHAKE_CONFIG, RESCUE_SHAKE_CONFIG]) {
+			const regions = collectShakeRegions([recalled, ordinary], tokenizer, {
+				...preset,
+				protectTokens: 0,
+				minSavings: 0,
+			});
+			expect(regions.map(region => region.entry.id)).toEqual([ordinary.id]);
+		}
+	});
+
 	test("never collects already-pruned tool results", () => {
 		const entry = messageEntry(toolResultMessage("bash", "z".repeat(800), { prunedAt: Date.now() }));
 		const regions = collectShakeRegions([entry], tokenizer, cfg());

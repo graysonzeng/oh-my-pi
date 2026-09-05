@@ -4,7 +4,7 @@ import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./b
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
-import { isImageBlock, isImageDataPayload } from "./session-persistence";
+import { isImageBlock, isImageDataPayload, isToolResultMessageWithRecovery } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import {
 	parseTitleSlotFromContent,
@@ -323,14 +323,33 @@ function shouldResolveImagePayload(value: unknown, key: string | undefined): val
 	return (key === "content" && isImageBlock(value)) || key === "images";
 }
 
-async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, key?: string): Promise<void> {
+/**
+ * Descent position for image blob resolution. Only elements of the VERIFIED
+ * `ToolResultMessage.omittedOriginal` recovery array — reached from the root
+ * session entry via a real toolResult message with a Text/Image content array —
+ * resolve under the new placement; generic subtrees can never re-authorize a
+ * same-named key. Legacy `content`/`images` positions keep their rules.
+ */
+type ResolveBlobStage = "entry" | "generic" | "toolResultMessage" | "omittedOriginal";
+
+async function resolvePersistedBlobRefs(
+	value: unknown,
+	blobStore: BlobStore,
+	key?: string,
+	stage: ResolveBlobStage = "generic",
+): Promise<void> {
+	// Verified recovery-array image elements (key + stage both required).
+	if (stage === "omittedOriginal" && key === "omittedOriginal" && isImageDataPayload(value) && isBlobRef(value.data)) {
+		value.data = await resolveImageData(blobStore, value.data);
+		return;
+	}
 	if (shouldResolveImagePayload(value, key)) {
 		value.data = await resolveImageData(blobStore, value.data);
 		return;
 	}
 
 	if (Array.isArray(value)) {
-		await Promise.all(value.map(item => resolvePersistedBlobRefs(item, blobStore, key)));
+		await Promise.all(value.map(item => resolvePersistedBlobRefs(item, blobStore, key, stage)));
 		return;
 	}
 
@@ -350,7 +369,23 @@ async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, ke
 	}
 
 	await Promise.all(
-		Object.entries(value).map(([childKey, item]) => resolvePersistedBlobRefs(item, blobStore, childKey)),
+		Object.entries(value).map(([childKey, item]) => {
+			let childStage: ResolveBlobStage = "generic";
+			if (
+				stage === "entry" &&
+				"type" in value &&
+				value.type === "message" &&
+				childKey === "message" &&
+				isToolResultMessageWithRecovery(item)
+			) {
+				// A real root message entry whose nested message is a toolResult
+				// with a verified recovery array.
+				childStage = "toolResultMessage";
+			} else if (stage === "toolResultMessage") {
+				childStage = childKey === "omittedOriginal" && Array.isArray(item) ? "omittedOriginal" : "generic";
+			}
+			return resolvePersistedBlobRefs(item, blobStore, childKey, childStage);
+		}),
 	);
 }
 
@@ -383,7 +418,7 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: 
 	for (const entry of entries) {
 		if (entry.type === "session") continue;
 		if (!containsBlobRef(entry)) continue;
-		pending.push(resolvePersistedBlobRefs(entry, blobStore));
+		pending.push(resolvePersistedBlobRefs(entry, blobStore, undefined, "entry"));
 	}
 	await Promise.all(pending);
 }

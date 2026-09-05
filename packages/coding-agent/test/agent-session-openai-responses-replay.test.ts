@@ -221,10 +221,12 @@ async function createPersistedSession(
 	// the way 6.x / tsgo does, so the two return shapes have to be siblings.
 	populate:
 		| ((sessionManager: SessionManager) => { treeTargetId?: string } | undefined)
-		| ((sessionManager: SessionManager) => void),
+		| ((sessionManager: SessionManager) => void)
+		| ((sessionManager: SessionManager) => Promise<{ treeTargetId?: string } | undefined>)
+		| ((sessionManager: SessionManager) => Promise<void>),
 ): Promise<{ sessionFile: string; treeTargetId?: string }> {
 	const sessionManager = SessionManager.create(tempDir, tempDir);
-	const result = populate(sessionManager);
+	const result = await populate(sessionManager);
 	await sessionManager.flush();
 	const sessionFile = sessionManager.getSessionFile();
 	if (!sessionFile) {
@@ -740,7 +742,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		tempDirs.push(tempDir);
 		const branchAssistantText = "Archived branch assistant";
 
-		const { sessionFile, treeTargetId } = await createPersistedSession(tempDir, sessionManager => {
+		const { sessionFile, treeTargetId } = await createPersistedSession(tempDir, async sessionManager => {
 			const rootUserId = sessionManager.appendMessage({ role: "user", content: "Root", timestamp: Date.now() - 5 });
 			const mainAssistantId = sessionManager.appendMessage({
 				role: "assistant",
@@ -752,10 +754,10 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 				stopReason: "stop",
 				timestamp: Date.now() - 4,
 			});
-			sessionManager.branch(rootUserId);
+			await sessionManager.branch(rootUserId);
 			sessionManager.appendMessage({ role: "user", content: "Archived branch", timestamp: Date.now() - 3 });
 			const { toolResultId: archivedTurnLeafId } = appendStaleAssistantTurn(sessionManager, branchAssistantText);
-			sessionManager.branch(mainAssistantId);
+			await sessionManager.branch(mainAssistantId);
 			sessionManager.appendMessage({ role: "user", content: "Active branch leaf", timestamp: Date.now() - 2 });
 			return { treeTargetId: archivedTurnLeafId };
 		});

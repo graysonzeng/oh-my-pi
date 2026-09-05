@@ -24,6 +24,28 @@ describe("tokenizerEncodingForModel", () => {
 });
 
 describe("Tokenizer", () => {
+	test("excludes recoverable original text and images from the visible request budget", () => {
+		const tokenizer = new Tokenizer();
+		const visible = {
+			role: "toolResult" as const,
+			toolCallId: "omitted-1",
+			toolName: "read",
+			content: [{ type: "text" as const, text: "Original stored under entry omitted-1." }],
+			isError: false,
+			timestamp: 1,
+		};
+		const visibleTokens = tokenizer.countMessage(visible);
+		expect(
+			tokenizer.countMessage({
+				...visible,
+				omittedOriginal: [
+					{ type: "text", text: "archived original ".repeat(40_000) },
+					{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+				],
+			}),
+		).toBe(visibleTokens);
+	});
+
 	test("defaults to null encoding and byte estimation", () => {
 		const tokenizer = new Tokenizer();
 		expect(tokenizer.encoding).toBeNull();

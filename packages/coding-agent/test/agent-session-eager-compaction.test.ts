@@ -101,7 +101,7 @@ function stubCompaction(firstKeptEntryId?: string): void {
 function emitHighUsageTurn(session: AgentSession): void {
 	const assistantMsg = {
 		role: "assistant" as const,
-		content: [{ type: "text" as const, text: "Done." }],
+		content: [{ type: "text" as const, text: "Next turn." }],
 		api: "anthropic-messages" as const,
 		provider: "anthropic" as const,
 		model: "claude-sonnet-4-5",
@@ -114,7 +114,9 @@ function emitHighUsageTurn(session: AgentSession): void {
 			totalTokens: 191_000,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		timestamp: Date.now(),
+		// A synthetic new turn must not reuse the just-settled response timestamp.
+		timestamp:
+			session.agent.state.messages.reduce((latest, message) => Math.max(latest, message.timestamp), Date.now()) + 1,
 	};
 	session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
 	session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
@@ -232,7 +234,8 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 						waiters.splice(i, 1);
 					}
 				}
-				const response = createAssistantResponse("done");
+				// A neutral stop avoids invoking the separate goal false-completion policy.
+				const response = createAssistantResponse("Next turn.");
 				const stream = new AssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: response });

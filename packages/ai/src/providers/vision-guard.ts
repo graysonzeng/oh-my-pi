@@ -107,3 +107,18 @@ export function isOpenAICompletionsVisionSupported(model: Model<"openai-completi
 	if (isTextOnlyDeepSeek(model)) return false;
 	return true;
 }
+export type AnthropicImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+
+export function normalizeAnthropicImageMediaType(mimeType: string): AnthropicImageMediaType | undefined {
+	const normalized = mimeType.trim().toLowerCase();
+	if (normalized === "image/jpg") return "image/jpeg";
+	if (
+		normalized === "image/jpeg" ||
+		normalized === "image/png" ||
+		normalized === "image/gif" ||
+		normalized === "image/webp"
+	) {
+		return normalized;
+	}
+	return undefined;
+}

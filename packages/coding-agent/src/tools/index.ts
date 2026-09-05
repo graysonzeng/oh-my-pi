@@ -6,7 +6,7 @@ import type {
 	AgentTool,
 	AgentToolContext,
 } from "@oh-my-pi/pi-agent-core";
-import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
+import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
@@ -34,7 +34,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
-import type { UsageStatistics } from "../session/session-entries";
+import type { SessionEntry, UsageStatistics } from "../session/session-entries";
 import type { LineageContext } from "../session/session-lineage";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
@@ -74,6 +74,7 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
+import { ReadOmittedContentTool } from "./read-omitted-content";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { SessionSearchTool } from "./session-search";
@@ -123,6 +124,7 @@ export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
 export * from "./read";
+export * from "./read-omitted-content";
 export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
@@ -480,6 +482,27 @@ export interface ToolSession {
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
 	getImageAttachments?: () => ImageAttachmentEntry[];
+
+	/**
+	 * Structured-compaction recovery access (read_omitted_content). Present only
+	 * when the session can serve recoverable omitted content. Callbacks read
+	 * live session state; they must never mutate it.
+	 */
+	readOmittedContent?: {
+		/** True only when read_omitted_content is currently authorized in the live tool set. */
+		authorized: () => boolean;
+		/** Current-session branch entries (read-only snapshot) or undefined when the session cannot serve recall right now. */
+		entries: () => readonly SessionEntry[] | undefined;
+		/**
+		 * Conservative pre-emission budget check: whether the full next provider
+		 * request — current context, tool results already accepted in this pending
+		 * batch, and this candidate including its visible metadata envelope —
+		 * fits the current model's usable window. Synchronous snapshot; the agent
+		 * loop re-admits serially at emission and is authoritative over this
+		 * pre-check.
+		 */
+		fits: (content: readonly (TextContent | ImageContent)[]) => boolean;
+	};
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -490,6 +513,7 @@ export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool |
  */
 export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	read: s => new ReadTool(s),
+	read_omitted_content: s => (s.readOmittedContent ? new ReadOmittedContentTool(s) : null),
 	security_scan: s => new SecurityScanTool(s),
 	bash: s => new BashTool(s),
 	edit: s => new EditTool(s),

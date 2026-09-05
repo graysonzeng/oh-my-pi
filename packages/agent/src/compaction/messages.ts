@@ -249,12 +249,14 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 			return { ...message, attribution: message.attribution ?? "agent" };
 		case "assistant":
 			return message;
-		case "toolResult":
-			return {
-				...message,
-				content: getPrunedToolResultContent(message as ToolResultMessage),
-				attribution: message.attribution ?? "agent",
-			};
+		case "toolResult": {
+			// Recovery originals belong to session storage, never to a provider
+			// context (including custom provider adapters and side requests).
+			const { omittedOriginal: _omittedOriginal, ...converted } = message;
+			converted.content = getPrunedToolResultContent(message);
+			converted.attribution = message.attribution ?? "agent";
+			return converted;
+		}
 		default:
 			return undefined;
 	}

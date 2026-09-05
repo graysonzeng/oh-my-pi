@@ -87,7 +87,12 @@ import type {
 	StreamFn,
 	ToolErrorMetadata,
 } from "./types";
-import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, isSoftToolRequirement } from "./types";
+import {
+	ADMIT_TOOL_RESULT_TERMINAL,
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
+	isSoftToolRequirement,
+} from "./types";
 import { yieldIfDue } from "./utils/yield";
 
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
@@ -446,7 +451,10 @@ function hasSubstantiveToolResultContent(content: AgentToolResult["content"]): b
 	return false;
 }
 
-function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; malformed: boolean } {
+function coerceToolResult(
+	raw: unknown,
+	preserveText = false,
+): { result: AgentToolResult<unknown>; malformed: boolean } {
 	const rawObj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
 	const rawContent = rawObj?.content;
 	const details = rawObj && "details" in rawObj ? rawObj.details : {};
@@ -480,8 +488,10 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 			invalidBlocks++;
 			continue;
 		}
-		if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
-			content.push({ type: "text", text: sanitizeText((block as { text: string }).text) });
+		if (block.type === "text" && "text" in block && typeof block.text === "string") {
+			// Addressable recovery text is a byte protocol. The TUI sanitizes its
+			// display separately; stripping CR/controls here corrupts its cursor.
+			content.push({ type: "text", text: preserveText ? block.text : sanitizeText(block.text) });
 		} else if (
 			block.type === "image" &&
 			typeof (block as { data?: unknown }).data === "string" &&
@@ -1345,6 +1355,10 @@ async function runLoopBody(
 				const softNonCompliant = softGateActive && !calledOnlyRequiredTool;
 
 				const toolResults: ToolResultMessage[] = [];
+				// Set when the serialized final admission returned the terminal
+				// cannot-fit sentinel for this batch; forces a hard run stop
+				// after the turn is emitted (queues stay intact).
+				let batchTerminalAdmission = false;
 				if (softNonCompliant && softRequiredTool !== undefined) {
 					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
 						throw new Error(
@@ -1392,6 +1406,17 @@ async function runLoopBody(
 					for (const result of toolResults) {
 						currentContext.messages.push(result);
 						newMessages.push(result);
+					}
+
+					if (executionResult.terminalAdmission) {
+						// A final admission could not fit a pending recovery result in
+						// ANY emitted form: the batch drains (real results plus the
+						// budget-stop stub for the un-fit record), but no next
+						// provider request may be dispatched — including queued
+						// steering/follow-ups/asides on this run. The run ends with
+						// queues intact for the next safe run.
+						hasMoreToolCalls = false;
+						batchTerminalAdmission = true;
 					}
 				} else if (toolCalls.length > 0) {
 					// Turn ended on a non-runnable reason (`length` truncation) or deadline was exceeded
@@ -1443,6 +1468,18 @@ async function runLoopBody(
 				turnOpen = false;
 
 				if (isDeadlineExceeded(config.deadline)) {
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
+				}
+
+				if (batchTerminalAdmission) {
+					// Run-terminal: never dispatch another provider request —
+					// including queued steering/follow-ups/asides on this run.
+					// The completed batch (real results plus the admission-stop
+					// stub) is already persisted by emitTurnEnd; steering and
+					// follow-up queues stay intact for the next safe run and the
+					// host's existing request-budget recovery/stop path takes
+					// over from here.
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
@@ -2334,7 +2371,7 @@ async function executeToolCalls(
 	config: AgentLoopConfig,
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
-): Promise<{ toolResults: ToolResultMessage[] }> {
+): Promise<{ toolResults: ToolResultMessage[]; terminalAdmission: boolean }> {
 	const tools = currentContext.tools;
 	const {
 		hasSteeringMessages,
@@ -2486,8 +2523,128 @@ async function executeToolCalls(
 		config.toolScheduling !== undefined && config.toolScheduling.orderedResultWriteback !== false;
 	let nextEmitIndex = 0;
 
-	const flushOrderedResults = (): void => {
+	// Single FIFO emission owner for the whole batch. Every acceptance — admit →
+	// resultEmitted → emittedToolResults.push → stream events — runs serially on
+	// this tail, so concurrent runTool tasks can never observe the same
+	// `emittedToolResults` snapshot, and ordered head-of-line processing cannot
+	// be re-entered while an admission await is in flight.
+	let emissionTail: Promise<void> = Promise.resolve();
+	/**
+	 * Set when a final admission returns the terminal cannot-fit sentinel. The
+	 * batch is STILL drained: the un-fit record gets a bounded budget-stop
+	 * pairing stub (no original data, no cursor), every other executed result
+	 * stays emitted and persisted, and the RUN terminates before any further
+	 * provider request.
+	 */
+	let terminalAdmission = false;
+
+	/**
+	 * Budget-stop pairing stub for a result the final admission could not fit
+	 * in ANY emitted form (not even a metadata-only same-cursor page). Delivers
+	 * no original data and no cursor; keeps the tool_use/tool_result pairing,
+	 * settles the tool's UI state, and marks the run as needing to stop before
+	 * the next provider request so the host's request-budget recovery/stop path
+	 * can run. Never claims the tool did not execute (it did; only delivery was
+	 * withheld on budget).
+	 */
+	const ADMISSION_BUDGET_STOP_RESULT: AgentToolResult = {
+		content: [
+			{
+				type: "text",
+				text: "Tool result withheld: the next request cannot fit this result's budget; the run stopped and request-budget recovery will run before continuing.",
+			},
+		],
+		details: { __admissionBudgetStop: true, source: "final_admission" },
+	};
+	const emitAdmissionStopRecord = (record: (typeof records)[number]): void => {
+		const toolResultMessage = buildToolResultMessage(record, ADMISSION_BUDGET_STOP_RESULT, true);
+		record.result = ADMISSION_BUDGET_STOP_RESULT;
+		record.isError = true;
+		record.toolResultMessage = toolResultMessage;
+		if (!record.started) {
+			stream.push({
+				type: "tool_execution_start",
+				toolCallId: record.toolCall.id,
+				toolName: record.toolCall.name,
+				args: record.args,
+				intent: record.toolCall.intent,
+			});
+		}
+		stream.push({
+			type: "tool_execution_end",
+			toolCallId: record.toolCall.id,
+			toolName: record.toolCall.name,
+			result: ADMISSION_BUDGET_STOP_RESULT,
+			isError: true,
+		});
+		record.resultEmitted = true;
+		emittedToolResults.push(toolResultMessage);
+		stream.push({ type: "message_start", message: toolResultMessage });
+		stream.push({ type: "message_end", message: toolResultMessage });
+	};
+	const enqueueEmission = (job: () => Promise<void>): Promise<void> => {
+		const next = emissionTail.then(job);
+		// Jobs never reject (admitFinalToolResult converts non-terminal throws
+		// to tool-error results); keep the chain alive defensively.
+		emissionTail = next.catch(() => undefined);
+		return next;
+	};
+
+	const admitFinalToolResult = async (
+		record: (typeof records)[number],
+		result: AgentToolResult<any>,
+		isError: boolean,
+	): Promise<AgentToolResult<any> | typeof ADMIT_TOOL_RESULT_TERMINAL> => {
+		if (!config.admitToolResult) return result;
+		try {
+			const admitted = await config.admitToolResult(
+				{
+					toolCall: record.toolCall,
+					result,
+					isError,
+					context: currentContext,
+					pendingBatch: emittedToolResults,
+				},
+				record.signal,
+			);
+			return admitted ?? result;
+		} catch (e) {
+			// A non-terminal admission throw surfaces as a genuine tool-error
+			// result (`isError: true`), so the rest of the batch keeps running
+			// and the record is settled as failed — never a pass-through with
+			// only an error text while keeping the executed `isError`. The
+			// cannot-fit case is NOT a throw: the hook returns
+			// ADMIT_TOOL_RESULT_TERMINAL so the loop emits the budget-stop
+			// error receipt and stops instead of dispatching the next request.
+			const errorMetadata = structuredToolErrorMetadata(e);
+			return {
+				content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+				details: errorMetadata ? { errorMetadata } : {},
+				isError: true,
+			};
+		}
+	};
+
+	const buildToolResultMessage = (
+		record: (typeof records)[number],
+		result: AgentToolResult<any>,
+		isError: boolean,
+	): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: record.toolCall.id,
+		toolName: record.toolCall.name,
+		content: result.content,
+		details: result.details,
+		providerMetadata: result.providerMetadata,
+		isError,
+		...(result.useless && !isError ? { useless: true } : {}),
+		timestamp: Date.now(),
+	});
+
+	const flushOrderedResults = async (): Promise<void> => {
 		if (!orderedWriteback) return;
+		// The terminal flag does not stop draining: the batch still accepts and
+		// emits every executed record (real results or budget-stop stubs).
 		while (nextEmitIndex < records.length) {
 			const rec = records[nextEmitIndex]!;
 			if (!rec.toolResultMessage || rec.resultEmitted) {
@@ -2496,6 +2653,31 @@ async function executeToolCalls(
 					continue;
 				}
 				break;
+			}
+			// Serialized final admission at the head acceptance point: once a
+			// record becomes head-of-line, its result is admitted against the
+			// current context plus every already-accepted result in this batch
+			// before it joins `emittedToolResults`. Runs on the FIFO emission
+			// tail, so no other acceptance can interleave mid-await.
+			const admittedResult = await admitFinalToolResult(rec, rec.result!, rec.isError);
+			if (admittedResult === ADMIT_TOOL_RESULT_TERMINAL) {
+				// Cannot fit in any emitted form: settle this record with the
+				// budget-stop error receipt (real failed record: keeps pairing,
+				// no cursor, no original data) and mark the run terminal — the
+				// batch still drains so other executed results are persisted,
+				// but no next provider request may be dispatched.
+				terminalAdmission = true;
+				emitAdmissionStopRecord(rec);
+				nextEmitIndex++;
+				continue;
+			}
+			// A hook-replaced result carries its own error flag: reflect it on
+			// the record, the tool_execution_end event, and the emitted message.
+			const finalIsError = rec.isError || admittedResult.isError === true;
+			if (admittedResult !== rec.result || finalIsError !== rec.isError) {
+				rec.result = admittedResult;
+				rec.isError = finalIsError;
+				rec.toolResultMessage = buildToolResultMessage(rec, admittedResult, finalIsError);
 			}
 			// tool_execution_end + toolResult message already prepared on the record;
 			// emit stream events now in order.
@@ -2524,57 +2706,77 @@ async function executeToolCalls(
 		}
 	};
 
-	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult<any>, isError: boolean): void => {
+	const emitToolResult = async (
+		record: (typeof records)[number],
+		result: AgentToolResult<any>,
+		isError: boolean,
+	): Promise<void> => {
 		if (record.resultEmitted) return;
 		if (record.toolResultMessage) {
-			// Already prepared (ordered writeback); just try to flush the queue head.
-			flushOrderedResults();
+			// Already marked ready (ordered writeback): enqueue a flush. The
+			// serialized emission tail is the single owner, so a concurrent
+			// flush cannot re-process the head mid-await.
+			await enqueueEmission(flushOrderedResults);
 			return;
 		}
-		const { toolCall } = record;
-		const toolResultMessage: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			content: result.content,
-			details: result.details,
-			providerMetadata: result.providerMetadata,
-			isError,
-			...(result.useless && !isError ? { useless: true } : {}),
-			timestamp: Date.now(),
-		};
-		record.result = result;
-		record.isError = isError;
-		record.toolResultMessage = toolResultMessage;
-
 		if (orderedWriteback) {
-			// Defer stream message emission until head-of-line is ready.
-			flushOrderedResults();
+			// Defer stream message emission until head-of-line is ready; the
+			// serialized final admission runs in `flushOrderedResults` at the
+			// acceptance point. The readiness marker is written synchronously
+			// (idempotent), but acceptance itself is serialized on the tail.
+			record.result = result;
+			record.isError = isError;
+			record.toolResultMessage = buildToolResultMessage(record, result, isError);
+			await enqueueEmission(flushOrderedResults);
 			return;
 		}
+		// Unordered writeback: the emission itself is the serial admission
+		// point — count current context, results already accepted in this
+		// pending batch, and this candidate before it joins the batch. The
+		// whole accept→emit sequence runs on the FIFO tail. The terminal flag
+		// does NOT stop draining: every executed record is still emitted (real
+		// results or the budget-stop stub); only the next provider request is
+		// suppressed.
+		await enqueueEmission(async () => {
+			if (record.resultEmitted) return;
+			const admittedResult = await admitFinalToolResult(record, result, isError);
+			if (admittedResult === ADMIT_TOOL_RESULT_TERMINAL) {
+				terminalAdmission = true;
+				emitAdmissionStopRecord(record);
+				return;
+			}
+			const { toolCall } = record;
+			// A hook-replaced result carries its own error flag: reflect it on
+			// the record, the tool_execution_end event, and the emitted message.
+			const finalIsError = isError || admittedResult.isError === true;
+			const toolResultMessage = buildToolResultMessage(record, admittedResult, finalIsError);
+			record.result = admittedResult;
+			record.isError = finalIsError;
+			record.toolResultMessage = toolResultMessage;
 
-		if (!record.started) {
+			if (!record.started) {
+				stream.push({
+					type: "tool_execution_start",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: record.args,
+					intent: toolCall.intent,
+				});
+			}
 			stream.push({
-				type: "tool_execution_start",
+				type: "tool_execution_end",
 				toolCallId: toolCall.id,
 				toolName: toolCall.name,
-				args: record.args,
-				intent: toolCall.intent,
+				result: admittedResult,
+				isError: finalIsError,
 			});
-		}
-		stream.push({
-			type: "tool_execution_end",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			result,
-			isError,
+
+			record.resultEmitted = true;
+			emittedToolResults.push(toolResultMessage);
+
+			stream.push({ type: "message_start", message: toolResultMessage });
+			stream.push({ type: "message_end", message: toolResultMessage });
 		});
-
-		record.resultEmitted = true;
-		emittedToolResults.push(toolResultMessage);
-
-		stream.push({ type: "message_start", message: toolResultMessage });
-		stream.push({ type: "message_end", message: toolResultMessage });
 	};
 
 	// Filled once scheduling opts are known; runTool reads this after validation to
@@ -2610,7 +2812,7 @@ async function executeToolCalls(
 		// failure recorded there surfaces here at the record's scheduled slot so
 		// result emission keeps batch order.
 		if (record.validationErrorMessage !== undefined) {
-			emitToolResult(
+			await emitToolResult(
 				record,
 				{
 					content: [{ type: "text" as const, text: record.validationErrorMessage }],
@@ -2632,7 +2834,7 @@ async function executeToolCalls(
 				toolName: toolCall.name,
 				status: "aborted",
 			});
-			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
+			await emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
 			return;
 		}
 		// Commit one tool-call from the shared remaining budget (cross-batch).
@@ -2711,13 +2913,14 @@ async function executeToolCalls(
 							toolCallId: toolCall.id,
 							toolName: toolCall.name,
 							args: executionArgs,
-							partialResult: coerceToolResult(partialResult).result,
+							partialResult: coerceToolResult(partialResult, record.toolCall.name === "read_omitted_content")
+								.result,
 						});
 					},
 					toolContext,
 				);
 				completedToolExecution = true;
-				const coerced = coerceToolResult(rawResult);
+				const coerced = coerceToolResult(rawResult, record.toolCall.name === "read_omitted_content");
 				result = coerced.result;
 				if (coerced.malformed || result.isError) isError = true;
 			} catch (e) {
@@ -2748,13 +2951,16 @@ async function executeToolCalls(
 						// code and may return malformed `content` (non-array / invalid blocks), which
 						// would otherwise be persisted verbatim and corrupt the session — the same
 						// hazard `coerceToolResult` guards on the execute path.
-						const coerced = coerceToolResult({
-							content: after.content ?? result.content,
-							details: after.details ?? result.details,
-							isError: after.isError ?? result.isError,
-							providerMetadata: after.providerMetadata ?? result.providerMetadata,
-							useless: after.useless ?? result.useless,
-						});
+						const coerced = coerceToolResult(
+							{
+								content: after.content ?? result.content,
+								details: after.details ?? result.details,
+								isError: after.isError ?? result.isError,
+								providerMetadata: after.providerMetadata ?? result.providerMetadata,
+								useless: after.useless ?? result.useless,
+							},
+							record.toolCall.name === "read_omitted_content",
+						);
 						result = coerced.result;
 						isError = coerced.malformed || (after.isError ?? isError);
 					}
@@ -2781,7 +2987,7 @@ async function executeToolCalls(
 			// user/system steering or peer IRC when a steering interrupt fired,
 			// otherwise the external abort.
 			record.skipped = true;
-			emitToolResult(record, createStartedAbortedToolResult(interruptState.source), true);
+			await emitToolResult(record, createStartedAbortedToolResult(interruptState.source), true);
 		} else {
 			// No interrupt on this signal, or the tool finished before the interrupt landed
 			// (`completedToolExecution`) — even if the signal aborted around completion. Keep
@@ -2790,7 +2996,7 @@ async function executeToolCalls(
 			// false "skipped" that discards work the tool performed (#4752). A peer-IRC interrupt
 			// on the batch leaves non-interruptible tools' signals untouched — their genuine
 			// errors survive here too.
-			emitToolResult(record, result, isError);
+			await emitToolResult(record, result, isError);
 		}
 
 		const firstTextBlock = result.content?.[0];
@@ -2995,7 +3201,7 @@ async function executeToolCalls(
 			record.skipped = true;
 			record.budgetSkipped = false;
 			const failTask = (async () => {
-				emitToolResult(
+				await emitToolResult(
 					record,
 					{
 						content: [
@@ -3035,7 +3241,7 @@ async function executeToolCalls(
 						toolName: record.toolCall.name,
 						status: "aborted",
 					});
-					emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
+					await emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
 					return;
 				}
 				await runTool(record, index);
@@ -3072,7 +3278,7 @@ async function executeToolCalls(
 				toolName: record.toolCall.name,
 				status: "skipped",
 			});
-			emitToolResult(
+			await emitToolResult(
 				record,
 				{
 					content: [{ type: "text", text: "Skipped: tool-call budget exhausted for this stage" }],
@@ -3088,10 +3294,10 @@ async function executeToolCalls(
 			toolName: record.toolCall.name,
 			status: "skipped",
 		});
-		emitToolResult(record, createSkippedToolResult(interruptState.source), true);
+		await emitToolResult(record, createSkippedToolResult(interruptState.source), true);
 	}
 
-	return { toolResults: emittedToolResults };
+	return { toolResults: emittedToolResults, terminalAdmission };
 }
 
 /** Semaphore for max concurrent shared tools within one batch. */

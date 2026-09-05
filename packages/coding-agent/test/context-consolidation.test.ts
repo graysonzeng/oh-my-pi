@@ -148,7 +148,7 @@ describe("Context usage consolidation", () => {
 			timestamp: 3000,
 		} as AssistantMessage);
 
-		sessionManager.branch(parentId!);
+		await sessionManager.branch(parentId!);
 		sessionManager.appendMessage({ role: "user", content: "active branch hello", timestamp: 4000 } as Message);
 		sessionManager.appendMessage({
 			role: "assistant",
@@ -222,7 +222,7 @@ describe("Context usage consolidation", () => {
 			timestamp: 4000,
 		} as AssistantMessage);
 
-		sessionManager.branch(firstId);
+		await sessionManager.branch(firstId);
 		syncSession(session, agent);
 
 		const breakdown = session.getContextBreakdown();

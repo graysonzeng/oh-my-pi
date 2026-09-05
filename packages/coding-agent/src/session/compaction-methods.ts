@@ -10,6 +10,12 @@ import type { CompactionSettings } from "../config/settings-schema";
 /** Choices presented by the ordered compaction-method setting. */
 export const COMPACTION_METHOD_CHOICES = [
 	{
+		value: "structured",
+		label: "Structured compaction",
+		description:
+			"Elide heavy tool results in place, preserving their original content with a bounded recovery tool; optionally summarize old assistant turns entry by entry",
+	},
+	{
 		value: "remote",
 		label: "OpenAI server compaction",
 		description: "Use provider-native OpenAI-compatible server compaction when the active route supports it",
@@ -39,8 +45,23 @@ export const COMPACTION_METHOD_CHOICES = [
 /** One selectable automatic context-maintenance method. */
 export type CompactionMethod = (typeof COMPACTION_METHOD_CHOICES)[number]["value"];
 
-/** Default fallback order: server-native first, portable summary last. */
+/**
+ * Methods that run through the checkpoint engine's compact/prepare pipeline.
+ * `structured` is deliberately excluded: its preparation and commit are owned
+ * entirely by SessionMaintenance via the structured-compaction module, and it
+ * must never reach `compact()`/`prepareCompaction()` — the engine methods are
+ * separated at the type level so any accidental dispatch fails to compile.
+ */
+export type EngineCompactionMethod = Exclude<CompactionMethod, "structured">;
+
+/**
+ * Default fallback order: structured preservation first so original tool
+ * content is recoverable before any destructive method sees it, then
+ * server-native, then portable summaries. Explicit user-configured orders are
+ * preserved verbatim; only fresh defaults adopt this ordering.
+ */
 export const DEFAULT_COMPACTION_METHOD_ORDER: CompactionMethod[] = [
+	"structured",
 	"remote",
 	"snapcompact",
 	"handoff",
@@ -49,6 +70,7 @@ export const DEFAULT_COMPACTION_METHOD_ORDER: CompactionMethod[] = [
 ];
 
 const COMPACTION_METHODS: Record<CompactionMethod, true> = {
+	structured: true,
 	remote: true,
 	snapcompact: true,
 	handoff: true,
@@ -75,7 +97,10 @@ export function resolveCompactionMethodOrder(value: unknown): CompactionMethod[]
 	return methods;
 }
 
-const STRATEGY_BY_COMPACTION_METHOD: Record<CompactionMethod, "context-full" | "handoff" | "shake" | "snapcompact"> = {
+const STRATEGY_BY_COMPACTION_METHOD: Record<
+	EngineCompactionMethod,
+	"context-full" | "handoff" | "shake" | "snapcompact"
+> = {
 	remote: "context-full",
 	snapcompact: "snapcompact",
 	handoff: "handoff",
@@ -84,13 +109,14 @@ const STRATEGY_BY_COMPACTION_METHOD: Record<CompactionMethod, "context-full" | "
 };
 
 /**
- * Convert the selected preference into the engine's compact operation flags.
- * The engine intentionally remains usable by SDK consumers that do not expose
- * the coding agent's preference list.
+ * Convert the selected engine method into the engine's compact operation
+ * flags. `structured` has no engine translation (it never enters the
+ * checkpoint pipeline), so callers must narrow it away before calling this —
+ * the parameter type enforces that at compile time.
  */
 export function resolveMethodSettings(
 	settings: CompactionSettings,
-	method: CompactionMethod,
+	method: EngineCompactionMethod,
 ): EngineCompactionSettings {
 	return {
 		...settings,
@@ -112,20 +138,31 @@ export function canUseRemoteCompaction(model: Model | null | undefined, settings
  * local (snapcompact/shake) — local methods are effectively instant, so there
  * is nothing to speculate. Shared by the maintenance loop's speculation gate
  * and the status line's annotated context gauge (speculation marker).
+ *
+ * `structured` is speculative like remote/handoff/soft: its assistant-entry
+ * summarization is an LLM call worth hiding behind the lead band. Availability
+ * of the structured recovery tool is a separate, maintenance-side gate (the
+ * tool set is not visible here); `structuredAvailable` lets callers that know
+ * the actual tool list suppress speculation when the recovery tool is absent.
  */
 export function resolveSpeculationMethod(
 	model: Model | null | undefined,
 	settings: CompactionSettings,
-): "remote" | "handoff" | "soft" | undefined {
+	structuredAvailable?: boolean,
+): "structured" | "remote" | "handoff" | "soft" | undefined {
 	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
 		const available =
 			candidate === "remote"
 				? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
 				: candidate === "snapcompact"
 					? model?.input?.includes("image") === true
-					: true;
+					: candidate === "structured"
+						? (structuredAvailable ?? true)
+						: true;
 		if (!available) continue;
-		return candidate === "remote" || candidate === "handoff" || candidate === "soft" ? candidate : undefined;
+		return candidate === "remote" || candidate === "handoff" || candidate === "soft" || candidate === "structured"
+			? candidate
+			: undefined;
 	}
 	return undefined;
 }
