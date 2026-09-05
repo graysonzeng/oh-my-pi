@@ -272,7 +272,7 @@ import {
 	writeDeviceDispatch,
 } from "../tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { TodoPhase } from "../tools/todo";
+import { type TodoPhase, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "../utils/edit-mode";
@@ -7711,8 +7711,11 @@ export class AgentSession {
 		return this.#todo.phases;
 	}
 
+	/** Commit todo state independently of the tool transport that changed it. */
 	setTodoPhases(phases: TodoPhase[]): void {
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: this.#todo.clonePhases(phases) });
 		this.#todo.setPhases(phases);
+		this.#emit({ type: "todo_updated", phases: this.#todo.phases });
 	}
 
 	#buildReplanTitleContext(): string {
@@ -8016,7 +8019,7 @@ export class AgentSession {
 
 			this.#clearSessionScopedToolState(departedSessionId);
 			this.#clearCheckpointRuntimeState();
-			this.setTodoPhases([]);
+			this.#todo.setPhases([]);
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();

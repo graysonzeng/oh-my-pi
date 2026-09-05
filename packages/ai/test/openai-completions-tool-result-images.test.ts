@@ -79,6 +79,49 @@ function buildToolResult(toolCallId: string, timestamp: number): ToolResultMessa
 }
 
 describe("openai-completions convertMessages", () => {
+	it("does not reattach archived images or text to the next provider request", () => {
+		const model = buildModel({
+			id: "structured-wire-fixture",
+			name: "Structured wire fixture",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Read the image", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "image.png" } }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: emptyUsage,
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+				{
+					...buildToolResult("tool-1", 3),
+					content: [{ type: "text", text: "Omitted result; read entry original-1." }],
+					omittedOriginal: buildToolResult("tool-1", 3).content,
+				},
+			],
+		};
+
+		const messages = convertMessages(model, context, compat);
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "tool"]);
+		expect(messages.at(-1)).toEqual({
+			role: "tool",
+			tool_call_id: "tool-1",
+			content: "Omitted result; read entry original-1.",
+		});
+	});
+
 	it("serializes Cerebras gemma image inputs as Chat Completions data URIs", () => {
 		const model = buildModel({
 			id: "gemma-4-31b",

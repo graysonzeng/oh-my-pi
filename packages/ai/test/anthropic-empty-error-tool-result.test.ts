@@ -73,6 +73,29 @@ function getToolResultBlock(
 }
 
 describe("anthropic empty error tool_result encoding", () => {
+	it("sends only visible tool content when recoverable text and images are stored", () => {
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "toolu_empty_error",
+			toolName: "bash",
+			content: [{ type: "text", text: "Omitted result; read entry original-1." }],
+			omittedOriginal: [
+				{ type: "text", text: "stored original that must not consume the request budget" },
+				{ type: "image", data: "c3RvcmVkLWltYWdl", mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: 1,
+		};
+
+		const block = getToolResultBlock(visionModel, toolResult);
+		expect(block).toEqual({
+			type: "tool_result",
+			tool_use_id: "toolu_empty_error",
+			content: [{ type: "text", text: "Omitted result; read entry original-1." }],
+			is_error: false,
+		});
+	});
+
 	it("fills whitespace-only error tool results so Anthropic does not 400", () => {
 		const toolResult: ToolResultMessage = {
 			role: "toolResult",

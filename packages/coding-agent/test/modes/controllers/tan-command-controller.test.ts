@@ -440,11 +440,9 @@ describe("TanCommandController", () => {
 		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
 		await compacted.promise;
 
-		// Inherited parent todos are wiped both in-memory and in the persisted
-		// session so reloads agree; otherwise todo reminders drag the tan back
-		// onto the parent's task.
+		// The canonical setter clears and persists inherited todos so reminders
+		// cannot drag the fork back onto the parent's task.
 		expect(stub.clone.setTodoPhases).toHaveBeenCalledWith([]);
-		expect(harness.cloneManager.appendCustomEntry).toHaveBeenCalledWith("user_todo_edit", { phases: [] });
 		// Fork notice injected before the prompt and again after compaction.
 		expect(stub.appendMessage).toHaveBeenCalledTimes(2);
 		for (const call of stub.appendMessage.mock.calls) {

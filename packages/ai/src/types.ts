@@ -1010,6 +1010,8 @@ export interface ToolResultMessage<TDetails = unknown> {
 	toolCallId: string;
 	toolName: string;
 	content: (TextContent | ImageContent)[]; // Supports text and images
+	/** Stored recovery data; never part of the provider-visible result content. */
+	omittedOriginal?: (TextContent | ImageContent)[];
 	details?: TDetails;
 	isError: boolean;
 	/**
