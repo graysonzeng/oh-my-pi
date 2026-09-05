@@ -214,3 +214,44 @@
 **修复后结论**: `PASS`
 
 Consult 变更已达到可合并状态；无需额外 handoff。仓库完整套件仍有上述父提交可复现的 discovery 基线失败，应独立处理，不阻塞本次 Consult 修复判断。
+
+## 8. 本轮 fix-implement 复核（2026-08-27）
+
+审查文档 §7 记录了上一轮对 HIGH/MEDIUM 的关闭声明。本轮按代码独立复核，原审查结论 `NEEDS_FIX` 对应的生产路径大多已落地；发现一处审查遗漏的 D12 门控洞，并补了合同测试。
+
+### 8.1 处理状态
+
+| 审查发现 | 处理状态 | 证据 / 替代处理 |
+|---|---|---|
+| HIGH 凭据解析不受 abort/timeout 约束 | 修复（上一轮已落地，本轮复核保留） | `execute` 先建组合 signal，传入 `resolveConsultSelection` / `getApiKey`；abort/timeout/throw 映射为 `aborted`/`timeout`/`provider_error` 并 `recordConsultAttempt`。测试覆盖 caller abort、`consult.timeoutMs`、credential reject。 |
+| HIGH 最终请求预算发生在脱敏前 | 修复（上一轮已落地；本轮补脱敏膨胀回归） | `projectConsultContext` 对脱敏 + Handlebars 渲染后的 system/user 按 `max(0, contextWindow-maxTokens)` 拟合。新增 `refits after secret placeholders expand droppable history`。 |
+| HIGH 新逻辑 session 未清配额 | 修复（上一轮已落地） | `#clearSessionScopedToolState` 与成功 `fork()` 调用 `resetConsultSession`。SDK 覆盖成功 `/new` 原位清零、取消 `/new` 保留旧状态。 |
+| HIGH subagent runtime gate 可绕过 | 修复（上一轮 runtime 已落地；本轮补 createTools 洞） | runtime 已拦 `agentKind !== "main"`。`createTools` 原先只看 `taskDepth === 0`，`/tan` 克隆 `taskDepth` 仍为 0 且会继承父会话 `toolNames`（含 `consult`）。现注册门控改为 `enabled && taskDepth === 0 && agentKind !== "sub"`，SDK 把 `agentKind` 写入 `ToolSession`。 |
+| HIGH execute-time same-model/no-credentials 未测 | 修复（上一轮已落地） | execute 边界断言错误码、零 complete 调用、usage。 |
+| HIGH provider 真抛错与脱敏 fail-closed 零外发未覆盖 | 修复（上一轮已落地） | throwing complete stub 后可继续；跨块 obfuscate 不一致返回 `redaction_unavailable` 且零外发。 |
+| MEDIUM provider 错误文本未截断 | 修复（上一轮 throw 路径已落地；本轮补 `stopReason: "error"`） | throw 与 `response.errorMessage` 都 `truncate(..., CONSULT_TOOL_RESULT_CHARS)`。 |
+| MEDIUM prompt 同 turn 重试矛盾 | 修复（上一轮已落地） | `consult-instructions.md` 统一为错误后继续且本 turn 不重试。未加 source-grep 测试。 |
+| MEDIUM TUI artifact URI 可被 expanded 行上限裁掉 | 修复（上一轮已落地） | renderer 切片前提取 recovery footer；expanded 独立显示。 |
+| MEDIUM status credentials 不准确 | 修复（上一轮已落地） | 解析顺序 credentials → same-model；status 仅 ok/same_model 报 credentials true。 |
+| MEDIUM 实现文档验证表述过度 | 修复 | 实现文档 §5-6 改为本轮真实命令与未执行项。 |
+| MEDIUM CLI 只覆盖 parser | 不采纳（保留为验证边界） | parser、`main.ts` ephemeral override、用户文档已核对；未新增需要抽象生产启动路径的测试。 |
+| 新增修复思考：`createTools` 与 runtime `agentKind` 不一致 | 修复 | 来源：复核 D12 时对照 `/tan`（`parentTaskPrefix` 且默认 `taskDepth` 0）与 `createTools(..., parent.getEnabledToolNames())`。影响面：嵌套克隆会拿到 consult schema/系统提示。验证：createTools 继承 `toolNames` 过滤 + SDK `parentTaskPrefix` 克隆。 |
+| 新增修复思考：fork 清零无自动测试 | 转为后续风险 | `SessionManager.fork()` 在 in-memory/非 persist 时返回 `undefined`，当前 SDK 生命周期夹具无法走成功 fork。生产路径已调用 `resetConsultSession`；`/new` 成功/取消已覆盖。 |
+
+### 8.2 本轮验证
+
+- 焦点合同测试：`bun test packages/coding-agent/test/tools/consult.test.ts packages/coding-agent/test/tools/consult-renderer.test.ts packages/coding-agent/test/sdk-consult-tool-lifecycle.test.ts packages/coding-agent/test/cli-consult-flag.test.ts packages/coding-agent/test/advisor/config.test.ts` → 65 pass / 0 fail / 216 expect。
+- 变更文件 Biome：`bunx biome check packages/coding-agent/src/tools/index.ts packages/coding-agent/src/sdk.ts packages/coding-agent/test/tools/consult.test.ts packages/coding-agent/test/sdk-consult-tool-lifecycle.test.ts` → No fixes applied。
+- `cd packages/coding-agent && bun run check:types` → 通过。
+- 未重跑完整 coding-agent 套件、binary build、`--smoke-test`（与本轮 `createTools`/`agentKind` diff 无直接覆盖关系）。
+- 未执行真实跨 provider 请求。
+
+### 8.3 结论
+
+**修复后结论**: `PASS_WITH_NOTES`
+
+代码已可合并，无需额外 code-review handoff。Notes：CLI 启动边界仍非自动覆盖；成功 `fork()` 清零无 in-memory 合同测试。
+
+**同会话继续**: 无需。代码已可合并。
+
+**新会话恢复 prompt**: 无需。

@@ -33,12 +33,29 @@ Default profile registration order is the router preference (see `DEFAULT_MODEL_
 
 ## Tool operations
 
-Built-in tool `workflow` supports **only**:
+Built-in tool `workflow` supports:
 
-- `start` — create workflow (write; optional `qualityTier: balanced | critical`)
+- `start` — create workflow (write; optional `qualityTier: balanced | critical`, optional `pipeline=devflow`)
+- `run` — create then execute immediately (write; optional `pipeline=devflow`). One invocation runs at most 32 stage steps.
 - `status` — read-only snapshot (stage, attempts, artifacts, budget)
-- `resume` — continue from persisted stage (write; refuses terminal)
+- `resume` — continue from persisted stage (write; refuses terminal; same 32-step cap)
 - `cancel` — abort + persist `cancelled` (write)
+
+### DevFlow Autopilot overlay
+
+User entry is `/delivery` (registered in `builtin-modes.ts`). The handler calls `modes/delivery.ts`, which invokes `workflow op=run pipeline=devflow`. This is a different product from the `workflowz` keyword.
+
+Each DevFlow row persists `owner_session_id`. `/delivery` queries active work through `WorkflowTool`/`WorkflowEngine` for the current persistent session only: a held `runner_owner` is reported without starting or resuming, an unlocked active workflow is resumed, and a new `run` starts only when that session has no active workflow. Legacy rows with a NULL owner remain available only through an explicit `workflow op=resume workflowId=...` call.
+
+Answering a persisted grill pause goes through one engine-owned recovery operation before `resume`: `incomplete_plan`, `gate_parse_failed`, and `max_grill_questions` append the answer and clear the stale pause in one optimistic sidecar update; `needs_redesign` appends the answer and keeps the existing lock-empty replan CAS.
+
+`pipeline=devflow` writes `pipeline_kind`, `owner_session_id`, and the versioned overlay sidecar (including pre-stage `grill.answers`) on the **first** `INSERT`. The sidecar parser rejects missing, malformed, unknown-field, or unsupported-version data; a DevFlow row without a valid sidecar fails closed. NULL kind is legacy and keeps the old stage graph.
+
+Plan/code review for DevFlow uses the static `gate-review-adapter.md` prompt and parses a `GateResultArtifact` with `parseGateResultArtifact(raw, expected)`. The selected reviewer profile determines the native reviewer agent and pins its matching model family; provider-attested identity is checked against the same profile. Every Gate parse attempt records usage and runtime evidence before parsing, including attempts later rejected and retried. `PASS` / `PASS_WITH_NOTES` fail closed if any finding is `status=open` and (`blocking===true` or priority P0/P1). Open P2/P3 notes may remain only when `blocking !== true`. The engine does not auto-downgrade those to `NEEDS_REVISION`.
+
+`replanFromRedesign` moves `plan_review → planning` without incrementing `planRejectionCount`. The CAS `WHERE` requires `runner_owner IS NULL`, the same `UPDATE` sets `runner_owner=NULL`, and the success path must not call `releaseRunner`.
+
+Ordinary `/goal complete` user confirmation is unchanged.
 
 ## Recovery
 

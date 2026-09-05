@@ -3,7 +3,7 @@
 - Date: 2026-08-28
 - Design Doc: docs/superpowers/specs/2026-08-27-goal-host-completion-and-grok-unload-design.md
 - Review Doc: docs/superpowers/plans/2026-08-28-goal-host-completion-and-grok-unload-design-review.md
-- Status: Completed
+- Status: Review fixes (settle snapshot, evaluator single-flight, D3 outcomes, falseCompletion, timeoutMs=0)
 
 ## 1. 评审意见处理摘要
 
@@ -67,12 +67,12 @@
 ## 5. 验证结果
 
 - 测试：
-  - `cd packages/coding-agent && bun test test/goals/host-gate.test.ts test/goals/goal-evaluator.test.ts test/goals/goal-nomination.test.ts test/goals/goal-tool.test.ts test/goals/goal-hash-shadow.test.ts test/goals/goal-runtime.test.ts test/goals/goal-mode-integration.test.ts test/model-policy/adapters.test.ts`
-  - 结果：85 pass / 0 fail / 344 expect
-  - 覆盖：host gate 缺验证/open todo/失败测试/成功验证；false-completion snapshot；evaluator unknown field 与 blocker_key；同 turn 共享提名与 stale discard；drop 取消 in-flight；recover 不清成 complete；工具 complete 保持 active；用户 `/goal complete` 退出 goal mode；hash `next_step` 重置；Grok overlay 默认无 numbered、可独立回滚
+  - `cd packages/coding-agent && bun test test/goals/ test/agent-session-goal-false-completion.test.ts test/model-policy/adapters.test.ts`
+  - 结果：102 pass / 0 fail / 404 expect
+  - 覆盖补充：完整 settle turn snapshot（排除未完成 goal complete、纳入此前验证）；同-turn evaluator single-flight；D3 在 rejected/candidate_complete 时不误判；`goal.hostGate.falseCompletion`；evaluator 近期对话投影；验证命令不再把裸 `test` 当验证；`timeoutMs=0` 禁用超时
 - lint/typecheck：`cd packages/coding-agent && bun check` → biome 无诊断，`tsgo --noEmit` 通过
-- 构建：未跑包级 `bun run build`（本次是运行时/测试合同，不改编译入口）
-- 功能验证：焦点测试即合同验证。未跑 grok-4.6 手工长任务；未跑全仓 test / cargo。
+- 构建：未跑包级 `bun run build`（运行时/测试合同，不改编译入口）
+- 功能验证：session 级 D3 hidden-next-turn 与同-turn complete 时序测试。未跑 grok-4.6 手工长任务；未跑全仓 test / cargo。
 
 ## 6. 已知限制与后续建议
 

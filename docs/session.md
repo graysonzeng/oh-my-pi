@@ -340,7 +340,8 @@ Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pi
   "outputSchemaMode": "strict",
   "restrictToolNames": true,
   "spawns": "*",
-  "readSummarize": false
+  "readSummarize": false,
+  "outputTruncation": false
 }
 ```
 

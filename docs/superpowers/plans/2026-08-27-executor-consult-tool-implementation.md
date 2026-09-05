@@ -43,7 +43,7 @@
 ## 3. 采纳的设计修订
 
 1. 顾问输入：`snapshotConsultContext(): { systemPrompt: string[]; messages: AgentMessage[] }`。user prompt 含 `<pinned-constraints>` + `<transcript>`。裁剪顺序：固定 system/project constraints、首用户任务、末用户任务；oldest-first 丢中段。
-2. 生命周期：注册门控 = `consult.enabled && taskDepth === 0`。execute/status 解析 model → credentials → same-model。失败返回 D7 错误码，`isError: true`，本 turn 不自动重试。配额对成功和失败都计数，超限拒绝不再计数。
+2. 生命周期：注册门控 = `consult.enabled && taskDepth === 0 && agentKind !== "sub"`。execute/status 解析 credentials → same-model。失败返回 D7 错误码，`isError: true`，本 turn 不自动重试。配额对成功和失败都计数，超限拒绝不再计数。`/tan` 这类 `parentTaskPrefix` 克隆即使 `taskDepth` 仍为 0，也不得继承父会话 `consult`。
 3. 脱敏：复用 history formatter 与 advisor secret 管线；缺 obfuscator 或一致性失败 → `redaction_unavailable`。历史 consult 正文 stub 成 `consult #N → (omitted, see prior turn)`，避免顾问读自己。
 4. 预算：`consult.maxTokens` 传入 oneshot；`consult.maxFocusChars` 限制 focus；输入侧按顾问 context window 减去 system/framing/output 预留。
 5. xdev：`consult` 加入 `XDEV_KEEP_TOP_LEVEL`，避免被挂到 `xd://` 后系统提示不可达。
@@ -71,33 +71,20 @@
 
 ## 5. 最终验证结果（code-review 修复后）
 
-- 焦点合同测试：`bun test packages/coding-agent/test/tools/consult.test.ts packages/coding-agent/test/tools/consult-renderer.test.ts packages/coding-agent/test/sdk-consult-tool-lifecycle.test.ts packages/coding-agent/test/cli-consult-flag.test.ts packages/coding-agent/test/advisor/config.test.ts` → 60 pass / 0 fail / 198 expect。
-- 覆盖：execute-time same-model/no_credentials；凭据 abort/timeout/reject；provider 真抛错后 session 继续；provider error 截断；脱敏不一致 fail-closed 且零外发；脱敏后最终请求真实 token budget；session reset；subagent runtime gate；status credentials；renderer artifact recovery；CLI parse；advisor 隔离。
+- 焦点合同测试：`bun test packages/coding-agent/test/tools/consult.test.ts packages/coding-agent/test/tools/consult-renderer.test.ts packages/coding-agent/test/sdk-consult-tool-lifecycle.test.ts packages/coding-agent/test/cli-consult-flag.test.ts packages/coding-agent/test/advisor/config.test.ts` → 65 pass / 0 fail / 216 expect。
+- 覆盖：execute-time same-model/no_credentials；凭据 abort/timeout/reject；provider 真抛错后 session 继续；throw 与 `stopReason: "error"` 的错误文本截断；脱敏不一致 fail-closed 且零外发；脱敏后最终请求真实 token budget（含 secret placeholder 膨胀后再拟合）；session reset；subagent runtime gate；`parentTaskPrefix`/`agentKind: "sub"` 克隆即使 `taskDepth === 0` 也不注册 consult，继承的 `toolNames` 也会被滤掉；status credentials；renderer artifact recovery；CLI parse；advisor 隔离。
 - 回归测试红绿证据：把 input budget 临时恢复为 1024 下限后，低余量用例按预期失败；恢复真实余量后通过。临时移除 credential signal 透传后，timeout 用例按预期收到 `provider_error: credential signal was not forwarded`；恢复后通过。
-- 完整 coding-agent 套件：`bun run test` → 944 pass / 1 fail。唯一失败为 `test/discovery/codex-mcp-cwd.test.ts:82`（期望 `enabled` 未定义，实际为 true）；该文件不在 Consult 变更中，且在父提交 `d6e93ae06e` 的隔离 worktree 中单独运行同样为 4 pass / 1 fail。
-- 代码质量：本次变更文件 `bunx biome check ...` → No fixes applied；`bun run check:types` → 通过。包级 `bun run check` 的全目录 Biome 阶段仍被仓库既有、非 Consult 文件格式诊断阻断。
-- 构建：`cd packages/coding-agent && bun run build` → 通过。
-- 功能 smoke：`packages/coding-agent/dist/omp --smoke-test` → `smoke-test: ok`；`--version` → `omp/18.0.5`。
+- 代码质量：本次变更文件 `bunx biome check packages/coding-agent/src/tools/index.ts packages/coding-agent/src/sdk.ts packages/coding-agent/test/tools/consult.test.ts packages/coding-agent/test/sdk-consult-tool-lifecycle.test.ts` → No fixes applied；`cd packages/coding-agent && bun run check:types` → 通过。
+- 未在本轮重跑完整 coding-agent 套件、binary build 或 `--smoke-test`；这些不覆盖本次 `createTools`/`agentKind` 门控 diff。
 - 未执行真实跨 provider 调用；自动验证使用注入的 `completeSimple`、公开 SDK session 和真实 renderer。调用频率与顾问质量仍是上线观测项。
 
 ## 6. 已知限制与后续建议
 
 - `consult` 默认关闭；开启后会把 fail-closed 脱敏后的策展 transcript 发往所选 provider，这是功能的数据边界，需由用户显式开启。
 - 未验证真实 provider 的延迟、回答质量与执行器主动调用频率；这些不影响本地合同正确性，但仍需 telemetry/线上观察。
-- 仓库完整 coding-agent 套件存在上述父提交可复现的 discovery 基线失败；Consult 焦点套件、typecheck、changed-file Biome、build 与 compiled smoke 均通过。
+- CLI `--consult` 只自动覆盖 parser；启动边界非持久化仍靠 `main.ts` ephemeral override 代码核对，未新增专用启动测试。
+- `fork()` 成功路径调用 `resetConsultSession`；当前 SDK 生命周期测试使用 in-memory session（`fork()` 在非 persist 时直接返回），因此 fork 清零没有自动合同测试，只覆盖 `/new` 成功/取消。
 
 ## 7. Handoff
 
-### 7.1 同会话继续
-
-`直接执行 $code-review 或 /code-review`
-
-### 7.2 新会话恢复 prompt
-
-```text
-请阅读设计输入 docs/superpowers/specs/2026-08-26-executor-consult-tool-design.md、
-实现文档 docs/superpowers/plans/2026-08-27-executor-consult-tool-implementation.md，
-以及本次提交的代码变更，
-重点核对根因前提（如有）、设计修订、实现结果与验证证据是否一致，
-使用 $code-review（或 /code-review）进行方案重审及代码审查。
-```
+代码已可合并，无需额外 code-review handoff。审查记录见 `docs/superpowers/plans/2026-08-27-executor-consult-tool-code-review.md` §8。

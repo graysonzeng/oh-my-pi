@@ -5,12 +5,20 @@
 ### Added
 
 - Added native `code_intel`: one query returns a `CCE_SEARCH_RESULT` evidence envelope from grep, tags/PageRank, read-only LSP call hierarchy, and optional local embeddings, without Cursor CCE.
+- Added `/delivery` DevFlow autopilot overlay on the existing workflow engine: grill → plan → review → implement → code review → fix, with atomic pipeline rows, Gate-result reviews, and automatic resume after a 32-step run cap.
 - Added default-off provider-health and adaptive-thinking latency arms plus ordinary-session work metrics linked to rollout outcomes.
 - Added the `consult` tool: a default-off mid-turn oneshot to a stronger model for strategic guidance, with pinned system/project constraints, execute-time model/credential revalidation, fail-closed secret redaction, and a hard `consult.maxTokens` output budget.
+- Explicit `:raw`/range `read` output now bypasses ordinary output clamping even when args use `file_path`; shadow-review trajectories fall back to the assignment when the parent transcript is still empty. Bundled `scout`, `sonic`, and `librarian` now prefer `gateway/deepseek-v4-flash:max`, then `gateway/grok-4.6:high`. Unset `smol`/`tiny` use the same pair first and no longer inherit the primary `default` model; an explicit `modelRoles.smol` still wins.
 - Detached subagents now show a compact current/recent tool gist on the Subagents HUD and live `hub wait` / `hub jobs` rows, with home-directory prefixes shortened, without changing settled result/error previews.
 
 ### Fixed
 
+- Fixed `/delivery` treating a user abort during Gate review or completeness audit as a grill/incomplete pause instead of cancelling the run.
+- Fixed custom `models.yml` entries ignoring `requestModelId`, so OpenAI-compatible gateways that advertise display-name ids (for example `DeepSeek V4 Flash`) can keep a slug locally without sending that slug on the wire.
+- Fixed `/delivery` skipping pre-start completeness grilling and dropping Gate `blocking` flags, so incomplete requests no longer create a workflow and blocking P2/P3 notes still fail closed.
+- Fixed `/delivery` losing the original request across grilling, stopping after seven of eight questions, crossing session boundaries, and retaining stale non-redesign grill pauses after an answer; active workflows now use persisted session ownership, locked runs only report, unlocked runs resume, and malformed DevFlow sidecars fail closed.
+- Fixed DevFlow Gate retries to use the static review prompt, keep native reviewer agent/model/attested identity aligned, and persist usage/runtime evidence for every parse attempt.
+- Fixed Shadow review results being permanently suppressed before subagent quiescence; completed findings now resume through the existing exactly-once `async-result` delivery path.
 - Fixed marker-less edits to fail closed on fuzzy or partial-line neighbor overlaps while retaining exact adjacent whole-line duplicate collapse, and repeated empty model responses to try configured cross-model fallbacks before stopping.
 - Fixed `consult` remaining registered on nested clones such as `/tan` that inherit the parent tool list at `taskDepth` 0.
 - Fixed thinking-only stops whose `thinkingSignature` is an OpenAI reasoning field name (`reasoning_content`, `reasoning`, or `reasoning_text`) being treated as authenticated output and skipping empty-stop retry.
@@ -19,14 +27,16 @@
 - Added independent `xai` service-tier family (`tier.xai`: none \| priority) so `/fast` and `set_fast_mode` work on xAI-capable Grok text models without merging into OpenAI or inventing a Fireworks-style provider knob. OpenRouter Grok can enable without marking `fastModeActive` until forwarding is verified.
 
 ### Changed
+- Skill `description` is now a 160-character discovery budget: `manage_skill` rejects over-length text on write, discovery warns without truncating, and the default skill-loading prompt skips skill bodies on factual Q&A / formatting / single-command checks.
 - Default agent guidance now verifies referenced files/URLs and version-sensitive facts, preserves unknown identifiers instead of inventing them, and ends tool-driven parent turns with the requested answer.
 - Reviewer delegation now preflights an exact mandatory late reviewer with useful read-only repository work, reuses the checked agent over IRC after verification, and avoids duplicate final reviews during fallback.
 - Review orchestration now defaults routine reviewers to medium effort, caps agent-level escalation at `xhigh`, pins one shared diff evidence snapshot, and bounds parallel fan-out to disjoint file/contract scopes.
 - Canonical `skill://<name>` full-text reads now stub a second identical view; unknown skills stay fail-closed with a `rule://` hint and no SKILL.md scan; `adaptive-delivery` is routed as a rule.
-- Review/Gate `task` spawns now cap at 20 minutes without raising a stricter or unlimited `task.maxRuntimeMs`, and workflow live quality treats missing or non-`completed` `completionKind` as non-PASS.
+- Structured subagents now classify review and explore work after fresh agent discovery: review tasks use a 30-minute/80-request envelope, scout/sonic use 10 minutes/40 requests, the 75% wall-clock reminder is advisory rather than `budget_stop`, bundled scout defaults to medium summarized reads, and live review quality fails closed unless every required case passes first try.
 - Grok model-optimization overlay no longer repeats the profile-injected step-by-step sentence. `task` tool prompt no longer restates schema-exposed `effort` / `schemaMode` enum literals.
 - `goal({op:"complete"})` now nominates only; a deterministic host gate must pass, and `/goal complete` is the user confirmation that actually closes the goal. Same-model evaluator output is advisory `next_step`/`blocker` and cannot complete.
 - Ordinary Grok overlay no longer requires numbered / step-by-step instructions; `goal.grokOverlayUnload=false` restores the previous overlay independently of the host gate.
+- Design-author subagents can disable model-family tool-output clamps with `output-truncation: false` without changing the Grok family profile. Ordinary Grok sessions keep truncation.
 
 ### Fixed
 
@@ -38,6 +48,7 @@
 - Fixed ambiguous marker-less edits to fail closed instead of inferring replacement text, and capped empty stops — including billed dropped-content stops — to try configured cross-model fallbacks before stopping.
 - Fixed thinking-only empty stops whose `thinkingSignature` is an OpenAI reasoning field name (`reasoning_content`, `reasoning`, `reasoning_text`) being treated as authenticated terminal content. Those stops now retry like unsigned thinking; Claude-style non-field-name signatures stay terminal.
 - Fixed Codex WebSocket 1006 interruptions after unexecuted tool calls to auto-retry only when every emitted call has an exact synthetic `executed: false` result, preserving the failed turn to avoid duplicate side effects.
+- Fixed unexpected socket closures after resolved tool calls to resume from the preserved turn without rerunning completed side effects.
 
 ## [17.1.9] - 2026-08-07
 

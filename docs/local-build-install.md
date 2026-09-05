@@ -82,23 +82,21 @@ created by the current build; never delete pre-existing user files.
 
 ## Latest verified baseline
 
-Last updated: 2026-08-31 (Asia/Shanghai).
+Last updated: 2026-09-03 (Asia/Shanghai).
 
 | Item | Verified value |
 |---|---|
-| Source commit | `aa9b9233af` / `aa9b9233af86d2aff303ad387bc192daa40240af` (worktree dirty only in this baseline doc; `v17.2.12-2482-gaa9b9233af`) |
+| Source commit | `8ff3af0dcb` / `8ff3af0dcbf2fd290e02d1db65c411cc1f4f8c59` (`v17.1.9-3916-g8ff3af0dcb`). Built from the current checkout at this HEAD, including uncommitted `requestModelId` wiring for custom models.yml entries. Unrelated docs, tests, changelog changes, plans, specs, and handoffs were preserved. |
 | Package version | `omp/18.0.5` |
 | Artifact | `packages/coding-agent/dist/omp` |
 | Installed path | `/Users/sheng/.local/bin/omp` |
-| SHA-256 | `949289c296a50bd165ba260559fbd6f600e9cec0f8aeb982487e6792336b32b0` |
-| Native SHA-256 | `237fc586419742a606870aaf98ce8affdf6c2c35972a247f3e6a9b11de75adb7` (embedded `packages/natives/native/pi_natives.darwin-arm64.node`, sentinel `__piNativesV18_0_5`) |
-| Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build` |
+| SHA-256 | `efeed31ca62fa5beeb0a7ea82915d37213059e2b0ce74562244d3202d180e654` |
+| Native SHA-256 | `00b2f04d9983ea6d5ff61782388f320bbaed47433867a0ce6c9355f8c75e6abd` (embedded `packages/natives/native/pi_natives.darwin-arm64.node`, sentinel `__piNativesV18_0_5`; matches `~/.omp/natives/18.0.5/pi_natives.darwin-arm64.node`) |
+| Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build` (`448eeb9d77dfad49dc47627b37fa8f1474d4c92c5b1cd9e13cda326cf3a7cd96`, previous `omp/18.0.5` from `2f8d2b09a5`) |
 | Artifact type | adhoc-signed arm64 Mach-O executable |
-| Gates | `bun --cwd=packages/coding-agent run check` (biome 3059 files + tsgo) exit 0; production binary build; artifact type/signature/version/checksum and `--smoke-test`; installed path/type/version/checksum and `--smoke-test` |
+| Gates | `bun --cwd=packages/coding-agent run check` (biome 3069 files + tsgo) exit 0; production binary build; artifact version/`--help`/`stats --summary`/type/signature/checksum/`--smoke-test`; staged install signature; installed path/type/version/checksum/`--smoke-test`; live `omp --print --model gateway/deepseek-v4-flash` returned `stopReason: stop` with `PONG` |
 
 The installed checksum matched the build artifact, both artifact and installed
 `--smoke-test` returned `smoke-test: ok`, and the installed command resolved to
-`/Users/sheng/.local/bin/omp` (`omp/18.0.5`). The binary was built from commit
-`aa9b9233af` (`v17.2.12-2482-gaa9b9233af`); the only worktree change at verify
-time is this baseline document. The previous installed command remains available
-at the rollback path above.
+`/Users/sheng/.local/bin/omp` (`omp/18.0.5`). The previous installed command
+remains available at the rollback path above.

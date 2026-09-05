@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added first-party `gpt-6-astra` (GPT-6 Astra) with published API pricing, 1.05M context, and mandatory reasoning. GitHub Copilot now routes GPT-5+ (including GPT-6 Astra) through the Responses API.
+
+### Changed
+
+- DeepSeek V4 Flash now always runs at `max` effort across providers and task types; lower task or agent effort limits cannot downgrade it.
+
 ## [17.1.9] - 2026-08-07
 
 ### Added

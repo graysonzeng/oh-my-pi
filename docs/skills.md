@@ -224,6 +224,9 @@ No fallback search is performed for missing assets.
 
 - Put each skill in its own directory: `<skills-root>/<skill-name>/SKILL.md`
 - Always include explicit `name` and `description` frontmatter
+- `description` is the discovery surface: one line, ≤160 characters, what it does and when it applies. Add a `Not for …` exclusion when nearby tasks would otherwise trigger it. Discovery warns (does not truncate) when a description exceeds 160 characters — truncation would hide the trigger boundary.
+- Keep `SKILL.md` a router: shared purpose, essential constraints, and which `references/` or scripts to read. Put mode-specific procedures in supporting files and load them only when that mode applies.
 - Keep referenced assets under the same skill directory and access with `skill://<name>/...`
 - For nested taxonomy (`team/domain/skill`), point `skills.customDirectories` to the nested parent directory; scanning itself remains non-recursive
 - Avoid duplicate skill names across sources; first match wins by provider precedence
+- Prefer a narrow correction after a real failure over accumulating universal rules for every example

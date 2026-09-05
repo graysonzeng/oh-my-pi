@@ -14,5 +14,6 @@ globs: ["packages/**", "crates/**", "python/**"]
 | `packages/tui` | Differential-rendering terminal UI library |
 | `packages/natives` | Native text, image, and grep bindings |
 | `packages/stats` | Local `omp stats` observability dashboard |
+| `packages/omptype` | ArkType-compatible schema validation with a lazy JIT runtime |
 | `packages/utils` | Shared logger, streams, and temporary-file utilities |
 | `crates/pi-natives` | Performance-critical Rust text and grep operations |

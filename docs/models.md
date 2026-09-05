@@ -60,6 +60,7 @@ providers:
     models:
       - id: some-model-id
         name: Some Model
+        requestModelId: Some Model
         api: openai-completions
         reasoning: false
         input: [text]
@@ -151,6 +152,7 @@ It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 
 - `id` required
 - `contextWindow` and `maxTokens` must be positive if provided
+- `requestModelId` optional; when set it must be a non-empty string. Local selection keeps `id`; the provider request sends `requestModelId`.
 
 ### Command-resolved secrets
 

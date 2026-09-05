@@ -25,10 +25,10 @@ Toggle it with the `/vibe` slash command:
 
 Every worker is a real, keep-alive task-executor subagent with the normal coding tool surface and its own persisted child transcript. Choose a tier when spawning:
 
-| Tier   | Bundled agent | Default role | Use for                                             |
-| ------ | ------------- | ------------ | --------------------------------------------------- |
-| `fast` | `sonic`       | `@smol`      | Mechanical execution, drafts, high-volume work      |
-| `good` | `task`        | `@task`      | Design, judgment calls, and reviewing `fast` output |
+| Tier   | Bundled agent | Default model | Use for                                             |
+| ------ | ------------- | ------------- | --------------------------------------------------- |
+| `fast` | `sonic`       | `gateway/deepseek-v4-flash:max`, then `gateway/grok-4.6:high` | Mechanical execution, drafts, high-volume work      |
+| `good` | `task`        | `@task`       | Design, judgment calls, and reviewing `fast` output |
 
 The tier always selects the bundled `sonic` or `task` definition, not a same-named discovered custom agent. Model resolution otherwise matches task-agent routing: `task.agentModelOverrides.sonic` / `.task` wins over the bundled agent model, and role aliases resolve through `modelRoles`, with the parent active/default model as fallback.
 
