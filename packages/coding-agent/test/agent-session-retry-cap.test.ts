@@ -2229,6 +2229,16 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 
+	it("caps Grok Completions closes after streamed thinking across custom providers", async () => {
+		const model = getBundledModel("xai", "grok-4.6");
+		if (!model) throw new Error("Expected bundled Grok 4.6 test model to exist");
+		await expectThinkingStreamCloseRetryCap({
+			model: { ...model, provider: "gateway", api: "openai-completions" },
+			errorMessage: "OpenAI completions stream closed before a finish_reason was received",
+			prompt: "Trigger Grok Completions incomplete stream after reasoning",
+		});
+	});
+
 	it("defaults 502 auto-retry to ten capped backoff attempts", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

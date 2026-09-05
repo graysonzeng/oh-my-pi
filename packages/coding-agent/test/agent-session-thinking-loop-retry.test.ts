@@ -243,6 +243,48 @@ describe("AgentSession thinking-loop retry", () => {
 		expect(assistants[0].content).toEqual([{ type: "text", text: "Recovered after retry." }]);
 	});
 
+	it("stops repeated Grok thinking loops after one corrective retry", async () => {
+		const model = createMockModel({ provider: "gateway", id: "grok-4.6" }).model;
+		authStorage.setRuntimeApiKey("gateway", "gateway-test-key");
+		let calls = 0;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: requestedModel => {
+				calls++;
+				return calls <= 2 ? errorIdOnlyThinkingLoopStream(requestedModel) : successStream(requestedModel);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": false,
+			"todo.enabled": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const starts: Array<Extract<AgentSessionEvent, { type: "auto_retry_start" }>> = [];
+		const ends: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") starts.push(event);
+			if (event.type === "auto_retry_end") ends.push(event);
+		});
+
+		await session.prompt("Trigger repeated Grok thinking loops");
+		await session.waitForIdle();
+
+		expect(calls).toBe(2);
+		expect(starts).toHaveLength(1);
+		expect(starts[0]).toMatchObject({ attempt: 1, maxAttempts: 1 });
+		expect(ends).toHaveLength(1);
+		expect(ends[0]).toMatchObject({ success: false, attempt: 1 });
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant");
+		expect(last?.stopReason).toBe("error");
+		expect(last?.errorMessage).toBe("Retry budget exhausted after 1 retry: loop guard stopped repeated reasoning");
+		expect(session.isRetrying).toBe(false);
+	});
+
 	it("injects a redirect notice into the retried turn after a thinking loop", async () => {
 		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
 		const calls: string[] = [];

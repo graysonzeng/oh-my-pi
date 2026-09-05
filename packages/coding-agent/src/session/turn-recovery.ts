@@ -1329,6 +1329,9 @@ export class TurnRecovery {
 		return (
 			(message.provider === "openrouter" &&
 				/server_error:\s*stream closed with reason:\s*error/i.test(errorMessage)) ||
+			(message.model === "grok-4.6" &&
+				message.api === "openai-completions" &&
+				/OpenAI completions stream closed before a finish_reason was received/i.test(errorMessage)) ||
 			(message.provider === "github-copilot" &&
 				message.model === "grok-4.6" &&
 				message.api === "openai-responses" &&
@@ -2011,13 +2014,15 @@ export class TurnRecovery {
 		// (every rotation sets switchedCredential and skips it), so without
 		// this last resort a provider-wide usage cap never fails over to the
 		// configured chain.
-		const maxRetries = this.#isBoundedThinkingStreamClose(message)
-			? Math.min(retrySettings.maxRetries, 1)
-			: retrySettings.maxRetries;
+		const id = this.#classifyRetryMessage(message);
+		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
+		const maxRetries =
+			this.#isBoundedThinkingStreamClose(message) || (message.model === "grok-4.6" && thinkingLoop)
+				? Math.min(retrySettings.maxRetries, 1)
+				: retrySettings.maxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
-		const id = this.#classifyRetryMessage(message);
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
@@ -2109,7 +2114,6 @@ export class TurnRecovery {
 		// would swap a healthy planning turn to another family based on chain
 		// contents, not model health (issue #8760). Keep it on the same model; the
 		// retry budget still bounds a genuinely stuck stream.
-		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
