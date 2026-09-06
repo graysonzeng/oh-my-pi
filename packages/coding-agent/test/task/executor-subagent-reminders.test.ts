@@ -7,11 +7,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import {
-	finalizeSubprocessOutput,
-	runSubprocess,
-	SUBAGENT_WARNING_MISSING_YIELD,
-} from "@oh-my-pi/pi-coding-agent/task/executor";
+import { finalizeSubprocessOutput, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -119,6 +115,7 @@ describe("runSubprocess yield reminders", () => {
 		task: "do work",
 		index: 0,
 		id: "subagent-1",
+		performanceClass: "review" as const,
 		settings: Settings.isolated(),
 		modelRegistry: {
 			refresh: async () => {},
@@ -602,7 +599,7 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.thinkingLevel).toBe(Effort.High);
 	});
-	it("fails after 3 reminders when yield is never called for a structured task", async () => {
+	it("returns an incomplete review after one submission reminder with its report preserved", async () => {
 		const prompts: string[] = [];
 		const session = createMockSession(({ text, promptIndex, emit, state }) => {
 			prompts.push(text);
@@ -618,10 +615,12 @@ describe("runSubprocess yield reminders", () => {
 			id: "subagent-3",
 			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
 		});
-		expect(prompts).toHaveLength(4);
+		expect(prompts).toHaveLength(2);
 		expect(result.exitCode).toBe(1);
 		expect(result.aborted).toBe(false);
-		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
+		expect(result.stderr).toContain("required terminal verdict");
+		expect(result.output).toContain("still no yield");
+		expect(result.structuredOutput?.status).not.toBe("valid");
 		expect(result.abortReason).toBeUndefined();
 	});
 

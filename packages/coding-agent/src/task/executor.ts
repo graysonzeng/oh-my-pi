@@ -2209,14 +2209,15 @@ async function driveSessionToYield(
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
 
 		const runYieldLadder = async (): Promise<void> => {
+			const maxRetries = requireYieldTool ? 1 : MAX_YIELD_RETRIES;
 			let retryCount = 0;
-			while (!monitor.yieldCalled() && retryCount < MAX_YIELD_RETRIES && !abortSignal.aborted) {
+			while (!monitor.yieldCalled() && retryCount < maxRetries && !abortSignal.aborted) {
 				// A budget stop collapses the reminder ladder to a single forced
 				// final yield: wait for the stop's session abort to settle, then
 				// prompt once with the wrap-up reminder + named tool choice.
 				const budgetStop = monitor.budgetStopRequested();
 				if (budgetStop) {
-					retryCount = MAX_YIELD_RETRIES - 1;
+					retryCount = maxRetries - 1;
 					await monitor.waitForBudgetStop();
 					if (monitor.yieldCalled() || abortSignal.aborted) break;
 				}
@@ -2230,11 +2231,12 @@ async function driveSessionToYield(
 					retryCount++;
 					const reminder = prompt.render(submitReminderTemplate, {
 						retryCount,
-						maxRetries: MAX_YIELD_RETRIES,
+						maxRetries,
+						finalizeOnly: requireYieldTool,
 						budgetStop,
 					});
 
-					const isFinalRetry = retryCount >= MAX_YIELD_RETRIES;
+					const isFinalRetry = retryCount >= maxRetries;
 					await awaitAbortable(
 						session.prompt(reminder, {
 							attribution: "agent",
@@ -2452,13 +2454,17 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	let exitCode = done.exitCode;
 	let stderr = done.error ?? "";
 
-	// Use final output if available, otherwise accumulated output.
-	// Worker/explore final-text completion has no yield events, so seed from salvage.
-	// Review still requires yield: do not let salvage text look like a successful result.
+	// Preserve the last report even when the required terminal submission is missing.
+	// Failure status, not discarded text, keeps incomplete reviews out of the Gate.
 	let rawOutput = monitor.rawOutput();
-	if (args.requireYieldTool === false && !rawOutput.trim()) {
+	if (!rawOutput.trim()) {
 		const salvage = monitor.lastAssistantSalvageText()?.trim();
 		if (salvage) rawOutput = salvage;
+	}
+	if (args.requireYieldTool && !monitor.yieldCalled() && exitCode === 0 && !done.aborted) {
+		exitCode = 1;
+		stderr ||=
+			"Subagent stopped without submitting the required terminal verdict; report is incomplete, not a passing review.";
 	}
 	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block

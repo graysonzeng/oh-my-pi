@@ -308,7 +308,13 @@ describe("task spawn routing", () => {
 			projectAgentsDir: null,
 		});
 		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
-			makeResult("YieldedScout", { completionKind: "budget_stop", aborted: false, exitCode: 0 }),
+			makeResult("YieldedScout", {
+				completionKind: "budget_stop",
+				aborted: false,
+				exitCode: 1,
+				output: "partial review report",
+				stderr: "soft request budget exceeded",
+			}),
 		);
 		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false } }));
 		const result = await tool.execute("tc-budget-stop-summary", {
@@ -319,8 +325,40 @@ describe("task spawn routing", () => {
 		const text = getFirstText(result);
 		expect(text).toContain('completionKind="budget_stop"');
 		expect(text).toContain('status="budget_stop"');
+		expect(text).toContain("partial review report");
+		expect(text).toContain("soft request budget exceeded");
 		expect(text).not.toMatch(/status="completed"/);
 	});
+
+	for (const kind of ["completed", "timeout"] as const) {
+		it(`delivers ${kind === "timeout" ? "timed-out" : "incomplete"} review reports to the parent async job`, async () => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+			const reason = kind === "timeout" ? "runtime limit exceeded" : "required terminal verdict missing";
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+				makeResult(options.id ?? "ReviewReport", {
+					completionKind: kind,
+					exitCode: 1,
+					aborted: kind === "timeout",
+					abortReason: kind === "timeout" ? reason : undefined,
+					stderr: reason,
+					output: "Checked authentication; authorization remains unreviewed.",
+				}),
+			);
+			const manager = createManager();
+			const tool = await TaskTool.create(createSession({ manager }));
+			const spawned = await tool.execute("tc-review-report", {
+				agent: "task",
+				name: "ReviewReport",
+				task: "Review authentication.",
+			} as TaskParams);
+			const job = manager.getJob(spawned.details!.async!.jobId)!;
+			await job.promise;
+			const delivered = job.resultText ?? job.errorText ?? "";
+			expect(delivered).toContain(reason);
+			expect(delivered).toContain("authorization remains unreviewed");
+			expect(delivered).not.toContain('status="completed"');
+		});
+	}
 
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({

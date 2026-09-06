@@ -1214,7 +1214,8 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		});
 
 		expect(result.exitCode).toBe(1);
-		expect(result.output).toContain("exited without calling yield");
+		expect(result.output).toBe("looks done");
+		expect(result.stderr).toContain("required terminal verdict");
 	});
 });
 

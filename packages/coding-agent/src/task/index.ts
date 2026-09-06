@@ -1695,6 +1695,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			duration: formatDuration(totalDurationMs),
 			completionKind: completionKind !== "completed" ? completionKind : undefined,
 			abortReason: result.aborted ? result.abortReason : undefined,
+			error: result.exitCode !== 0 ? result.stderr : undefined,
 			resumable,
 			preview,
 			truncated,
