@@ -59,32 +59,72 @@ const explicitGrokPrompt: PromptStrategy = {
 	instructionFormat: "numbered",
 };
 
+const BASH_ERROR_PRESERVE = ["ERROR", "FAIL", "Exception", "Traceback"] as const;
+
+function truncationRules(opts: {
+	bashBytes: number;
+	bashLines: number;
+	readBytes: number;
+	readLines: number;
+	grepBytes: number;
+	grepLines: number;
+	starBytes: number;
+	starLines: number;
+}): NonNullable<ToolStrategy["outputTruncation"]> {
+	return {
+		enabled: true,
+		rules: [
+			{
+				toolName: "bash",
+				strategy: "smart",
+				maxBytes: opts.bashBytes,
+				maxLines: opts.bashLines,
+				preservePatterns: [...BASH_ERROR_PRESERVE],
+			},
+			{ toolName: "read", strategy: "smart", maxBytes: opts.readBytes, maxLines: opts.readLines },
+			{ toolName: "grep", strategy: "head", maxBytes: opts.grepBytes, maxLines: opts.grepLines },
+			{ toolName: "*", strategy: "head", maxBytes: opts.starBytes, maxLines: opts.starLines },
+		],
+	};
+}
+
+const ORDINARY_TRUNCATION = truncationRules({
+	bashBytes: 4000,
+	bashLines: 80,
+	readBytes: 8000,
+	readLines: 160,
+	grepBytes: 8000,
+	grepLines: 120,
+	starBytes: 4000,
+	starLines: 80,
+});
+
+function conservativeTruncation(opts: {
+	maxBytes: number;
+	maxLines: number;
+}): NonNullable<ToolStrategy["outputTruncation"]> {
+	return truncationRules({
+		bashBytes: opts.maxBytes,
+		bashLines: opts.maxLines,
+		readBytes: opts.maxBytes + 2000,
+		readLines: opts.maxLines + 20,
+		grepBytes: 3000,
+		grepLines: 40,
+		starBytes: Math.min(2000, opts.maxBytes),
+		starLines: 50,
+	});
+}
+
 function toolStrategy(opts?: {
-	maxBytes?: number;
-	maxLines?: number;
 	maxConcurrent?: number;
 	aliases?: Record<string, string>;
 	argAliases?: Record<string, Record<string, string>>;
+	truncation?: NonNullable<ToolStrategy["outputTruncation"]>;
 }): ToolStrategy {
-	const maxBytes = opts?.maxBytes ?? 4000;
 	return {
 		toolAliases: opts?.aliases,
 		argumentAliases: opts?.argAliases,
-		outputTruncation: {
-			enabled: true,
-			rules: [
-				{
-					toolName: "bash",
-					strategy: "smart",
-					maxBytes,
-					maxLines: opts?.maxLines ?? 80,
-					preservePatterns: ["ERROR", "FAIL", "Exception", "Traceback"],
-				},
-				{ toolName: "read", strategy: "smart", maxBytes: maxBytes + 2000, maxLines: opts?.maxLines ?? 100 },
-				{ toolName: "grep", strategy: "head", maxBytes: 3000, maxLines: 40 },
-				{ toolName: "*", strategy: "head", maxBytes: Math.min(2000, maxBytes), maxLines: 50 },
-			],
-		},
+		outputTruncation: opts?.truncation ?? ORDINARY_TRUNCATION,
 		resultSummarization: { enabled: true, summarizerKeys: ["bash", "read", "grep", "ls", "test", "*"] },
 		maxConcurrentTools: opts?.maxConcurrent ?? 8,
 	};
@@ -159,7 +199,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		thinkingLevel: ThinkingLevel.XHigh,
 		toolPolicyId: "readonly-planning",
 		promptStrategy: conciseClaudePrompt,
-		toolStrategy: toolStrategy({ maxBytes: 4000, maxConcurrent: 8 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 8 }),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: true,
@@ -186,7 +226,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "readonly-planning",
 		promptStrategy: structuredGptPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: true,
@@ -213,7 +253,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "readonly-planning",
 		promptStrategy: explicitGrokPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: true,
@@ -240,7 +280,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		thinkingLevel: ThinkingLevel.Medium,
 		toolPolicyId: "readonly-review",
 		promptStrategy: conciseClaudePrompt,
-		toolStrategy: toolStrategy({ maxBytes: 4000 }),
+		toolStrategy: toolStrategy(),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: true,
@@ -268,7 +308,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		thinkingLevel: ThinkingLevel.Medium,
 		toolPolicyId: "readonly-review",
 		promptStrategy: structuredGptPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 3000 }),
+		toolStrategy: toolStrategy(),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: true,
@@ -297,7 +337,6 @@ const WORKFLOW_MODEL_PROFILES = {
 		toolPolicyId: "scoped-implementation",
 		promptStrategy: explicitGrokPrompt,
 		toolStrategy: toolStrategy({
-			maxBytes: 4000,
 			maxConcurrent: 12,
 			aliases: { bash: "run_command" },
 			argAliases: { read: { path: "file_path" } },
@@ -337,7 +376,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "scoped-implementation",
 		promptStrategy: structuredGptPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 5000, maxConcurrent: 10 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 10 }),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.65,
 			repoMap: false,
@@ -370,7 +409,11 @@ const WORKFLOW_MODEL_PROFILES = {
 		toolPolicyId: "scoped-implementation",
 		// No family prompt overlay for DeepSeek — see model-optimization/default-profiles
 		// (deepseek: "no Grok prompt inheritance"); keep prompt/output strategies off the grok style.
-		toolStrategy: toolStrategy({ maxBytes: 3500, maxConcurrent: 8, aliases: { bash: "run_command" } }),
+		toolStrategy: toolStrategy({
+			maxConcurrent: 8,
+			aliases: { bash: "run_command" },
+			truncation: conservativeTruncation({ maxBytes: 3500, maxLines: 80 }),
+		}),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: true,
@@ -403,7 +446,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		thinkingLevel: ThinkingLevel.Medium,
 		toolPolicyId: "readonly-review",
 		promptStrategy: conciseClaudePrompt,
-		toolStrategy: toolStrategy({ maxBytes: 4000 }),
+		toolStrategy: toolStrategy(),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: true,
@@ -431,7 +474,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		thinkingLevel: ThinkingLevel.Medium,
 		toolPolicyId: "readonly-review",
 		promptStrategy: structuredGptPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 4000 }),
+		toolStrategy: toolStrategy(),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.7,
 			repoMap: true,
@@ -458,7 +501,11 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "scoped-repair",
 		thinkingLevel: ThinkingLevel.Max,
-		toolStrategy: toolStrategy({ maxBytes: 3500, maxConcurrent: 8, aliases: { bash: "run_command" } }),
+		toolStrategy: toolStrategy({
+			maxConcurrent: 8,
+			aliases: { bash: "run_command" },
+			truncation: conservativeTruncation({ maxBytes: 3500, maxLines: 80 }),
+		}),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
 			repoMap: false,
@@ -490,7 +537,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "readonly-review",
 		promptStrategy: explicitGrokPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 4000 }),
+		toolStrategy: toolStrategy(),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.55,
 			repoMap: false,
@@ -517,7 +564,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "scoped-repair",
 		promptStrategy: explicitGrokPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 3500, maxConcurrent: 10 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 10 }),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.55,
 			repoMap: false,
@@ -550,7 +597,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		thinkingLevel: ThinkingLevel.XHigh,
 		toolPolicyId: "scoped-repair",
 		promptStrategy: conciseClaudePrompt,
-		toolStrategy: toolStrategy({ maxBytes: 4000 }),
+		toolStrategy: toolStrategy(),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.7,
 			repoMap: true,
@@ -582,7 +629,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "scoped-repair",
 		promptStrategy: structuredGptPrompt,
-		toolStrategy: toolStrategy({ maxBytes: 4000 }),
+		toolStrategy: toolStrategy(),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.7,
 			repoMap: true,
@@ -615,7 +662,10 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "scoped-repair",
 		promptStrategy: { ...conciseClaudePrompt, roleEmphasis: "medium" },
-		toolStrategy: toolStrategy({ maxBytes: 2000, maxLines: 40, maxConcurrent: 4 }),
+		toolStrategy: toolStrategy({
+			maxConcurrent: 4,
+			truncation: conservativeTruncation({ maxBytes: 2000, maxLines: 40 }),
+		}),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.8,
 			repoMap: true,
@@ -642,7 +692,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptVersion: "1.0",
 		toolPolicyId: "readonly-planning",
 		promptStrategy: conciseClaudePrompt,
-		toolStrategy: toolStrategy({ maxBytes: 5000, maxConcurrent: 10 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 10 }),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.65,
 			repoMap: false,

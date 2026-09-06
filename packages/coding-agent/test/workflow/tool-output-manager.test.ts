@@ -13,9 +13,11 @@ import {
 	processToolOutput,
 	processToolOutputDetailed,
 	processToolOutputDetailedAsync,
+	SUBAGENT_READ_TRUNCATION_RULE,
 	summarizeToolOutput,
 	truncateToolOutput,
 	utf8ByteLength,
+	withSubagentReadClamp,
 } from "../../src/workflow/tool-output-manager";
 import type { ToolStrategy } from "../../src/workflow/types";
 
@@ -480,5 +482,60 @@ describe("processToolOutputDetailedAsync + ordinary defaults", () => {
 		expect(detailed.text).not.toBe(huge);
 		expect(detailed.receipt?.transform).toBe("summarize");
 		expect(detailed.receipt?.recoveryUri).toBe("artifact://sum-only");
+	});
+});
+
+function ruleFor(rules: { toolName: string | string[]; maxBytes?: number; maxLines?: number }[], name: string) {
+	return rules.find(rule => rule.toolName === name);
+}
+
+describe("ordinary truncation defaults vs conservative families", () => {
+	it("raises ordinary family read/grep/star caps without widening DeepSeek or Sol", () => {
+		const grok = DEFAULT_MODEL_OPTIMIZATION_PROFILES.grok.toolStrategy?.outputTruncation?.rules ?? [];
+		const claude = DEFAULT_MODEL_OPTIMIZATION_PROFILES.claude.toolStrategy?.outputTruncation?.rules ?? [];
+		expect(ruleFor(grok, "bash")).toEqual(expect.objectContaining({ maxBytes: 4000, maxLines: 80 }));
+		expect(ruleFor(grok, "read")).toEqual(expect.objectContaining({ maxBytes: 8000, maxLines: 160 }));
+		expect(ruleFor(grok, "grep")).toEqual(expect.objectContaining({ maxBytes: 8000, maxLines: 120 }));
+		expect(ruleFor(grok, "*")).toEqual(expect.objectContaining({ maxBytes: 4000, maxLines: 80 }));
+		expect(ruleFor(claude, "grep")).toEqual(expect.objectContaining({ maxBytes: 8000, maxLines: 120 }));
+		expect(DEFAULT_TRUNCATION_RULES.find(r => r.toolName === "read")).toEqual(
+			expect.objectContaining({ maxBytes: 8000, maxLines: 160 }),
+		);
+
+		const deepseek = DEFAULT_MODEL_OPTIMIZATION_PROFILES.deepseek.toolStrategy?.outputTruncation?.rules ?? [];
+		const sol = DEFAULT_MODEL_OPTIMIZATION_PROFILES.sol.toolStrategy?.outputTruncation?.rules ?? [];
+		expect(ruleFor(deepseek, "bash")).toEqual(expect.objectContaining({ maxBytes: 1500, maxLines: 30 }));
+		expect(ruleFor(deepseek, "grep")).toEqual(expect.objectContaining({ maxBytes: 3000, maxLines: 40 }));
+		expect(ruleFor(sol, "bash")).toEqual(expect.objectContaining({ maxBytes: 2000, maxLines: 40 }));
+		expect(ruleFor(sol, "grep")).toEqual(expect.objectContaining({ maxBytes: 3000, maxLines: 40 }));
+	});
+
+	it("clamps only the read rule for subagents and leaves grep/bash unchanged", () => {
+		const parent = DEFAULT_MODEL_OPTIMIZATION_PROFILES.grok.toolStrategy;
+		const clamped = withSubagentReadClamp(parent);
+		expect(clamped).not.toBe(parent);
+		expect(ruleFor(clamped?.outputTruncation?.rules ?? [], "read")).toEqual(
+			expect.objectContaining({
+				maxBytes: SUBAGENT_READ_TRUNCATION_RULE.maxBytes,
+				maxLines: SUBAGENT_READ_TRUNCATION_RULE.maxLines,
+			}),
+		);
+		expect(ruleFor(clamped?.outputTruncation?.rules ?? [], "grep")).toEqual(
+			ruleFor(parent?.outputTruncation?.rules ?? [], "grep"),
+		);
+		expect(ruleFor(clamped?.outputTruncation?.rules ?? [], "bash")).toEqual(
+			ruleFor(parent?.outputTruncation?.rules ?? [], "bash"),
+		);
+
+		const deepseek = DEFAULT_MODEL_OPTIMIZATION_PROFILES.deepseek.toolStrategy;
+		const deepseekClamped = withSubagentReadClamp(deepseek);
+		expect(ruleFor(deepseekClamped?.outputTruncation?.rules ?? [], "read")).toEqual(
+			ruleFor(deepseek?.outputTruncation?.rules ?? [], "read"),
+		);
+
+		const disabled = withSubagentReadClamp({
+			outputTruncation: { enabled: false, rules: DEFAULT_TRUNCATION_RULES },
+		});
+		expect(disabled?.outputTruncation?.enabled).toBe(false);
 	});
 });

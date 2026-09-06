@@ -301,7 +301,7 @@ import {
 	type ToolOptimizationReceiptV1,
 	type ToolOutputArtifactAdapter,
 } from "../workflow/optimization-receipt";
-import { processToolOutputDetailedAsync } from "../workflow/tool-output-manager";
+import { processToolOutputDetailedAsync, withSubagentReadClamp } from "../workflow/tool-output-manager";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import type {
 	AgentSessionConfig,
@@ -4088,8 +4088,10 @@ export class AgentSession {
 		const artifact: ToolOutputArtifactAdapter = {
 			saveRaw: async (toolName, fullText) => this.sessionManager.saveArtifact(fullText, toolName),
 		};
+		const clampedStrategy =
+			this.#agentKind === "sub" && outputTruncationEnabled ? withSubagentReadClamp(toolStrategy) : toolStrategy;
 		const effectiveToolStrategy: SessionToolStrategy | undefined = outputTruncationEnabled
-			? toolStrategy
+			? clampedStrategy
 			: toolStrategy
 				? { ...toolStrategy, outputTruncation: { enabled: false, rules: [] } }
 				: undefined;

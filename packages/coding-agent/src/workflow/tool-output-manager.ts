@@ -562,7 +562,7 @@ export function processToolOutput(
 	return processToolOutputDetailed(output, toolName, toolStrategy, args, artifact).text;
 }
 
-/** Default smart truncation rules used by quality-first profiles. */
+/** Default smart truncation rules used by quality-first ordinary profiles. */
 export const DEFAULT_TRUNCATION_RULES: ToolOutputTruncationRule[] = [
 	{
 		toolName: "bash",
@@ -571,7 +571,53 @@ export const DEFAULT_TRUNCATION_RULES: ToolOutputTruncationRule[] = [
 		maxLines: 80,
 		preservePatterns: ["ERROR", "FAIL", "Exception", "Traceback"],
 	},
-	{ toolName: "read", strategy: "smart", maxBytes: 6000, maxLines: 100 },
-	{ toolName: "grep", strategy: "head", maxBytes: 3000, maxLines: 40 },
-	{ toolName: "*", strategy: "head", maxBytes: 2000, maxLines: 50 },
+	{ toolName: "read", strategy: "smart", maxBytes: 8000, maxLines: 160 },
+	{ toolName: "grep", strategy: "head", maxBytes: 8000, maxLines: 120 },
+	{ toolName: "*", strategy: "head", maxBytes: 4000, maxLines: 80 },
 ];
+
+/** Subagent read clamp: keep explore/worker visible reads tighter than the parent. */
+export const SUBAGENT_READ_TRUNCATION_RULE: ToolOutputTruncationRule = {
+	toolName: "read",
+	strategy: "smart",
+	maxBytes: 5000,
+	maxLines: 100,
+};
+
+/**
+ * Immutable overlay: tighten only the `read` rule for subagent sessions.
+ * Never raises an existing family cap (DeepSeek/Sol stay conservative).
+ * No-op when truncation is off or there is no read rule to overlay.
+ */
+export function withSubagentReadClamp<
+	T extends { outputTruncation?: { enabled: boolean; rules: ToolOutputTruncationRule[] } },
+>(strategy: T | undefined): T | undefined {
+	const truncation = strategy?.outputTruncation;
+	if (!strategy || !truncation?.enabled) return strategy;
+	const rules = truncation.rules;
+	if (
+		!rules.some(rule => rule.toolName === "read" || (Array.isArray(rule.toolName) && rule.toolName.includes("read")))
+	) {
+		return strategy;
+	}
+	return {
+		...strategy,
+		outputTruncation: {
+			...truncation,
+			rules: rules.map(rule => {
+				const names = Array.isArray(rule.toolName) ? rule.toolName : [rule.toolName];
+				if (!names.includes("read")) return rule;
+				const maxBytes = Math.min(
+					rule.maxBytes ?? SUBAGENT_READ_TRUNCATION_RULE.maxBytes!,
+					SUBAGENT_READ_TRUNCATION_RULE.maxBytes!,
+				);
+				const maxLines = Math.min(
+					rule.maxLines ?? SUBAGENT_READ_TRUNCATION_RULE.maxLines!,
+					SUBAGENT_READ_TRUNCATION_RULE.maxLines!,
+				);
+				if (maxBytes === rule.maxBytes && maxLines === rule.maxLines) return rule;
+				return { ...rule, maxBytes, maxLines };
+			}),
+		},
+	};
+}

@@ -11,25 +11,67 @@ import {
 	type SessionToolStrategy,
 } from "./types";
 
-function toolStrategy(opts?: { maxBytes?: number; maxLines?: number; maxConcurrent?: number }): SessionToolStrategy {
-	const maxBytes = opts?.maxBytes ?? 4000;
-	const maxLines = opts?.maxLines ?? 80;
+const BASH_ERROR_PRESERVE = ["ERROR", "FAIL", "Exception", "Traceback"] as const;
+
+function truncationRules(opts: {
+	bashBytes: number;
+	bashLines: number;
+	readBytes: number;
+	readLines: number;
+	grepBytes: number;
+	grepLines: number;
+	starBytes: number;
+	starLines: number;
+}): SessionToolStrategy["outputTruncation"] {
 	return {
-		outputTruncation: {
-			enabled: true,
-			rules: [
-				{
-					toolName: "bash",
-					strategy: "smart",
-					maxBytes,
-					maxLines,
-					preservePatterns: ["ERROR", "FAIL", "Exception", "Traceback"],
-				},
-				{ toolName: "read", strategy: "smart", maxBytes: maxBytes + 2000, maxLines: maxLines + 20 },
-				{ toolName: "grep", strategy: "head", maxBytes: 3000, maxLines: 40 },
-				{ toolName: "*", strategy: "head", maxBytes: Math.min(2000, maxBytes), maxLines: 50 },
-			],
-		},
+		enabled: true,
+		rules: [
+			{
+				toolName: "bash",
+				strategy: "smart",
+				maxBytes: opts.bashBytes,
+				maxLines: opts.bashLines,
+				preservePatterns: [...BASH_ERROR_PRESERVE],
+			},
+			{ toolName: "read", strategy: "smart", maxBytes: opts.readBytes, maxLines: opts.readLines },
+			{ toolName: "grep", strategy: "head", maxBytes: opts.grepBytes, maxLines: opts.grepLines },
+			{ toolName: "*", strategy: "head", maxBytes: opts.starBytes, maxLines: opts.starLines },
+		],
+	};
+}
+
+/** Ordinary coding-session defaults from historical hit-rate simulation. */
+const ORDINARY_TRUNCATION = truncationRules({
+	bashBytes: 4000,
+	bashLines: 80,
+	readBytes: 8000,
+	readLines: 160,
+	grepBytes: 8000,
+	grepLines: 120,
+	starBytes: 4000,
+	starLines: 80,
+});
+
+/** DeepSeek / Sol / other small-context families keep the tighter clamps. */
+function conservativeTruncation(opts: { maxBytes: number; maxLines: number }): SessionToolStrategy["outputTruncation"] {
+	return truncationRules({
+		bashBytes: opts.maxBytes,
+		bashLines: opts.maxLines,
+		readBytes: opts.maxBytes + 2000,
+		readLines: opts.maxLines + 20,
+		grepBytes: 3000,
+		grepLines: 40,
+		starBytes: Math.min(2000, opts.maxBytes),
+		starLines: 50,
+	});
+}
+
+function toolStrategy(opts?: {
+	maxConcurrent?: number;
+	truncation?: SessionToolStrategy["outputTruncation"];
+}): SessionToolStrategy {
+	return {
+		outputTruncation: opts?.truncation ?? ORDINARY_TRUNCATION,
 		// P3 keeps LLM summarizer off; deterministic truncation remains available.
 		// Explicit user profile overrides may re-enable summarization.
 		resultSummarization: { enabled: false, summarizerKeys: ["bash", "read", "grep", "ls", "test", "*"] },
@@ -66,7 +108,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 			thinkingPrompt: { enabled: true, style: "scratchpad" },
 			instructionFormat: "natural",
 		},
-		toolStrategy: toolStrategy({ maxBytes: 4000, maxConcurrent: 8 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 8 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.75, keepRecentN: 12 }),
 	},
 	"gpt-5": {
@@ -78,7 +120,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 			systemPromptTemplate: "structured-gpt",
 			instructionFormat: "numbered",
 		},
-		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.75, keepRecentN: 10 }),
 	},
 	grok: {
@@ -92,7 +134,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 			thinkingPrompt: { enabled: true, style: "step-by-step" },
 			instructionFormat: "numbered",
 		},
-		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.7, keepRecentN: 10 }),
 	},
 	glm: {
@@ -101,7 +143,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		priority: 0,
 		// No family prompt overlay until GLM-specific live ablation passes.
 		// Do not inherit explicit-grok / step-by-step.
-		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.7, keepRecentN: 10 }),
 	},
 	deepseek: {
@@ -109,7 +151,10 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		modelPattern: ["deepseek-*", "deepseek/*"],
 		priority: 0,
 		// Shared baseline only; no Grok prompt inheritance or guessed step-by-step.
-		toolStrategy: toolStrategy({ maxBytes: 1500, maxLines: 30, maxConcurrent: 3 }),
+		toolStrategy: toolStrategy({
+			maxConcurrent: 3,
+			truncation: conservativeTruncation({ maxBytes: 1500, maxLines: 30 }),
+		}),
 		contextStrategy: contextStrategy({ targetUtilization: 0.8, keepRecentN: 5 }),
 	},
 	// Gateway production ids also match the broad gpt-5* family. Raise priority
@@ -121,7 +166,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		modelPattern: ["*luna*", "gpt-5.6-luna", "gateway/gpt-5.6-luna", "gpt-5.6-luna*"],
 		priority: 10,
 		// Conservative deterministic truncation only; no family prompt overlay.
-		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.75, keepRecentN: 10 }),
 		contextBudgetCandidate: {
 			version: CONTEXT_BUDGET_CANDIDATE_VERSION,
@@ -134,7 +179,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		id: "terra",
 		modelPattern: ["*terra*", "gpt-5.6-terra", "gateway/gpt-5.6-terra", "gpt-5.6-terra*"],
 		priority: 10,
-		toolStrategy: toolStrategy({ maxBytes: 3000, maxConcurrent: 6 }),
+		toolStrategy: toolStrategy({ maxConcurrent: 6 }),
 		contextStrategy: contextStrategy({ targetUtilization: 0.75, keepRecentN: 10 }),
 	},
 	sol: {
@@ -142,7 +187,10 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		modelPattern: ["gpt-5.6-sol", "gpt-5.6-sol*", "gateway/gpt-5.6-sol", "gateway/gpt-5.6-sol*", "*-sol", "*-sol-*"],
 		priority: 10,
 		// More conservative visible tool output for the slow/review class.
-		toolStrategy: toolStrategy({ maxBytes: 2000, maxLines: 40, maxConcurrent: 4 }),
+		toolStrategy: toolStrategy({
+			maxConcurrent: 4,
+			truncation: conservativeTruncation({ maxBytes: 2000, maxLines: 40 }),
+		}),
 		contextStrategy: contextStrategy({ targetUtilization: 0.7, keepRecentN: 8 }),
 	},
 };

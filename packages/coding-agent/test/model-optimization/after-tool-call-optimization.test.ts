@@ -36,6 +36,12 @@ const profile: ModelOptimizationProfile = {
 					maxBytes: 800,
 					maxLines: 20,
 				},
+				{
+					toolName: "read",
+					strategy: "smart",
+					maxBytes: 8000,
+					maxLines: 160,
+				},
 			],
 		},
 		resultSummarization: { enabled: false },
@@ -50,6 +56,7 @@ async function createSession(opts?: {
 	saveArtifact?: (content: string, toolType: string) => Promise<string | undefined>;
 	appendCustomEntry?: SessionManager["appendCustomEntry"];
 	outputTruncationEnabled?: boolean;
+	agentKind?: "main" | "sub";
 }) {
 	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!bundled) throw new Error("missing model");
@@ -73,17 +80,24 @@ async function createSession(opts?: {
 			"modelOptimization.outputTruncation.enabled": opts?.outputTruncationEnabled ?? true,
 		}),
 		modelRegistry,
+		agentKind: opts?.agentKind,
 		reconcileModelOptimization: async () => buildResolvedModelOptimization(profile),
 	});
 	await session.ensureModelOptimization();
 	return { session, sessionManager };
 }
 
-function toolCtx(text: string, toolCallId = "call-1", isError = false): AfterToolCallContext {
+function toolCtx(
+	text: string,
+	toolCallId = "call-1",
+	isError = false,
+	toolName: "bash" | "read" = "bash",
+): AfterToolCallContext {
+	const args = toolName === "bash" ? { command: "ls" } : { path: "src/x.ts" };
 	return {
 		assistantMessage: {
 			role: "assistant",
-			content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "ls" } }],
+			content: [{ type: "toolCall", id: toolCallId, name: toolName, arguments: args }],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
@@ -98,8 +112,8 @@ function toolCtx(text: string, toolCallId = "call-1", isError = false): AfterToo
 			},
 			timestamp: Date.now(),
 		},
-		toolCall: { type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "ls" } },
-		args: { command: "ls" },
+		toolCall: { type: "toolCall", id: toolCallId, name: toolName, arguments: args },
+		args,
 		result: {
 			content: [{ type: "text", text }],
 			details: {},
@@ -215,6 +229,35 @@ describe("ordinary session afterToolCall optimization", () => {
 			expect(result).toBeUndefined();
 		} finally {
 			await session.dispose();
+		}
+	});
+
+	it("clamps subagent reads tighter than the parent family read cap", async () => {
+		const original = Array.from({ length: 140 }, (_, i) => `read-line-${i} ${"x".repeat(40)}`).join("\n");
+		const saved = new Map<string, string>();
+		const { session: parent } = await createSession({
+			saveArtifact: async () => "parent",
+		});
+		const { session: sub } = await createSession({
+			agentKind: "sub",
+			saveArtifact: async content => {
+				const id = String(saved.size);
+				saved.set(id, content);
+				return id;
+			},
+		});
+		try {
+			const parentResult = await parent.agent.afterToolCall!(toolCtx(original, "call-parent-read", false, "read"));
+			const subResult = await sub.agent.afterToolCall!(toolCtx(original, "call-sub-read", false, "read"));
+			expect(parentResult).toBeUndefined();
+			const subText = subResult?.content?.find(b => b.type === "text");
+			expect(subText?.type).toBe("text");
+			if (subText?.type !== "text") throw new Error("expected subagent text");
+			expect(subText.text.length).toBeLessThan(original.length);
+			expect(subText.text).toMatch(/\[raw output: artifact:\/\//);
+		} finally {
+			await parent.dispose();
+			await sub.dispose();
 		}
 	});
 });
