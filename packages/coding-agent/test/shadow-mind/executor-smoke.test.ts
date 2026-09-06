@@ -169,7 +169,7 @@ describe("shadow-review executor smoke", () => {
 			id: "SmokeReviewer",
 			modelRegistry,
 			authStorage,
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ "task.shadowReview.enabled": true }),
 		});
 
 		expect(result.exitCode).toBe(0);

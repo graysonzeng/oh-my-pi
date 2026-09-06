@@ -5570,13 +5570,13 @@ export const SETTINGS_SCHEMA = {
 
 	"task.shadowReview.enabled": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
 			label: "Reviewer Shadow Review",
 			description:
-				"When a qualified code-reviewer spawn starts, run four read-only Shadow Mind dimensions in parallel and inject their report as an async-result. Disable to roll back to single-core review. Quality A/B is not yet complete.",
+				"When enabled, a qualified code-reviewer spawn runs four read-only Shadow Mind dimensions in parallel and injects their report as an async-result. Default off so first-yield completion is not blocked by the cohort. Quality A/B is not yet complete.",
 		},
 	},
 

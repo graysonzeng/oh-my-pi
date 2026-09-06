@@ -13,6 +13,8 @@ const reviewerAgent: AgentDefinition = {
 	source: "bundled",
 };
 
+const shadowEnabledSettings = () => Settings.isolated({ "task.shadowReview.enabled": true });
+
 function sessionStub(overrides: Partial<AgentSession> = {}): AgentSession {
 	return {
 		model: { id: "mock-model", provider: "mock", api: "mock" },
@@ -33,7 +35,7 @@ describe("tryRegisterShadowReviewJob fail-open", () => {
 			agent: reviewerAgent,
 			cwd: "/tmp",
 			restrictToolNames: false,
-			settings: Settings.isolated(),
+			settings: shadowEnabledSettings(),
 		});
 		expect(id).toBeUndefined();
 	});
@@ -46,7 +48,7 @@ describe("tryRegisterShadowReviewJob fail-open", () => {
 			agent: reviewerAgent,
 			cwd: "/tmp",
 			restrictToolNames: false,
-			settings: Settings.isolated(),
+			settings: shadowEnabledSettings(),
 		});
 		expect(id).toBeUndefined();
 		expect(manager.getRunningJobs({ ownerId: "RegisterReviewer" })).toEqual([]);
@@ -64,8 +66,22 @@ describe("tryRegisterShadowReviewJob fail-open", () => {
 			agent: reviewerAgent,
 			cwd: "/tmp",
 			restrictToolNames: false,
+			settings: shadowEnabledSettings(),
+		});
+		expect(id).toBeUndefined();
+	});
+
+	it("does not register a bundled reviewer when the setting is left at default off", () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 8 });
+		AsyncJobManager.setInstance(manager);
+		const id = tryRegisterShadowReviewJob({
+			session: sessionStub({ asyncJobManager: manager }),
+			agent: reviewerAgent,
+			cwd: "/tmp",
+			restrictToolNames: false,
 			settings: Settings.isolated(),
 		});
 		expect(id).toBeUndefined();
+		expect(manager.getRunningJobs({ ownerId: "RegisterReviewer" })).toEqual([]);
 	});
 });
