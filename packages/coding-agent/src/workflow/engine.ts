@@ -17,7 +17,11 @@ import {
 	shouldAutoParallel,
 	validateConcurrencyDeclaration,
 } from "../latency/concurrency-declaration";
-import { parseWorkflowMechanicalClass } from "../latency/mechanical-class";
+import {
+	classifyPlanMechanicalImplementer,
+	isVeryComplexImplementerPlan,
+	parseWorkflowMechanicalClass,
+} from "../latency/mechanical-class";
 import { ProviderHealthBreaker } from "../latency/provider-health-breaker";
 import {
 	computeLatencyCohortMetrics,
@@ -2510,8 +2514,15 @@ export class WorkflowEngine {
 			}
 		}
 		const packagePlan = buildWorkPackageExecutionPlan(packageInput, maxConcurrency);
+		const implementerRoute = {
+			mechanicalClass:
+				parseWorkflowMechanicalClass(policy.mechanicalClass) ??
+				classifyPlanMechanicalImplementer(this.#plan) ??
+				undefined,
+			preferVeryComplexImplementer: isVeryComplexImplementerPlan(this.#plan),
+		};
 		if (!mergeCapturedChanges || !packagePlan) {
-			const result = await this.#withProfileFallback("implementer", {}, async profile => {
+			const result = await this.#withProfileFallback("implementer", implementerRoute, async profile => {
 				this.#implementerVendor = profile.vendor;
 				return new ImplementStage(this.#adapter).execute({
 					workflowId,
@@ -2557,7 +2568,7 @@ export class WorkflowEngine {
 
 		let profileAttempt = 0;
 		const resumableStatePresent = this.#workPackageState !== undefined;
-		const completed = await this.#withProfileFallback("implementer", {}, async (profile, route) => {
+		const completed = await this.#withProfileFallback("implementer", implementerRoute, async (profile, route) => {
 			this.#implementerVendor = profile.vendor;
 			const reuseSucceeded = profileAttempt === 0 && resumableStatePresent;
 			profileAttempt += 1;

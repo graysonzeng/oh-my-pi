@@ -36,7 +36,7 @@ describe("sessionFallbackImplementerProfile", () => {
 		// gateway transport folds onto the OpenAI lineage so an OpenAI reviewer is not
 		// treated as a different vendor.
 		expect(sessionFallbackImplementerProfile(sessionWithModel("gateway/gpt-5.6-sol"))?.vendor).toBe("openai");
-		expect(sessionFallbackImplementerProfile(sessionWithModel("xai/grok-4.5"))?.vendor).toBe("xai");
+		expect(sessionFallbackImplementerProfile(sessionWithModel("xai/grok-4.6"))?.vendor).toBe("xai");
 		expect(sessionFallbackImplementerProfile(sessionWithModel("zhipu/glm-5.2"))?.vendor).toBe("glm");
 	});
 

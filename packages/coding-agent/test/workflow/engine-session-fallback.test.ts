@@ -162,35 +162,35 @@ describe("WorkflowEngine implementer chain with session-model last resort", () =
 		await fs.rm(artifactDir, { recursive: true, force: true });
 	});
 
-	it("routes deepseek → grok → luna → session model across retryable failures", async () => {
+	it("routes grok → astra → deepseek → session model across retryable failures", async () => {
 		const seen: string[] = [];
 		const engine = engineWith(store, artifactDir, chainRunner({ failCount: 3, seen }));
 		const id = await engine.startWorkflow({ request: "chain fallback" });
 		const result = await engine.run(id, fakeSession({ getActiveModelString: () => SESSION_MODEL }));
 		expect(result.state.status).toBe("completed");
 		// One retryable failure per static candidate, then the session model succeeds.
-		expect(seen).toEqual(["deepseek-v4-flash", "grok-4.5", "gpt-5.6-luna", SESSION_MODEL]);
+		expect(seen).toEqual(["grok-4.6", "gpt-6-astra", "deepseek-v4-flash", SESSION_MODEL]);
 		const main = result.routingAudit.find(a => a.profileId === SESSION_FALLBACK_PROFILE_ID);
 		expect(main).toBeDefined();
-		expect(main?.reason).toBe("fallback_from:deepseek_implementer");
+		expect(main?.reason).toBe("fallback_from:grok_implementer");
 		expect(main?.degraded).toBe(true);
 	});
 
 	it("preflight-excluded primary does not truncate the chain (maxAttempts = candidate count)", async () => {
-		// Simulate DeepSeek being preflight-unavailable by dropping its profile: the router
-		// prefers Grok, and the retry budget must still cover Luna + the session model.
+		// Simulate Grok being preflight-unavailable by dropping its profile: the router
+		// prefers Astra, and the retry budget must still cover DeepSeek + the session model.
 		const profiles = Object.fromEntries(
-			Object.entries(DEFAULT_MODEL_PROFILES).filter(([id]) => id !== "deepseek_implementer"),
+			Object.entries(DEFAULT_MODEL_PROFILES).filter(([id]) => id !== "grok_implementer"),
 		);
 		const seen: string[] = [];
 		const engine = engineWith(store, artifactDir, chainRunner({ failCount: 2, seen }), profiles);
 		const id = await engine.startWorkflow({ request: "truncated primary" });
 		const result = await engine.run(id, fakeSession({ getActiveModelString: () => SESSION_MODEL }));
 		expect(result.state.status).toBe("completed");
-		expect(seen).toEqual(["grok-4.5", "gpt-5.6-luna", SESSION_MODEL]);
+		expect(seen).toEqual(["gpt-6-astra", "deepseek-v4-flash", SESSION_MODEL]);
 		const main = result.routingAudit.find(a => a.profileId === SESSION_FALLBACK_PROFILE_ID);
 		expect(main?.degraded).toBe(true);
-		expect(main?.reason).toBe("fallback_from:grok_implementer");
+		expect(main?.reason).toBe("fallback_from:gpt_astra_implementer");
 	});
 
 	it("does not fall back when no session model selector exists", async () => {
@@ -200,7 +200,7 @@ describe("WorkflowEngine implementer chain with session-model last resort", () =
 		// No dynamic profile is registered: the three static candidates exhaust and the
 		// last candidate's retryable error surfaces — no invented session-model route.
 		await expect(engine.run(id, fakeSession())).rejects.toThrow(/transient provider failure/);
-		expect(seen).toEqual(["deepseek-v4-flash", "grok-4.5", "gpt-5.6-luna"]);
+		expect(seen).toEqual(["grok-4.6", "gpt-6-astra", "deepseek-v4-flash"]);
 		expect(engine.routingAudit.some(a => a.profileId === SESSION_FALLBACK_PROFILE_ID)).toBe(false);
 	});
 });

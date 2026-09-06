@@ -11,7 +11,11 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { InteractiveMode, renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import {
+	InteractiveMode,
+	renderSubagentHudLines,
+	SUBAGENT_HUD_REFRESH_MS,
+} from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import {
 	type ObservableSession,
 	SessionObserverRegistry,
@@ -91,6 +95,21 @@ function makeProgressPayload(
 
 function render(sessions: ObservableSession[], columns = 120): string {
 	return Bun.stripANSI(renderSubagentHudLines(sessions, columns).join("\n"));
+}
+/**
+ * Attach the streaming-phase fields to a progress snapshot. The runtime agent
+ * lands `activityPhase` / `lastActivityAtMs` on `AgentProgress` in parallel;
+ * consumers read them through `Record` access, so tests attach them without
+ * depending on that type change landing first.
+ */
+function withLivePhase(
+	progress: AgentProgress,
+	live: {
+		activityPhase?: "working" | "model" | "thinking" | "responding" | "tool";
+		lastActivityAtMs?: number;
+	},
+): AgentProgress {
+	return Object.assign(progress, live);
 }
 
 describe("subagent HUD lines", () => {
@@ -256,6 +275,174 @@ describe("subagent HUD lines", () => {
 		]);
 		expect(recent).toMatch(/grep: password/);
 		expect(recent).not.toContain("6.0s");
+	});
+
+	it("marks finished recent tools as explicit last history, never as current work", () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const history = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: makeProgress({
+					id: "AuthLoader",
+					recentTools: [{ tool: "grep", args: "password", endMs: now }],
+				}),
+			}),
+		]);
+		const historyLine = history.split("\n").find(line => line.includes("grep:")) ?? "";
+		expect(historyLine).toContain("last grep: password");
+
+		const current = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: makeProgress({
+					id: "AuthLoader",
+					currentTool: "grep",
+					currentToolArgs: "password",
+				}),
+			}),
+		]);
+		const currentLine = current.split("\n").find(line => line.includes("grep:")) ?? "";
+		expect(currentLine).toContain("grep: password");
+		expect(currentLine).not.toContain("last grep");
+	});
+
+	it("shows the observed phase label once a tool ended, never the stale tool name", () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const out = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: withLivePhase(
+					makeProgress({
+						id: "AuthLoader",
+						recentTools: [{ tool: "read", args: "src/auth.ts", endMs: now - 60_000 }],
+					}),
+					{ activityPhase: "working", lastActivityAtMs: now - 30_000 },
+				),
+			}),
+		]);
+		expect(out).toContain("working");
+		expect(out).toContain("30.0s no new events");
+		expect(out).not.toContain("read");
+		expect(out).not.toContain("src/auth.ts");
+	});
+
+	it("grows silence on later paints and narrow rows keep it over stale tool detail", () => {
+		const now = 1_700_000_000_000;
+		const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);
+		const session = makeSession({
+			id: "AuthLoader",
+			description: "Refactor the auth flow",
+			progress: withLivePhase(
+				makeProgress({
+					id: "AuthLoader",
+					recentTools: [{ tool: "read", args: "src/auth.ts", endMs: now - 60_000 }],
+				}),
+				{ activityPhase: "working", lastActivityAtMs: now - 30_000 },
+			),
+		});
+		expect(render([session])).toContain("30.0s no new events");
+
+		dateNow.mockReturnValue(now + 10_000);
+		const grown = render([session]);
+		expect(grown).toContain("40.0s no new events");
+		expect(grown).not.toContain("30.0s");
+
+		// The silence hint must survive before any stale tool args on a narrow
+		// history row (`columns - 8` is the HUD activity budget).
+		const historyIdle = makeSession({
+			id: "AuthLoader",
+			description: "Refactor the auth flow",
+			progress: withLivePhase(
+				makeProgress({
+					id: "AuthLoader",
+					recentTools: [{ tool: "read", args: "src/auth.ts", endMs: now }],
+				}),
+				{ activityPhase: "working", lastActivityAtMs: now - 30_000 },
+			),
+		});
+		const narrowish = render([historyIdle], 46);
+		expect(narrowish).toContain("working");
+		expect(narrowish).toContain("no new events");
+		expect(narrowish).not.toContain("src/auth.ts");
+		for (const line of narrowish.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(46);
+		}
+	});
+
+	it("renders the model phase as waiting on model without inventing tool time", () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const out = render([
+			makeSession({
+				id: "AuthLoader",
+				progress: withLivePhase(makeProgress({ id: "AuthLoader" }), {
+					activityPhase: "model",
+					lastActivityAtMs: now - 5_000,
+				}),
+			}),
+		]);
+		expect(out).toContain("AuthLoader");
+		expect(out).toContain("waiting on model");
+		expect(out).not.toMatch(/\bread\b/);
+		// 5s of silence is below the hint threshold; short quiet is normal.
+		expect(out).not.toContain("no new events");
+	});
+
+	it("never renders terminal progress as running activity", () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const out = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: withLivePhase(
+					makeProgress({
+						id: "AuthLoader",
+						status: "completed",
+						currentTool: "read",
+						currentToolArgs: "src/auth.ts",
+						currentToolStartMs: now - 6_000,
+					}),
+					{ activityPhase: "tool", lastActivityAtMs: now - 30_000 },
+				),
+			}),
+		]);
+		expect(out).toContain("AuthLoader: Refactor the auth flow");
+		expect(out).not.toMatch(/read: src\/auth\.ts/);
+		expect(out).not.toContain("6.0s");
+		expect(out.split("\n").filter(line => line.includes("AuthLoader")).length).toBe(1);
+	});
+
+	it("surfaces the real retry state ahead of the tool gist", () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const out = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactor the auth flow",
+				progress: makeProgress({
+					id: "AuthLoader",
+					currentTool: "read",
+					currentToolArgs: "src/auth.ts",
+					currentToolStartMs: now - 6_000,
+					retryState: {
+						attempt: 2,
+						maxAttempts: 5,
+						delayMs: 45_000,
+						errorMessage: "429 rate limited",
+						startedAtMs: now,
+					},
+				}),
+			}),
+		]);
+		expect(out).toContain("retry 2/5");
+		expect(out).toContain("retrying in 45.0s");
+		expect(out).not.toMatch(/\bread\b/);
 	});
 
 	it("truncates a long MCP tool name to the HUD viewport", () => {
@@ -539,7 +726,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		}
 
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 
 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
@@ -567,7 +754,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			}),
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(hud).toContain("AuthLoader: Refactor the auth flow");
@@ -591,7 +778,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			}),
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const switched = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(switched).toMatch(/grep: password/);
@@ -609,7 +796,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			status: "completed",
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const cleared = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(cleared).not.toContain("AuthLoader");
@@ -642,7 +829,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			}),
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const first = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(first).toMatch(/read: src\/auth\.ts/);
@@ -685,7 +872,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			}),
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const wide = mode.subagentContainer.render(120).map(line => Bun.stripANSI(line).trimEnd());
 		const wideActivity = wide.find(line => /mcp|search|read|auth/.test(line) && !line.includes("AuthLoader:"));
@@ -716,7 +903,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			}),
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const out = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(out).toMatch(/read: Inspect login/);
@@ -749,7 +936,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			});
 		}
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const out = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		const activityRows = out.split("\n").filter(line => /read: src\/file-\d+\.ts/.test(line));
@@ -790,7 +977,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			});
 		}
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const out = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		const activityRows = out.split("\n").filter(line => /read: src\/file-\d+\.ts/.test(line));
@@ -831,7 +1018,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			}),
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const out = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(out).toContain("AuthLoader: Refactor the auth flow");
@@ -865,7 +1052,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			}),
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const out = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(out).toMatch(/read: src\/auth\.ts/);
@@ -895,7 +1082,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			}),
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		const out = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(out).toContain("AuthLoader: Refactor the auth flow");
@@ -928,9 +1115,123 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			completionKind: "budget_stop",
 		});
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(100);
 		await Promise.resolve();
 		expect(mode.todoPhases[0]?.tasks[0]?.status).toBe("in_progress");
+	});
+
+	it("repaints the detached HUD at a bounded low frequency and stops after stop()", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+		const invalidate = vi.spyOn(mode.subagentContainer, "invalidate");
+		vi.useFakeTimers();
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("AuthLoader", 0, "Refactor the auth flow", true));
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...makeProgressPayload("AuthLoader", 0, "Refactor the auth flow", true),
+			progress: withLivePhase(
+				makeProgress({
+					id: "AuthLoader",
+					description: "Refactor the auth flow",
+					recentTools: [{ tool: "read", args: "src/auth.ts", endMs: now }],
+				}),
+				{ activityPhase: "working", lastActivityAtMs: now - 30_000 },
+			),
+		});
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		await Promise.resolve();
+		// The coalesced observer flush drew the row exactly once.
+		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(invalidate).toHaveBeenCalledTimes(1);
+		const first = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		expect(first).toContain("working");
+		expect(first).toContain("30.0s no new events");
+
+		// The low-frequency ticker repaints without new progress events, so
+		// silence/elapsed keep advancing; it never emits worker activity.
+		vi.advanceTimersByTime(SUBAGENT_HUD_REFRESH_MS);
+		expect(requestRender).toHaveBeenCalledTimes(2);
+		expect(invalidate).toHaveBeenCalledTimes(2);
+
+		// stop() clears the ticker: no repaints past this point.
+		mode.stop();
+		const settled = requestRender.mock.calls.length;
+		vi.advanceTimersByTime(10_000);
+		expect(requestRender.mock.calls.length).toBe(settled);
+		expect(invalidate.mock.calls.length).toBe(2);
+	});
+
+	it("clears the HUD ticker once no detached active rows remain", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+		vi.useFakeTimers();
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("AuthLoader", 0, "Refactor the auth flow", true));
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...makeProgressPayload("AuthLoader", 0, "Refactor the auth flow", true),
+			progress: withLivePhase(makeProgress({ id: "AuthLoader", description: "Refactor the auth flow" }), {
+				activityPhase: "working",
+				lastActivityAtMs: 5_000,
+			}),
+		});
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		await Promise.resolve();
+		expect(requestRender).toHaveBeenCalledTimes(1);
+
+		// Completing the last detached subagent flushes a HUD with nothing to
+		// keep alive, so the ticker clears itself instead of scheduling more
+		// repaints.
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("AuthLoader", 0, "Refactor the auth flow", true),
+			status: "completed",
+		});
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		await Promise.resolve();
+		const afterComplete = requestRender.mock.calls.length;
+		vi.advanceTimersByTime(10_000);
+		expect(requestRender.mock.calls.length).toBe(afterComplete);
+	});
+
+	it("renders phase and silence through InteractiveMode and keeps silence over history args", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+		vi.useFakeTimers();
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("AuthLoader", 0, "Refactor the auth flow", true));
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...makeProgressPayload("AuthLoader", 0, "Refactor the auth flow", true),
+			progress: withLivePhase(
+				makeProgress({
+					id: "AuthLoader",
+					description: "Refactor the auth flow",
+					recentTools: [{ tool: "read", args: "src/auth.ts", endMs: now - 60_000 }],
+				}),
+				{ activityPhase: "working", lastActivityAtMs: now - 30_000 },
+			),
+		});
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		await Promise.resolve();
+		const wide = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		expect(wide).toContain("AuthLoader: Refactor the auth flow");
+		expect(wide).toContain("working");
+		expect(wide).toContain("30.0s no new events");
+		expect(wide).not.toContain("read");
+		expect(wide).not.toContain("src/auth.ts");
+
+		// Narrow rows: the stale history tool description never crowds out the
+		// silence hint — phase + silence survive, tool args are dropped.
+		const narrow = Bun.stripANSI(mode.subagentContainer.render(42).join("\n"));
+		expect(narrow).toContain("working");
+		expect(narrow).toContain("no new events");
+		expect(narrow).not.toContain("src/auth.ts");
+		for (const line of narrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(42);
+		}
 	});
 });
 

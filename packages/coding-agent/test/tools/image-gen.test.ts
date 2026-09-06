@@ -659,8 +659,8 @@ describe("imageGenTool", () => {
 		const model = {
 			api: "openai-completions",
 			provider: "xai-oauth",
-			id: "grok-4.5",
-			name: "Grok 4.5",
+			id: "grok-4.6",
+			name: "Grok 4.6",
 			baseUrl: "https://api.x.ai/v1",
 		} as Model;
 		const ctx = createAntigravityXAIContext(model, fetchMock);

@@ -676,6 +676,18 @@ describe("WorkflowMechanicalClassV1 + eval parity", () => {
 		).toBe(false);
 	});
 
+	it("treats mechanical implementer class as Flash-eligible when the arm is on", () => {
+		const mech = buildMechanicalClass({
+			class: "mechanical_implement",
+			source: "deterministic_rule",
+			ref: "plan_scope:single_file_single_step",
+			targetRole: "implementer",
+		});
+		expect(isMechanicalFlashEligible(mech, true)).toBe(true);
+		expect(isMechanicalFlashEligible(mech, false)).toBe(false);
+		expect(parseWorkflowMechanicalClass(mech)).toEqual(mech);
+	});
+
 	it("rejects incomplete mechanical evidence before Flash routing", () => {
 		const missingRef = {
 			schemaVersion: 1,

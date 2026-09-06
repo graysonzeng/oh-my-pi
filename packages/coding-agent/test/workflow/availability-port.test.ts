@@ -487,8 +487,8 @@ describe("WorkflowAvailabilityPort contract", () => {
 	});
 
 	it("parseResolvedModelIdentity only accepts provider/model form", () => {
-		expect(parseResolvedModelIdentity("xai/grok-4.5")).toEqual({ provider: "xai", model: "grok-4.5" });
-		expect(parseResolvedModelIdentity("xai/grok-4.5:high")).toEqual({ provider: "xai", model: "grok-4.5" });
+		expect(parseResolvedModelIdentity("xai/grok-4.6")).toEqual({ provider: "xai", model: "grok-4.6" });
+		expect(parseResolvedModelIdentity("xai/grok-4.6:high")).toEqual({ provider: "xai", model: "grok-4.6" });
 		expect(parseResolvedModelIdentity(undefined)).toBeUndefined();
 		expect(parseResolvedModelIdentity("no-slash")).toBeUndefined();
 		expect(parseResolvedModelIdentity("/onlymodel")).toBeUndefined();

@@ -7,11 +7,16 @@
 
 export const WORKFLOW_MECHANICAL_CLASS_VERSION = 1 as const;
 
-export type MechanicalClassKind = "deterministic_evidence" | "mechanical_repair" | "format_check" | "none";
+export type MechanicalClassKind =
+	| "deterministic_evidence"
+	| "mechanical_repair"
+	| "mechanical_implement"
+	| "format_check"
+	| "none";
 
 export type MechanicalEvidenceSource = "caller_declaration" | "deterministic_rule" | "accepted_finding";
 
-export type MechanicalTargetRole = "evidence" | "repair" | "code_review_experiment";
+export type MechanicalTargetRole = "evidence" | "repair" | "implementer" | "code_review_experiment";
 
 export interface WorkflowMechanicalClassV1 {
 	schemaVersion: typeof WORKFLOW_MECHANICAL_CLASS_VERSION;
@@ -32,6 +37,7 @@ export const MECHANICAL_TARGET_MODEL_HINT = "flash" as const;
 const MECHANICAL_CLASS_KINDS: Record<MechanicalClassKind, true> = {
 	deterministic_evidence: true,
 	mechanical_repair: true,
+	mechanical_implement: true,
 	format_check: true,
 	none: true,
 };
@@ -43,6 +49,7 @@ const MECHANICAL_EVIDENCE_SOURCES: Record<MechanicalEvidenceSource, true> = {
 const MECHANICAL_TARGET_ROLES: Record<MechanicalTargetRole, true> = {
 	evidence: true,
 	repair: true,
+	implementer: true,
 	code_review_experiment: true,
 };
 export function buildMechanicalClass(input: {
@@ -120,4 +127,53 @@ export function isMechanicalFlashEligible(
 		return parsed.evidence.source === "caller_declaration";
 	}
 	return true;
+}
+
+/** Minimal plan shape for deterministic implementer routing. Avoids a workflow import cycle. */
+export interface MechanicalImplementerPlanScope {
+	affectedFiles?: readonly unknown[] | null;
+	implementationSteps?: readonly unknown[] | null;
+	workPackages?: readonly unknown[] | null;
+}
+
+export const MECHANICAL_IMPLEMENT_RULE_REF = "plan_scope:single_file_single_step";
+export const VERY_COMPLEX_IMPLEMENT_FILE_THRESHOLD = 4;
+export const VERY_COMPLEX_IMPLEMENT_STEP_THRESHOLD = 4;
+
+export type ImplementerComplexityClass = "mechanical" | "complex" | "very_complex";
+
+/**
+ * Fail closed to Grok 4.6: unknown/empty scope is relatively complex, not Flash.
+ * Single-file, single-step, at most one work package → mechanical Flash.
+ * ≥4 files or ≥4 steps → very complex (Astra, fallback Grok 4.6).
+ */
+export function classifyImplementerComplexity(
+	plan: MechanicalImplementerPlanScope | null | undefined,
+): ImplementerComplexityClass {
+	if (!plan) return "complex";
+	const files = plan.affectedFiles?.length ?? 0;
+	const steps = plan.implementationSteps?.length ?? 0;
+	const packages = plan.workPackages?.length ?? 0;
+	if (files === 0 && steps === 0) return "complex";
+	if (files <= 1 && steps <= 1 && packages <= 1) return "mechanical";
+	if (files >= VERY_COMPLEX_IMPLEMENT_FILE_THRESHOLD || steps >= VERY_COMPLEX_IMPLEMENT_STEP_THRESHOLD) {
+		return "very_complex";
+	}
+	return "complex";
+}
+
+export function classifyPlanMechanicalImplementer(
+	plan: MechanicalImplementerPlanScope | null | undefined,
+): WorkflowMechanicalClassV1 | null {
+	if (classifyImplementerComplexity(plan) !== "mechanical") return null;
+	return buildMechanicalClass({
+		class: "mechanical_implement",
+		source: "deterministic_rule",
+		ref: MECHANICAL_IMPLEMENT_RULE_REF,
+		targetRole: "implementer",
+	});
+}
+
+export function isVeryComplexImplementerPlan(plan: MechanicalImplementerPlanScope | null | undefined): boolean {
+	return classifyImplementerComplexity(plan) === "very_complex";
 }

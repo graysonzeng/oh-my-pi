@@ -118,7 +118,7 @@ function strictProfile(id: string, role: WorkflowRole, modelPattern: string, ven
 
 function strictPackageConfig(
 	forbiddenPaths: string[] = [],
-	implementerProfile = strictProfile("strict_implementer", "implementer", "xai/grok-4.5", "xai"),
+	implementerProfile = strictProfile("strict_implementer", "implementer", "xai/grok-4.6", "xai"),
 ): Partial<WorkflowDefaultConfig> {
 	const profiles = [
 		strictProfile("strict_planner", "planner", "anthropic/claude-fable-5", "anthropic"),
@@ -150,7 +150,7 @@ function roleStaticSplitConfig(): Partial<WorkflowDefaultConfig> {
 	const profiles = [
 		strictProfile("role_planner", "planner", "anthropic/claude-fable-5", "anthropic"),
 		strictProfile("role_plan_reviewer", "plan_reviewer", "openai/gpt-5.6-sol", "openai"),
-		strictProfile("role_implementer", "implementer", "xai/grok-4.5", "xai"),
+		strictProfile("role_implementer", "implementer", "xai/grok-4.6", "xai"),
 		strictProfile("role_code_reviewer", "code_reviewer", "openai/gpt-5.6-terra", "openai"),
 		strictProfile("role_repair_strong", "repair", "anthropic/claude-fable-5", "anthropic"),
 		flashRepair,
@@ -183,7 +183,7 @@ function availableProfiles(): WorkflowAvailabilityPort {
 function strictPackageReceipt(
 	profileId = "strict_implementer",
 	provider = "xai",
-	model = "grok-4.5",
+	model = "grok-4.6",
 	modelFamily = "xai",
 ): WorkflowRuntimeIdentityReceiptV1 {
 	return {
@@ -1308,7 +1308,7 @@ describe("WorkflowEngine work-package execution", () => {
 			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
 		];
 		const selectedProfile = {
-			...strictProfile("strict_implementer_v2", "implementer", "xai/grok-4.5", "xai"),
+			...strictProfile("strict_implementer_v2", "implementer", "xai/grok-4.6", "xai"),
 			thinkingLevel: "high" as NonNullable<ModelProfile["thinkingLevel"]>,
 		};
 		const config = strictPackageConfig([], selectedProfile);

@@ -70,7 +70,7 @@ function qualityConfig(suffix = "", criticalSameLineage = false): QualityConfigF
 		`${tier}_${role}${suffix ? `_${suffix}` : ""}`;
 	const plannerModel = suffix ? "anthropic/claude-opus-4.8" : "anthropic/claude-fable-5";
 	const planReviewerModel = suffix ? "openai/gpt-5.6-terra" : "openai/gpt-5.6-sol";
-	const implementerModel = "xai/grok-4.5";
+	const implementerModel = "xai/grok-4.6";
 	const balancedReviewerModel = "openai/gpt-5.6-terra";
 	const criticalReviewerModel = criticalSameLineage ? implementerModel : balancedReviewerModel;
 
@@ -632,7 +632,7 @@ describe("WorkflowEngine quality routes", () => {
 
 	it("canonicalizes legacy effort aliases before routing", async () => {
 		const aliasProfile = {
-			...strictProfile("legacy_alias_planner", "planner", "xai/grok-4.5", "xai"),
+			...strictProfile("legacy_alias_planner", "planner", "xai/grok-4.6", "xai"),
 			strictIdentity: false,
 			thinkingLevel: "med" as ModelProfile["thinkingLevel"],
 		};
@@ -653,7 +653,7 @@ describe("WorkflowEngine quality routes", () => {
 					result: {
 						id: "legacy-alias-planner",
 						structuredOutput: { status: "valid", data: planArtifact() },
-						resolvedModel: "xai/grok-4.5",
+						resolvedModel: "xai/grok-4.6",
 					},
 				};
 			},

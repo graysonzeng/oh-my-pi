@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "../../src/config/settings";
 import * as taskDiscovery from "../../src/task/discovery";
 import { TaskTool } from "../../src/task/index";
-import { isScoutSpawnable } from "../../src/task/spawn-policy";
+import { isScoutSpawnable, isSonicSpawnable } from "../../src/task/spawn-policy";
 import type { AgentDefinition } from "../../src/task/types";
 import { getTaskSchema } from "../../src/task/types";
 import type { ToolSession } from "../../src/tools";
@@ -88,6 +88,15 @@ describe("isScoutSpawnable", () => {
 	});
 });
 
+describe("isSonicSpawnable", () => {
+	it("is true with unrestricted spawns and false when sonic is disabled or excluded", () => {
+		expect(isSonicSpawnable(undefined, "*")).toBe(true);
+		expect(isSonicSpawnable(["sonic"], "*")).toBe(false);
+		expect(isSonicSpawnable(undefined, "scout,reviewer")).toBe(false);
+		expect(isSonicSpawnable(undefined, "sonic,task")).toBe(true);
+	});
+});
+
 describe("task tool description scout gating", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -128,5 +137,9 @@ describe("task tool description scout gating", () => {
 		// policy only filters disabledAgents, so reviewer stays); only the
 		// hard-coded scout guidance is dropped.
 		expect(description).toContain("### reviewer");
+	});
+
+	it("routes mechanical implementation to sonic when sonic is spawnable", async () => {
+		expect(await renderDescription(false)).toContain("MUST run on `sonic`");
 	});
 });

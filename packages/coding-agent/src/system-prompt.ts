@@ -637,6 +637,8 @@ export interface BuildSystemPromptOptions {
 	taskIrcEnabled?: boolean;
 	/** Whether the read-only `scout` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
 	scoutAvailable?: boolean;
+	/** Whether the mechanical `sonic` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
+	sonicAvailable?: boolean;
 
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
@@ -717,6 +719,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
+		sonicAvailable = true,
 		memoryRootEnabled = false,
 		securityEnabled = false,
 		model,
@@ -1012,6 +1015,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskProactiveStageRouting,
 		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
+		sonicAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,

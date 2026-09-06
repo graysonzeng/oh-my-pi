@@ -58,23 +58,28 @@ describe("target models + quality-first defaults", () => {
 		expect(["anthropic", "openai"]).toContain(review.vendor);
 
 		const implement = router.resolve("implementer");
-		// DeepSeek-V4-Flash first for implement (quality/cost), then Grok, then Luna
-		expect(["deepseek", "xai", "openai"]).toContain(implement.vendor);
-		expect(implement.profileId).toBe("deepseek_implementer");
+		// Grok 4.6 first for relatively complex implement, Astra for very complex, Flash only for mechanical
+		expect(["xai", "openai", "deepseek"]).toContain(implement.vendor);
+		expect(implement.profileId).toBe("grok_implementer");
+		expect(implement.profile.modelPattern).toEqual(["grok-4.6"]);
 	});
 
-	it("default implementer chain: exact patterns, efforts, no wildcards, no GLM/Terra", () => {
+	it("default implementer chain: exact patterns, efforts, no wildcards, no GLM/Terra/Luna", () => {
 		const implementers = Object.values(DEFAULT_MODEL_PROFILES).filter(p => p.roles.includes("implementer"));
 		// Registration order = router preference; main_agent_fallback is a runtime-registered last resort.
-		expect(implementers.map(p => p.id)).toEqual(["deepseek_implementer", "grok_implementer", "gpt_luna_implementer"]);
-		const [deepseek, grok, luna] = implementers.map(p => p.modelPattern);
+		expect(implementers.map(p => p.id)).toEqual([
+			"grok_implementer",
+			"gpt_astra_implementer",
+			"deepseek_implementer",
+		]);
+		const [grok, astra, deepseek] = implementers.map(p => p.modelPattern);
+		expect(grok).toEqual(["grok-4.6"]);
+		expect(astra).toEqual(["gpt-6-astra"]);
 		expect(deepseek).toEqual(["deepseek-v4-flash"]);
-		expect(grok).toEqual(["grok-4.5"]);
-		expect(luna).toEqual(["gpt-5.6-luna"]);
 		const efforts = Object.values(DEFAULT_MODEL_PROFILES)
 			.filter(p => p.roles.includes("implementer"))
 			.map(p => p.thinkingLevel);
-		expect(efforts.map(level => String(level))).toEqual(["max", "high", "max"]);
+		expect(efforts.map(level => String(level))).toEqual(["high", "max", "max"]);
 		for (const p of implementers) {
 			const patterns = Array.isArray(p.modelPattern) ? p.modelPattern : [p.modelPattern];
 			for (const pattern of patterns) expect(pattern).not.toMatch(/[*?[\]{}]/);
@@ -83,6 +88,7 @@ describe("target models + quality-first defaults", () => {
 		expect(ids).not.toContain("glm_implementer");
 		expect(ids).not.toContain("gpt_terra_implementer");
 		expect(ids).not.toContain("deepseek_bulk");
+		expect(ids).not.toContain("gpt_luna_implementer");
 	});
 });
 

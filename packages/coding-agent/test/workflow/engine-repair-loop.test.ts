@@ -43,7 +43,7 @@ function strictRepairProfiles(): Record<string, ModelProfile> {
 			DEFAULT_MODEL_PROFILES.claude_plan_reviewer,
 			"anthropic/claude-opus-5",
 		),
-		strictProfile("implementer", "implementer", DEFAULT_MODEL_PROFILES.grok_implementer, "xai/grok-4.5"),
+		strictProfile("implementer", "implementer", DEFAULT_MODEL_PROFILES.grok_implementer, "xai/grok-4.6"),
 		strictProfile(
 			"code_reviewer",
 			"code_reviewer",

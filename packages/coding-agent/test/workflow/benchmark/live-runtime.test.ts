@@ -476,7 +476,7 @@ describe("live workflow benchmark runtime", () => {
 			planner: ["gpt_planner"],
 			plan_reviewer: ["claude_plan_reviewer"],
 			plan_arbitrator: ["grok_plan_arbitrator"],
-			implementer: ["gpt_luna_implementer"],
+			implementer: ["gpt_astra_implementer"],
 			code_reviewer: ["claude_reviewer"],
 			repair: ["gpt_repair"],
 		});
@@ -515,7 +515,7 @@ describe("live workflow benchmark runtime", () => {
 		expect(baseline.claude_planner?.thinkingLevel).toBe(Effort.Max);
 		expect(baseline.deepseek_implementer?.thinkingLevel).toBe(Effort.Max);
 		expect(baseline.gpt_planner?.thinkingLevel).toBe(Effort.Max);
-		expect(baseline.grok_implementer?.thinkingLevel).toBe(Effort.High);
+		expect(baseline.grok_implementer?.thinkingLevel).toBe(Effort.Max);
 		expect(baseline.claude_plan_reviewer?.thinkingLevel).toBe(Effort.Medium);
 		expect(baseline.claude_reviewer?.thinkingLevel).toBe(Effort.Medium);
 
@@ -526,7 +526,7 @@ describe("live workflow benchmark runtime", () => {
 		expect(merged.claude_reviewer?.modelPattern).toBe("gateway/claude-fable-5");
 		expect(merged.claude_planner?.thinkingLevel).toBe(Effort.Max);
 		expect(merged.claude_plan_reviewer?.thinkingLevel).toBe(Effort.Medium);
-		expect(merged.grok_implementer?.thinkingLevel).toBe(Effort.High);
+		expect(merged.grok_implementer?.thinkingLevel).toBe(Effort.Max);
 	});
 
 	it("includes untracked files in the live scope verdict", async () => {

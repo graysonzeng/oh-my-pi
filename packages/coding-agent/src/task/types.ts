@@ -419,6 +419,9 @@ export interface YieldItem {
 	schemaOverridden?: boolean;
 }
 
+/** Live activity of a subagent, evidenced by real execution events observed by the run monitor. */
+export type AgentActivityPhase = "working" | "model" | "thinking" | "responding" | "tool";
+
 /** Progress tracking for a single agent */
 export interface AgentProgress {
 	index: number;
@@ -430,6 +433,27 @@ export interface AgentProgress {
 	assignment?: string;
 	description?: string;
 	lastIntent?: string;
+	/**
+	 * Live activity phase, evidenced only by real execution events observed by
+	 * the run monitor: assistant `message_start` → `model`, thinking stream
+	 * deltas → `thinking`, text/toolcall/image stream deltas → `responding`,
+	 * `tool_execution_start` → `tool` until the tool ends, and
+	 * every other execution event (turn boundaries, message ends, tool end,
+	 * auto-retry transitions) → `working`. Never reports a tool as still
+	 * running after its end event, and is cleared (undefined) once the run
+	 * settles into a terminal status. Optional so existing snapshots, fixtures,
+	 * and observers keep working — a UI must not invent a phase on its own.
+	 */
+	activityPhase?: AgentActivityPhase;
+	/**
+	 * `Date.now()` of the most recent real execution event observed (message /
+	 * stream-delta / tool / auto-retry events). NOT refreshed by progress
+	 * emission, the 150ms coalescing timer, or serving-model publication —
+	 * observers can therefore detect a stalled child by comparing this against
+	 * their own wall clock without conflating "still emitting snapshots" with
+	 * "still making progress". Optional; absent until the first event.
+	 */
+	lastActivityAtMs?: number;
 	currentTool?: string;
 	currentToolArgs?: string;
 	currentToolStartMs?: number;

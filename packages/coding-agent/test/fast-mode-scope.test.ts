@@ -156,8 +156,8 @@ describe("/fast targets the current model's service-tier family", () => {
 	it("enables priority on the xai family for bundled Grok", async () => {
 		const session = await createSessionForModel(
 			buildModel({
-				id: "grok-4.5",
-				name: "Grok 4.5",
+				id: "grok-4.6",
+				name: "Grok 4.6",
 				api: "openai-completions",
 				provider: "xai",
 				baseUrl: "https://api.x.ai/v1",
@@ -198,8 +198,8 @@ describe("/fast targets the current model's service-tier family", () => {
 	it("enables OpenRouter Grok without marking fast mode active", async () => {
 		const session = await createSessionForModel(
 			buildModel({
-				id: "x-ai/grok-4.5",
-				name: "Grok 4.5",
+				id: "x-ai/grok-4.6",
+				name: "Grok 4.6",
 				api: "openrouter",
 				provider: "openrouter",
 				baseUrl: "https://openrouter.ai/api/v1",
@@ -273,7 +273,7 @@ describe("/fast targets the current model's service-tier family", () => {
 	it("rejects Fast mode on GitHub Copilot Grok", async () => {
 		const session = await createSessionForModel(
 			buildModel({
-				id: "grok-4.5",
+				id: "grok-4.6",
 				name: "Grok",
 				api: "openai-completions",
 				provider: "github-copilot",

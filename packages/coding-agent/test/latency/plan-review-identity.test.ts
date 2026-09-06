@@ -324,7 +324,7 @@ describe("plan review identity pin + arbitration", () => {
 		const exactArbitrator = normalizeModelProfile({
 			...DEFAULT_MODEL_PROFILES.grok_plan_arbitrator,
 			id: "exact_xai_arbitrator",
-			modelPattern: "xai/grok-4.5",
+			modelPattern: "xai/grok-4.6",
 			thinkingLevel: Effort.Medium,
 		});
 		const router = new ModelRouter([
@@ -615,7 +615,7 @@ describe("plan review identity pin + arbitration", () => {
 		const exactArbitrator = normalizeModelProfile({
 			...DEFAULT_MODEL_PROFILES.grok_plan_arbitrator,
 			id: "exact_xai_arbitrator_f5",
-			modelPattern: "xai/grok-4.5",
+			modelPattern: "xai/grok-4.6",
 			thinkingLevel: Effort.Medium,
 		});
 		const router = new ModelRouter([
@@ -725,7 +725,7 @@ describe("plan review identity pin + arbitration", () => {
 		const exactArbitrator = normalizeModelProfile({
 			...DEFAULT_MODEL_PROFILES.grok_plan_arbitrator,
 			id: "exact_xai_arbitrator_f5b",
-			modelPattern: "xai/grok-4.5",
+			modelPattern: "xai/grok-4.6",
 			thinkingLevel: Effort.Medium,
 		});
 		const router = new ModelRouter([

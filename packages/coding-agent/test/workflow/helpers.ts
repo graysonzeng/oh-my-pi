@@ -61,8 +61,14 @@ export function planArtifact(overrides: Partial<PlanArtifactV1> = {}): PlanArtif
 		summary: "Do the thing",
 		assumptions: [],
 		nonGoals: [],
-		affectedFiles: [{ path: "src/a.ts", action: "modify", reason: "fix" }],
-		implementationSteps: [{ id: "s1", description: "edit", dependsOn: [] }],
+		affectedFiles: [
+			{ path: "src/a.ts", action: "modify", reason: "fix" },
+			{ path: "src/b.ts", action: "modify", reason: "wire caller" },
+		],
+		implementationSteps: [
+			{ id: "s1", description: "edit core", dependsOn: [] },
+			{ id: "s2", description: "wire caller", dependsOn: ["s1"] },
+		],
 		acceptanceCriteria: ["tests pass"],
 		verificationCommands: ["git diff --check"],
 		risks: [],

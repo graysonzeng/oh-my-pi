@@ -42,11 +42,11 @@ function snapshotConfig(
 		planner_backup: snapshotProfile("planner_backup", "planner", "anthropic", "claude-fable-5"),
 		plan_reviewer_primary: snapshotProfile("plan_reviewer_primary", "plan_reviewer", "anthropic", "claude-fable-5"),
 		plan_reviewer_backup: snapshotProfile("plan_reviewer_backup", "plan_reviewer", "openai", "gpt-5.6-sol"),
-		implementer_primary: snapshotProfile("implementer_primary", "implementer", "xai", "grok-4.5"),
+		implementer_primary: snapshotProfile("implementer_primary", "implementer", "xai", "grok-4.6"),
 		implementer_backup: snapshotProfile("implementer_backup", "implementer", "openai", "gpt-5.6-sol"),
 		reviewer_primary: snapshotProfile("reviewer_primary", "code_reviewer", "openai", "gpt-5.6-sol"),
-		reviewer_backup: snapshotProfile("reviewer_backup", "code_reviewer", "xai", "grok-4.5"),
-		repair_primary: snapshotProfile("repair_primary", "repair", "xai", "grok-4.5"),
+		reviewer_backup: snapshotProfile("reviewer_backup", "code_reviewer", "xai", "grok-4.6"),
+		repair_primary: snapshotProfile("repair_primary", "repair", "xai", "grok-4.6"),
 		repair_backup: snapshotProfile("repair_backup", "repair", "anthropic", "claude-fable-5"),
 	};
 	const secretProfile = profiles.planner_primary as ModelProfile & {

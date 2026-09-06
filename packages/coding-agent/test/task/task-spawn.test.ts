@@ -33,7 +33,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import * as structuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
-import { TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { hubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/hub";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
@@ -357,6 +357,57 @@ describe("task spawn routing", () => {
 			expect(delivered).toContain(reason);
 			expect(delivered).toContain("authorization remains unreviewed");
 			expect(delivered).not.toContain('status="completed"');
+		});
+	}
+
+	for (const lifecycleFirst of [true, false]) {
+		it(`delivers failed review content when lifecycle arrives ${lifecycleFirst ? "before" : "after"} consumption`, async () => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+			const bus = new EventBus();
+			const observers = new SessionObserverRegistry();
+			observers.subscribeToEventBus(bus);
+			const delivered = Promise.withResolvers<string>();
+			let deliveries = 0;
+			const manager = new AsyncJobManager({
+				onJobComplete: (_id, text) => {
+					deliveries++;
+					delivered.resolve(text);
+				},
+			});
+			managers.push(manager);
+			const emitTerminal = () =>
+				bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+					id: "ReviewRace",
+					agent: "task",
+					status: "failed",
+					completionKind: "completed",
+					index: 0,
+				});
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				if (lifecycleFirst) emitTerminal();
+				return makeResult(options.id ?? "ReviewRace", {
+					exitCode: 1,
+					stderr: "required terminal verdict missing",
+					output: "SALVAGE: authorization not reviewed",
+				});
+			});
+			try {
+				const tool = await TaskTool.create(createSession({ manager, eventBus: bus }));
+				const spawned = await tool.execute("tc-review-race", {
+					agent: "task",
+					name: "ReviewRace",
+					task: "Review authorization.",
+				} as TaskParams);
+				const text = await delivered.promise;
+				await manager.getJob(spawned.details!.async!.jobId)!.promise;
+				if (!lifecycleFirst) emitTerminal();
+				expect(text).toContain("SALVAGE: authorization not reviewed");
+				expect(text).toContain("required terminal verdict missing");
+				expect(text).not.toContain('status="completed"');
+				expect(deliveries).toBe(1);
+			} finally {
+				observers.dispose();
+			}
 		});
 	}
 

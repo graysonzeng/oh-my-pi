@@ -38,8 +38,8 @@ function qualityTestProfile(id: string, role: WorkflowRole): ModelProfile {
 	const identityByRole: Record<WorkflowRole, { vendor: string; modelPattern: string }> = {
 		planner: { vendor: "anthropic", modelPattern: "anthropic/claude-fable-5" },
 		plan_reviewer: { vendor: "openai", modelPattern: "openai/gpt-5.6-sol" },
-		plan_arbitrator: { vendor: "xai", modelPattern: "grok-4.5" },
-		implementer: { vendor: "xai", modelPattern: "xai/grok-4.5" },
+		plan_arbitrator: { vendor: "xai", modelPattern: "grok-4.6" },
+		implementer: { vendor: "xai", modelPattern: "xai/grok-4.6" },
 		code_reviewer: { vendor: "openai", modelPattern: "openai/gpt-5.6-terra" },
 		repair: { vendor: "anthropic", modelPattern: "anthropic/claude-fable-5" },
 	};

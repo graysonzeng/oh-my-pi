@@ -744,6 +744,76 @@ describe("job renderer running live activity", () => {
 		await manager.getJob(id)?.promise;
 	});
 
+	it("marks finished recent tools as last history on hub wait rows", async () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const output = await renderRunningCopiedJob(
+			makeCopiedProgress({
+				id: "AuthLoader",
+				recentTools: [{ tool: "grep", args: "password", endMs: now }],
+			}),
+		);
+		const line = output.split("\n").find(row => row.includes("grep:")) ?? "";
+		expect(line).toContain("last grep: password");
+	});
+
+	it("shows phase and real silence on a live hub wait refresh", async () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const progress = makeCopiedProgress({ id: "AuthLoader" });
+		Object.assign(progress, { activityPhase: "working", lastActivityAtMs: now - 30_000 });
+		const output = await renderRunningCopiedJob(progress);
+		expect(output).toContain("AuthLoader");
+		expect(output).toContain("working");
+		expect(output).toContain("30.0s no new events");
+
+		// Narrow: phase + silence survive; no invented tool time or old args.
+		const narrow = await renderRunningCopiedJob(progress, 40);
+		expect(narrow).toContain("working");
+		expect(narrow).toContain("no new events");
+		for (const line of narrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+	});
+
+	it("surfaces real retry state on hub wait rows ahead of the tool gist", async () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const output = await renderRunningCopiedJob(
+			makeCopiedProgress({
+				id: "AuthLoader",
+				currentTool: "read",
+				currentToolStartMs: now - 6_000,
+				retryState: {
+					attempt: 2,
+					maxAttempts: 5,
+					delayMs: 45_000,
+					errorMessage: "429 rate limited",
+					startedAtMs: now,
+				},
+			}),
+		);
+		expect(output).toContain("retry 2/5");
+		expect(output).toContain("retrying in 45.0s");
+		expect(output).not.toMatch(/\bread\b/);
+	});
+
+	it("drops live activity once a copied progress snapshot is terminal", async () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const progress = makeCopiedProgress({
+			id: "AuthLoader",
+			currentTool: "read",
+			currentToolArgs: "src/auth.ts",
+			currentToolStartMs: now - 6_000,
+		});
+		progress.status = "completed";
+		const output = await renderRunningCopiedJob(progress);
+		expect(output).toContain("AuthLoader");
+		expect(output).not.toMatch(/read: src\/auth\.ts/);
+		expect(output).not.toContain("6.0s");
+	});
+
 	it("drops copied live activity from snapshotJobs once the job settles", async () => {
 		const reported = Promise.withResolvers<void>();
 		const finish = Promise.withResolvers<string>();

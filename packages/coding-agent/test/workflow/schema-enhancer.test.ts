@@ -10,7 +10,7 @@ import type { ModelProfile } from "../../src/workflow/types";
 const baseProfile = {
 	id: "t",
 	vendor: "xai",
-	modelPattern: "grok-4.5",
+	modelPattern: "grok-4.6",
 	roles: ["implementer"] as const,
 	promptTemplate: "implementer",
 	promptVersion: "1.0",

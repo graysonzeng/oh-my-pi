@@ -28,7 +28,7 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { isScoutSpawnable, isSonicSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -149,6 +149,12 @@ export function copySpawnJobLiveProgress(target: AgentProgress, source: AgentPro
 	target.retryState = source.retryState;
 	target.retryFailure = source.retryFailure;
 	target.reviewMetrics = source.reviewMetrics;
+	// Observed streaming-phase fields: the hub `wait`/`jobs` rows and the
+	// subagent HUD must tell the same story about what the child is doing now
+	// (and how long it has been silent). Direct assignment matches the other
+	// live progress fields, `undefined` included.
+	target.activityPhase = source.activityPhase;
+	target.lastActivityAtMs = source.lastActivityAtMs;
 }
 
 /**
@@ -195,9 +201,11 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
+	const sonicAvailable = isSonicSpawnable(options.disabledAgents, options.parentSpawns);
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
 		scoutAvailable,
+		sonicAvailable,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
 		isolationEnabled: options.isolationEnabled,

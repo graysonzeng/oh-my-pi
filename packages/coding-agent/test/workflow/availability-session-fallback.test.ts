@@ -17,7 +17,7 @@ describe("availability preflight with session-model fallback", () => {
 		const router = new ModelRouter([
 			DEFAULT_MODEL_PROFILES.deepseek_implementer,
 			DEFAULT_MODEL_PROFILES.grok_implementer,
-			DEFAULT_MODEL_PROFILES.gpt_luna_implementer,
+			DEFAULT_MODEL_PROFILES.gpt_astra_implementer,
 			fallback!,
 		]);
 		const probed: string[] = [];

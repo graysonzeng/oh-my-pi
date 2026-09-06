@@ -10,8 +10,8 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
-const XAI_WEB_SEARCH_MODEL = "grok-4.5";
-// grok-4.5 defaults reasoning.effort to "high"; xAI documents "low" for
+const XAI_WEB_SEARCH_MODEL = "grok-4.6";
+// grok-4.6 defaults reasoning.effort to "high"; xAI documents "low" for
 // latency-sensitive agentic use and simple tool calling
 // (docs.x.ai/developers/model-capabilities/text/reasoning). Web search is
 // latency-sensitive, so pin these calls low regardless of their configured timeout.

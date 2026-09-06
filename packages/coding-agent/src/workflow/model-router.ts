@@ -1,4 +1,8 @@
-import { isMechanicalFlashEligible, type WorkflowMechanicalClassV1 } from "../latency/mechanical-class";
+import {
+	isMechanicalFlashEligible,
+	parseWorkflowMechanicalClass,
+	type WorkflowMechanicalClassV1,
+} from "../latency/mechanical-class";
 import { WorkflowPolicyError } from "./errors";
 import type { FindingTracker } from "./finding-tracker";
 import { configuredIdentityForProfile } from "./model-profile-registry";
@@ -74,14 +78,47 @@ export interface RouteOptions {
 	findingTracker?: FindingTracker;
 	/** Prefer reasoning repair profile over mechanical. */
 	preferReasoningRepair?: boolean;
-	/** Caller/deferred evidence used only for repair mechanical Flash routing. */
+	/** Caller/deferred evidence for mechanical Flash routing (repair + implementer). */
 	mechanicalClass?: WorkflowMechanicalClassV1;
 	roleStaticSplitEnabled?: boolean;
+	/** Prefer GPT-6-Astra for very-complex implementer work; fall back to Grok 4.6. */
+	preferVeryComplexImplementer?: boolean;
+}
+
+function profilePatterns(profile: ModelProfile): string[] {
+	return Array.isArray(profile.modelPattern) ? profile.modelPattern : [profile.modelPattern];
 }
 
 function isFlashProfile(profile: ModelProfile): boolean {
-	const patterns = Array.isArray(profile.modelPattern) ? profile.modelPattern : [profile.modelPattern];
-	return profile.vendor === "deepseek" && patterns.some(pattern => pattern.toLowerCase().includes("flash"));
+	return (
+		profile.vendor === "deepseek" && profilePatterns(profile).some(pattern => pattern.toLowerCase().includes("flash"))
+	);
+}
+
+function isAstraImplementerProfile(profile: ModelProfile): boolean {
+	return (
+		profile.vendor === "openai" &&
+		profilePatterns(profile).some(pattern => pattern.toLowerCase().includes("gpt-6-astra"))
+	);
+}
+
+function isGrok46ImplementerProfile(profile: ModelProfile): boolean {
+	return (
+		profile.vendor === "xai" && profilePatterns(profile).some(pattern => pattern.toLowerCase().includes("grok-4.6"))
+	);
+}
+
+function preferVeryComplexImplementerCandidates<T extends { profile?: ModelProfile } | ModelProfile>(
+	candidates: readonly T[],
+	options: Pick<RouteOptions, "preferVeryComplexImplementer">,
+	role: WorkflowRole,
+	getProfile: (candidate: T) => ModelProfile,
+): T[] {
+	if (role !== "implementer" || options.preferVeryComplexImplementer !== true) return [...candidates];
+	const astra = candidates.filter(candidate => isAstraImplementerProfile(getProfile(candidate)));
+	if (astra.length > 0) return astra;
+	const grok = candidates.filter(candidate => isGrok46ImplementerProfile(getProfile(candidate)));
+	return grok.length > 0 ? grok : [...candidates];
 }
 
 function narrowMechanicalFlashCandidates<T extends { profile?: ModelProfile } | ModelProfile>(
@@ -90,10 +127,16 @@ function narrowMechanicalFlashCandidates<T extends { profile?: ModelProfile } | 
 	role: WorkflowRole,
 	getProfile: (candidate: T) => ModelProfile,
 ): T[] {
-	if (role !== "repair") return [...candidates];
-	if (!isMechanicalFlashEligible(options.mechanicalClass, options.roleStaticSplitEnabled === true)) {
+	if (role !== "repair" && role !== "implementer") return [...candidates];
+	// Implementer mechanical split is product routing, not the repair A/B arm.
+	const armEnabled = role === "implementer" || options.roleStaticSplitEnabled === true;
+	if (!isMechanicalFlashEligible(options.mechanicalClass, armEnabled)) {
 		return [...candidates];
 	}
+	const parsed = parseWorkflowMechanicalClass(options.mechanicalClass);
+	if (!parsed) return [...candidates];
+	if (role === "repair" && parsed.targetRole !== "repair") return [...candidates];
+	if (role === "implementer" && parsed.targetRole !== "implementer") return [...candidates];
 	const flash = candidates.filter(candidate => isFlashProfile(getProfile(candidate)));
 	return flash.length > 0 ? flash : [...candidates];
 }
@@ -149,6 +192,7 @@ export class ModelRouter {
 		}
 
 		candidates = narrowMechanicalFlashCandidates(candidates, options, role, profile => profile);
+		candidates = preferVeryComplexImplementerCandidates(candidates, options, role, profile => profile);
 
 		if (role === "repair" && !preferReasoning) {
 			const mechanical = candidates.filter(p => p.vendor === "xai");
@@ -307,6 +351,7 @@ export class ModelRouter {
 			candidates.push({ profile, modelFamily });
 		}
 		candidates = narrowMechanicalFlashCandidates(candidates, options, role, candidate => candidate.profile);
+		candidates = preferVeryComplexImplementerCandidates(candidates, options, role, candidate => candidate.profile);
 		const selected = candidates[0];
 		if (!selected) {
 			throw new WorkflowPolicyError(

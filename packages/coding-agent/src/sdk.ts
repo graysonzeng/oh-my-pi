@@ -203,7 +203,7 @@ import {
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
-import { isScoutSpawnable } from "./task/spawn-policy";
+import { isScoutSpawnable, isSonicSpawnable } from "./task/spawn-policy";
 import type { StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
@@ -3262,6 +3262,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskProactiveStageRouting,
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isScoutSpawnable(
+					settings.get("task.disabledAgents") as string[] | undefined,
+					options.spawns ?? "*",
+				),
+				sonicAvailable: isSonicSpawnable(
 					settings.get("task.disabledAgents") as string[] | undefined,
 					options.spawns ?? "*",
 				),

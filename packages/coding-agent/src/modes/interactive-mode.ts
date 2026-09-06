@@ -526,9 +526,18 @@ const DEFERRED_PREVIEW_VIEWPORT_FRACTION = 0.4;
 /** How long the ctrl+p model-role cycle chip track lingers above the editor
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
-
 const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
+
+/**
+ * Bounded low-frequency repaint for the detached subagent HUD. Progress
+ * snapshots coalesce at ~100ms, but while a subagent is silent — no tool
+ * events, no stream chunks — nothing repaints and the row freezes on the last
+ * tool name. The ticker only invalidates the HUD block so elapsed/silence
+ * counters grow; it never emits or fabricates worker activity. Cleared as
+ * soon as no detached active rows remain, and always in `stop()`.
+ */
+export const SUBAGENT_HUD_REFRESH_MS = 2000;
 
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
@@ -858,6 +867,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	/** Low-frequency repaint ticker for the detached subagent HUD; `undefined` when idle. */
+	#subagentHudTicker?: NodeJS.Timeout;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
 	#mcpStatusOrder: string[] = [];
@@ -2475,6 +2486,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#syncTodoAutoClearTimer();
 		this.#renderTodoList();
 		this.#renderSubagentList();
+		this.#ensureSubagentHudTicker();
 		this.ui.requestRender();
 	}
 
@@ -2484,6 +2496,43 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#observerUiSyncTimer = undefined;
 		}
 		this.#observerUiSyncNeedsTodoReconcile = false;
+	}
+	/** Whether the anchored subagent HUD currently has detached active rows to keep alive. */
+	#hasDetachedActiveHudSessions(): boolean {
+		return this.#observerRegistry
+			.getSessions()
+			.some(session => session.kind === "subagent" && session.status === "active" && session.detached === true);
+	}
+
+	/**
+	 * Keep the detached HUD repainting at a bounded low frequency so elapsed /
+	 * silence counters advance without new progress events. Redraw only: never
+	 * emits progress or fabricates worker activity. Self-clears the moment the
+	 * HUD has nothing left to show.
+	 */
+	#ensureSubagentHudTicker(): void {
+		if (this.#subagentHudTicker) return;
+		if (!this.#hasDetachedActiveHudSessions()) {
+			this.#cancelSubagentHudTicker();
+			return;
+		}
+		const ticker = setInterval(() => {
+			if (!this.#hasDetachedActiveHudSessions()) {
+				this.#cancelSubagentHudTicker();
+				return;
+			}
+			this.#renderSubagentList();
+			this.ui.requestRender();
+		}, SUBAGENT_HUD_REFRESH_MS);
+		ticker.unref?.();
+		this.#subagentHudTicker = ticker;
+	}
+
+	#cancelSubagentHudTicker(): void {
+		if (this.#subagentHudTicker) {
+			clearInterval(this.#subagentHudTicker);
+			this.#subagentHudTicker = undefined;
+		}
 	}
 
 	#renderTodoList(): void {
@@ -4683,6 +4732,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
+		this.#cancelSubagentHudTicker();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
 			this.#sttController.dispose();

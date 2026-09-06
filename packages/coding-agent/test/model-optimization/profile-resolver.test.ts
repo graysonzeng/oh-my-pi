@@ -134,8 +134,8 @@ describe("ordinary-session model optimization resolver", () => {
 			{ id: "gpt-5.6-sol", provider: "gateway", expected: "sol" },
 			{ id: "gpt-5.6-sol-pro", provider: "gateway", expected: "sol" },
 			{ id: "gateway/gpt-5.6-sol", provider: "gateway", expected: "sol" },
-			{ id: "grok-4.5", provider: "gateway", expected: "grok" },
-			{ id: "gateway/grok-4.5", provider: "custom", expected: "grok" },
+			{ id: "grok-4.6", provider: "gateway", expected: "grok" },
+			{ id: "gateway/grok-4.6", provider: "custom", expected: "grok" },
 		];
 
 		for (const { id, provider, expected } of cases) {

@@ -36,10 +36,10 @@ function qualityProfiles(): ModelProfile[] {
 		qualityProfile("plan_reviewer_anthropic", "plan_reviewer", "anthropic", "claude-fable-5"),
 		qualityProfile("plan_reviewer_openai", "plan_reviewer", "openai", "gpt-5.6-sol"),
 		qualityProfile("implementer_openai", "implementer", "openai", "gpt-5.6-sol"),
-		qualityProfile("implementer_xai", "implementer", "xai", "grok-4.5"),
-		qualityProfile("reviewer_xai", "code_reviewer", "xai", "grok-4.5"),
+		qualityProfile("implementer_xai", "implementer", "xai", "grok-4.6"),
+		qualityProfile("reviewer_xai", "code_reviewer", "xai", "grok-4.6"),
 		qualityProfile("reviewer_openai", "code_reviewer", "openai", "gpt-5.6-sol"),
-		qualityProfile("repair_xai", "repair", "xai", "grok-4.5"),
+		qualityProfile("repair_xai", "repair", "xai", "grok-4.6"),
 	];
 }
 

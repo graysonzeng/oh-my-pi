@@ -61,6 +61,8 @@ describe("proactive delegation guidance", () => {
 		expect(rendered).not.toContain("Auto-parallelize only real width.");
 		expect(rendered).not.toContain("Escalate complete gated delivery to workflow.");
 		expect(rendered).toContain("Route through existing agents.");
+		expect(rendered).toContain("Mechanical implementation");
+		expect(rendered).toContain("`sonic`");
 	});
 
 	it("renders the shared proactive blocks for Codex eager mode", async () => {

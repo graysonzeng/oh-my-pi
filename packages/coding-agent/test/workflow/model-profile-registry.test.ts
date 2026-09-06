@@ -177,7 +177,7 @@ describe("normalizeModelProfile", () => {
 	it("uses exact provider effort facts before global same-id references", () => {
 		const providerSpecific = strictProfile({
 			vendor: "xai",
-			modelPattern: "opencode-zen/grok-4.5",
+			modelPattern: "opencode-zen/grok-4.6",
 			thinkingLevel: Effort.XHigh,
 		});
 		expect(normalizeModelProfile(providerSpecific).thinkingLevel).toBe(Effort.XHigh);

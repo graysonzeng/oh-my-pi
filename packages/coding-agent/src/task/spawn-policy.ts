@@ -58,6 +58,21 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 }
 
 /**
+ * Whether `name` is spawnable: not in `task.disabledAgents`, and permitted by
+ * the session spawn policy.
+ */
+function isNamedAgentSpawnable(
+	name: string,
+	disabledAgents: readonly string[] | undefined,
+	spawns: string | boolean | null | undefined,
+): boolean {
+	if (disabledAgents?.includes(name)) return false;
+	const policy = resolveSpawnPolicy(spawns);
+	if (!policy.enabled) return false;
+	return policy.allowedAgents === null || policy.allowedAgents.includes(name);
+}
+
+/**
  * Whether the `scout` agent is spawnable in a session: not disabled via
  * `task.disabledAgents`, and permitted by the session spawn policy.
  */
@@ -65,8 +80,16 @@ export function isScoutSpawnable(
 	disabledAgents: readonly string[] | undefined,
 	spawns: string | boolean | null | undefined,
 ): boolean {
-	if (disabledAgents?.includes("scout")) return false;
-	const policy = resolveSpawnPolicy(spawns);
-	if (!policy.enabled) return false;
-	return policy.allowedAgents === null || policy.allowedAgents.includes("scout");
+	return isNamedAgentSpawnable("scout", disabledAgents, spawns);
+}
+
+/**
+ * Whether the `sonic` agent is spawnable in a session: not disabled via
+ * `task.disabledAgents`, and permitted by the session spawn policy.
+ */
+export function isSonicSpawnable(
+	disabledAgents: readonly string[] | undefined,
+	spawns: string | boolean | null | undefined,
+): boolean {
+	return isNamedAgentSpawnable("sonic", disabledAgents, spawns);
 }

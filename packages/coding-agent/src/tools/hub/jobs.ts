@@ -28,7 +28,14 @@ import {
 	type ToolUIColor,
 	type ToolUIStatus,
 } from "../render-utils";
-import type { AgentActivitySnapshot, CancelOutcome, CoordinationDetails, HubRenderArgs, JobSnapshot } from "./types";
+import type {
+	AgentActivitySnapshot,
+	CancelOutcome,
+	CoordinationDetails,
+	HubRenderArgs,
+	JobSnapshot,
+	LiveActivityPhase,
+} from "./types";
 
 const WAIT_DURATION_MS: Record<string, number> = {
 	"5s": 5_000,
@@ -162,25 +169,108 @@ interface TrackedJobLike {
 
 const CURRENT_TOOL_ELAPSED_MS = 5000;
 
+/**
+ * Long-silence threshold: a real `lastActivityAtMs` older than this yields an
+ * explicit "no new events" hint. Below it "just now" reads as normal activity
+ * and the row keeps only its phase/tool gist.
+ */
+const IDLE_HINT_THRESHOLD_MS = 10_000;
+
+const ACTIVITY_PHASE_SET: Record<string, true> = {
+	working: true,
+	model: true,
+	thinking: true,
+	responding: true,
+	tool: true,
+};
+
+/** Human labels for each observed phase. "tool" renders the tool gist itself. */
+const PHASE_LABELS: Record<Exclude<LiveActivityPhase, "tool">, string> = {
+	working: "working",
+	model: "waiting on model",
+	thinking: "thinking",
+	responding: "responding",
+};
+
 function asTrimmedString(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();
 	return trimmed ? trimmed : undefined;
 }
 
+/**
+ * Compact live gist extracted from an {@link AgentProgress} snapshot: what the
+ * subagent is doing *right now*, or how long it has been silent. Shared by the
+ * subagent HUD and the hub jobs renderer so both surfaces tell the same story.
+ *
+ * Truthfulness rules (see the shared contract):
+ * - `activityPhase` / `lastActivityAtMs` are written from real execution
+ *   events only (message_start, stream chunks, tool events); unknown
+ *   timestamps are never invented, so `idleMs` stays absent until a real
+ *   event time was observed.
+ * - Terminal progress snapshots never render as running activity, and the
+ *   elapsed/silence counters must not keep growing after the terminal event.
+ * - `currentTool` is in-flight work; `recentTools` are finished history and
+ *   only surface with the explicit `last` marker.
+ * - Real retry state outranks the tool gist.
+ */
 export function liveActivityFromProgress(record: unknown, now: number): JobSnapshot["liveActivity"] | undefined {
 	if (!record || typeof record !== "object") return undefined;
 	const progressRecord = record as Record<string, unknown>;
+
+	const status = progressRecord.status;
+	if (status === "completed" || status === "failed" || status === "aborted") return undefined;
+
+	const phaseValue = progressRecord.activityPhase;
+	const phase: LiveActivityPhase | undefined =
+		typeof phaseValue === "string" && ACTIVITY_PHASE_SET[phaseValue] === true
+			? (phaseValue as LiveActivityPhase)
+			: undefined;
+
 	const currentTool = asTrimmedString(progressRecord.currentTool);
 	const recentTools = Array.isArray(progressRecord.recentTools) ? progressRecord.recentTools : [];
 	const recent = recentTools[0];
 	const recentRecord = recent && typeof recent === "object" ? (recent as Record<string, unknown>) : undefined;
 	const recentTool = asTrimmedString(recentRecord?.tool);
 	const tool = currentTool ?? recentTool;
-	if (!tool) return undefined;
+	const isHistory = currentTool === undefined && recentTool !== undefined;
+
+	let retryState: NonNullable<JobSnapshot["liveActivity"]>["retryState"];
+	const retryValue = progressRecord.retryState;
+	if (retryValue && typeof retryValue === "object") {
+		const retry = retryValue as Record<string, unknown>;
+		const attempt = typeof retry.attempt === "number" ? retry.attempt : undefined;
+		const maxAttempts = typeof retry.maxAttempts === "number" ? retry.maxAttempts : undefined;
+		const delayMs = typeof retry.delayMs === "number" ? retry.delayMs : undefined;
+		if (attempt !== undefined && maxAttempts !== undefined) {
+			retryState = { attempt, maxAttempts, ...(delayMs !== undefined && delayMs > 0 ? { delayMs } : {}) };
+		}
+	}
+	let retryFailure: NonNullable<JobSnapshot["liveActivity"]>["retryFailure"];
+	const failureValue = progressRecord.retryFailure;
+	if (failureValue && typeof failureValue === "object") {
+		const failure = failureValue as Record<string, unknown>;
+		const attempt = typeof failure.attempt === "number" ? failure.attempt : undefined;
+		const errorMessage =
+			typeof failure.errorMessage === "string" && failure.errorMessage.trim()
+				? failure.errorMessage.trim()
+				: undefined;
+		if (attempt !== undefined || errorMessage !== undefined) {
+			retryFailure = { ...(attempt !== undefined ? { attempt } : {}), ...(errorMessage ? { errorMessage } : {}) };
+		}
+	}
+
+	const lastActivityAtMs = progressRecord.lastActivityAtMs;
+	const hasLastActivity = typeof lastActivityAtMs === "number" && Number.isFinite(lastActivityAtMs);
+	if (!phase && !tool && !retryState && !retryFailure && !hasLastActivity) return undefined;
+
 	const lastIntent = asTrimmedString(progressRecord.lastIntent);
+	// Tool gists pair with the tool's args (lastIntent preferred); phase-label
+	// gists only carry the still-current intent — a finished tool's args are
+	// stale, not a description of what the subagent is doing now.
 	const args = currentTool ? asTrimmedString(progressRecord.currentToolArgs) : asTrimmedString(recentRecord?.args);
-	const detail = lastIntent ?? args;
+	const detail = phase && phase !== "tool" && !currentTool ? lastIntent : (lastIntent ?? args);
+
 	let elapsedMs: number | undefined;
 	if (currentTool) {
 		const startMs = progressRecord.currentToolStartMs;
@@ -189,10 +279,23 @@ export function liveActivityFromProgress(record: unknown, now: number): JobSnaps
 			if (elapsed > CURRENT_TOOL_ELAPSED_MS) elapsedMs = elapsed;
 		}
 	}
+
+	// Silence = time since the last real execution event. Only shown in place
+	// of tool elapsed (an open tool already conveys liveness).
+	let idleMs: number | undefined;
+	if (hasLastActivity && elapsedMs === undefined) {
+		const idle = now - lastActivityAtMs;
+		if (idle > 0) idleMs = idle;
+	}
+
 	return {
-		tool,
+		...(phase ? { phase } : {}),
+		...(tool ? { tool, ...(isHistory ? { last: true } : {}) } : {}),
 		...(detail ? { detail } : {}),
 		...(elapsedMs !== undefined ? { elapsedMs } : {}),
+		...(idleMs !== undefined ? { idleMs } : {}),
+		...(retryState ? { retryState } : {}),
+		...(retryFailure ? { retryFailure } : {}),
 	};
 }
 
@@ -202,32 +305,77 @@ export function formatCompactLiveActivityLine(
 	uiTheme: Theme,
 ): string {
 	const hook = `${uiTheme.tree.hook} `;
-	const tool = sanitizeText(activity.tool);
+
+	// Real retry state outranks everything: the subagent is sleeping between
+	// provider retries, not working. Attempt numbers first; when attempts are
+	// exhausted the terminal failure hint takes over instead.
+	if (activity.retryState) {
+		let line = `${hook}${uiTheme.fg(
+			"warning",
+			`retry ${activity.retryState.attempt}/${activity.retryState.maxAttempts}`,
+		)}`;
+		const delay = activity.retryState.delayMs;
+		if (delay !== undefined) {
+			const part = `${uiTheme.sep.dot}${uiTheme.fg("warning", `retrying in ${formatDuration(delay)}`)}`;
+			if (visibleWidth(Bun.stripANSI(line)) + visibleWidth(Bun.stripANSI(part)) <= budget) line += part;
+		}
+		return truncateToWidth(line, budget, Ellipsis.Unicode);
+	}
+	if (activity.retryFailure) {
+		const hint = activity.retryFailure.errorMessage ? `blocked: ${activity.retryFailure.errorMessage}` : "blocked";
+		return truncateToWidth(
+			`${hook}${uiTheme.fg("warning", shortenHomePathsInText(replaceTabs(sanitizeText(hint)).trim()))}`,
+			budget,
+			Ellipsis.Unicode,
+		);
+	}
+
+	// Gist: an observed phase label wins over finished-history tool names, so
+	// the row answers "is it advancing / how silent?" before "what did it last
+	// touch?". In-flight tools keep their name — that *is* the tool phase.
+	// Legacy snapshots (no phase tracking) fall back to the tool gist with the
+	// explicit `last` marker for finished tools.
+	let gist: string;
+	if (activity.phase && activity.phase !== "tool") {
+		gist = PHASE_LABELS[activity.phase];
+	} else if (activity.tool) {
+		gist = activity.last ? `last ${activity.tool}` : activity.tool;
+	} else if (activity.phase === "tool") {
+		gist = "running a tool";
+	} else {
+		gist = PHASE_LABELS.working;
+	}
+
+	const base = `${hook}${uiTheme.fg("muted", sanitizeText(gist))}`;
+	const baseWidth = visibleWidth(Bun.stripANSI(base));
+	if (baseWidth >= budget) return truncateToWidth(base, budget, Ellipsis.Unicode);
+
+	// Silence hint (real event time only) or in-flight tool elapsed.
+	const timingText =
+		activity.idleMs !== undefined && activity.idleMs >= IDLE_HINT_THRESHOLD_MS
+			? `${formatDuration(activity.idleMs)} no new events`
+			: activity.elapsedMs !== undefined
+				? formatDuration(activity.elapsedMs)
+				: undefined;
+	const timingPart = timingText ? `${uiTheme.sep.dot}${uiTheme.fg("warning", timingText)}` : undefined;
+
 	const detailRaw = activity.detail
 		? shortenHomePathsInText(replaceTabs(sanitizeText(activity.detail)).trim())
 		: undefined;
-	const elapsedText = activity.elapsedMs !== undefined ? formatDuration(activity.elapsedMs) : "";
-	const elapsedPart = elapsedText ? `${uiTheme.sep.dot}${uiTheme.fg("warning", elapsedText)}` : "";
-	const elapsedWidth = elapsedPart ? visibleWidth(Bun.stripANSI(elapsedPart)) : 0;
-	let remaining = Math.max(1, budget - visibleWidth(hook));
-	const toolShown = truncateToWidth(tool, remaining, Ellipsis.Unicode);
-	remaining -= visibleWidth(toolShown);
-	let line = `${hook}${uiTheme.fg("muted", toolShown)}`;
-	if (detailRaw && remaining > 2) {
-		remaining -= 2;
-		const detailBudget = Math.max(0, remaining - (elapsedWidth > 0 && elapsedWidth <= remaining ? elapsedWidth : 0));
-		if (detailBudget > 0) {
-			const detailShown = previewLine(detailRaw, detailBudget, Ellipsis.Unicode);
-			if (detailShown) {
-				line += `: ${uiTheme.fg("dim", detailShown)}`;
-				remaining -= visibleWidth(detailShown) + 2;
-			}
-		}
-	}
-	if (elapsedPart && elapsedWidth > 0 && elapsedWidth <= remaining) {
-		line += elapsedPart;
-	}
-	return line;
+	const detailPart =
+		detailRaw !== undefined
+			? `: ${uiTheme.fg("dim", previewLine(detailRaw, Math.max(1, budget - baseWidth - 2), Ellipsis.Unicode))}`
+			: undefined;
+
+	const width = (s: string): number => visibleWidth(Bun.stripANSI(s));
+	// Width is spent in priority order: gist > liveness/silence > the (possibly
+	// stale) tool description — narrow HUDs never hide "no new events" behind
+	// old tool args.
+	const full = `${base}${detailPart ?? ""}${timingPart ?? ""}`;
+	if (width(full) <= budget) return full;
+	const noDetail = `${base}${timingPart ?? ""}`;
+	if (width(noDetail) <= budget) return noDetail;
+	return `${base}${detailPart ?? ""}`;
 }
 
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {

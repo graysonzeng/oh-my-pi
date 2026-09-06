@@ -131,7 +131,7 @@ describe("WorkflowTool", () => {
 		const profiles = [
 			statusProfile("status_planner", "planner", "openai", "openai/gpt-5.6-sol"),
 			statusProfile("status_plan_reviewer", "plan_reviewer", "anthropic", "anthropic/claude-fable-5"),
-			statusProfile("status_implementer", "implementer", "xai", "xai/grok-4.5"),
+			statusProfile("status_implementer", "implementer", "xai", "xai/grok-4.6"),
 			statusProfile("status_code_reviewer", "code_reviewer", "openai", "openai/gpt-5.6-sol"),
 			statusProfile("status_repair", "repair", "anthropic", "anthropic/claude-fable-5"),
 		];
