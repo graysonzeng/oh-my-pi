@@ -33,6 +33,7 @@ import { getSessionSlashCommands } from "../extensibility/extensions/get-command
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
+import { IrcBus } from "../irc/bus";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
@@ -40,6 +41,7 @@ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pendi
 import subagentSoftRuntimeNoticeTemplate from "../prompts/system/subagent-soft-runtime-notice.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
+import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
@@ -66,6 +68,7 @@ import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
+import { formatDuration } from "../tools/render-utils";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -2657,6 +2660,23 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const index = options.index ?? 0;
 	const performanceClass = options.performanceClass ?? "worker";
 	session.setIrcWakeTurnObserver(records => {
+		const owner = AgentRegistry.global().get(id);
+		const parentId = owner?.parentId;
+		const parent = parentId ? AgentRegistry.global().get(parentId) : undefined;
+		const request = parentId
+			? records.find(record => {
+					const details = record.details;
+					return (
+						record.customType === "irc:incoming" &&
+						isRecord(details) &&
+						details.from === parentId &&
+						!details.replyTo &&
+						typeof details.id === "string"
+					);
+				})
+			: undefined;
+		const replyTo = request && isRecord(request.details) ? (request.details.id as string) : undefined;
+		let finished = false;
 		const ircTask =
 			records
 				.map(record => {
@@ -2711,6 +2731,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
 		return async turnError => {
+			if (finished) return;
+			finished = true;
 			unsubscribeTurn();
 			const activeSession = turnMonitor.takeActiveSession();
 			if (activeSession) turnMonitor.captureSalvage(activeSession);
@@ -2728,7 +2750,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						: undefined;
 			turnMonitor.finish();
 			try {
-				await finalizeRunResult({
+				const result = await finalizeRunResult({
 					monitor: turnMonitor,
 					done: {
 						exitCode: aborted || error ? 1 : 0,
@@ -2755,6 +2777,30 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					sessionFile,
 					startTime: turnStartTime,
 				});
+				// Reply only up the captured parent edge, never to a reply or child result.
+				// A replaced registration must not receive an earlier session's report.
+				if (
+					replyTo &&
+					parentId &&
+					parent &&
+					AgentRegistry.global().get(parentId) === parent &&
+					AgentRegistry.global().get(id) === owner
+				) {
+					const body = prompt.render(taskSummaryTemplate, {
+						id,
+						agentName: agent.name,
+						status: result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed",
+						completionKind: result.completionKind,
+						duration: formatDuration(result.durationMs),
+						abortReason: result.abortReason,
+						error: result.exitCode !== 0 ? result.stderr : undefined,
+						preview: result.output,
+					});
+					const receipt = await IrcBus.global().send({ from: id, to: parentId, replyTo, body });
+					if (receipt.outcome === "failed") {
+						logger.warn("IRC wake report delivery failed", { id, parentId, error: receipt.error });
+					}
+				}
 			} catch (finalizeError) {
 				logger.warn("IRC subagent turn finalization failed", {
 					id,

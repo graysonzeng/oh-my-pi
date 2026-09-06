@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
@@ -130,6 +131,7 @@ function createFactory(cwd: string, eventBus?: EventBus, settings: Settings = Se
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	IrcBus.resetGlobalForTests();
 	MCPManager.resetForTests();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
@@ -324,9 +326,18 @@ describe("persisted subagent revival", () => {
 		rpcRegistry.setSubscriptionLevel("progress");
 		const ref = createRef(sessionFile);
 		AgentRegistry.global().register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: {
+				deliverIrcMessage: async () => "injected",
+			} as unknown as AgentSession,
+		});
+		AgentRegistry.global().register({
 			id: ref.id,
 			displayName: ref.displayName,
 			kind: "sub",
+			parentId: "Main",
 			session: null,
 			sessionFile,
 			status: "parked",
