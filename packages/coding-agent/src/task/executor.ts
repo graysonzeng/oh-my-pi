@@ -79,7 +79,9 @@ import {
 	EXPLORE_SOFT_REQUEST_BUDGET,
 	emptyReviewMetrics,
 	REVIEWER_SOFT_REQUEST_BUDGET,
+	resolveClassMaxRuntimeMs,
 	resolveClassSoftRuntimeMs,
+	resolveSubagentPerformanceClass,
 	type SubagentPerformanceClass,
 	type SubagentReviewMetrics,
 } from "./review-performance";
@@ -130,6 +132,35 @@ export function resolveSoftRequestBudget(performanceClass: SubagentPerformanceCl
 	if (performanceClass === "explore") return Math.min(normalized, EXPLORE_SOFT_REQUEST_BUDGET);
 	if (performanceClass === "review") return Math.min(normalized, REVIEWER_SOFT_REQUEST_BUDGET.reviewer);
 	return normalized;
+}
+
+/** Per-run monitor budgets. An omitted override is not `0`; explicit `0` disables that guard. */
+export function resolveRunMonitorBudgets(args: {
+	performanceClass: SubagentPerformanceClass;
+	settings: Settings;
+	maxRuntimeMs?: number;
+	softRequestBudget?: number;
+}): { maxRuntimeMs: number; softRequestBudget: number; softRequestBudgetNotice: boolean } {
+	const configuredMax = Math.max(0, Math.trunc(Number(args.settings.get("task.maxRuntimeMs") ?? 0) || 0));
+	const configuredBudget = Math.max(
+		0,
+		Math.trunc(Number(args.settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
+	);
+	const maxRuntimeMs =
+		args.maxRuntimeMs !== undefined
+			? Math.max(0, Math.trunc(Number(args.maxRuntimeMs) || 0))
+			: configuredMax === 0
+				? 0
+				: Math.min(configuredMax, resolveClassMaxRuntimeMs(args.performanceClass));
+	const softRequestBudget =
+		args.softRequestBudget !== undefined
+			? Math.max(0, Math.trunc(Number(args.softRequestBudget) || 0))
+			: resolveSoftRequestBudget(args.performanceClass, configuredBudget);
+	return {
+		maxRuntimeMs,
+		softRequestBudget,
+		softRequestBudgetNotice: args.settings.get("task.softRequestBudgetNotice") ?? false,
+	};
 }
 
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
@@ -2115,15 +2146,16 @@ const MAX_YIELD_RETRIES = 3;
 
 /**
  * Drive one assignment through a live session: send the prompt, wait for idle,
- * remind the agent to `yield` (up to {@link MAX_YIELD_RETRIES} times), then
- * classify the terminal assistant state. A soft-budget stop short-circuits the
- * reminder ladder into a single forced final yield so partial findings still
- * come back as a real report.
+ * then either take a tool-free final assistant message (worker/explore) or
+ * remind the agent to `yield` (review, or a budget stop). A soft-budget stop
+ * short-circuits the reminder ladder into a single forced final yield so
+ * partial findings still come back as a real report.
  */
 async function driveSessionToYield(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
+	requireYieldTool = true,
 ): Promise<DriveOutcome> {
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
@@ -2255,15 +2287,27 @@ async function driveSessionToYield(
 		let asyncPendingNoticeSent = false;
 		while (!abortSignal.aborted) {
 			if (!monitor.yieldCalled()) {
-				await runYieldLadder();
-				// Ladder exhausted / terminal model error: classified below
-				// (missing yield, or stale yield when one was invalidated).
-				if (!monitor.yieldCalled()) break;
+				const lastAssistant = session.getLastAssistantMessage();
+				const lastHasToolCall = Array.isArray(lastAssistant?.content)
+					? lastAssistant.content.some(block => block.type === "toolCall")
+					: false;
+				const pendingAsync = typeof session.hasPendingAsyncWork === "function" && session.hasPendingAsyncWork();
+				const demandYield = requireYieldTool || monitor.budgetStopRequested() || monitor.yieldInvalidatedByAsync();
+				if (demandYield || lastHasToolCall) {
+					await runYieldLadder();
+					// Ladder exhausted / terminal model error: classified below
+					// (missing yield, or stale yield when one was invalidated).
+					if (!monitor.yieldCalled()) break;
+				} else if (!pendingAsync) {
+					break;
+				}
 			}
-			// Let the parked yield's turn-stop session abort settle before
-			// prompting again (mirrors waitForBudgetStop).
-			await awaitAbortable(monitor.waitForYieldTurnStop());
-			if (!session.hasPendingAsyncWork()) break;
+			if (monitor.yieldCalled()) {
+				// Let the parked yield's turn-stop session abort settle before
+				// prompting again (mirrors waitForBudgetStop).
+				await awaitAbortable(monitor.waitForYieldTurnStop());
+				if (!session.hasPendingAsyncWork()) break;
+			}
 			if (!asyncPendingNoticeSent) {
 				asyncPendingNoticeSent = true;
 				const running = session.getAsyncJobSnapshot()?.running ?? [];
@@ -2390,6 +2434,8 @@ interface FinalizeRunArgs {
 	 * completed run's artifact with a missing-yield warning body (issue #9518).
 	 */
 	followUpTurn?: boolean;
+	/** When false, a tool-free assistant message may complete without yield. Review stays true. */
+	requireYieldTool?: boolean;
 	sessionFile?: string;
 	startTime: number;
 }
@@ -2406,8 +2452,14 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	let exitCode = done.exitCode;
 	let stderr = done.error ?? "";
 
-	// Use final output if available, otherwise accumulated output
+	// Use final output if available, otherwise accumulated output.
+	// Worker/explore final-text completion has no yield events, so seed from salvage.
+	// Review still requires yield: do not let salvage text look like a successful result.
 	let rawOutput = monitor.rawOutput();
+	if (args.requireYieldTool === false && !rawOutput.trim()) {
+		const salvage = monitor.lastAssistantSalvageText()?.trim();
+		if (salvage) rawOutput = salvage;
+	}
 	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
@@ -2577,6 +2629,9 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
+	softRequestBudget?: number;
+	performanceClass?: SubagentPerformanceClass;
+	settings?: Settings;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2594,7 +2649,7 @@ export interface IrcWakeTurnMonitorOptions {
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
 	const { id, agent } = options;
 	const index = options.index ?? 0;
-	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	const performanceClass = options.performanceClass ?? "worker";
 	session.setIrcWakeTurnObserver(records => {
 		const ircTask =
 			records
@@ -2609,6 +2664,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				.join("\n\n") || "IRC follow-up";
 		const turnStartTime = Date.now();
 		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const budgets = resolveRunMonitorBudgets({
+			performanceClass,
+			settings: options.settings ?? session.settings,
+			maxRuntimeMs: options.maxRuntimeMs,
+			softRequestBudget: options.softRequestBudget,
+		});
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
@@ -2621,9 +2682,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			parentToolCallId: options.parentToolCallId,
 			detached: true,
 			sessionFile,
-			softRequestBudget: 0,
-			softRequestBudgetNotice: false,
-			maxRuntimeMs,
+			softRequestBudget: budgets.softRequestBudget,
+			softRequestBudgetNotice: budgets.softRequestBudgetNotice,
+			maxRuntimeMs: budgets.maxRuntimeMs,
+			performanceClass,
 		});
 
 		if (options.eventBus) {
@@ -2683,6 +2745,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					parentToolCallId: options.parentToolCallId,
 					detached: true,
 					followUpTurn: true,
+					requireYieldTool: performanceClass === "review",
 					sessionFile,
 					startTime: turnStartTime,
 				});
@@ -2845,8 +2908,12 @@ export interface FollowUpTurnOptions {
 	 * wake answering a message) leaves the existing artifact intact (issue #9518).
 	 */
 	artifactsDir?: string;
-	/** Wall-clock cap in ms for this turn; 0 disables. */
+	/** Wall-clock cap in ms for this turn; 0 disables. Omitted uses class + settings. */
 	maxRuntimeMs?: number;
+	/** Soft request budget for this turn; 0 disables. Omitted uses class + settings. */
+	softRequestBudget?: number;
+	performanceClass?: SubagentPerformanceClass;
+	settings?: Settings;
 }
 
 /**
@@ -2867,6 +2934,14 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
+	const performanceClass = options.performanceClass ?? "worker";
+	const requireYieldTool = performanceClass === "review";
+	const budgets = resolveRunMonitorBudgets({
+		performanceClass,
+		settings: options.settings ?? session.settings,
+		maxRuntimeMs: options.maxRuntimeMs,
+		softRequestBudget: options.softRequestBudget,
+	});
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -2881,9 +2956,10 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
 		sessionFile,
-		softRequestBudget: 0,
-		softRequestBudgetNotice: false,
-		maxRuntimeMs: options.maxRuntimeMs ?? 0,
+		softRequestBudget: budgets.softRequestBudget,
+		softRequestBudgetNotice: budgets.softRequestBudgetNotice,
+		maxRuntimeMs: budgets.maxRuntimeMs,
+		performanceClass,
 	});
 
 	if (options.eventBus) {
@@ -2904,7 +2980,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const unsubscribe = monitor.attach(session);
 	let outcome: DriveOutcome;
 	try {
-		outcome = await driveSessionToYield(session, monitor, message);
+		outcome = await driveSessionToYield(session, monitor, message, requireYieldTool);
 	} finally {
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
@@ -2934,6 +3010,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
 		followUpTurn: true,
+		requireYieldTool,
 		sessionFile,
 		startTime,
 	});
@@ -3024,19 +3101,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		options.parentServiceTier,
 	);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
-	const maxRuntimeMs = Math.max(
-		0,
-		Math.trunc(Number(options.maxRuntimeMs ?? settings.get("task.maxRuntimeMs") ?? 0) || 0),
-	);
+	const performanceClass =
+		options.performanceClass ??
+		resolveSubagentPerformanceClass({
+			agentName: agent.name,
+			agentShadowReview: agent.shadowReview,
+			spawnShadowReview: options.shadowReview,
+		});
+	const requireYieldTool = performanceClass === "review";
+	const { maxRuntimeMs, softRequestBudget, softRequestBudgetNotice } = resolveRunMonitorBudgets({
+		performanceClass,
+		settings,
+		maxRuntimeMs: options.maxRuntimeMs,
+	});
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0);
-	const configuredDefaultBudget = Math.max(
-		0,
-		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
-	);
-	const softRequestBudget = resolveSoftRequestBudget(options.performanceClass ?? "worker", configuredDefaultBudget);
-	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -3101,7 +3181,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
-		performanceClass: options.performanceClass,
+		performanceClass,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -3118,6 +3198,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			parentToolCallId: options.parentToolCallId,
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
+			softRequestBudget,
+			performanceClass,
+			settings: subagentSettings,
 			outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
@@ -3421,7 +3504,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: options.restrictToolNames,
-				requireYieldTool: true,
+				requireYieldTool,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
 				promptTemplates: options.promptTemplates,
@@ -3589,6 +3672,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				performanceClass,
 			});
 
 			abortSignal.addEventListener(
@@ -3706,7 +3790,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (shadowJobId) session.asyncJobManager?.resumeDeliveries([shadowJobId]);
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToYield(session, monitor, task);
+			const outcome = await driveSessionToYield(session, monitor, task, requireYieldTool);
 			exitCode = outcome.exitCode;
 			error = outcome.error;
 			aborted = outcome.aborted;
@@ -3897,6 +3981,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
+		requireYieldTool,
 		startTime,
 	});
 	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });

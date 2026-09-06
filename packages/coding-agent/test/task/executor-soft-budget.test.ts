@@ -89,6 +89,7 @@ function createMockSession(
 		},
 		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
+		hasPendingAsyncWork: () => false,
 		sendUserMessage: async () => {},
 		setIrcWakeTurnObserver: observer => {
 			ircWakeTurnObserver = observer;

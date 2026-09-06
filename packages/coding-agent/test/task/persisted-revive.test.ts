@@ -70,6 +70,7 @@ async function createPersistedSession(
 	modelRole?: string,
 	advisor?: string,
 	readSummarize?: boolean,
+	init?: { agent?: string; performanceClass?: "review" | "explore" | "worker" },
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -83,6 +84,8 @@ async function createPersistedSession(
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		advisor,
 		readSummarize,
+		agent: init?.agent,
+		performanceClass: init?.performanceClass,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -411,5 +414,36 @@ describe("persisted subagent revival", () => {
 		expect(await Bun.file(artifactPath).text()).toBe(completedReport);
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("uses persisted performanceClass on a real wakeAgent stub and does not invent shadowReview", async () => {
+		const cwd = makeTempDir("@pi-revive-class-");
+		const reviewFile = await createPersistedSession(cwd, undefined, undefined, undefined, undefined, {
+			agent: "task",
+			performanceClass: "review",
+		});
+		const workerFile = await createPersistedSession(cwd, undefined, undefined, undefined, undefined, {
+			agent: "task",
+		});
+		const floorFile = await createPersistedSession(cwd, undefined, undefined, undefined, undefined, {
+			agent: "reviewer",
+		});
+		const exploreFile = await createPersistedSession(cwd, undefined, undefined, undefined, undefined, {
+			agent: "scout",
+		});
+		const captured: CreateAgentSessionOptions[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options) captured.push(options);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const factory = createFactory(cwd);
+		for (const sessionFile of [reviewFile, workerFile, floorFile, exploreFile]) {
+			const reviver = await factory(createRef(sessionFile));
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(createRef(sessionFile));
+		}
+
+		expect(captured.map(options => options.requireYieldTool)).toEqual([true, false, true, false]);
 	});
 });

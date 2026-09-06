@@ -8,6 +8,7 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	buildSoftRuntimeNotice,
+	resolveRunMonitorBudgets,
 	resolveSubagentCompletionKind,
 	runSubprocess,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -57,6 +58,7 @@ function createHangingSession(): HangingSessionHandle {
 		prepareForHeadlessAdvisorDrain: () => {},
 		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
+		hasPendingAsyncWork: () => false,
 		abort: async () => {
 			abortCount += 1;
 			releaseHang();
@@ -112,6 +114,7 @@ function createSteeredHangingSession(
 		prepareForHeadlessAdvisorDrain: () => {},
 		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
+		hasPendingAsyncWork: () => false,
 		sendUserMessage: async (text, steerOptions) => {
 			steers.push({ text: String(text), deliverAs: steerOptions?.deliverAs });
 			await options.onSteer?.(emit);
@@ -213,6 +216,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => undefined,
+			hasPendingAsyncWork: () => false,
 			abort: async () => {},
 			dispose: async () => {},
 		};
@@ -594,6 +598,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => lastAssistantMessage as never,
+			hasPendingAsyncWork: () => false,
 			abort: async () => {
 				abortCount += 1;
 			},
@@ -1110,5 +1115,149 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				abortKind: () => "budget",
 			}),
 		).toBe("budget_stop");
+	});
+
+	it("completes a worker on a tool-free final assistant message without yield reminders", async () => {
+		const settings = Settings.isolated();
+		const inits: Array<{ performanceClass?: string }> = [];
+		const captured: CreateAgentSessionOptions[] = [];
+		const session: Partial<AgentSession> = {
+			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
+			state: { messages: [] } as never,
+			agent: { state: { systemPrompt: ["test"] } } as never,
+			extensionRunner: undefined as never,
+			sessionManager: {
+				appendSessionInit: (init: { performanceClass?: string }) => {
+					inits.push(init);
+				},
+			} as never,
+			getActiveToolNames: () => ["read", "yield"],
+			getEnabledToolNames: () => ["read", "yield"],
+			setActiveToolsByName: async () => {},
+			subscribe: () => () => {},
+			prompt: async () => true,
+			waitForIdle: async () => {},
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			getLastAssistantMessage: () =>
+				({
+					role: "assistant",
+					content: [{ type: "text", text: "done without yield" }],
+					stopReason: "stop",
+				}) as never,
+			hasPendingAsyncWork: () => false,
+			abort: async () => {},
+			dispose: async () => {},
+		};
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options) captured.push(options);
+			return {
+				session: session as AgentSession,
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			} satisfies CreateAgentSessionResult;
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-final-text",
+			settings,
+			performanceClass: "worker",
+		});
+
+		expect(captured[0]?.requireYieldTool).toBe(false);
+		expect(inits[0]?.performanceClass).toBe("worker");
+		expect(result.aborted).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.completionKind).toBe("completed");
+		expect(result.output).toBe("done without yield");
+		expect(result.output).not.toContain("exited without calling yield");
+	});
+
+	it("still fails a review that never yields even when salvage text exists", async () => {
+		const settings = Settings.isolated();
+		const session: Partial<AgentSession> = {
+			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
+			state: { messages: [] } as never,
+			agent: { state: { systemPrompt: ["test"] } } as never,
+			extensionRunner: undefined as never,
+			sessionManager: { appendSessionInit: () => {} } as never,
+			getActiveToolNames: () => ["read", "yield"],
+			getEnabledToolNames: () => ["read", "yield"],
+			setActiveToolsByName: async () => {},
+			subscribe: () => () => {},
+			prompt: async () => true,
+			waitForIdle: async () => {},
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			getLastAssistantMessage: () =>
+				({
+					role: "assistant",
+					content: [{ type: "text", text: "looks done" }],
+					stopReason: "stop",
+				}) as never,
+			hasPendingAsyncWork: () => false,
+			abort: async () => {},
+			dispose: async () => {},
+		};
+		mockCreateAgentSession(session as AgentSession);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "reviewer" },
+			id: "subagent-review-must-yield",
+			settings,
+			performanceClass: "review",
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("exited without calling yield");
+	});
+});
+
+describe("resolveRunMonitorBudgets", () => {
+	it("treats an omitted override as class+settings, not disabled", () => {
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 3_600_000,
+			"task.softRequestBudget": 200,
+			"task.softRequestBudgetNotice": true,
+		});
+		expect(resolveRunMonitorBudgets({ performanceClass: "worker", settings })).toEqual({
+			maxRuntimeMs: 3_600_000,
+			softRequestBudget: 200,
+			softRequestBudgetNotice: true,
+		});
+		expect(resolveRunMonitorBudgets({ performanceClass: "explore", settings })).toEqual({
+			maxRuntimeMs: 600_000,
+			softRequestBudget: 40,
+			softRequestBudgetNotice: true,
+		});
+		expect(resolveRunMonitorBudgets({ performanceClass: "review", settings })).toEqual({
+			maxRuntimeMs: 1_800_000,
+			softRequestBudget: 80,
+			softRequestBudgetNotice: true,
+		});
+	});
+
+	it("keeps an explicit 0 as disabled and does not fall back to class ceilings", () => {
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 3_600_000,
+			"task.softRequestBudget": 200,
+		});
+		expect(
+			resolveRunMonitorBudgets({
+				performanceClass: "review",
+				settings,
+				maxRuntimeMs: 0,
+				softRequestBudget: 0,
+			}),
+		).toEqual({
+			maxRuntimeMs: 0,
+			softRequestBudget: 0,
+			softRequestBudgetNotice: true,
+		});
 	});
 });

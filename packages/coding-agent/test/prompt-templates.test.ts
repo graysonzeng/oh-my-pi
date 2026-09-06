@@ -409,3 +409,22 @@ describe("subagent peer roster prompt", () => {
 		expect(rendered).toContain("never parked names");
 	});
 });
+
+describe("subagent completion contract", () => {
+	const templatePath = path.resolve(import.meta.dir, "../src/prompts/system/subagent-system-prompt.md");
+
+	test("worker and explore omit keep-going; review still requires yield", async () => {
+		const templateSource = await fs.readFile(templatePath, "utf-8");
+		const worker = prompt.render(templateSource, { agent: "task" });
+		const explore = prompt.render(templateSource, { agent: "scout", exploreClass: true });
+		const review = prompt.render(templateSource, { agent: "reviewer", reviewClass: true });
+
+		expect(worker).not.toContain("keep going until this ticket is closed");
+		expect(worker).not.toContain("While work remains, you MUST continue with another tool call");
+		expect(worker).toContain("A tool-free final assistant message is the result");
+		expect(explore).not.toContain("keep going until this ticket is closed");
+		expect(explore).toContain("Write a compressed final assistant message");
+		expect(review).toContain("terminal-yield");
+		expect(review).toContain("This is your only way to return a final result");
+	});
+});

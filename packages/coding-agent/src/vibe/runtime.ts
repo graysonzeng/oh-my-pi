@@ -1542,6 +1542,11 @@ export class VibeSessionRegistry {
 								onProgress,
 								eventBus: session.eventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
+								performanceClass: resolveSubagentPerformanceClass({
+									agentName: record.agent.name,
+									agentShadowReview: record.agent.shadowReview,
+								}),
+								settings: session.settings,
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {

@@ -42,15 +42,15 @@ Use `hub` messaging only for quick coordination, never long-form content. Addres
 {{/if}}
 
 § Completion
-No TODO tracking, no progress updates. Execute; report results with `yield`.
+No TODO tracking, no progress updates. Execute; report results.
 
 {{#if exploreClass}}
-When the assignment is answered, stop immediately and terminal-yield a compressed handoff. A broader ticket remaining open is not a reason to continue.
+When the assignment is answered, stop immediately. Write a compressed final assistant message with no further tool calls. A broader ticket remaining open is not a reason to continue. You MAY still `yield`; it is optional.
 {{else}}
 {{#if reviewClass}}
 Use incremental yield sections when useful. As soon as the verdict is ready or a wrap-up steer arrives, terminal-yield; do not keep searching merely for completeness.
 {{else}}
-While work remains, you MUST continue with another tool call — investigate, edit, run, verify. Save narrative for a terminal `yield` unless you intentionally record an incremental section.
+Use tools while they are needed. After the last tool result, write a final assistant message with no tool calls — that message is the result. You MAY still `yield`; it is optional. A broader ticket remaining open is not a reason to keep searching.
 {{/if}}
 {{/if}}
 
@@ -63,7 +63,15 @@ Yield protocol:
 - Use `type: string` for a terminal result; if data is omitted, your last assistant turn becomes the raw final result.
 {{/if}}
 
+{{#if reviewClass}}
 This is your only way to return a final result. For structured results, you NEVER put JSON in plain text or substitute a text summary for `result.data`.
+{{else}}
+{{#if outputSchema}}
+For structured results, you NEVER put JSON in plain text or substitute a text summary for `result.data`. Prefer a terminal `yield` matching the schema; a tool-free final assistant message is enough only when there is no remaining structured payload.
+{{else}}
+A tool-free final assistant message is the result. `yield` is optional.
+{{/if}}
+{{/if}}
 
 {{#if outputSchemaOverridesAgent}}
 Caller schema overrides agent-native output instructions. Ignore ROLE-provided output/yield labels, field names, examples, and procedures that conflict with the interface below. Use ONLY labels/fields from the caller schema; safest path: omit `type` and terminal-yield the full `result.data` object.
@@ -75,7 +83,7 @@ Your terminal `yield` MUST use exactly this shape — the schema fields go insid
 ```
 {{/if}}
 
-Giving up is a last resort. If truly blocked, you MUST terminal-yield `result.error` describing what you tried and the exact blocker.
+Giving up is a last resort. If truly blocked, {{#if reviewClass}}you MUST terminal-yield `result.error` describing what you tried and the exact blocker.{{else}}write a final assistant message (or terminal-yield `result.error`) describing what you tried and the exact blocker.{{/if}}
 You NEVER give up due to uncertainty, missing information obtainable via tools or repo context, or needing a design decision you can derive yourself.
 
-{{#unless exploreClass}}{{#unless reviewClass}}You MUST keep going until this ticket is closed. This matters.{{/unless}}{{/unless}}
+
