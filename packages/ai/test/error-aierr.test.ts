@@ -37,6 +37,16 @@ describe("AIError.classify — structural provider errors", () => {
 		}
 	});
 
+	it("classifies statusless bad_response_status_code errors as transient and retryable", () => {
+		const err = new AIError.ProviderResponseError("Error Code bad_response_status_code: openai_error", {
+			provider: "openai",
+			kind: "output",
+		});
+		const id = AIError.classify(err);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
 	it("does not treat benign capacity descriptions as transient", () => {
 		const id = AIError.classify(new Error("This model has a 128k token capacity"));
 		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
