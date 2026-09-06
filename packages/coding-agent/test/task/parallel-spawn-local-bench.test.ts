@@ -332,90 +332,94 @@ if (!BENCH_MODE) {
 			unregisterCustomApis(BENCH_API_SOURCE);
 		});
 
-		it("cap 1: a provider-gated first spawn forces the second to queue on the real semaphore; both deliver", {
-			timeout: 60_000,
-		}, async () => {
-			const firstEntry = Promise.withResolvers<void>();
-			const release = Promise.withResolvers<void>();
-			let liveWatch: ProviderConcurrencyWatch | undefined;
-			let entries = 0;
-			const batchPromise = runBatch({
-				cap: 1,
-				tasks: 2,
-				loadMs: 10,
-				gate: {
-					onEntry: async watch => {
-						liveWatch = watch;
-						entries++;
-						if (entries === 1) {
-							firstEntry.resolve();
-							await release.promise;
-						}
+		it(
+			"cap 1: a provider-gated first spawn forces the second to queue on the real semaphore; both deliver",
+			async () => {
+				const firstEntry = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				let liveWatch: ProviderConcurrencyWatch | undefined;
+				let entries = 0;
+				const batchPromise = runBatch({
+					cap: 1,
+					tasks: 2,
+					loadMs: 10,
+					gate: {
+						onEntry: async watch => {
+							liveWatch = watch;
+							entries++;
+							if (entries === 1) {
+								firstEntry.resolve();
+								await release.promise;
+							}
+						},
 					},
-				},
-			});
-			// Wait until the first child's first provider call is in flight (gate held).
-			await firstEntry.promise;
-			// While the first spawn holds the only permit, the second must not have
-			// reached the provider at all — it is blocked on the real semaphore.
-			expect(liveWatch?.entries).toBe(1);
-			release.resolve();
-			const batch = await batchPromise;
+				});
+				// Wait until the first child's first provider call is in flight (gate held).
+				await firstEntry.promise;
+				// While the first spawn holds the only permit, the second must not have
+				// reached the provider at all — it is blocked on the real semaphore.
+				expect(liveWatch?.entries).toBe(1);
+				release.resolve();
+				const batch = await batchPromise;
 
-			expect(batch.allDelivered).toBe(true);
-			expect(batch.allOk).toBe(true);
-			// 2 workers × 4 provider calls (1 reply + 3 yield reminders).
-			expect(batch.providerEntries).toBe(CALLS_PER_WORKER * 2);
-			// Sequential cap: provider concurrency can never exceed 1.
-			expect(batch.providerPeak).toBe(1);
-			for (const job of batch.jobs) {
-				expect(job.requests).toBeGreaterThanOrEqual(1);
-				expect(job.ok).toBe(true);
-			}
-			// The queued job (second spawn) really waited on the task semaphore.
-			expect(batch.spawnQueueMsPresent).toBe(true);
-			expect(batch.spawnQueueMsSamples.filter(value => value > 0).length).toBeGreaterThanOrEqual(1);
-		});
+				expect(batch.allDelivered).toBe(true);
+				expect(batch.allOk).toBe(true);
+				// 2 workers × 4 provider calls (1 reply + 3 yield reminders).
+				expect(batch.providerEntries).toBe(CALLS_PER_WORKER * 2);
+				// Sequential cap: provider concurrency can never exceed 1.
+				expect(batch.providerPeak).toBe(1);
+				for (const job of batch.jobs) {
+					expect(job.requests).toBeGreaterThanOrEqual(1);
+					expect(job.ok).toBe(true);
+				}
+				// The queued job (second spawn) really waited on the task semaphore.
+				expect(batch.spawnQueueMsPresent).toBe(true);
+				expect(batch.spawnQueueMsSamples.filter(value => value > 0).length).toBeGreaterThanOrEqual(1);
+			},
+			{ timeout: 60_000 },
+		);
 
-		it("cap 2: two gated first-entries prove real provider concurrency ≤ cap and all four tasks deliver", {
-			timeout: 60_000,
-		}, async () => {
-			const twoEntered = Promise.withResolvers<void>();
-			const release = Promise.withResolvers<void>();
-			let liveWatch: ProviderConcurrencyWatch | undefined;
-			let entries = 0;
-			const batchPromise = runBatch({
-				cap: 2,
-				tasks: 4,
-				loadMs: 10,
-				gate: {
-					onEntry: async watch => {
-						liveWatch = watch;
-						entries++;
-						if (entries <= 2) {
-							if (entries === 2) twoEntered.resolve();
-							await release.promise;
-						}
+		it(
+			"cap 2: two gated first-entries prove real provider concurrency ≤ cap and all four tasks deliver",
+			async () => {
+				const twoEntered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				let liveWatch: ProviderConcurrencyWatch | undefined;
+				let entries = 0;
+				const batchPromise = runBatch({
+					cap: 2,
+					tasks: 4,
+					loadMs: 10,
+					gate: {
+						onEntry: async watch => {
+							liveWatch = watch;
+							entries++;
+							if (entries <= 2) {
+								if (entries === 2) twoEntered.resolve();
+								await release.promise;
+							}
+						},
 					},
-				},
-			});
-			// Both spawns acquired their permits and entered the mock provider at
-			// the same time; the remaining two spawns must still be queued behind
-			// the real task semaphore.
-			await twoEntered.promise;
-			expect(liveWatch?.entries).toBe(2);
-			release.resolve();
-			const batch = await batchPromise;
+				});
+				// Both spawns acquired their permits and entered the mock provider at
+				// the same time; the remaining two spawns must still be queued behind
+				// the real task semaphore.
+				await twoEntered.promise;
+				expect(liveWatch?.entries).toBe(2);
+				release.resolve();
+				const batch = await batchPromise;
 
-			expect(batch.allDelivered).toBe(true);
-			expect(batch.allOk).toBe(true);
-			expect(batch.providerEntries).toBe(CALLS_PER_WORKER * 4);
-			// Provider utilization peaked at exactly the two concurrently-held entries.
-			expect(batch.providerPeak).toBe(2);
-			// The two spawns that queued behind the held permits really waited.
-			expect(batch.spawnQueueMsPresent).toBe(true);
-			expect(batch.spawnQueueMsSamples.filter(value => value > 0).length).toBeGreaterThanOrEqual(2);
-		});
+				expect(batch.allDelivered).toBe(true);
+				expect(batch.allOk).toBe(true);
+				expect(batch.providerEntries).toBe(CALLS_PER_WORKER * 4);
+				// Provider utilization peaked at exactly the two concurrently-held entries.
+				expect(batch.providerPeak).toBe(2);
+				// The two spawns that queued behind the held permits really waited.
+				expect(batch.spawnQueueMsPresent).toBe(true);
+				expect(batch.spawnQueueMsSamples.filter(value => value > 0).length).toBeGreaterThanOrEqual(2);
+			},
+			{ timeout: 60_000 },
+		);
 	});
 }
 

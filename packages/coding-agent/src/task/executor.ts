@@ -3844,7 +3844,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		// — never per request-phase `queueMs`, which stays unused to avoid
 		// double-counting the same wait). Omitted when the spawn site captured
 		// no epochs; this is harness queueing time, not a provider queue.
-		if (queueMs !== undefined) {
+		if (queueMs !== undefined && progress.reviewMetrics) {
 			progress.reviewMetrics.spawnQueueMs = queueMs;
 		}
 		const preRunMs = options.acquiredAt !== undefined ? Math.round(startTime - options.acquiredAt) : undefined;

@@ -3,8 +3,10 @@ import type { Effort, Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel, TaskEffort } from "../thinking";
-import type { SubagentReviewMetrics } from "./review-performance";
+import type { SubagentRequestPhase, SubagentReviewMetrics, SubagentToolPhase } from "./review-performance";
 import type { NestedRepoPatch } from "./worktree";
+
+export type { SubagentRequestPhase, SubagentReviewMetrics, SubagentToolPhase };
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
