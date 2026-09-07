@@ -6,6 +6,7 @@ import { type Rule, resetActiveRulesForTests, setActiveRules } from "@oh-my-pi/p
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadSkills, resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { formatUnknownRuleError, RuleProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/rule-protocol";
 import { formatUnknownSkillError, SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -187,15 +188,59 @@ describe("unknown skill fail-closed", () => {
 		]);
 		const handler = new SkillProtocolHandler();
 		await expect(handler.resolve(parseInternalUrl("skill://adaptive-delivery"))).rejects.toThrow(
-			/Unknown skill: adaptive-delivery[\s\S]*Did you mean rule:\/\/adaptive-delivery\?[\s\S]*Do not glob or read \*\*\/SKILL\.md/,
+			/Unknown skill: adaptive-delivery[\s\S]*Did you mean rule:\/\/adaptive-delivery\?[\s\S]*Do not glob, guess filesystem paths, or read \*\*\/SKILL\.md/,
+		);
+	});
+
+	it("does not alias a bundled task agent into a successful skill read", async () => {
+		const handler = new SkillProtocolHandler();
+		await expect(handler.resolve(parseInternalUrl("skill://designer"))).rejects.toThrow(
+			/Unknown skill: designer[\s\S]*Did you mean task agent designer\?[\s\S]*Do not glob, guess filesystem paths, or read \*\*\/SKILL\.md/,
 		);
 	});
 
 	it("omits the rule hint when no exact rule name matches", () => {
 		const message = formatUnknownSkillError("missing-skill", ["first-skill"]);
 		expect(message).toBe(
-			"Unknown skill: missing-skill\nAvailable: first-skill\nDo not glob or read **/SKILL.md to recover unknown skills.",
+			"Unknown skill: missing-skill\nAvailable: first-skill\nDo not glob, guess filesystem paths, or read **/SKILL.md to recover unknown skills.",
 		);
+		expect(message).not.toContain("Did you mean");
+	});
+});
+
+describe("unknown rule fail-closed", () => {
+	afterEach(() => {
+		resetActiveSkillsForTests();
+		resetActiveRulesForTests();
+	});
+
+	it("does not alias a same-named skill into a successful rule read", async () => {
+		setActiveSkills([
+			{
+				name: "engineering-flow",
+				description: "Verification workflow",
+				filePath: "/tmp/skills/engineering-flow/SKILL.md",
+				baseDir: "/tmp/skills/engineering-flow",
+				source: "test",
+			},
+		]);
+		const handler = new RuleProtocolHandler();
+		const error = await handler.resolve(parseInternalUrl("rule://engineering-flow")).then(
+			() => {
+				throw new Error("expected rule://engineering-flow to fail closed");
+			},
+			(err: unknown) => err,
+		);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toMatch(
+			/Unknown rule: engineering-flow[\s\S]*Did you mean skill:\/\/engineering-flow\?/,
+		);
+		expect((error as Error).message).not.toContain("Verification workflow");
+	});
+
+	it("omits the skill hint when no exact skill name matches", () => {
+		const message = formatUnknownRuleError("missing-rule", ["first-rule"]);
+		expect(message).toBe("Unknown rule: missing-rule\nAvailable: first-rule");
 		expect(message).not.toContain("Did you mean");
 	});
 });

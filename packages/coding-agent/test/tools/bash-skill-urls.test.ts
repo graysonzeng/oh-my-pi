@@ -83,7 +83,7 @@ describe("expandSkillUrls", () => {
 		];
 
 		expect(() => expandSkillUrls("python skill://missing/run.py", skills)).toThrow(
-			/Unknown skill: missing\nAvailable: first-skill, second-skill\nDo not glob or read \*\*\/SKILL\.md to recover unknown skills\./,
+			/Unknown skill: missing\nAvailable: first-skill, second-skill\nDo not glob, guess filesystem paths, or read \*\*\/SKILL\.md to recover unknown skills\./,
 		);
 	});
 

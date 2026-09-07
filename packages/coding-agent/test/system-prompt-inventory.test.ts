@@ -607,7 +607,7 @@ describe("system prompt tool inventory", () => {
 		});
 		const text = systemPrompt.join("\n\n");
 
-		expect(text).toContain("- prompt-authoring: Prompt authoring workflow");
+		expect(text).toContain("- `skill://prompt-authoring`: Prompt authoring workflow");
 	});
 
 	it("omits skills when active tool names exclude read", async () => {
@@ -678,12 +678,16 @@ describe("system prompt tool inventory", () => {
 		const text = systemPrompt.join("\n\n");
 		// The staged contract replaces the broad bulk-read trigger.
 		expect(text).not.toContain("Read matching `skill://<name>` or `rule://<name>` before proceeding.");
-		expect(text).toContain("Choose at most ONE primary routing/lifecycle skill");
+		expect(text).toContain("Choose at most ONE primary routing/lifecycle skill from the `<skills>` list");
+		expect(text).toContain("Names in `<domain-rules>` are `rule://`, not `skill://`");
+		expect(text).not.toContain("Indexed names that are not in `<skills>` are rules");
+		expect(text).not.toContain("delivery-route skill");
 		expect(text).toContain("do NOT bulk-read the index");
 		expect(text).toContain("do not read skill bodies");
 		expect(text).toContain("Path-matched domain rules still load");
 		expect(text).toContain("<skills>");
-		expect(text).toContain("- frontend-design: Frontend UI workflow");
+		expect(text).toContain("- `skill://frontend-design`: Frontend UI workflow");
+		expect(text).not.toContain("- frontend-design: Frontend UI workflow");
 	});
 
 	it("lists matching rules and gates the read on known paths", async () => {
@@ -706,10 +710,48 @@ describe("system prompt tool inventory", () => {
 		});
 		const text = systemPrompt.join("\n\n");
 		expect(text).not.toContain("Read matching `skill://<name>` or `rule://<name>` before proceeding.");
-		expect(text).not.toContain("<skills>");
+		expect(text).not.toMatch(/<skills>\s*\n/);
+		expect(text).not.toContain("</skills>");
+		expect(text).not.toContain("Choose at most ONE primary routing/lifecycle skill");
 		expect(text).toContain("Load domain rules only when working in a known target path");
 		expect(text).toContain("<domain-rules>");
-		expect(text).toContain("- typescript (**/*.ts): TypeScript constraints");
+		expect(text).toContain("- `rule://typescript` (**/*.ts): TypeScript constraints");
+		expect(text).not.toContain("- typescript (**/*.ts): TypeScript constraints");
+	});
+
+	it("lists unglobbed routing rules as rule:// URIs, not skill names", async () => {
+		const rulePath = path.join(tempDir, "adaptive-delivery.md");
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "engineering-flow",
+					description: "Verification workflow",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [
+				{
+					name: "adaptive-delivery",
+					path: rulePath,
+					description: "Use when workflow choice is unclear",
+				},
+			],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+		expect(text).toContain("Names in `<domain-rules>` are `rule://`, not `skill://`");
+		expect(text).toContain("`adaptive-delivery` is `rule://adaptive-delivery`, not a skill");
+		expect(text).toContain("- `skill://engineering-flow`: Verification workflow");
+		expect(text).toContain("- `rule://adaptive-delivery`: Use when workflow choice is unclear");
+		expect(text).not.toContain("- adaptive-delivery ():");
+		expect(text).not.toContain("- `rule://adaptive-delivery` ():");
+		expect(text).not.toContain("delivery-route skill");
 	});
 	it("omits the read-only scout delegation gate when scout is unavailable", async () => {
 		const opts = { toolNames: ["read", "bash", "task"], tools: TOOLS };

@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { formatUnknownSkillError } from "./skill-protocol";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, WriteContext } from "./types";
 
 /** Canonical prefix for virtual tool-device URLs. */
@@ -79,8 +80,12 @@ export class XdProtocolHandler implements ProtocolHandler {
 			}
 			const skill = skills.find(s => s.name === target.name);
 			if (!skill) {
-				const available = skills.map(s => s.name).join(", ") || "none";
-				throw new Error(`Unknown skill: ${target.name}\nAvailable: ${available}`);
+				throw new Error(
+					formatUnknownSkillError(
+						target.name,
+						skills.map(s => s.name),
+					),
+				);
 			}
 			// Prefer an in-memory body when present (workflow catalog forwards prepared
 			// skill content); fall back to the on-disk SKILL.md for discovered skills.
