@@ -84,6 +84,7 @@ import {
 	REVIEWER_SOFT_REQUEST_BUDGET,
 	resolveClassMaxRuntimeMs,
 	resolveClassSoftRuntimeMs,
+	resolveRequireYieldTool,
 	resolveSubagentPerformanceClass,
 	type SubagentPerformanceClass,
 	type SubagentReviewMetrics,
@@ -2149,16 +2150,16 @@ const MAX_YIELD_RETRIES = 3;
 
 /**
  * Drive one assignment through a live session: send the prompt, wait for idle,
- * then either take a tool-free final assistant message (worker/explore) or
- * remind the agent to `yield` (review, or a budget stop). A soft-budget stop
- * short-circuits the reminder ladder into a single forced final yield so
- * partial findings still come back as a real report.
+ * then take a tool-free final assistant message. `yield` is optional. A
+ * budget stop still short-circuits into a wrap-up reminder so partial
+ * findings come back as a real report. Structured review results are
+ * accepted from that final message when they parse against `outputSchema`.
  */
 async function driveSessionToYield(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
-	requireYieldTool = true,
+	requireYieldTool = false,
 ): Promise<DriveOutcome> {
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
@@ -2297,7 +2298,7 @@ async function driveSessionToYield(
 					? lastAssistant.content.some(block => block.type === "toolCall")
 					: false;
 				const pendingAsync = typeof session.hasPendingAsyncWork === "function" && session.hasPendingAsyncWork();
-				const demandYield = requireYieldTool || monitor.budgetStopRequested() || monitor.yieldInvalidatedByAsync();
+				const demandYield = requireYieldTool || monitor.budgetStopRequested();
 				if (demandYield || lastHasToolCall) {
 					await runYieldLadder();
 					// Ladder exhausted / terminal model error: classified below
@@ -2379,13 +2380,10 @@ async function driveSessionToYield(
 			exitCode = 1;
 		}
 
-		// A recorded yield that async-result deliveries superseded and the
-		// model never refreshed is stale: fail the run instead of letting the
-		// parent act on a payload that predates the background job outcomes
-		// the model was shown. The stale payload still ships through
-		// finalizeSubprocessOutput's failed-after-yield path (exit 1 + stderr,
-		// output preserved as salvage).
-		if (monitor.yieldInvalidatedByAsync() && !abortSignal.aborted) {
+		// A recorded yield that async-result deliveries superseded is stale.
+		// When yield is required, fail closed. Otherwise drop the stale
+		// payload and let finalize parse a refreshed final assistant message.
+		if (requireYieldTool && monitor.yieldInvalidatedByAsync() && !abortSignal.aborted) {
 			exitCode = 1;
 			error ??=
 				"Background job results arrived after the subagent's last yield; it did not submit a refreshed yield covering them.";
@@ -2439,7 +2437,7 @@ interface FinalizeRunArgs {
 	 * completed run's artifact with a missing-yield warning body (issue #9518).
 	 */
 	followUpTurn?: boolean;
-	/** When false, a tool-free assistant message may complete without yield. Review stays true. */
+	/** When false, a tool-free assistant message may complete without yield. */
 	requireYieldTool?: boolean;
 	sessionFile?: string;
 	startTime: number;
@@ -2457,19 +2455,17 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	let exitCode = done.exitCode;
 	let stderr = done.error ?? "";
 
-	// Preserve the last report even when the required terminal submission is missing.
-	// Failure status, not discarded text, keeps incomplete reviews out of the Gate.
+	// Prefer the last assistant turn when there is no live yield: concatenated
+	// rawOutput can mix earlier tool turns and fail JSON fallback parse.
+	// Schema validation — not a missing yield — decides whether a review is complete.
+	const yieldStale = monitor.yieldInvalidatedByAsync();
+	const yieldItems = yieldStale ? undefined : (progress.extractedToolData?.yield as YieldItem[] | undefined);
+	const hasLiveYield = !yieldStale && monitor.yieldCalled();
 	let rawOutput = monitor.rawOutput();
-	if (!rawOutput.trim()) {
+	if (!hasLiveYield || !rawOutput.trim()) {
 		const salvage = monitor.lastAssistantSalvageText()?.trim();
 		if (salvage) rawOutput = salvage;
 	}
-	if (args.requireYieldTool && !monitor.yieldCalled() && exitCode === 0 && !done.aborted) {
-		exitCode = 1;
-		stderr ||=
-			"Subagent stopped without submitting the required terminal verdict; report is incomplete, not a passing review.";
-	}
-	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
 	pushLoopPhase(`subagent:${id}`);
@@ -2773,7 +2769,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					parentToolCallId: options.parentToolCallId,
 					detached: true,
 					followUpTurn: true,
-					requireYieldTool: performanceClass === "review",
+					requireYieldTool: resolveRequireYieldTool(performanceClass),
 					sessionFile,
 					startTime: turnStartTime,
 				});
@@ -2987,7 +2983,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 	const performanceClass = options.performanceClass ?? "worker";
-	const requireYieldTool = performanceClass === "review";
+	const requireYieldTool = resolveRequireYieldTool(performanceClass);
 	const budgets = resolveRunMonitorBudgets({
 		performanceClass,
 		settings: options.settings ?? session.settings,
@@ -3160,7 +3156,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			agentShadowReview: agent.shadowReview,
 			spawnShadowReview: options.shadowReview,
 		});
-	const requireYieldTool = performanceClass === "review";
+	const requireYieldTool = resolveRequireYieldTool(performanceClass);
 	const { maxRuntimeMs, softRequestBudget, softRequestBudgetNotice } = resolveRunMonitorBudgets({
 		performanceClass,
 		settings,

@@ -32,6 +32,15 @@ function createAssistantStopMessage(text: string): AssistantMessage {
 	};
 }
 
+function createAssistantToolCallStop(text: string, name: string, args: Record<string, unknown> = {}): AssistantMessage {
+	const assistant = createAssistantStopMessage(text);
+	assistant.content = [
+		{ type: "toolCall" as const, id: `tool-${name}`, name, arguments: args },
+		...(Array.isArray(assistant.content) ? assistant.content : []),
+	];
+	return assistant;
+}
+
 function createMockSession(
 	onPrompt: (params: {
 		text: string;
@@ -242,14 +251,14 @@ describe("runSubprocess yield reminders", () => {
 		expect(userPrompt).not.toMatch(/CONTEXT\n=+/);
 	});
 
-	it("sends reminder prompt when subagent stops without yield", async () => {
+	it("sends reminder prompt when a worker stops after a tool call without yield", async () => {
 		const prompts: string[] = [];
 		const promptOptions: Array<PromptOptions | undefined> = [];
 		const session = createMockSession(({ text, options, promptIndex, emit, state }) => {
 			prompts.push(text);
 			promptOptions.push(options);
 			if (promptIndex === 1) {
-				const assistant = createAssistantStopMessage("did some work");
+				const assistant = createAssistantToolCallStop("did some work", "read", { path: "x.ts" });
 				state.messages.push(assistant);
 				emit({ type: "message_end", message: assistant });
 				return;
@@ -268,7 +277,7 @@ describe("runSubprocess yield reminders", () => {
 
 		mockCreateAgentSession(session);
 
-		const result = await runSubprocess(baseOptions);
+		const result = await runSubprocess({ ...baseOptions, performanceClass: "worker" });
 		expect(prompts.length).toBe(2);
 		expect(promptOptions).toHaveLength(2);
 		expect(promptOptions[0]?.attribution).toBe("agent");
@@ -278,13 +287,7 @@ describe("runSubprocess yield reminders", () => {
 	});
 
 	it("keeps null yield warning when subagent submits success without data", async () => {
-		const session = createMockSession(({ promptIndex, emit, state }) => {
-			if (promptIndex === 1) {
-				const assistant = createAssistantStopMessage("partial output");
-				state.messages.push(assistant);
-				emit({ type: "message_end", message: assistant });
-				return;
-			}
+		const session = createMockSession(({ emit }) => {
 			emit({
 				type: "tool_execution_end",
 				toolCallId: "tool-2",
@@ -308,7 +311,7 @@ describe("runSubprocess yield reminders", () => {
 		const session = createMockSession(({ text, promptIndex, emit, state }) => {
 			prompts.push(text);
 			if (promptIndex === 1) {
-				const assistant = createAssistantStopMessage("attempted yield");
+				const assistant = createAssistantToolCallStop("attempted yield", "yield");
 				state.messages.push(assistant);
 				emit({ type: "message_end", message: assistant });
 				emit({
@@ -337,7 +340,11 @@ describe("runSubprocess yield reminders", () => {
 
 		mockCreateAgentSession(session);
 
-		const result = await runSubprocess({ ...baseOptions, id: "subagent-err-then-success" });
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-err-then-success",
+			performanceClass: "worker",
+		});
 		expect(prompts).toHaveLength(2);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain('"ok": true');
@@ -480,24 +487,7 @@ describe("runSubprocess yield reminders", () => {
 		const abortCleanup = Promise.withResolvers<void>();
 		const validYieldEmitted = Promise.withResolvers<void>();
 		let abortCalls = 0;
-		const session = createMockSession(async ({ promptIndex, emit, state }) => {
-			if (promptIndex === 1) {
-				const assistant = createAssistantStopMessage("malformed yield attempt");
-				state.messages.push(assistant);
-				emit({ type: "message_end", message: assistant });
-				emit({
-					type: "tool_execution_end",
-					toolCallId: "tool-malformed",
-					toolName: "yield",
-					result: {
-						content: [{ type: "text", text: "result must be an object containing either data or error" }],
-						details: { status: "error", error: "result must be an object containing either data or error" },
-					},
-					isError: true,
-				});
-				return;
-			}
-
+		const session = createMockSession(async ({ emit }) => {
 			emit({
 				type: "tool_execution_end",
 				toolCallId: "tool-success-after-malformed",
@@ -599,11 +589,11 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.thinkingLevel).toBe(Effort.High);
 	});
-	it("returns an incomplete review after one submission reminder with its report preserved", async () => {
+	it("returns an incomplete review without a second reminder when final text is not schema JSON", async () => {
 		const prompts: string[] = [];
-		const session = createMockSession(({ text, promptIndex, emit, state }) => {
+		const session = createMockSession(({ text, emit, state }) => {
 			prompts.push(text);
-			const assistant = createAssistantStopMessage(promptIndex === 1 ? "did work" : "still no yield");
+			const assistant = createAssistantStopMessage("still no yield");
 			state.messages.push(assistant);
 			emit({ type: "message_end", message: assistant });
 		});
@@ -613,12 +603,13 @@ describe("runSubprocess yield reminders", () => {
 		const result = await runSubprocess({
 			...baseOptions,
 			id: "subagent-3",
+			performanceClass: "review",
 			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
 		});
-		expect(prompts).toHaveLength(2);
+		expect(prompts).toHaveLength(1);
 		expect(result.exitCode).toBe(1);
 		expect(result.aborted).toBe(false);
-		expect(result.stderr).toContain("required terminal verdict");
+		expect(result.stderr).toContain("exited without calling yield");
 		expect(result.output).toContain("still no yield");
 		expect(result.structuredOutput?.status).not.toBe("valid");
 		expect(result.abortReason).toBeUndefined();
@@ -762,25 +753,19 @@ describe("runSubprocess yield reminders", () => {
 	});
 
 	it("logs reminder-loop aborts at debug, not error (issue #1623)", async () => {
-		// Repro: user ^C or compaction aborts pending operations while the
-		// yield-reminder loop is awaiting session.prompt. awaitAbortable rejects
-		// with ToolAbortError, which previously surfaced as logger.error and
-		// polluted operator dashboards.
+		// Worker with a tool-call stop still enters the yield-reminder ladder.
+		// Abort during that reminder prompt must log at debug, not error.
 		const abortController = new AbortController();
 		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
 
 		const session = createMockSession(({ promptIndex, emit, state }) => {
 			if (promptIndex === 1) {
-				// Initial prompt: stop without yielding so the reminder loop kicks in.
-				const assistant = createAssistantStopMessage("no yield yet");
+				const assistant = createAssistantToolCallStop("no yield yet", "read", { path: "x.ts" });
 				state.messages.push(assistant);
 				emit({ type: "message_end", message: assistant });
 				return;
 			}
-			// Reminder prompt: abort the run while it is in flight. The follow-up
-			// awaitAbortable(session.waitForIdle()) then throws ToolAbortError into
-			// the catch we are guarding.
 			abortController.abort();
 		});
 
@@ -789,6 +774,7 @@ describe("runSubprocess yield reminders", () => {
 		const result = await runSubprocess({
 			...baseOptions,
 			id: "subagent-abort-during-reminder",
+			performanceClass: "worker",
 			signal: abortController.signal,
 		});
 

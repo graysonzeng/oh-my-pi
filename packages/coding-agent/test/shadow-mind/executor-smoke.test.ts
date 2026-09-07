@@ -23,7 +23,7 @@ const reviewerAgent: AgentDefinition = {
 	systemPrompt:
 		"Review the assignment. Yield when done. If an async-result with this evidence packet arrives, mention it in explanation.",
 	shadowReview: "code",
-	tools: ["read", "grep", "glob"],
+	tools: ["read", "grep", "glob", "yield"],
 	source: "bundled",
 };
 

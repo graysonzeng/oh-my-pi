@@ -130,6 +130,20 @@ export function resolveClassSoftRuntimeMs(performanceClass: SubagentPerformanceC
 	return softMs > 0 && softMs < maxRuntimeMs ? softMs : 0;
 }
 
+/**
+ * Whether the run driver must demand a yield tool.
+ * Review completes on a host-validated final message; explore/worker already did.
+ */
+export function resolveRequireYieldTool(performanceClass: SubagentPerformanceClass): boolean {
+	switch (performanceClass) {
+		case "review":
+			return false;
+		case "explore":
+		case "worker":
+			return false;
+	}
+}
+
 export function emptyReviewMetrics(): SubagentReviewMetrics {
 	return { requestPhases: [], toolPhases: [], checkpoints: [] };
 }

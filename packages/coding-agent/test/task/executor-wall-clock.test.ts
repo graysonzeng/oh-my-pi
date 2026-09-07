@@ -1176,7 +1176,74 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		expect(result.output).not.toContain("exited without calling yield");
 	});
 
-	it("still fails a review that never yields even when salvage text exists", async () => {
+	it("completes a review from schema-valid final JSON without yield", async () => {
+		const settings = Settings.isolated();
+		const captured: CreateAgentSessionOptions[] = [];
+		const session: Partial<AgentSession> = {
+			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
+			state: { messages: [] } as never,
+			agent: { state: { systemPrompt: ["test"] } } as never,
+			extensionRunner: undefined as never,
+			sessionManager: { appendSessionInit: () => {} } as never,
+			getActiveToolNames: () => ["read", "yield"],
+			getEnabledToolNames: () => ["read", "yield"],
+			setActiveToolsByName: async () => {},
+			subscribe: () => () => {},
+			prompt: async () => true,
+			waitForIdle: async () => {},
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			getLastAssistantMessage: () =>
+				({
+					role: "assistant",
+					content: [
+						{
+							type: "text",
+							text: '{"overall_correctness":"correct","explanation":"no blockers","confidence":0.9}',
+						},
+					],
+					stopReason: "stop",
+				}) as never,
+			hasPendingAsyncWork: () => false,
+			abort: async () => {},
+			dispose: async () => {},
+		};
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options) captured.push(options);
+			return {
+				session: session as AgentSession,
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			} satisfies CreateAgentSessionResult;
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "reviewer" },
+			id: "subagent-review-final-json",
+			settings,
+			performanceClass: "review",
+			outputSchema: {
+				type: "object",
+				properties: {
+					overall_correctness: { type: "string" },
+					explanation: { type: "string" },
+					confidence: { type: "number" },
+				},
+				required: ["overall_correctness", "explanation", "confidence"],
+			},
+		});
+
+		expect(captured[0]?.requireYieldTool).toBe(false);
+		expect(result.aborted).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain('"overall_correctness": "correct"');
+		expect(result.output).not.toContain("exited without calling yield");
+	});
+
+	it("fails a review whose final text is prose instead of schema JSON", async () => {
 		const settings = Settings.isolated();
 		const session: Partial<AgentSession> = {
 			setIrcWakeTurnObserver: () => {},
@@ -1208,14 +1275,23 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		const result = await runSubprocess({
 			...baseOptions,
 			agent: { ...baseAgent, name: "reviewer" },
-			id: "subagent-review-must-yield",
+			id: "subagent-review-prose-fails",
 			settings,
 			performanceClass: "review",
+			outputSchema: {
+				type: "object",
+				properties: {
+					overall_correctness: { type: "string" },
+					explanation: { type: "string" },
+					confidence: { type: "number" },
+				},
+				required: ["overall_correctness", "explanation", "confidence"],
+			},
 		});
 
 		expect(result.exitCode).toBe(1);
-		expect(result.output).toBe("looks done");
-		expect(result.stderr).toContain("required terminal verdict");
+		expect(result.output).toContain("looks done");
+		expect(result.stderr).toContain("exited without calling yield");
 	});
 });
 

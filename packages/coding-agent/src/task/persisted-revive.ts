@@ -13,7 +13,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
-import { resolveSubagentPerformanceClass } from "./review-performance";
+import { resolveRequireYieldTool, resolveSubagentPerformanceClass } from "./review-performance";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -73,7 +73,7 @@ export function createPersistedSubagentReviverFactory(
 		const init = peek.init;
 		const performanceClass =
 			init.performanceClass ?? resolveSubagentPerformanceClass({ agentName: init.agent ?? ref.displayName });
-		const requireYieldTool = performanceClass === "review";
+		const requireYieldTool = resolveRequireYieldTool(performanceClass);
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
 		// assuming a fixed level.

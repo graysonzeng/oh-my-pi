@@ -455,6 +455,6 @@ describe("persisted subagent revival", () => {
 			await reviver(createRef(sessionFile));
 		}
 
-		expect(captured.map(options => options.requireYieldTool)).toEqual([true, false, true, false]);
+		expect(captured.map(options => options.requireYieldTool)).toEqual([false, false, false, false]);
 	});
 });

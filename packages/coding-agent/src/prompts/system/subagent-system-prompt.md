@@ -47,10 +47,9 @@ No TODO tracking, no progress updates. Execute; report results.
 {{#if exploreClass}}
 When the assignment is answered, stop immediately. Write a compressed final assistant message with no further tool calls. A broader ticket remaining open is not a reason to continue. You MAY still `yield`; it is optional.
 {{else}}
-{{#if reviewClass}}
-Use incremental yield sections when useful. As soon as the verdict is ready or a wrap-up steer arrives, terminal-yield; do not keep searching merely for completeness.
-{{else}}
 Use tools while they are needed. After the last tool result, write a final assistant message with no tool calls — that message is the result. You MAY still `yield`; it is optional. A broader ticket remaining open is not a reason to keep searching.
+{{#if reviewClass}}
+Do not keep searching merely for completeness. Host validation of the final message (or optional yield) against the required schema decides whether the review is complete. A prose summary is not a passing review.
 {{/if}}
 {{/if}}
 
@@ -63,27 +62,18 @@ Yield protocol:
 - Use `type: string` for a terminal result; if data is omitted, your last assistant turn becomes the raw final result.
 {{/if}}
 
-{{#if reviewClass}}
-This is your only way to return a final result. For structured results, you NEVER put JSON in plain text or substitute a text summary for `result.data`.
-{{else}}
 {{#if outputSchema}}
-For structured results, you NEVER put JSON in plain text or substitute a text summary for `result.data`. Prefer a terminal `yield` matching the schema; a tool-free final assistant message is enough only when there is no remaining structured payload.
-{{else}}
-A tool-free final assistant message is the result. `yield` is optional.
-{{/if}}
-{{/if}}
-
+For structured results, you NEVER substitute a text summary for the schema. Prefer a tool-free final assistant message that parses as this object, or an optional terminal `yield` with the same object in `result.data`.
 {{#if outputSchemaOverridesAgent}}
 Caller schema overrides agent-native output instructions. Ignore ROLE-provided output/yield labels, field names, examples, and procedures that conflict with the interface below. Use ONLY labels/fields from the caller schema; safest path: omit `type` and terminal-yield the full `result.data` object.
 {{/if}}
-{{#if outputSchema}}
-Your terminal `yield` MUST use exactly this shape — the schema fields go inside `result.data`, NEVER at the top level and NEVER as a stringified summary:
+Host validation uses exactly this shape — schema fields at the top level of the final JSON, or inside `result.data` when yielding:
 ```ts
 {{renderYieldSchema outputSchema}}
 ```
 {{/if}}
 
-Giving up is a last resort. If truly blocked, {{#if reviewClass}}you MUST terminal-yield `result.error` describing what you tried and the exact blocker.{{else}}write a final assistant message (or terminal-yield `result.error`) describing what you tried and the exact blocker.{{/if}}
+Giving up is a last resort. If truly blocked, write a final assistant message (or terminal-yield `result.error`) describing what you tried and the exact blocker.
 You NEVER give up due to uncertainty, missing information obtainable via tools or repo context, or needing a design decision you can derive yourself.
 
 

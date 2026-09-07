@@ -66,11 +66,10 @@ Find bugs author wants fixed before merge.
 1. Prefer the assignment's shared review evidence packet. Treat its snapshot/fixed point and diff as authoritative; NEVER rerun an unscoped repository diff when captured evidence exists.
 2. Review only assigned files. Read direct producer/consumer or dispatch call sites only when needed to prove a concrete finding; do not explore unrelated modules.
 3. If the packet omits a large diff, run only path-scoped `git diff`, `git show`, `jj diff --git`, or PR-diff reads for owned files. If evidence is stale or incomplete, report the gap instead of mixing workspace revisions.
-4. Record each issue with incremental `yield` using `type: ["findings"]`.
-5. At the soft request-budget wrap-up, yield whatever findings you already have; do not keep searching for completeness.
-6. Record `overall_correctness`, `explanation`, and `confidence` with incremental `yield` sections, then stop so idle finalization assembles the result.
+4. When the verdict is ready, stop. Write one tool-free final assistant message whose JSON matches the output schema (`overall_correctness`, `explanation`, `confidence`; `findings` when present). You MAY still `yield` the same object; it is optional.
+5. At wrap-up, emit whatever findings you already have in that final object; do not keep searching for completeness.
 
-If this turn includes an async-result whose label is `shadow-review`, treat it as evidence. Recheck it against the criteria above before writing any finding. If no such message arrives, finish the review on your own. Never wait for a shadow-review report.
+If this turn includes an async-result whose label is `shadow-review`, treat it as evidence and emit a refreshed final object. If no such message arrives, finish the review on your own. Never wait for a shadow-review report.
 
 Bash is read-only: path-scoped `git diff`, `git log`, `git show`, `jj diff --git`, `gh pr diff`. You NEVER make file edits or trigger builds.
 </procedure>
@@ -119,22 +118,12 @@ memcpy(buf, data.ptr, data.length);
 </example>
 
 <output>
-Finding: incremental `yield`, `type: ["findings"]`; `result.data`:
-- `title`: imperative, ≤80 chars.
-- `body`: one paragraph.
-- `priority`: 0-3.
+Final assistant message: one JSON object matching the output schema. Host validation fails the run if it does not parse.
+
+- `overall_correctness`: `"correct"` (no bugs/blockers) | `"incorrect"`.
+- `explanation`: plain-text 1-3-sentence verdict summary.
 - `confidence`: 0.0-1.0.
-- `file_path`: affected-file path.
-- `line_start`, `line_end`: ≤10-line range; MUST overlap diff.
-
-Verdict fields: incremental `yield`:
-- `type: ["overall_correctness"]`: `"correct"` (no bugs/blockers) | `"incorrect"`.
-- `type: ["explanation"]`: plain-text 1-3-sentence verdict summary.
-- `type: ["confidence"]`: 0.0-1.0 confidence.
-
-Do not emit separate submit tool call or duplicate `findings` in another payload. After all sections, stop; idle finalization assembles result.
-
-NEVER output JSON or code blocks.
+- `findings` (optional): `title` (imperative, ≤80 chars), `body` (one paragraph), `priority` 0-3, `confidence` 0.0-1.0, `file_path`, `line_start`/`line_end` (≤10-line range overlapping the diff).
 
 Correctness ignores non-blocking issues: style, docs, nits.
 </output>
