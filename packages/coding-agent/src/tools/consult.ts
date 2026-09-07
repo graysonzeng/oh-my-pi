@@ -34,7 +34,16 @@ function consultError(code: string, details: ConsultDetails, message?: string): 
 }
 
 function isAbortError(error: unknown): boolean {
-	return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+	return (
+		error instanceof Error &&
+		(error.name === "AbortError" || error.name === "TimeoutError" || error.name === "StreamTimeoutError")
+	);
+}
+
+function consultTimeoutCode(error: unknown, timedOut: boolean): "timeout" | "aborted" {
+	return timedOut || (error instanceof Error && (error.name === "TimeoutError" || error.name === "StreamTimeoutError"))
+		? "timeout"
+		: "aborted";
 }
 
 function truncatedConsultErrorMessage(error: unknown): string {
@@ -88,6 +97,7 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 		const maxTokens = Number.isFinite(maxTokensRaw) && maxTokensRaw > 0 ? Math.floor(maxTokensRaw) : 2048;
 		const maxFocusChars = this.session.settings.get("consult.maxFocusChars");
 		const timeoutMs = this.session.settings.get("consult.timeoutMs");
+		const firstEventTimeoutMs = this.session.settings.get("consult.firstEventTimeoutMs");
 		const usage = getConsultUsage(this.session);
 
 		if (usage.turn >= maxUsesPerTurn || usage.session >= maxUsesPerSession) {
@@ -119,7 +129,7 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 		try {
 			resolved = await resolveConsultSelection(this.session, effectiveSignal);
 		} catch (error) {
-			const code = isAbortError(error) ? (timedOut() ? "timeout" : "aborted") : "provider_error";
+			const code = isAbortError(error) ? consultTimeoutCode(error, timedOut()) : "provider_error";
 			recordConsultAttempt(this.session, { error: code, maxTokens });
 			return consultError(code, { maxTokens }, truncatedConsultErrorMessage(error));
 		}
@@ -176,26 +186,38 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 					signal: effectiveSignal,
 					reasoning,
 					maxTokens,
+					...(typeof firstEventTimeoutMs === "number" &&
+					Number.isFinite(firstEventTimeoutMs) &&
+					firstEventTimeoutMs >= 0
+						? { streamFirstEventTimeoutMs: firstEventTimeoutMs }
+						: {}),
 				},
 				{ telemetry, oneshotKind: "consult", completeImpl: this.completeConsultRequest },
 			);
 		} catch (error) {
-			const code = isAbortError(error) ? (timedOut() ? "timeout" : "aborted") : "provider_error";
+			const code = isAbortError(error) ? consultTimeoutCode(error, timedOut()) : "provider_error";
 			const model = formatModelString(resolved.model);
 			recordConsultAttempt(this.session, { error: code, maxTokens, model });
 			return consultError(code, { maxTokens, model }, truncatedConsultErrorMessage(error));
 		}
 
 		if (response.stopReason === "error") {
+			const firstEventTimedOut =
+				typeof response.errorMessage === "string" &&
+				/timed out while waiting for the first event/i.test(response.errorMessage);
+			const errorCode = firstEventTimedOut ? "timeout" : "provider_error";
 			recordConsultAttempt(this.session, {
-				error: "provider_error",
+				error: errorCode,
 				maxTokens,
 				model: formatModelString(resolved.model),
 			});
 			return consultError(
-				"provider_error",
+				errorCode,
 				{ maxTokens, model: formatModelString(resolved.model) },
-				truncate(response.errorMessage ?? "consult request failed", CONSULT_TOOL_RESULT_CHARS),
+				truncate(
+					response.errorMessage ?? (firstEventTimedOut ? "consult request timed out" : "consult request failed"),
+					CONSULT_TOOL_RESULT_CHARS,
+				),
 			);
 		}
 		if (response.stopReason === "aborted") {

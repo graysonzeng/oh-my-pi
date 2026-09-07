@@ -4,6 +4,7 @@ import type { completeSimple, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { formatModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getDefault } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ConsultTool } from "@oh-my-pi/pi-coding-agent/tools/consult";
@@ -651,6 +652,59 @@ describe("ConsultTool.execute", () => {
 		const options = stub.calls[0]?.[2] as { maxTokens?: number; apiKey?: unknown } | undefined;
 		expect(options?.maxTokens).toBe(333);
 		expect(options?.apiKey).toBe("test-key");
+	});
+
+	it("defaults consult wall-clock timeout to five minutes and first-event timeout to one minute", () => {
+		expect(getDefault("consult.timeoutMs")).toBe(300_000);
+		expect(getDefault("consult.firstEventTimeoutMs")).toBe(60_000);
+	});
+
+	it("forwards consult.firstEventTimeoutMs into the oneshot", async () => {
+		const stub = completeStub("Verdict: proceed.");
+		const session = makeSession({
+			settings: Settings.isolated({
+				"consult.enabled": true,
+				"consult.model": "openai/o3",
+				"consult.firstEventTimeoutMs": 45_000,
+			}),
+			snapshot: { systemPrompt: ["keep"], messages: [userMessage("task")] },
+		});
+		const tool = new ConsultTool(session, stub.fn);
+		const result = await tool.execute("c1", {});
+		expect(result.isError).toBeUndefined();
+		const options = stub.calls[0]?.[2] as { streamFirstEventTimeoutMs?: number } | undefined;
+		expect(options?.streamFirstEventTimeoutMs).toBe(45_000);
+	});
+
+	it("maps first-event stream stalls to timeout instead of provider_error", async () => {
+		const stub = completeStub("", "error", "OpenAI responses stream timed out while waiting for the first event");
+		const session = makeSession({
+			settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/o3" }),
+			snapshot: { systemPrompt: ["keep"], messages: [userMessage("task")] },
+		});
+		const tool = new ConsultTool(session, stub.fn);
+		const result = await tool.execute("c1", {});
+		expect(result.isError).toBe(true);
+		expect(toolText(result)).toContain("timeout");
+		expect(toolText(result)).toContain("timed out while waiting for the first event");
+		expect(result.details?.error).toBe("timeout");
+	});
+
+	it("maps thrown StreamTimeoutError to timeout", async () => {
+		const fn = (async () => {
+			const error = new Error("stream timed out while waiting for the first event");
+			error.name = "StreamTimeoutError";
+			throw error;
+		}) as typeof completeSimple;
+		const session = makeSession({
+			settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/o3" }),
+			snapshot: { systemPrompt: ["keep"], messages: [userMessage("task")] },
+		});
+		const tool = new ConsultTool(session, fn);
+		const result = await tool.execute("c1", {});
+		expect(result.isError).toBe(true);
+		expect(toolText(result)).toContain("timeout");
+		expect(result.details?.error).toBe("timeout");
 	});
 
 	it("maps provider failures to isError without throwing", async () => {

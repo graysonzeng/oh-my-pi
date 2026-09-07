@@ -38,6 +38,7 @@
 - Ordinary Grok overlay no longer requires numbered / step-by-step instructions; `goal.grokOverlayUnload=false` restores the previous overlay independently of the host gate.
 - Design-author subagents can disable model-family tool-output clamps with `output-truncation: false` without changing the Grok family profile. Ordinary Grok sessions keep truncation.
 - Worker and explore subagents now finish on a tool-free final assistant message instead of keep-going until a yield; review still requires yield. Follow-up and IRC wake turns reuse the same per-run class budgets instead of disabling them, and `session_init` persists `performanceClass` for cold revive. Old files without the field fall back to the agent name only.
+- Consult now waits 60s for the first model event and 5 minutes for the full oneshot by default. First-event stalls surface as `timeout` instead of a generic provider error. Override with `consult.firstEventTimeoutMs` and `consult.timeoutMs`.
 
 ### Fixed
 

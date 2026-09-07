@@ -652,12 +652,32 @@ export const SETTINGS_SCHEMA = {
 	},
 	"consult.timeoutMs": {
 		type: "number",
-		default: 60_000,
+		default: 300_000,
 		ui: {
 			tab: "model",
 			group: "Consult",
 			label: "Consult Timeout",
-			description: "Per-request timeout for the consult oneshot, in milliseconds. Set to 0 to disable.",
+			description:
+				"Wall-clock timeout for the entire consult oneshot, including first-token wait and answer generation, in milliseconds. Set to 0 to disable.",
+			condition: "consultEnabled",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "60000", label: "1 minute" },
+				{ value: "120000", label: "2 minutes" },
+				{ value: "180000", label: "3 minutes" },
+				{ value: "300000", label: "5 minutes" },
+			],
+		},
+	},
+	"consult.firstEventTimeoutMs": {
+		type: "number",
+		default: 60_000,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult First-Event Timeout",
+			description:
+				"Timeout waiting for the first model event after consult starts, in milliseconds. Thinking or text counts. Set to 0 to disable.",
 			condition: "consultEnabled",
 			options: [
 				{ value: "0", label: "Disabled" },

@@ -391,7 +391,8 @@ Consult is a mid-turn tool that asks a stronger model for strategic guidance. It
 | `consult.allowSameModel` | boolean | `false` | Allow consult when the resolved model is the same as the primary. |
 | `consult.maxUsesPerTurn` | number | `2` | Successful plus failed consult executes in the current primary turn. |
 | `consult.maxUsesPerSession` | number | `12` | Cumulative consult executes in this session. |
-| `consult.timeoutMs` | number | `60000` | Per-request timeout in milliseconds. `0` disables. |
+| `consult.timeoutMs` | number | `300000` | Wall-clock timeout for the entire consult oneshot, including first-token wait and answer generation. `0` disables. |
+| `consult.firstEventTimeoutMs` | number | `60000` | Timeout waiting for the first model event (thinking or text). `0` disables. |
 | `consult.maxTokens` | number | `2048` | Hard output token budget passed to the consult oneshot. |
 | `consult.maxFocusChars` | number | `2000` | Maximum characters for the optional `focus` argument. |
 
