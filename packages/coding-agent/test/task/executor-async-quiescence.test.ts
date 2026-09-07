@@ -2,9 +2,11 @@
  * Quiescence barrier fresh-yield contract (PR #6119 review): a terminal
  * `yield` recorded while owner background jobs are still pending parks the
  * run instead of terminating it, and an async-result delivered after that
- * yield supersedes it — the run only completes on a yield that postdates
- * every delivered result. A model that never refreshes its yield must fail
- * the run rather than surface the stale payload as a clean success.
+ * yield supersedes it. Since commit 5fe79c41f8 `yield` is optional for every
+ * performance class: the superseded payload is dropped and the run completes
+ * on the fresh post-async assistant response. Review completions are decided
+ * by schema validation against the fresh response — a malformed final is a
+ * failure, never a clean success, and the stale pre-job payload never ships.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -52,6 +54,8 @@ interface AsyncQuiescenceHarness {
 interface AsyncSessionOptions {
 	abort?: () => Promise<void>;
 	dispose?: () => Promise<void>;
+	/** Text of the plain assistant reaction the job injects after settling. */
+	reactionText?: string;
 }
 
 /**
@@ -107,7 +111,7 @@ function createAsyncSession(
 				timestamp: Date.now(),
 			},
 		} as AgentSessionEvent);
-		const reaction = assistantStopMessage("The background build failed after I yielded.");
+		const reaction = assistantStopMessage(options.reactionText ?? "The background build failed after I yielded.");
 		state.messages.push(reaction);
 		emit({ type: "message_end", message: reaction } as AgentSessionEvent);
 	};
@@ -184,7 +188,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		AsyncJobManager.resetForTests();
 	});
 
-	it("parks a pending yield, injects the result, and completes on the fresh yield", async () => {
+	it("parks a pending yield, injects the result, and completes on the fresh post-async response", async () => {
 		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
 			if (promptIndex === 1) {
 				// Terminal yield while the background job is still running.
@@ -196,9 +200,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 				// finishes during the barrier's settle.
 				return;
 			}
-			// Reminder ladder after the async-result invalidated the yield:
-			// submit the fresh yield that accounts for the job outcome.
-			h.emitTerminalYield({ report: "FRESH: build failed, see job-1" });
 		});
 		mockCreateAgentSession(harness.session);
 
@@ -210,25 +211,37 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 			id: "quiescence-fresh-yield",
 		});
 
-		// Run did not terminate on the parked yield: the barrier noticed, the
-		// job settled, and the ladder demanded exactly one more prompt.
-		expect(harness.prompts).toHaveLength(3);
+		// Run did not terminate on the parked yield: the barrier noticed and
+		// the job settled. With yield optional, the superseded pre-job payload
+		// is dropped and the run completes on the fresh post-async assistant
+		// response — no reminder ladder is demanded.
+		expect(harness.prompts).toHaveLength(2);
 		expect(harness.settleCalls()).toBe(1);
 		// The parked yield stopped the turn without killing the run.
 		expect(harness.abortCalls()).toBeGreaterThanOrEqual(1);
-		// The fresh yield — not the stale one — is the result of record.
 		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain("FRESH: build failed");
+		// The fresh post-async response — never the stale pre-job payload — is
+		// the output of record.
+		expect(result.output).toContain("The background build failed after I yielded.");
 		expect(result.output).not.toContain("STALE");
 	});
 
-	it("fails the run when the model never refreshes the superseded yield", async () => {
-		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
-			if (promptIndex === 1) {
-				h.emitTerminalYield({ report: "STALE: build passing (job still running)" });
-			}
-			// Notice and every reminder: the model never yields again.
-		});
+	it("rejects a schema-bound review whose only post-async response is malformed", async () => {
+		const harness = createAsyncSession(
+			({ promptIndex, harness: h }) => {
+				if (promptIndex === 1) {
+					h.emitTerminalYield({ report: "STALE: build passing (job still running)" });
+					return;
+				}
+				if (promptIndex === 2) {
+					// Async-pending notice: the model stands by; the job then
+					// finishes during the settle and the model answers with
+					// malformed schema output instead of a valid completion.
+					return;
+				}
+			},
+			{ reactionText: JSON.stringify({ verdict: "needs_revision" }) },
+		);
 		mockCreateAgentSession(harness.session);
 
 		const result = await runSubprocess({
@@ -236,16 +249,63 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,
-			id: "quiescence-stale-refusal",
+			id: "quiescence-malformed-schema",
+			performanceClass: "review",
+			outputSchema: {
+				type: "object",
+				properties: { approved: { type: "boolean" } },
+				required: ["approved"],
+			},
 		});
 
-		// task + notice + full reminder ladder (3).
-		expect(harness.prompts).toHaveLength(5);
-		// Stale payload must not read as success; it ships only as failed-run
-		// salvage with an explicit reason.
+		// No forced-yield reminder counts: the run settles on the fresh
+		// response after the async injection (task + async-pending notice).
+		expect(harness.prompts).toHaveLength(2);
+		expect(harness.settleCalls()).toBe(1);
+		// Schema validation — not a required yield — decides review
+		// completeness: a malformed final is a failure, never a clean success.
 		expect(result.exitCode).toBe(1);
-		expect(result.error).toContain("refreshed yield");
-		expect(result.output).toContain("STALE: build passing");
+		expect(result.structuredOutput?.status).not.toBe("valid");
+		// The stale pre-job payload must not surface as the review result, and
+		// the malformed fresh response is preserved for the parent.
+		expect(result.output).not.toContain("STALE");
+		expect(result.output).toContain("needs_revision");
+	});
+	it("fails without a fresh post-async response instead of reusing the superseded yield", async () => {
+		// The model yields while the job is pending and then never answers
+		// after the async-result invalidation (empty reaction). The stale
+		// pre-job payload must not read as a clean success: with nothing fresh
+		// to complete on, the run fails rather than reuse pre-async output.
+		const harness = createAsyncSession(
+			({ promptIndex, harness: h }) => {
+				if (promptIndex === 1) {
+					h.emitTerminalYield({ report: "STALE: build passing (job still running)" });
+					return;
+				}
+				if (promptIndex === 2) {
+					// Async-pending notice: the model stands by; the job then
+					// finishes during the settle, and the model never re-answers.
+					return;
+				}
+			},
+			{ reactionText: "" },
+		);
+		mockCreateAgentSession(harness.session);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: "quiescence-no-fresh-response",
+		});
+
+		expect(harness.prompts).toHaveLength(2);
+		expect(harness.settleCalls()).toBe(1);
+		expect(result.exitCode).toBe(1);
+		expect(result.structuredOutput?.status).not.toBe("valid");
+		// The superseded payload is dropped, never salvaged as a completion.
+		expect(result.output).not.toContain("STALE");
 	});
 
 	it("terminates immediately on yield when no owner async work is pending", async () => {

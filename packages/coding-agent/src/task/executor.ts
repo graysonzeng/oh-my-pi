@@ -106,7 +106,7 @@ import {
 	type TaskToolDetails,
 	type YieldItem,
 } from "./types";
-import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
+import { arrayValuedLabels, assembleYieldResult, isIncrementalYieldType } from "./yield-assembly";
 
 export type { YieldItem } from "./types";
 
@@ -659,6 +659,8 @@ interface FinalizeSubprocessOutputArgs {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	lastAssistantText?: string;
+	/** Current tool-free assistant text eligible to replace incremental sections. */
+	finalAssistantText?: string;
 }
 
 interface FinalizeSubprocessOutputResult {
@@ -667,6 +669,15 @@ interface FinalizeSubprocessOutputResult {
 	stderr: string;
 	abortedViaYield: boolean;
 	hasYield: boolean;
+	/**
+	 * True when finalize settled a concrete completion payload — an assembled
+	 * yield final (any status), or a tool-free message that parsed against the
+	 * schema — as opposed to a warning body (null yield / missing yield), an
+	 * aborted yield, or no output at all. The runtime's follow-up artifact
+	 * refresh keys on it (together with a completed kind and a zero exit code)
+	 * so chat-only wakes and revoked runs can't overwrite a completed artifact.
+	 */
+	finalPayload: boolean;
 	structuredOutput?: StructuredSubagentOutput;
 }
 export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
@@ -702,7 +713,7 @@ function buildSchemaViolationOutcome(
 
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
-	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
+	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText, finalAssistantText } = args;
 	const mode = args.outputSchemaMode ?? "permissive";
 	const source = args.outputSchemaSource ?? (outputSchema === undefined ? "none" : "session");
 	const includeStructuredOutput = source !== "none";
@@ -712,6 +723,8 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	const hadFailureBeforeYield = exitCode !== 0 && stderr.trim().length > 0;
 	// Caller cancel while parked behind pending async work must not be normalized to success.
 	const cancelWhileParked = Boolean(signalAborted) && hasYield;
+	const hasTerminalYield = yieldItems?.some(item => !isIncrementalYieldType(item.type)) ?? false;
+	let finalPayload = false;
 
 	if (hasYield) {
 		const lastYield = yieldItems[yieldItems.length - 1];
@@ -725,11 +738,20 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				rawOutput = `{"aborted":true,"error":"${lastYield.error || "Unknown error"}"}`;
 			}
 		} else {
-			const assembled = assembleYieldResult(yieldItems, lastAssistantText, arrayValuedLabels(outputSchema));
+			const { validator, error: schemaError, normalized } = buildOutputValidator(outputSchema);
+			let assembled = assembleYieldResult(yieldItems, lastAssistantText, arrayValuedLabels(outputSchema));
+			// Only incremental sections can be replaced by a complete final message.
+			// Explicit terminals, including data-less section finalizers, stay authoritative.
+			if (!hasTerminalYield && exitCode === 0 && !doneAborted && !signalAborted && finalAssistantText?.trim()) {
+				const textCandidate = parseStringifiedJson(finalAssistantText);
+				if (!schemaError && validator?.validate(textCandidate).success) {
+					assembled = { data: textCandidate, schemaOverridden: false, rawText: false, missingData: false };
+				}
+			}
 			if (!assembled || assembled.missingData) {
 				rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
 			} else {
-				const { validator, error: schemaError, normalized } = buildOutputValidator(outputSchema);
+				finalPayload = true;
 				const completeData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
 				const validation = validator?.validate(completeData);
 				const failure =
@@ -788,6 +810,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		const hasOutputSchema = normalizedSchema !== undefined && !schemaError;
 		const fallback = allowFallback ? resolveFallbackCompletion(rawOutput, outputSchema) : null;
 		if (fallback) {
+			finalPayload = hasOutputSchema;
 			const { validator } = buildOutputValidator(outputSchema);
 			const completeData = parseStringifiedJson(fallback.data ?? null);
 			const result = validator?.validate(completeData) ?? { success: true as const };
@@ -835,7 +858,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		exitCode = exitCode === 0 ? 1 : exitCode;
 		if (!stderr) stderr = "Subagent cancelled while parked on pending async work";
 	}
-	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
+	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput, finalPayload };
 }
 
 /**
@@ -1097,6 +1120,13 @@ interface SubagentRunMonitor {
 	 */
 	yieldInvalidatedByAsync(): boolean;
 	/**
+	 * True when a fresh assistant TEXT response landed after an async-result
+	 * delivery invalidated the recorded yield: the only last-assistant text the
+	 * runtime may reuse as a completion once the yield is stale. A response that
+	 * predates the delivery never qualifies, and each new delivery resets it.
+	 */
+	hasFreshResponseAfterAsync(): boolean;
+	/**
 	 * True once a terminal yield with pending owner async work stopped the
 	 * free-running turn (recoverable, like a budget stop) instead of
 	 * terminating the run. Cleared when {@link waitForYieldTurnStop} settles.
@@ -1125,6 +1155,7 @@ interface SubagentRunMonitor {
 	/** Best-effort capture of the last assistant text for cancelled-run salvage. */
 	captureSalvage(session: AgentSession): void;
 	lastAssistantSalvageText(): string | undefined;
+	finalAssistantText(): string | undefined;
 	/** Final raw output: end-of-run assistant text when available, else accumulated chunks. */
 	rawOutput(): string;
 	scheduleProgress(flush?: boolean): void;
@@ -1199,6 +1230,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldCallPending = false;
 	let terminalYieldCommitted = false;
 	let yieldInvalidatedByAsync = false;
+	// A text-bearing assistant response seen after an async-result delivery
+	// invalidated the yield: the only salvage text that may complete a
+	// stale-yield run (see hasFreshResponseAfterAsync).
+	let freshResponseAfterAsync = false;
 	let yieldTurnStopRequested = false;
 	let yieldTurnStopPromise: Promise<void> | null = null;
 
@@ -1222,6 +1257,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
+	let finalAssistantText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
 	// Tool metrics pair by non-empty toolCallId so concurrent calls never merge
 	// into one phase. Entries are popped on a matching end; anything still open
@@ -1599,10 +1635,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// model is now being shown. Un-latch so the quiescence barrier's
 				// reminder ladder demands a fresh yield. Guarded on the run signal:
 				// once the run is completing, late injections must not destabilize
-				// the settled classification.
-				if (yieldCalled && !abortSignal.aborted && isAsyncResultInjection(event.message)) {
-					yieldCalled = false;
-					yieldInvalidatedByAsync = true;
+				// the settled classification. Every delivery also invalidates any
+				// earlier fresh response: a text that predates THIS job outcome
+				// must not be reused as the completion either.
+				if (!abortSignal.aborted && isAsyncResultInjection(event.message)) {
+					freshResponseAfterAsync = false;
+					if (yieldCalled) {
+						yieldCalled = false;
+						yieldInvalidatedByAsync = true;
+					}
 				}
 				break;
 
@@ -1868,17 +1909,25 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
 					const messageContent = getMessageContent(event.message) || eventContent;
 					if (messageContent && Array.isArray(messageContent)) {
+						let hasAssistantText = false;
+						let hasToolCall = false;
 						for (const block of messageContent) {
 							if (!isRecord(block)) continue;
 							if (block.type === "text" && typeof block.text === "string") {
 								outputChunks.push(block.text);
+								hasAssistantText ||= block.text.trim().length > 0;
 								continue;
 							}
+							if (block.type === "toolCall") hasToolCall = true;
 							if (block.type !== "toolCall" || typeof block.name !== "string") continue;
 							if (block.name === "yield" && !yieldCalled) {
 								yieldCallPending = true;
 								flushProgress = true;
 							}
+						}
+						// Only a tool-free final can replace the invalidated report.
+						if (yieldInvalidatedByAsync) {
+							freshResponseAfterAsync = hasAssistantText && !hasToolCall;
 						}
 					}
 					if (softRequestBudget > 0 && !abortSent && !yieldCallPending) {
@@ -2029,6 +2078,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		// Best-effort salvage: capture the last assistant text so
 		// cancelled/aborted children can surface "last activity" instead of
 		// "(no output)".
+		finalAssistantText = undefined;
 		try {
 			const lastContent = session.getLastAssistantMessage()?.content;
 			if (Array.isArray(lastContent)) {
@@ -2038,6 +2088,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					.join("\n");
 				if (text.trim()) {
 					lastAssistantSalvageText = text;
+					if (!lastContent.some(block => block.type === "toolCall")) finalAssistantText = text;
 				}
 			}
 		} catch {
@@ -2063,6 +2114,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		budgetStopRequested: () => budgetStopRequested,
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
+		hasFreshResponseAfterAsync: () => freshResponseAfterAsync,
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
 		waitForYieldTurnStop: async () => {
 			const pending = yieldTurnStopPromise;
@@ -2110,6 +2162,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		attach,
 		captureSalvage,
 		lastAssistantSalvageText: () => lastAssistantSalvageText,
+		finalAssistantText: () => finalAssistantText,
 		rawOutput: () => (finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("")),
 		scheduleProgress,
 		reviewMetrics: () => progress.reviewMetrics ?? emptyReviewMetrics(),
@@ -2381,8 +2434,10 @@ async function driveSessionToYield(
 		}
 
 		// A recorded yield that async-result deliveries superseded is stale.
-		// When yield is required, fail closed. Otherwise drop the stale
-		// payload and let finalize parse a refreshed final assistant message.
+		// When yield is required, fail closed. Otherwise drop the stale payload
+		// and let finalize parse a refreshed final assistant message —
+		// finalizeRunResult additionally fails closed when no fresh text
+		// response covered the async results.
 		if (requireYieldTool && monitor.yieldInvalidatedByAsync() && !abortSignal.aborted) {
 			exitCode = 1;
 			error ??=
@@ -2432,9 +2487,12 @@ interface FinalizeRunArgs {
 	detached?: boolean;
 	/**
 	 * This finalize is a revival/wake or explicit follow-up turn, not the initial
-	 * run. Such turns only (re)write `<id>.md` when they produce a real `yield`
-	 * result, so a conversational hub wake (which never yields) cannot clobber the
-	 * completed run's artifact with a missing-yield warning body (issue #9518).
+	 * run. Such turns only (re)write `<id>.md` when they settle an accepted
+	 * final payload under a completed kind — a real terminal yield or a
+	 * schema-valid tool-free final — so a conversational hub wake (which never
+	 * yields or finalizes a payload) cannot clobber the completed run's artifact
+	 * with a missing-yield warning body (issue #9518), and revoked
+	 * (timeout/cancel/budget) turns stay out even with valid-looking output.
 	 */
 	followUpTurn?: boolean;
 	/** When false, a tool-free assistant message may complete without yield. */
@@ -2460,11 +2518,28 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// Schema validation — not a missing yield — decides whether a review is complete.
 	const yieldStale = monitor.yieldInvalidatedByAsync();
 	const yieldItems = yieldStale ? undefined : (progress.extractedToolData?.yield as YieldItem[] | undefined);
-	const hasLiveYield = !yieldStale && monitor.yieldCalled();
+	// Only an explicit terminal yield settles the run: array-typed incremental
+	// yields are intermediate sections, so they never count as a live terminal
+	// completion (their payload finalizes via assembleYieldResult when idle).
+	const hasLiveYield = !yieldStale && (yieldItems?.some(item => !isIncrementalYieldType(item.type)) ?? false);
 	let rawOutput = monitor.rawOutput();
 	if (!hasLiveYield || !rawOutput.trim()) {
 		const salvage = monitor.lastAssistantSalvageText()?.trim();
 		if (salvage) rawOutput = salvage;
+	}
+	// A yield that async-result deliveries superseded is stale: its payload —
+	// and the pre-injection assistant text behind it — predates the outcome the
+	// model was shown. Without a fresh text response covering the async results
+	// the salvage must NOT be reused as the completion; fail closed instead of
+	// validating stale output (driveSessionToYield already fails closed when a
+	// yield is required; this covers the tool-free-final path too).
+	if (yieldStale && !monitor.hasFreshResponseAfterAsync() && exitCode === 0 && !done.aborted && !signal?.aborted) {
+		// Caller-abort runs keep their abort attribution (parked yield + cancel
+		// stays an abort with exitCode 0); only otherwise-completing runs fail
+		// closed here.
+		exitCode = 1;
+		stderr =
+			stderr || "Background job results arrived after the subagent's last yield; no refreshed final covered them.";
 	}
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
@@ -2482,6 +2557,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			outputSchemaMode: args.outputSchemaMode,
 			outputSchemaSource: args.outputSchemaSource,
 			lastAssistantText: monitor.lastAssistantSalvageText(),
+			finalAssistantText: monitor.finalAssistantText(),
 		});
 	} finally {
 		popLoopPhase();
@@ -2502,39 +2578,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	}
 	const lastYield = yieldItems?.[yieldItems.length - 1];
 	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
-	const { abortedViaYield, hasYield } = finalized;
+	const { abortedViaYield, hasYield, finalPayload } = finalized;
 	const { content: truncatedOutput, truncated } = truncateTail(rawOutput, {
 		maxBytes: MAX_OUTPUT_BYTES,
 		maxLines: MAX_OUTPUT_LINES,
 	});
-
-	// Write output artifact (input and jsonl already written in real-time).
-	// Compute output metadata for agent:// URL integration.
-	//
-	// A revival/follow-up turn only (re)writes <id>.md when it produced a real
-	// yield result. A subagent revived to answer a hub message never yields, so
-	// writing here would overwrite the completed run's authoritative artifact with
-	// a missing-yield warning body (issue #9518). The initial run is unaffected
-	// (followUpTurn is unset), preserving the documented missing-yield artifact.
-	let outputMeta: { lineCount: number; charCount: number } | undefined;
-	let outputPath: string | undefined;
-	if (args.artifactsDir && (!args.followUpTurn || hasYield)) {
-		const candidatePath = path.join(args.artifactsDir, `${id}.md`);
-		try {
-			await writeArtifact(candidatePath, rawOutput);
-			outputPath = candidatePath;
-			outputMeta = {
-				lineCount: rawOutput.split("\n").length,
-				charCount: rawOutput.length,
-			};
-		} catch (error) {
-			logger.warn("Failed to persist subagent output artifact", {
-				agentId: id,
-				path: candidatePath,
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
-	}
 
 	// Update final progress. A wall-clock timeout always wins: if the runtime
 	// limit fired we report aborted/failed regardless of whether a yield landed
@@ -2563,7 +2611,44 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						: monitor.resolveAbortReasonText()
 		: undefined;
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
+	// Classified BEFORE the artifact write: the follow-up refresh predicate keys
+	// on a completed kind, so timeout / cancel / budget-stop outcomes can never
+	// overwrite the completed artifact — even when their structured output
+	// validates (docs: budget_stop is not a PASS).
 	const completionKind = resolveSubagentCompletionKind(monitor, { aborted: wasAborted });
+
+	// Write output artifact (input and jsonl already written in real-time).
+	// Compute output metadata for agent:// URL integration.
+	//
+	// A revival/follow-up turn only (re)writes <id>.md when it settled an
+	// accepted final payload under a completed kind. A subagent revived to
+	// answer a hub message never yields or finalizes a payload, so writing here
+	// would overwrite the completed run's authoritative artifact with a
+	// missing-yield warning body (issue #9518); revoked (timeout/cancel/budget)
+	// turns stay out even with valid-looking output. The initial run is
+	// unaffected (followUpTurn is unset), preserving the documented
+	// missing-yield artifact.
+	const refreshFollowupArtifact = completionKind === "completed" && exitCode === 0 && finalPayload;
+	let outputMeta: { lineCount: number; charCount: number } | undefined;
+	let outputPath: string | undefined;
+	if (args.artifactsDir && (!args.followUpTurn || refreshFollowupArtifact)) {
+		const candidatePath = path.join(args.artifactsDir, `${id}.md`);
+		try {
+			await writeArtifact(candidatePath, rawOutput);
+			outputPath = candidatePath;
+			outputMeta = {
+				lineCount: rawOutput.split("\n").length,
+				charCount: rawOutput.length,
+			};
+		} catch (error) {
+			logger.warn("Failed to persist subagent output artifact", {
+				agentId: id,
+				path: candidatePath,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected

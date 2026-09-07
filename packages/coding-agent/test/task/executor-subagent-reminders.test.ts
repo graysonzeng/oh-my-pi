@@ -84,6 +84,11 @@ function createMockSession(
 		prepareForHeadlessAdvisorDrain: () => {},
 		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
+		// Non-terminal (incremental-section) yields re-enter the driver loop;
+		// owner-async queries must exist on the mock (mirrors the soft-budget
+		// harness). The real session surface always provides them.
+		hasPendingAsyncWork: () => false,
+		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
@@ -482,6 +487,58 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.stderr).toContain("Subagent submitted invalid yield results 6 times");
 		expect(abortCalls).toBe(1);
 	});
+
+	it("finishes valid with the complete final JSON after an incremental explanation section", async () => {
+		const prompts: string[] = [];
+		const session = createMockSession(({ text, emit, state }) => {
+			prompts.push(text);
+			// Turn 1 records an incremental explanation section (non-terminating
+			// yield) and then the model answers with a fresh, tool-free final
+			// message carrying the complete final JSON. Yield is optional, so
+			// the run must finish VALID on the complete final — not by
+			// assembling the partial section (which fails schema validation).
+			const sectionCall = createAssistantToolCallStop("", "yield", {
+				result: { data: { note: "partial draft" }, type: ["finding"] },
+			});
+			state.messages.push(sectionCall);
+			emit({ type: "message_end", message: sectionCall });
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-incremental-final",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Section recorded." }],
+					details: { status: "success", data: { note: "partial draft" }, type: ["finding"] },
+				},
+				isError: false,
+			});
+			const finalMessage = createAssistantStopMessage(JSON.stringify({ verdict: "needs_revision", ok: false }));
+			state.messages.push(finalMessage);
+			emit({ type: "message_end", message: finalMessage });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-incremental-then-complete-final",
+			performanceClass: "review",
+			outputSchema: {
+				type: "object",
+				properties: { verdict: { type: "string" }, ok: { type: "boolean" } },
+				required: ["verdict", "ok"],
+			},
+		});
+
+		// A single turn covers the section + the complete final; with yield
+		// optional there is no reminder ladder.
+		expect(prompts).toHaveLength(1);
+		expect(result.exitCode).toBe(0);
+		expect(result.structuredOutput?.status).toBe("valid");
+		expect(result.structuredOutput?.data).toEqual({ verdict: "needs_revision", ok: false });
+		// The partial explanation section must not leak into the final.
+		expect(result.output).not.toContain("partial draft");
+	});
+
 	it("waits for yield-triggered abort cleanup before resolving the subagent", async () => {
 		const promptCleanup = Promise.withResolvers<void>();
 		const abortCleanup = Promise.withResolvers<void>();
@@ -555,6 +612,61 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toBe("");
 		expect(result.rawOutput).toContain('"ok": true');
+	});
+
+	it("keeps an explicit terminal yield authoritative over the final message", () => {
+		// A terminal yield carrying data is the complete result even when the
+		// current tool-free final message carries a different schema-valid
+		// payload: the explicit terminal wins over sections and over the final.
+		const result = finalizeSubprocessOutput({
+			rawOutput: "the model kept talking after the final yield",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [
+				{ status: "success", data: { note: "partial draft" }, type: ["finding"] },
+				{ status: "success", data: { verdict: "approved", ok: true } },
+			],
+			lastAssistantText: "yield-assembly fallback (unused here)",
+			finalAssistantText: JSON.stringify({ verdict: "rejected", ok: false }),
+			outputSchema: {
+				type: "object",
+				properties: { verdict: { type: "string" }, ok: { type: "boolean" } },
+				required: ["verdict", "ok"],
+			},
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.structuredOutput?.status).toBe("valid");
+		expect(result.structuredOutput?.data).toEqual({ verdict: "approved", ok: true });
+		expect(result.rawOutput).not.toContain("partial draft");
+	});
+
+	it("keeps sections finalized by a data-less terminal authoritative over a later final", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "the model kept talking after finalizing sections",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [
+				{ status: "success", data: "approved", type: ["verdict"] },
+				{ status: "success", data: true, type: ["ok"] },
+				{ status: "success", type: "result" },
+			],
+			lastAssistantText: JSON.stringify({ verdict: "rejected", ok: false }),
+			finalAssistantText: JSON.stringify({ verdict: "rejected", ok: false }),
+			outputSchema: {
+				type: "object",
+				properties: { verdict: { type: "string" }, ok: { type: "boolean" } },
+				required: ["verdict", "ok"],
+			},
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.structuredOutput?.status).toBe("valid");
+		expect(result.structuredOutput?.data).toEqual({ verdict: "approved", ok: true });
 	});
 	it("uses provided thinking level when model override has no explicit suffix", async () => {
 		vi.clearAllMocks();

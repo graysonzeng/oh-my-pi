@@ -47,7 +47,11 @@ interface RevivedSessionHandle {
 	observer: () => IrcWakeObserver | undefined;
 }
 
-function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
+function createRevivedSession(
+	activeToolNames: string[][],
+	extensionRunner?: unknown,
+	lastAssistantText?: string,
+): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
@@ -59,7 +63,14 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 			observer = next;
 		},
 		subscribeRunState: () => () => {},
-		getLastAssistantMessage: () => undefined,
+		getLastAssistantMessage: () =>
+			lastAssistantText === undefined
+				? undefined
+				: {
+						role: "assistant",
+						content: [{ type: "text", text: lastAssistantText }],
+						stopReason: "stop",
+					},
 		extensionRunner,
 	} as unknown as AgentSession;
 	return { session, observer: () => observer };
@@ -71,7 +82,7 @@ async function createPersistedSession(
 	modelRole?: string,
 	advisor?: string,
 	readSummarize?: boolean,
-	init?: { agent?: string; performanceClass?: "review" | "explore" | "worker" },
+	init?: { agent?: string; performanceClass?: "review" | "explore" | "worker"; outputSchema?: unknown },
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -87,6 +98,7 @@ async function createPersistedSession(
 		readSummarize,
 		agent: init?.agent,
 		performanceClass: init?.performanceClass,
+		...(init?.outputSchema !== undefined ? { outputSchema: init.outputSchema } : {}),
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -456,5 +468,68 @@ describe("persisted subagent revival", () => {
 		}
 
 		expect(captured.map(options => options.requireYieldTool)).toEqual([false, false, false, false]);
+	});
+	it("refreshes the completed artifact when a cold-revived subagent ends a wake turn with a valid schema final", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-valid-final-");
+		const outputSchema = {
+			type: "object",
+			properties: { approved: { type: "boolean" }, verdict: { type: "string" } },
+			required: ["approved", "verdict"],
+		};
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, undefined, {
+			agent: "reviewer",
+			performanceClass: "review",
+			outputSchema,
+		});
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([], undefined, JSON.stringify({ approved: false, verdict: "needs_revision" }));
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// The completed first run already wrote PASS to <artifactsDir>/<id>.md
+		// (artifactsDir = parent sessionFile sans ".jsonl"; see createFactory).
+		const artifactPath = path.join(cwd, "parent", `${ref.id}.md`);
+		await Bun.write(artifactPath, "# PASS\n\nApproved on first review.\n");
+
+		const observer = handle?.observer();
+		expect(observer).toBeDefined();
+		const record: CustomMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "please revise",
+			display: true,
+			details: { id: "irc-1", from: "Main", message: "please revise" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		// The wake turn ends with a schema-valid NEEDS_REVISION final message
+		// (no yield tool call). That valid final is authoritative: it must
+		// refresh <id>.md so the parent's agent:// link tracks the latest
+		// verdict instead of the stale PASS artifact.
+		const finish = observer?.([record]);
+		await finish?.();
+
+		const refreshed = await Bun.file(artifactPath).text();
+		expect(refreshed).not.toContain("# PASS");
+		expect(JSON.parse(refreshed)).toEqual({ approved: false, verdict: "needs_revision" });
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
 	});
 });

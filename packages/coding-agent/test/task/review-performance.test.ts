@@ -4,7 +4,6 @@ import {
 	REVIEW_GATE_MAX_RUNTIME_MS,
 	resolveClassMaxRuntimeMs,
 	resolveClassSoftRuntimeMs,
-	resolveRequireYieldTool,
 	resolveSubagentPerformanceClass,
 } from "@oh-my-pi/pi-coding-agent/task";
 import { readPathFromToolArgs, shouldPreserveExplicitReadRange } from "../../src/tools/read-selector";
@@ -72,12 +71,6 @@ describe("subagent performance class", () => {
 		expect(resolveClassSoftRuntimeMs("worker", 1_800_000)).toBe(0);
 		expect(resolveClassSoftRuntimeMs("review", 0)).toBe(0);
 		expect(resolveClassSoftRuntimeMs("review", 1)).toBe(0);
-	});
-
-	it("does not demand a yield tool for any performance class", () => {
-		expect(resolveRequireYieldTool("review")).toBe(false);
-		expect(resolveRequireYieldTool("explore")).toBe(false);
-		expect(resolveRequireYieldTool("worker")).toBe(false);
 	});
 
 	it("treats both path and file_path as explicit raw/range selectors", () => {

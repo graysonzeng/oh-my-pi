@@ -63,12 +63,13 @@ const OFFLINE_FETCH: FetchImpl = () =>
 /** Workload: every provider call waits this long before emitting its response. */
 const DEFAULT_LOAD_MS = 120;
 /**
- * Provider calls per child run: 1 initial + up to MAX_YIELD_RETRIES(3)
- * yield-reminder turns. The subagent loop sends exactly these turns for a
- * plain-text mock answer (no async work, no yield tool call), so the total is
- * deterministic: `tasks * CALLS_PER_WORKER` provider entries per batch.
+ * Provider calls per child run. With completion optional-yield enabled, a
+ * plain-text mock answer (no async work, no yield tool call) completes on the
+ * first provider response — the optional final ends immediately, so no
+ * yield-reminder turns are sent. Total is deterministic: `tasks *
+ * CALLS_PER_WORKER` provider entries per batch.
  */
-const CALLS_PER_WORKER = 4;
+const CALLS_PER_WORKER = 1;
 
 /**
  * Provider-boundary concurrency observer. Counts in-flight mock streams
@@ -364,7 +365,7 @@ if (!BENCH_MODE) {
 
 				expect(batch.allDelivered).toBe(true);
 				expect(batch.allOk).toBe(true);
-				// 2 workers × 4 provider calls (1 reply + 3 yield reminders).
+				// 2 workers × 1 provider response each (optional-yield final completes immediately).
 				expect(batch.providerEntries).toBe(CALLS_PER_WORKER * 2);
 				// Sequential cap: provider concurrency can never exceed 1.
 				expect(batch.providerPeak).toBe(1);
