@@ -165,7 +165,7 @@ const modelSegment: StatusLineSegment = {
 		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
 		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
-		// dim = everything paused/no-model. Per-advisor detail lives in
+		// dim = everything paused/no-model/same-model. Per-advisor detail lives in
 		// `/advisor status`.
 		// Optional chaining: lightweight session doubles (test mocks) that don't
 		// implement getAdvisorStatusOverview skip the badge instead of crashing.

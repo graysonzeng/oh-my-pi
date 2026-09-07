@@ -2,11 +2,17 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { completeSimple, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { formatModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ConsultTool } from "@oh-my-pi/pi-coding-agent/tools/consult";
-import { resolveConsultSelection } from "@oh-my-pi/pi-coding-agent/tools/consult-model";
+import {
+	isConsultActivationAllowed,
+	isConsultSameModel,
+	resolveConsultModel,
+	resolveConsultSelection,
+} from "@oh-my-pi/pi-coding-agent/tools/consult-model";
 import { resetConsultTurn } from "@oh-my-pi/pi-coding-agent/tools/consult-state";
 import { CONSULT_TOOL_RESULT_CHARS, projectConsultContext } from "@oh-my-pi/pi-coding-agent/tools/consult-transcript";
 
@@ -154,6 +160,58 @@ describe("consult tool gating", () => {
 		expect(names).toContain("consult");
 	});
 
+	it("stays unregistered when the consult model equals the active primary (same-model auto-pause)", async () => {
+		const names = (
+			await createTools(
+				makeSession({
+					settings: Settings.isolated({
+						"consult.enabled": true,
+						"consult.model": "openai/gpt-4.1",
+						"tools.xdev": false,
+					}),
+					models: [primary],
+					active: primary,
+				}),
+			)
+		).map(tool => tool.name);
+		expect(names).not.toContain("consult");
+	});
+
+	it("still registers consult when no consult model resolves (call-time no_model)", async () => {
+		const names = (
+			await createTools(
+				makeSession({
+					settings: Settings.isolated({
+						"consult.enabled": true,
+						"consult.model": "missing-provider/none",
+						"tools.xdev": false,
+					}),
+					models: [primary],
+					active: primary,
+				}),
+			)
+		).map(tool => tool.name);
+		expect(names).toContain("consult");
+	});
+
+	it("registers the same primary model when consult.allowSameModel is on", async () => {
+		const names = (
+			await createTools(
+				makeSession({
+					settings: Settings.isolated({
+						"consult.enabled": true,
+						"consult.model": "openai/gpt-4.1",
+						"consult.allowSameModel": true,
+						"tools.xdev": false,
+					}),
+					models: [primary],
+					active: primary,
+				}),
+			)
+		).map(tool => tool.name);
+		expect(names).toContain("consult");
+	});
+
 	it("stays unregistered in subagents even when enabled", async () => {
 		const names = (
 			await createTools(
@@ -242,6 +300,112 @@ describe("resolveConsultSelection", () => {
 		const resolved = await resolveConsultSelection(session, controller.signal);
 		expect(resolved.ok).toBe(true);
 		expect(seen).toBe(controller.signal);
+	});
+
+	it("allows the primary model when allowSameModel is on", async () => {
+		const session = makeSession({
+			settings: Settings.isolated({
+				"consult.enabled": true,
+				"consult.model": "openai/gpt-4.1",
+				"consult.allowSameModel": true,
+			}),
+			models: [primary],
+			active: primary,
+		});
+		const resolved = await resolveConsultSelection(session);
+		expect(resolved.ok).toBe(true);
+		if (resolved.ok) {
+			expect(resolved.sameModel).toBe(true);
+			expect(resolved.apiKey).toBe("test-key");
+		}
+	});
+
+	it("re-checks same-model after the credential lookup (primary switching race)", async () => {
+		const session = makeSession({
+			settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/o3" }),
+			models: [primary, advisor],
+			getApiKey: async () => {
+				session.getActiveModel = () => advisor;
+				return "test-key";
+			},
+		});
+		const resolved = await resolveConsultSelection(session);
+		expect(resolved.ok).toBe(false);
+		if (!resolved.ok) expect(resolved.error).toBe("same_model");
+	});
+});
+
+describe("consult same-model activation", () => {
+	it("resolves the configured consult model without touching credentials", async () => {
+		let apiKeyCalls = 0;
+		const session = makeSession({
+			settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/o3" }),
+			models: [primary, advisor],
+			active: primary,
+			getApiKey: async () => {
+				apiKeyCalls += 1;
+				return "test-key";
+			},
+		});
+		const selection = resolveConsultModel(session);
+		expect(selection.ok).toBe(true);
+		if (selection.ok) {
+			expect(formatModelString(selection.model)).toBe("openai/o3");
+			expect(selection.sameModel).toBe(false);
+		}
+		expect(apiKeyCalls).toBe(0);
+	});
+
+	it("flags sameModel when the consult model equals the active primary by provider/id", () => {
+		const session = makeSession({
+			settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/gpt-4.1" }),
+			models: [primary],
+			active: primary,
+		});
+		expect(isConsultSameModel(session, primary)).toBe(true);
+		expect(isConsultSameModel(session, advisor)).toBe(false);
+		const selection = resolveConsultModel(session);
+		expect(selection.ok).toBe(true);
+		if (selection.ok) expect(selection.sameModel).toBe(true);
+		expect(isConsultActivationAllowed(session)).toBe(false);
+	});
+
+	it("allows the same primary model when consult.allowSameModel is on", () => {
+		const session = makeSession({
+			settings: Settings.isolated({
+				"consult.enabled": true,
+				"consult.model": "openai/gpt-4.1",
+				"consult.allowSameModel": true,
+			}),
+			models: [primary],
+			active: primary,
+		});
+		expect(isConsultActivationAllowed(session)).toBe(true);
+	});
+
+	it("picks the session override ahead of the persisted consult.model", () => {
+		const session = makeSession({
+			settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/o3" }),
+			models: [primary, advisor],
+			active: primary,
+			consultOverride: "openai/gpt-4.1",
+		});
+		const selection = resolveConsultModel(session);
+		expect(selection.ok).toBe(true);
+		if (selection.ok) {
+			expect(formatModelString(selection.model)).toBe("openai/gpt-4.1");
+			expect(selection.sameModel).toBe(true);
+		}
+	});
+
+	it("reports no_model when no consult model can be resolved", () => {
+		const session = makeSession({ settings: Settings.isolated({ "consult.enabled": true }), models: [] });
+		const selection = resolveConsultModel(session);
+		expect(selection.ok).toBe(false);
+		if (!selection.ok) expect(selection.error).toBe("no_model");
+		// An unresolvable model is not a same-model pause: activation stays
+		// allowed and the call-time guard reports `no_model`.
+		expect(isConsultActivationAllowed(session)).toBe(true);
 	});
 });
 

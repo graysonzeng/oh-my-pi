@@ -2296,7 +2296,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
-				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "deny" } }),
+				settings: Settings.isolated({
+					"advisor.enabled": true,
+					"advisor.allowSameModel": true,
+					"tools.approval": { write: "deny" },
+				}),
 			});
 			try {
 				// The default advisor roster is read-only (read/grep/glob); the

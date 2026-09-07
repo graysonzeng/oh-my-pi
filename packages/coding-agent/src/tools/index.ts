@@ -57,6 +57,7 @@ import { type CheckpointState, CheckpointTool, type CompletedRewindState, Rewind
 import { CodeIntelTool } from "./code-intel";
 import { ComputerTool } from "./computer";
 import { ConsultTool } from "./consult";
+import { isConsultActivationAllowed } from "./consult-model";
 import type { ConsultUsage } from "./consult-state";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
@@ -726,7 +727,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "inspect_image") return isInspectImageToolActive(session);
 		if (name === "consult")
 			return (
-				session.settings.get("consult.enabled") && (session.taskDepth ?? 0) === 0 && session.agentKind !== "sub"
+				session.settings.get("consult.enabled") &&
+				(session.taskDepth ?? 0) === 0 &&
+				session.agentKind !== "sub" &&
+				isConsultActivationAllowed(session)
 			);
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "security_scan") return session.settings.get("security.enabled");

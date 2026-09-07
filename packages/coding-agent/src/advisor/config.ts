@@ -35,9 +35,11 @@ export interface AdvisorConfig {
  * - `quota_exhausted` — provider returned a quota/rate-limit error; the
  *   runtime auto-retries after a cooldown so it can resume without user action
  * - `error` — repeated transient failures; backlog dropped to prevent stall
- * - `no_model` — no model resolved for this advisor's role/explicit model
+ * - `same_model` — the resolved advisor model equals the primary's active
+ *   model and `advisor.allowSameModel` is off; the runtime stays suspended
+ *   (enabled config preserved) until the models diverge or the setting flips
  */
-export type AdvisorRuntimeStatus = "running" | "paused" | "quota_exhausted" | "error" | "no_model";
+export type AdvisorRuntimeStatus = "running" | "paused" | "quota_exhausted" | "error" | "no_model" | "same_model";
 
 /**
  * The result of walking the `WATCHDOG.yml`/`WATCHDOG.yaml` search path: the

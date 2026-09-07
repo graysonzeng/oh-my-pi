@@ -562,6 +562,18 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.allowSameModel": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Allow Same Model",
+			description:
+				"Run advisors when the resolved advisor model is the same as the active model. Off pauses them (status: same model) until the models differ.",
+			condition: "advisorEnabled",
+		},
+	},
 	"advisor.immuneTurns": {
 		type: "number",
 		default: 3,

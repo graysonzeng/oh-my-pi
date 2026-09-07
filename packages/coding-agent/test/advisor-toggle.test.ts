@@ -59,7 +59,7 @@ describe("AgentSession advisor toggle", () => {
 				messages: [],
 			},
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false });
+		const settings = Settings.isolated({ "compaction.enabled": false, "advisor.allowSameModel": true });
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -102,6 +102,7 @@ describe("AgentSession advisor toggle", () => {
 
 	function enableAdvisor(target: AgentSession = session): Agent {
 		target.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		target.settings.set("advisor.allowSameModel", true);
 		target.toggleAdvisorEnabled();
 		const advisor = target.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to exist");
@@ -209,7 +210,7 @@ describe("AgentSession advisor toggle", () => {
 		).toEqual(["fireworks"]);
 	});
 
-	it("refreshes the live advisor after project model-role reloads", async () => {
+	it("suspends a same-model advisor across project reload and resumes when the role differs", async () => {
 		const projectA = path.join(tempDir.path(), "project-a");
 		const projectB = path.join(tempDir.path(), "project-b");
 		const agentDir = path.join(tempDir.path(), "agent");
@@ -244,18 +245,98 @@ describe("AgentSession advisor toggle", () => {
 		});
 
 		try {
-			expect(customSession.setAdvisorEnabled(true)).toBe(true);
-			expect(customSession.getAdvisorAgent()?.state.model.provider).toBe(model.provider);
-			expect(customSession.getAdvisorAgent()?.state.model.id).toBe(model.id);
+			expect(customSession.setAdvisorEnabled(true)).toBe(false);
+			expect(customSession.isAdvisorActive()).toBe(false);
+			expect(customSession.isAdvisorEnabled()).toBe(true);
+			expect(customSession.getAdvisorStats().advisors[0]?.status).toBe("same_model");
 
 			await settings.reloadForCwd(projectB);
 
+			expect(customSession.isAdvisorActive()).toBe(true);
 			expect(customSession.getAdvisorAgent()?.state.model.provider).toBe(replacementModel.provider);
 			expect(customSession.getAdvisorAgent()?.state.model.id).toBe(replacementModel.id);
 		} finally {
 			await customSession.dispose();
 			AgentStorage.resetInstance();
 		}
+	});
+
+	it("pauses a same-model advisor by default and keeps the enable config intact", () => {
+		session.settings.override("advisor.allowSameModel", false);
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.isAdvisorActive()).toBe(false);
+		expect(session.isAdvisorEnabled()).toBe(true);
+		expect(session.getAdvisorAgent()).toBeUndefined();
+		expect(session.getAdvisorStats().advisors[0]?.status).toBe("same_model");
+		expect(session.getAdvisorStatusOverview().advisors[0]?.status).toBe("same_model");
+		const text = session.formatAdvisorStatus();
+		expect(text).toContain("same model");
+		expect(text).toContain("advisor.allowSameModel");
+	});
+
+	it("resumes a same-model advisor when the primary model changes to a different model", async () => {
+		session.settings.override("advisor.allowSameModel", false);
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.isAdvisorActive()).toBe(false);
+
+		await session.setModel(replacementModel);
+
+		expect(session.isAdvisorActive()).toBe(true);
+		expect(session.getAdvisorAgent()?.state.model.id).toBe(model.id);
+		await session.setModel(model);
+		expect(session.isAdvisorActive()).toBe(false);
+		expect(session.isAdvisorEnabled()).toBe(true);
+		expect(session.getAdvisorStats().advisors[0]?.status).toBe("same_model");
+	});
+
+	it("resumes a same-model advisor when the advisor role switches to a different model", () => {
+		session.settings.override("advisor.allowSameModel", false);
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.isAdvisorActive()).toBe(false);
+
+		session.settings.setModelRole("advisor", `${replacementModel.provider}/${replacementModel.id}`);
+
+		expect(session.isAdvisorActive()).toBe(true);
+		expect(session.getAdvisorAgent()?.state.model.id).toBe(replacementModel.id);
+	});
+
+	it("runs a same-model advisor when advisor.allowSameModel is enabled", () => {
+		session.settings.set("advisor.allowSameModel", true);
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		expect(session.isAdvisorActive()).toBe(true);
+		expect(session.getAdvisorAgent()?.state.model.id).toBe(model.id);
+	});
+
+	it("resumes a paused same-model advisor when allowSameModel flips on", () => {
+		session.settings.override("advisor.allowSameModel", false);
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.isAdvisorActive()).toBe(false);
+
+		session.settings.override("advisor.allowSameModel", true);
+
+		expect(session.isAdvisorActive()).toBe(true);
+		expect(session.getAdvisorAgent()?.state.model.id).toBe(model.id);
+	});
+
+	it("does not resume a disabled advisor when the model changes", () => {
+		session.settings.override("advisor.allowSameModel", false);
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.isAdvisorActive()).toBe(false);
+
+		session.toggleAdvisorEnabled();
+		expect(session.isAdvisorEnabled()).toBe(false);
+
+		session.settings.setModelRole("advisor", `${replacementModel.provider}/${replacementModel.id}`);
+
+		expect(session.isAdvisorEnabled()).toBe(false);
+		expect(session.isAdvisorActive()).toBe(false);
+		expect(session.formatAdvisorStatus()).toBe("Advisor is disabled.");
 	});
 
 	it("keeps explicit enable idempotent when the advisor config is unchanged", () => {
@@ -366,7 +447,7 @@ describe("AgentSession advisor toggle", () => {
 	});
 
 	it("keeps sessions isolated when sharing a Settings instance", async () => {
-		const sharedSettings = Settings.isolated({ "compaction.enabled": false });
+		const sharedSettings = Settings.isolated({ "compaction.enabled": false, "advisor.allowSameModel": true });
 		sharedSettings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(sharedSettings.get("advisor.enabled")).toBe(false);
 
@@ -517,6 +598,7 @@ describe("AgentSession advisor toggle", () => {
 		const settings = Settings.isolated({
 			"async.enabled": false,
 			"advisor.enabled": true,
+			"advisor.allowSameModel": true,
 			"compaction.enabled": false,
 		});
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
@@ -852,7 +934,7 @@ describe("AgentSession advisor toggle", () => {
 			},
 			streamFn: mock.stream,
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false });
+		const settings = Settings.isolated({ "compaction.enabled": false, "advisor.allowSameModel": true });
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 		const quotaSession = new AgentSession({
 			agent: primaryAgent,

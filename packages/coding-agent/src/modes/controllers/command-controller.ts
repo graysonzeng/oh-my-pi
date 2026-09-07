@@ -353,6 +353,7 @@ export class CommandController {
 		running: "●",
 		paused: "○",
 		no_model: "○",
+		same_model: "○",
 		quota_exhausted: "✕",
 		error: "✕",
 	};
@@ -361,6 +362,7 @@ export class CommandController {
 		running: "running",
 		paused: "off",
 		no_model: "no model",
+		same_model: "same model — paused",
 		quota_exhausted: "quota exhausted",
 		error: "error",
 	};

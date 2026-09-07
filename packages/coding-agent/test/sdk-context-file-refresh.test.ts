@@ -25,6 +25,7 @@ async function createContextSession(
 	if (options.advisor) {
 		authStorage.setRuntimeApiKey("openai", "test-key");
 		settings.set("advisor.enabled", true);
+		settings.set("advisor.allowSameModel", true);
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 	}
 	const modelRegistry = new ModelRegistry(authStorage, `${cwd}/models.json`);

@@ -120,6 +120,7 @@ import type { Settings, SkillsSettings } from "../config/settings";
 import {
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
+	onConsultationSettingsChanged,
 	onExtendedContextChanged,
 	onModelRolesChanged,
 } from "../config/settings";
@@ -875,6 +876,7 @@ export class AgentSession {
 	#exitRecorded = false;
 	#unsubscribeAppendOnly?: () => void;
 	#unsubscribeModelRoles?: () => void;
+	#unsubscribeConsultationSettings?: () => void;
 	#unsubscribeExtendedContext?: () => void;
 	#unsubscribeCodeMode?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
@@ -1946,6 +1948,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			getActiveModel: () => this.model,
 			yieldQueue: this.yieldQueue,
 			obfuscator: this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
@@ -2096,7 +2099,18 @@ export class AgentSession {
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
-		this.#unsubscribeModelRoles = onModelRolesChanged(() => this.#advisors.onModelRolesChanged());
+		this.#unsubscribeModelRoles = onModelRolesChanged(() => {
+			this.#advisors.onModelRolesChanged();
+			void this.#tools.reconcileConsultTool().catch(error => {
+				logger.warn("consult reconcile after model role change failed", { error: String(error) });
+			});
+		});
+		this.#unsubscribeConsultationSettings = onConsultationSettingsChanged(() => {
+			this.#advisors.onPrimaryModelChanged();
+			void this.#tools.reconcileConsultTool().catch(error => {
+				logger.warn("consult reconcile after setting change failed", { error: String(error) });
+			});
+		});
 		// Re-derive the active model's effective context window when the
 		// extended-context setting flips at runtime: the registry re-clamps (or
 		// restores) premium long-context windows, and the live model object must
@@ -4976,6 +4990,8 @@ export class AgentSession {
 			this.#unsubscribeModelRoles();
 			this.#unsubscribeModelRoles = undefined;
 		}
+		this.#unsubscribeConsultationSettings?.();
+		this.#unsubscribeConsultationSettings = undefined;
 		if (this.#unsubscribeExtendedContext) {
 			this.#unsubscribeExtendedContext();
 			this.#unsubscribeExtendedContext = undefined;
@@ -5780,7 +5796,7 @@ export class AgentSession {
 	}
 
 	applyConsultEnabledChange(): Promise<boolean> {
-		return this.#tools.setConsultToolEnabled(this.settings.get("consult.enabled") === true);
+		return this.#tools.reconcileConsultTool();
 	}
 
 	async consultState(): Promise<{
@@ -6815,6 +6831,8 @@ export class AgentSession {
 		await this.#recovery.maybeRestoreRetryFallbackPrimary();
 		// Cover fallback/restore paths that set the model without #syncAfterModelChange.
 		await this.#ensureModelOptimizationReconciled();
+		this.#advisors.onPrimaryModelChanged();
+		await this.#tools.reconcileConsultTool();
 
 		// A manual `/compact` runs with the agent subscription disconnected until its
 		// cleanup finally re-drains the preserved queues. Starting a turn before then
@@ -9010,6 +9028,8 @@ export class AgentSession {
 			}
 		}
 		this.agent.setModel(model);
+		this.#advisors.onPrimaryModelChanged();
+		await this.#tools.reconcileConsultTool();
 		// All model-change paths go through here; reconcile before next dispatch.
 		this.#modelOptimizationDirty = true;
 		this.#readDedupeArtifacts.clear();
@@ -9775,8 +9795,10 @@ export class AgentSession {
 			this.#todo.syncFromBranch();
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
+			this.#advisors.onPrimaryModelChanged();
 			this.#reconnectToAgent();
 			try {
+				await this.#tools.reconcileConsultTool();
 				await this.#sessionSwitchReconciler?.();
 			} catch (reconcileError) {
 				logger.warn("Failed to reconcile session mode after switch rollback", {

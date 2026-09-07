@@ -51,6 +51,7 @@ test("keeps Gemini 3.6 advisor context and accepts a silent review", async () =>
 		advisorStreamFn,
 	});
 	try {
+		session.settings.set("advisor.allowSameModel", true);
 		session.settings.setModelRole("advisor", "google/gemini-3.6-flash");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
 		const advisor = session.getAdvisorAgent();

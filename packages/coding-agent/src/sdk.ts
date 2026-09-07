@@ -3958,9 +3958,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createInspectImageTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.inspect_image(toolSession)) ?? null,
-			createConsultTool: restrictToolNames
-				? undefined
-				: async () => (await BUILTIN_TOOLS.consult(toolSession)) ?? null,
+			createConsultTool:
+				toolsRestricted && !explicitlyRequestedToolNames?.includes("consult")
+					? undefined
+					: async () => (await BUILTIN_TOOLS.consult(toolSession)) ?? null,
 			consultUsage: toolSession.consultUsage,
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix

@@ -20,6 +20,7 @@ import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with 
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
+import { type ConsultSelectionHost, isConsultActivationAllowed } from "../tools/consult-model";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -1525,21 +1526,59 @@ export class SessionTools {
 			return applied;
 		});
 	}
+	/** Explicit session toggle; automatic same-model pauses preserve this intent. */
 	setConsultToolEnabled(enabled: boolean): Promise<boolean> {
-		return this.runToolRegistryMutation(() => this.#setConsultToolActive(enabled));
+		return this.runToolRegistryMutation(() => this.#setConsultToolEnabled(enabled));
 	}
 
-	async #setConsultToolActive(enabled: boolean): Promise<boolean> {
-		const active = this.getEnabledToolNames();
+	async #setConsultToolEnabled(enabled: boolean): Promise<boolean> {
+		if (enabled && this.#host.agentKind() !== "main") return false;
+		this.#host.settings.override("consult.enabled", enabled);
 		if (!enabled) {
+			const active = this.getEnabledToolNames();
 			if (active.includes("consult")) {
 				await this.#applyActiveToolsByName(active.filter(name => name !== "consult"));
 			}
 			return true;
 		}
-		if (this.#host.agentKind() !== "main") {
-			return false;
+		return this.#reconcileConsultTool();
+	}
+
+	/** Re-evaluate availability without changing the user's enabled setting. */
+	reconcileConsultTool(): Promise<boolean> {
+		return this.runToolRegistryMutation(() => this.#reconcileConsultTool());
+	}
+
+	#consultSelectionHost(): ConsultSelectionHost {
+		return {
+			settings: this.#host.settings,
+			modelRegistry: this.#host.modelRegistry,
+			getConsultModelOverride: () => this.#host.getConsultModelOverride(),
+			getActiveModel: () => this.#host.model(),
+		};
+	}
+
+	async #reconcileConsultTool(): Promise<boolean> {
+		if (this.#consultShouldBeActive()) {
+			return this.#setConsultToolActive();
 		}
+		const active = this.getEnabledToolNames();
+		if (active.includes("consult")) {
+			await this.#applyActiveToolsByName(active.filter(name => name !== "consult"));
+		}
+		// A same-model/disabled pause is a successful no-op; a session that can
+		// never host consult (subagent) reports unavailability.
+		return this.#host.agentKind() === "main";
+	}
+
+	#consultShouldBeActive(): boolean {
+		if (this.#host.settings.get("consult.enabled") !== true) return false;
+		if (this.#host.agentKind() !== "main") return false;
+		return isConsultActivationAllowed(this.#consultSelectionHost());
+	}
+
+	async #setConsultToolActive(): Promise<boolean> {
+		const active = this.getEnabledToolNames();
 		if (!this.#toolRegistry.has("consult")) {
 			const tool = await this.#createConsultTool?.();
 			if (tool?.name !== "consult") {
@@ -1548,6 +1587,11 @@ export class SessionTools {
 				});
 				return false;
 			}
+			// The primary model can switch while the async factory awaits. Re-check
+			// the same-model pause before touching the registry so a tool built
+			// under a permissive model never re-enters the surface under a
+			// same-model primary.
+			if (!this.#consultShouldBeActive()) return true;
 			const wrapped = this.#wrapRuntimeTool(tool);
 			this.#toolRegistry.set(wrapped.name, wrapped);
 			this.#builtInToolNames.add(wrapped.name);
@@ -1558,6 +1602,12 @@ export class SessionTools {
 		return true;
 	}
 
+	/**
+	 * Session-scoped `/consult <model>` override. Setting one activates consult
+	 * for this session (overriding `consult.enabled`), then defers to the same
+	 * reconcile gate: an override targeting the active primary pauses the tool
+	 * instead of exposing a call that can only fail `same_model`.
+	 */
 	setConsultModelOverride(pattern: string | undefined): Promise<boolean> {
 		return this.runToolRegistryMutation(async () => {
 			if (pattern !== undefined && this.#host.agentKind() !== "main") {
@@ -1567,7 +1617,7 @@ export class SessionTools {
 			if (pattern !== undefined) {
 				this.#host.settings.override("consult.enabled", true);
 			}
-			return this.#setConsultToolActive(this.#host.settings.get("consult.enabled") === true);
+			return this.#reconcileConsultTool();
 		});
 	}
 

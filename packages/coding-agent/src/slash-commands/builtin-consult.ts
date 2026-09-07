@@ -4,12 +4,17 @@ import type { SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
 async function formatConsultStatus(session: AgentSession): Promise<string> {
 	const state = await session.consultState();
+	const paused = state.enabled && state.sameModel && !session.settings.get("consult.allowSameModel");
+	const status = paused
+		? "consult: paused (same model — resumes when the primary model changes)"
+		: `consult: ${state.active ? "active" : "inactive"}`;
 	const parts = [
-		`consult: ${state.active ? "active" : "inactive"}`,
+		status,
 		`enabled: ${state.enabled ? "on" : "off"}`,
 		state.override ? `override: ${state.override}` : undefined,
 		state.model ? `model: ${state.model}` : `model: ${state.error ?? "none"}`,
-		state.sameModel ? "same-model: yes" : "same-model: no",
+		paused ? "same-model: yes (auto-pause; allow with consult.allowSameModel)" : undefined,
+		state.sameModel && !paused ? "same-model: yes" : undefined,
 		`credentials: ${state.credentials ? "ok" : "missing"}`,
 		`uses: turn ${state.turn} / session ${state.session}`,
 	];
@@ -23,14 +28,10 @@ async function formatConsultStatus(session: AgentSession): Promise<string> {
 		].filter(Boolean);
 		parts.push(last.join(" · "));
 	}
-	if (state.sameModel && session.settings.get("advisor.enabled")) {
-		parts.push("same model is also the shadow advisor; extra consults add little");
-	}
 	return parts.filter(Boolean).join(" · ");
 }
 
 async function applyConsultToggle(session: AgentSession, enable: boolean): Promise<string> {
-	session.settings.override("consult.enabled", enable);
 	const applied = await session.setConsultToolEnabled(enable);
 	if (enable && !applied) {
 		return "Consult is unavailable in this session.";
