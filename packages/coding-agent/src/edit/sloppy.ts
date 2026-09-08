@@ -212,7 +212,8 @@ const SECTION_OPENER = "§";
 /**
  * Re-voice an engine error into the taught `§` vocabulary: opener markers
  * become `§` and `[path]` header lines merge into the opener that follows
- * them, so every copy-ready payload matches the prompt's surface.
+ * them, so corrected payloads and fill-in retry templates match the prompt's
+ * surface.
  */
 function toSloppyVoice(message: string): string {
 	const lines = message.replaceAll(OPENER, SECTION_OPENER).split("\n");
@@ -238,7 +239,12 @@ export function applySloppy(content: string, input: string, context: SloppyApply
 		if (error instanceof Error) {
 			const lines = toSloppyVoice(error.message).split("\n");
 			for (let index = 0; index + 1 < lines.length; index++) {
-				if (!lines[index].startsWith("Copy-ready corrected payload")) continue;
+				if (
+					!lines[index].startsWith("Copy-ready corrected payload") &&
+					!lines[index].startsWith(RETRY_TEMPLATE_PREFIX)
+				) {
+					continue;
+				}
 				const opener = lines[index + 1];
 				if (opener === SECTION_OPENER || opener === `${SECTION_OPENER}*`) {
 					lines[index + 1] = `${opener}${context.path}`;
@@ -253,6 +259,12 @@ const MAX_CANDIDATES = 200;
 const MAX_COMBINATIONS = 20_000;
 const noOpByPath = new Map<string, { hash: string; count: number }>();
 const ATOMICITY_NOTICE = "No operations were applied — ops apply atomically; re-send the full corrected payload.";
+/**
+ * Line prefix of a fill-in retry template emitted when an operation has MATCH
+ * but no REWRITE text: the model must replace the placeholder and re-send the
+ * full request — the template itself is never resendable verbatim.
+ */
+const RETRY_TEMPLATE_PREFIX = "Retry template (fill in";
 
 interface ExplicitRewrite {
 	kind: "explicit";
@@ -1118,7 +1130,7 @@ function parseOperations(input: string, content: string): Operation[] {
 				correctedLines[separatorIndex] = REWRITE_HEADER;
 				correctedLines.splice(endIndex, 0, "<final text>");
 				throw new Error(
-					`${referenceSeparator} after MATCH reads as the ${REWRITE_HEADER} separator, leaving REWRITE empty.\nCopy-ready corrected payload (fill in the final text):\n${correctedLines.join("\n")}`,
+					`${referenceSeparator} after MATCH reads as the ${REWRITE_HEADER} separator, leaving REWRITE empty: the operation states MATCH only, with no REWRITE text to apply, and the original file is unchanged. Fill in the template below and re-send the full request with every operation — replace the placeholder with the exact final text, and never send the template verbatim or guess a deletion.\n${RETRY_TEMPLATE_PREFIX} the final text):\n${correctedLines.join("\n")}`,
 				);
 			}
 			operations.push(createOperation(sourcePatternText, "", allMatches, operations.length + 1, false));
@@ -1211,7 +1223,7 @@ function parseOperations(input: string, content: string): Operation[] {
 				// Fall through to the fail-closed separator error.
 			}
 		}
-		const needsSeparator = `Operation ${operations.length + 1} needs ${REWRITE_HEADER}.\nCopy-ready corrected payload (fill in the new text):\n${[...lines.slice(0, endIndex), REWRITE_HEADER, "<new text>", ...lines.slice(endIndex)].join("\n")}`;
+		const needsSeparator = `Operation ${operations.length + 1} needs ${REWRITE_HEADER}: the operation states MATCH only, with no REWRITE text to apply, and the original file is unchanged. Fill in the template below and re-send the full request with every operation — replace the placeholder with the exact final text (an empty REWRITE line is the explicit deletion), and never send the template verbatim or guess a deletion.\n${RETRY_TEMPLATE_PREFIX} the new text):\n${[...lines.slice(0, endIndex), REWRITE_HEADER, "<new text>", ...lines.slice(endIndex)].join("\n")}`;
 		// A multiline pattern-only block may be the delete half of a move; assume
 		// deletion now, justified post-parse only when another op re-emits it.
 		const normalizedPattern = normalizeText(sourcePatternText).text;
@@ -3456,9 +3468,11 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 		operations = parseOperations(input, content);
 	} catch (error) {
 		if (!(error instanceof Error)) throw error;
-		// A parse error that already carries a copy-ready payload (e.g. the
-		// fill-in skeleton) must not be followed by an echo of the broken input.
-		if (error.message.includes("Copy-ready corrected payload")) throw error;
+		// A parse error that already carries a corrected payload or a fill-in
+		// retry template must not be followed by an echo of the broken input.
+		if (error.message.includes("Copy-ready corrected payload") || error.message.includes(RETRY_TEMPLATE_PREFIX)) {
+			throw error;
+		}
 		const normalizedPayload = normalizeInput(input);
 		const retry =
 			parseOpener(normalizedPayload.split("\n")[0] ?? "") === false
@@ -3783,6 +3797,7 @@ function apply(content: string, input: string, context: SloppyApplyContext): str
 			!/\bNear line \d+:/u.test(message) &&
 			!message.includes("Copy-ready corrected operation:") &&
 			!message.includes("Copy-ready corrected payload:") &&
+			!message.includes(RETRY_TEMPLATE_PREFIX) &&
 			!message.includes("Copy-ready per-selection interpretation:")
 		) {
 			message += `\nCurrent file content near the closest match (no re-read needed):\n${numberedPreview(content, 0)}`;

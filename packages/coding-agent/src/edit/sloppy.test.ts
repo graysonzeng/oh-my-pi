@@ -378,10 +378,14 @@ describe("sloppy v8", () => {
 			message = error instanceof Error ? error.message : String(error);
 		}
 
-		expect(message).toContain("Operation 2 needs ».");
-		expect(message.match(/Copy-ready corrected payload/g)).toHaveLength(1);
-		expect(message).toContain(
-			"Copy-ready corrected payload (fill in the new text):\n§i.ts\nconst a = ⟪1│2⟫;\n§\nkeep();\n»\n<new text>",
+		expect(message).toContain("Operation 2 needs »");
+		expect(message).not.toContain("Copy-ready corrected payload");
+		const templateHeader = "Retry template (fill in the new text):\n";
+		expect(message.split(templateHeader)).toHaveLength(2);
+		const template = message.split(templateHeader)[1]!.split("\nNo operations were applied")[0];
+		expect(template).toBe("§i.ts\nconst a = ⟪1│2⟫;\n§\nkeep();\n»\n<new text>");
+		expect(applySloppy(content, template.replace("<new text>", "keepUpdated();"), { path: "i.ts" })).toBe(
+			"const a = 2;\nkeepUpdated();\n",
 		);
 	});
 

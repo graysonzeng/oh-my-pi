@@ -24,7 +24,7 @@ Move code by deleting it where it is (MATCH + `»` + empty REWRITE, or `⟪old l
 - No inline desired side? Follow MATCH with `»` and the complete final text. NEVER combine `⟪old│new⟫` with a `»` REWRITE.
 - Ambiguous repeated line? Include its unique parent branch in the same operation; NEVER retry the bare line.
 - Operations address the original file; earlier ops never shift later anchors. A fuzzy location fallback may tolerate textual drift, but it NEVER repairs authored whitespace; operators and delimiters MUST match exactly.
-- A failure applies nothing and includes a copy-ready corrected payload: send that verbatim.
+- A parse or match failure applies nothing. A complete corrected payload can be retried verbatim. A retry template containing `<new text>` or `<final text>` is incomplete: replace the placeholder with the intended final text, then resend all operations. NEVER send a template verbatim or guess a deletion.
 - "No change" means the anchor already reads as your final text; look elsewhere.
 - To write markers (`§»⟪│⟫`) or a line starting with `＋` literally, use `write`.
 </rules>
@@ -122,6 +122,6 @@ loadUser(…
 2. Changes inside lines → `⟪old│new⟫`, several per op. New lines → `＋`. Moves and large restructures → MATCH + `»` + final text.
 3. Authored indentation is verbatim: every REWRITE/`＋`/desired line — retyped anchors included — carries the exact leading whitespace it must have in the file; wrong depth or style applies silently. Tab-indented file → tab indents; the engine NEVER reindents.
 4. Prove one unique match anchored on the changed line, or use `§*`.
-5. After an error, send the supplied corrected payload verbatim — nothing was applied; NEVER freestyle a new guess.
+5. After an error, retry the complete corrected payload; fill any retry-template placeholders first. NEVER repeat the rejected input or restore the working copy from Git to recover an edit.
 6. Edit FIRST only from a verbatim file read or edit-error payload. Markdown, diffs, and agent summaries are not indentation sources; re-read the exact region before authoring whole lines.
 </critical>
