@@ -844,10 +844,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
 	// "none" (explicit off — and every subagent) omits the block and skips the file lookup.
 	const systemPromptPolicy = getSystemPromptPolicy(model);
+	const useConciseSystemPrompt = systemPromptPolicy === "astra" || systemPromptPolicy === "concise";
 	const bundledPersonality =
 		personality === "none"
 			? ""
-			: (personality === "default" && systemPromptPolicy === "astra"
+			: (personality === "default" && useConciseSystemPrompt
 					? astraPersonality
 					: PERSONALITY_SPECS[personality]
 				).trim();
@@ -1012,7 +1013,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
 		useCodexTaskPrompt: systemPromptPolicy === "codex",
-		useAstraSystemPrompt: systemPromptPolicy === "astra",
+		useConciseSystemPrompt,
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",

@@ -57,6 +57,14 @@ describe("getSystemPromptPolicy", () => {
 			["gpt-6-mini", "default"],
 			["gpt-6-codex", "default"],
 			["gpt-6.1", "default"],
+			["grok-4.6", "concise"],
+			["gateway/grok-4.6", "concise"],
+			["deepseek-v4-flash", "concise"],
+			["openrouter/deepseek/deepseek-v4-flash", "concise"],
+			["grok-4.60", "default"],
+			["grok-4.6-fast", "default"],
+			["deepseek-v4-pro", "default"],
+			["deepseek-v4-flash-preview", "default"],
 		];
 		for (const [modelId, policy] of cases) {
 			expect(getSystemPromptPolicy(modelId), String(modelId)).toBe(policy);
@@ -187,47 +195,62 @@ describe("system prompt model identifier", () => {
 		return systemPrompt.join("\n\n");
 	}
 
-	it("selects the Astra system-prompt branch for GPT-6.0 base ids", async () => {
-		const rendered = await renderPrompt({ model: "openai/gpt-6-astra" });
-		expect(rendered).toContain("# Working agreement");
-		expect(rendered).toContain("# Execution");
-		expect(rendered).not.toContain("§ Workflow");
+	it("selects concise guidance for Astra, Grok 4.6, and DeepSeek V4 Flash", async () => {
+		for (const model of ["openai/gpt-6-astra", "gateway/grok-4.6", "deepseek/deepseek-v4-flash"]) {
+			const rendered = await renderPrompt({ model });
+			expect(rendered, model).toContain("# Working agreement");
+			expect(rendered, model).toContain("# Execution");
+			expect(rendered, model).not.toContain("§ Workflow");
+		}
 	});
 
-	it("keeps the default system-prompt branch for mini, codex, and non-GPT-6 models", async () => {
-		for (const model of ["anthropic/claude-opus-4", "gpt-6-mini", "gpt-6-codex", "gpt-5.6"]) {
+	it("keeps the default branch for models outside the concise allowlist", async () => {
+		for (const model of [
+			"anthropic/claude-opus-4",
+			"gpt-6-mini",
+			"gpt-6-codex",
+			"gpt-5.6",
+			"grok-4.6-fast",
+			"deepseek-v4-pro",
+		]) {
 			const rendered = await renderPrompt({ model });
 			expect(rendered, model).toContain("§ Workflow");
 			expect(rendered, model).not.toContain("# Working agreement");
 		}
 	});
 
-	it("does not apply the Astra system-prompt branch when a custom prompt is set", async () => {
-		const rendered = await renderPrompt({ model: "gpt-6-astra", customPrompt: "CUSTOM_PROMPT_ONLY" });
-		expect(rendered).toContain("CUSTOM_PROMPT_ONLY");
-		expect(rendered).not.toContain("# Working agreement");
-		expect(rendered).not.toContain("# Execution");
+	it("lets a custom prompt replace concise guidance", async () => {
+		for (const model of ["gpt-6-astra", "grok-4.6", "deepseek-v4-flash"]) {
+			const rendered = await renderPrompt({ model, customPrompt: "CUSTOM_PROMPT_ONLY" });
+			expect(rendered, model).toContain("CUSTOM_PROMPT_ONLY");
+			expect(rendered, model).not.toContain("# Working agreement");
+			expect(rendered, model).not.toContain("# Execution");
+		}
 	});
 
-	it("keeps PERSONALITY.md override when Astra default personality would apply", async () => {
+	it("keeps PERSONALITY.md override when the concise default personality would apply", async () => {
 		const originalAgentDir = getAgentDir();
 		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-astra-personality-"));
 		setAgentDir(agentDir);
 		try {
 			await Bun.write(path.join(agentDir, "PERSONALITY.md"), "OVERRIDE_PERSONALITY_MARKER");
-			const rendered = await renderPrompt({ model: "gpt-6-astra" });
-			expect(rendered).toContain("OVERRIDE_PERSONALITY_MARKER");
-			expect(rendered).toContain("# Working agreement");
+			for (const model of ["gpt-6-astra", "grok-4.6", "deepseek-v4-flash"]) {
+				const rendered = await renderPrompt({ model });
+				expect(rendered, model).toContain("OVERRIDE_PERSONALITY_MARKER");
+				expect(rendered, model).toContain("# Working agreement");
+			}
 		} finally {
 			setAgentDir(originalAgentDir);
 			removeSyncWithRetries(agentDir);
 		}
 	});
 
-	it("omits the personality block for none even on Astra models", async () => {
-		const rendered = await renderPrompt({ model: "gpt-6-astra", personality: "none" });
-		expect(rendered).not.toContain("# Personality");
-		expect(rendered).toContain("# Working agreement");
+	it("omits personality when disabled on concise models", async () => {
+		for (const model of ["gpt-6-astra", "grok-4.6", "deepseek-v4-flash"]) {
+			const rendered = await renderPrompt({ model, personality: "none" });
+			expect(rendered, model).not.toContain("# Personality");
+			expect(rendered, model).toContain("# Working agreement");
+		}
 	});
 });
 
@@ -361,13 +384,16 @@ describe("AgentSession model-change prompt refresh", () => {
 		expect(session.agent.state.systemPrompt).toEqual(["policy changed"]);
 	});
 
-	it("rebuilds a hidden-model prompt when switching default, astra, and codex policies", async () => {
+	it("rebuilds hidden-model prompts across policies but reuses equivalent concise guidance", async () => {
 		const defaultModel = fixtureModel("policy-default", "gpt-6-mini");
 		const astraModel = fixtureModel("policy-astra", "gpt-6-astra");
 		const codexModel = fixtureModel("policy-codex", "gpt-5.6");
+		const grokModel = fixtureModel("policy-concise", "grok-4.6");
+		const flashModel = fixtureModel("policy-concise", "deepseek-v4-flash");
 		authStorage.setRuntimeApiKey(defaultModel.provider, "key-a");
 		authStorage.setRuntimeApiKey(astraModel.provider, "key-b");
 		authStorage.setRuntimeApiKey(codexModel.provider, "key-c");
+		authStorage.setRuntimeApiKey(grokModel.provider, "key-d");
 
 		let rebuildCount = 0;
 		session = newSession(
@@ -385,6 +411,14 @@ describe("AgentSession model-change prompt refresh", () => {
 		expect(rebuildCount).toBe(2);
 		await session.setModel(defaultModel);
 		expect(rebuildCount).toBe(3);
+		await session.setModel(grokModel);
+		expect(rebuildCount).toBe(4);
+		await session.setModel(flashModel);
+		expect(rebuildCount).toBe(4);
+		await session.setModel(defaultModel);
+		expect(rebuildCount).toBe(5);
+		await session.setModel(flashModel);
+		expect(rebuildCount).toBe(6);
 	});
 
 	it("does not rebuild a hidden-model prompt for Astra aliases and vendor prefixes", async () => {
