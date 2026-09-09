@@ -567,6 +567,13 @@ export interface CreateAgentSessionOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
+	/**
+	 * When true, the default system prompt uses the worker execution context
+	 * instead of main-agent delegation, global workflow, and global completion
+	 * management. Custom / append / RULES text is not filtered or rewritten.
+	 * Default: false.
+	 */
+	workerClass?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
 	/** Parent Hindsight state to alias for subagent memory tools. */
@@ -3281,6 +3288,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
+				workerClass: options.workerClass === true,
 			});
 
 			const withModelOpt = (blocks: string[]): string[] => {

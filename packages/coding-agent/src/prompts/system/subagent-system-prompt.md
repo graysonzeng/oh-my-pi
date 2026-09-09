@@ -56,6 +56,8 @@ When the assignment is answered, stop immediately. Write a compressed final assi
 Use tools while they are needed. After the last tool result, write a final assistant message with no tool calls — that message is the result. You MAY still `yield`; it is optional. A broader ticket remaining open is not a reason to keep searching.
 {{#if reviewClass}}
 Do not keep searching merely for completeness. Host validation of the final message (or optional yield) against the required schema decides whether the review is complete. A prose summary is not a passing review.
+{{else}}
+Complete every assigned requirement from confirmed design and evidence; independently verify when needed. After this side's implementation and verification, deliver immediately. Do not repeat parent-owned integration or validation. Do not omit verification that was not transferred. Do not stop early because of turn count or elapsed time.
 {{/if}}
 {{/if}}
 

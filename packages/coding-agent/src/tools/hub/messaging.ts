@@ -205,6 +205,7 @@ export interface HubSendParams {
 	replyTo?: string;
 	await?: boolean;
 	timeoutMs?: number;
+	interrupt?: boolean;
 }
 
 export async function executeSend(
@@ -276,7 +277,13 @@ export async function executeSend(
 		const receipts = await Promise.all(
 			targets.map(target =>
 				bus.send(
-					{ from: senderId, to: target, body: message, replyTo: params.replyTo },
+					{
+						from: senderId,
+						to: target,
+						body: message,
+						replyTo: params.replyTo,
+						...(params.interrupt === true ? { interrupt: true } : {}),
+					},
 					// Awaited sends mark the sender as blocked on an answer so a
 					// busy recipient that cannot reach a step boundary (async
 					// disabled) auto-replies instead of stranding the sender.

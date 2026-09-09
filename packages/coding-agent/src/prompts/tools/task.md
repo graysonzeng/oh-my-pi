@@ -61,7 +61,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 
 # Communication
-Subagents start blank — no conversation history.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{/if}}
+Subagents start blank — no conversation history.{{#if ircEnabled}} Ordinary parent-to-subagent IRC arrives after the current tool batch; use `hub send` with `interrupt: true` for urgent corrections that must skip pending tools.{{/if}}
 Pass large payloads via `local://<path>` URIs, NEVER inline text.
 {{#if ircEnabled}}- NEVER ping an agent still running without new information; only send necessary recovery after a confirmed stall, park, or interrupt.{{/if}}
 - Label follow-up messages as corrections to the current assignment or explicit new work. Defer unrelated additions until the current result is delivered; an urgent replacement MUST state which acceptance criteria it supersedes. Never silently accumulate new criteria in a nearly finished run.

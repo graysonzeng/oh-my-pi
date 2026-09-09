@@ -422,10 +422,13 @@ describe("subagent completion contract", () => {
 		expect(worker).not.toContain("keep going until this ticket is closed");
 		expect(worker).not.toContain("While work remains, you MUST continue with another tool call");
 		expect(worker).toContain("that message is the result");
+		expect(worker).toContain("Do not stop early because of turn count or elapsed time");
 		expect(explore).not.toContain("keep going until this ticket is closed");
 		expect(explore).toContain("Write a compressed final assistant message");
+		expect(explore).not.toContain("Do not stop early because of turn count or elapsed time");
 		expect(review).toContain("A prose summary is not a passing review");
 		expect(review).toContain("Prefer a tool-free final assistant message that parses as this object");
 		expect(review).not.toContain("This is your only way to return a final result");
+		expect(review).not.toContain("Do not stop early because of turn count or elapsed time");
 	});
 });

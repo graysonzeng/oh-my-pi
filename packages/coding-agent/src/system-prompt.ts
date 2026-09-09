@@ -669,6 +669,12 @@ export interface BuildSystemPromptOptions {
 	xdevDocs?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
+	/**
+	 * When true, the default template uses the worker execution context instead of
+	 * main-agent delegation, global workflow, and global completion management.
+	 * Custom / append / RULES text is not filtered or rewritten. Default: false.
+	 */
+	workerClass?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -732,6 +738,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		activeRepoContext: providedActiveRepoContext,
+		workerClass = false,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -1014,6 +1021,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		model: includeModelInPrompt ? (model ?? "") : "",
 		useCodexTaskPrompt: systemPromptPolicy === "codex",
 		useConciseSystemPrompt,
+		workerClass,
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",

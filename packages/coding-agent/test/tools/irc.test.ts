@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type CoordinationDetails, HubTool, isIrcEnabled } from "@oh-my-pi/pi-coding-agent/tools/hub";
@@ -93,6 +96,88 @@ function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}
 		modelRegistry: {} as never,
 	});
 	return { session, sessionManager };
+}
+
+function countMessageBody(messages: Array<{ content?: unknown }> | undefined, body: string): number {
+	let count = 0;
+	for (const message of messages ?? []) {
+		const content = message.content;
+		const text =
+			typeof content === "string"
+				? content
+				: Array.isArray(content)
+					? content
+							.map(block => (block && typeof block === "object" && "text" in block ? String(block.text) : ""))
+							.join("\n")
+					: "";
+		if (text.includes(body)) count++;
+	}
+	return count;
+}
+
+const echoSchema = type({ value: "string" });
+
+function createBatchSession(): {
+	session: AgentSession;
+	mock: MockModel;
+	executed: string[];
+	firstStarted: Promise<void>;
+	releaseFirst: () => void;
+} {
+	const executed: string[] = [];
+	const firstStarted = Promise.withResolvers<void>();
+	const firstRelease = Promise.withResolvers<void>();
+	const echo: AgentTool<typeof echoSchema, { value: string }> = {
+		name: "echo",
+		label: "Echo",
+		description: "Echo tool",
+		parameters: echoSchema,
+		concurrency: "exclusive",
+		async execute(_id, params) {
+			executed.push(params.value);
+			if (params.value === "first") {
+				firstStarted.resolve();
+				await firstRelease.promise;
+			}
+			return {
+				content: [{ type: "text", text: `ok:${params.value}` }],
+				details: { value: params.value },
+			};
+		},
+	};
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+	const mock = createMockModel({
+		responses: [
+			{
+				content: [
+					{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+					{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+				],
+			},
+			{ content: ["done"] },
+		],
+	});
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model, systemPrompt: ["Test"], tools: [echo], messages: [] },
+		convertToLlm,
+		streamFn: mock.stream,
+	});
+	const session = new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory("/tmp"),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: { getApiKey: () => "test-key" } as never,
+		toolRegistry: new Map([["echo", echo]]),
+	});
+	return {
+		session,
+		mock,
+		executed,
+		firstStarted: firstStarted.promise,
+		releaseFirst: () => firstRelease.resolve(),
+	};
 }
 
 describe("IRC", () => {
@@ -686,6 +771,50 @@ describe("IRC", () => {
 			expect(details?.receipts).toEqual([{ to: "0-Sub", outcome: "injected" }]);
 			expect(details?.waited).toBeUndefined();
 			expect(sub.delivered.map(msg => msg.body)).toEqual(["ping"]);
+			expect(sub.delivered[0]?.interrupt).toBeUndefined();
+		});
+
+		it("op=send interrupt=true forwards the flag through the bus", async () => {
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", {
+				op: "send",
+				to: "0-Sub",
+				message: "stop",
+				interrupt: true,
+			});
+			expect(result.isError).toBeFalsy();
+			expect(sub.delivered.map(msg => msg.interrupt)).toEqual([true]);
+			expect(sub.delivered[0]?.body).toBe("stop");
+		});
+
+		it("ordinary op=send wakes a blocking wait exactly once", async () => {
+			const waiting = makeFakeSession();
+			registry.register({ id: "0-Waiting", displayName: "task", kind: "sub", session: waiting.session });
+			const peer = makeFakeSession();
+			registry.register({
+				id: "0-Peer",
+				displayName: "task",
+				kind: "sub",
+				session: peer.session,
+				status: "running",
+			});
+
+			const waitingTool = new HubTool(makeToolSession(registry, "0-Waiting"));
+			const sendingTool = new HubTool(makeToolSession(registry, "0-Peer"));
+			const pending = waitingTool.execute("call-wait", { op: "wait", timeoutMs: 30_000 });
+			await sendingTool.execute("call-send", { op: "send", to: "0-Waiting", message: "ordinary wake" });
+			const result = await pending;
+			const details = result.details as CoordinationDetails | undefined;
+			expect(result.isError).toBeFalsy();
+			expect(details?.waited).toMatchObject({ from: "0-Peer", body: "ordinary wake" });
+			expect(waiting.delivered).toEqual([]);
+
+			const empty = await waitingTool.execute("call-inbox", { op: "inbox" });
+			const emptyDetails = empty.details as CoordinationDetails | undefined;
+			expect(emptyDetails?.inbox).toEqual([]);
 		});
 
 		it("op=send to=all fans out to live peers and reports per-recipient receipts", async () => {
@@ -1000,7 +1129,7 @@ describe("IRC", () => {
 			expect(event.type).toBe("irc_message");
 		});
 
-		it("queues peer IRC as an interrupt while a turn is streaming", async () => {
+		it("queues ordinary peer IRC as an aside while a turn is streaming", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
@@ -1015,10 +1144,32 @@ describe("IRC", () => {
 			});
 			expect(outcome).toBe("injected");
 			expect(promptSpy).not.toHaveBeenCalled();
-			expect(await session.agent.hasIrcInterrupts?.()).toBe(true);
+			expect(await session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(session.drainPendingIrcInboxMessages("0-Me").map(msg => msg.body)).toEqual(["mid-turn note"]);
 		});
 
-		it("queues parent IRC as steering while a subagent turn is streaming", async () => {
+		it("queues interrupt:true peer IRC as an interrupt while a turn is streaming", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-2-int",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "urgent peer note",
+				ts: Date.now(),
+				interrupt: true,
+			});
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(await session.agent.hasIrcInterrupts?.()).toBe(true);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+		});
+
+		it("queues ordinary parent IRC as an aside while a subagent turn is streaming", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
@@ -1031,6 +1182,28 @@ describe("IRC", () => {
 				to: "0-Child",
 				body: "change approach",
 				ts: Date.now(),
+			});
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(session.drainPendingIrcInboxMessages("0-Child").map(msg => msg.body)).toEqual(["change approach"]);
+		});
+
+		it("queues interrupt:true parent IRC as steering while a subagent turn is streaming", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-parent-int",
+				from: "Main",
+				to: "0-Child",
+				body: "change approach",
+				ts: Date.now(),
+				interrupt: true,
 			});
 			const queued = session.agent.peekSteeringQueue();
 			expect(outcome).toBe("injected");
@@ -1105,6 +1278,102 @@ describe("IRC", () => {
 			const fireAndForget = await bus.send({ from: "0-Sub", to: "Main2", body: "fyi" });
 			expect(fireAndForget.outcome).toBe("injected");
 			expect(disabledSpy).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("hub send batch injection", () => {
+		it("ordinary parent send during the first tool still runs the second and injects once on the next model request", async () => {
+			const { session, mock, executed, firstStarted, releaseFirst } = createBatchSession();
+			sessions.push(session);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: null });
+			registry.register({
+				id: "0-Child",
+				displayName: "task",
+				kind: "sub",
+				parentId: "Main",
+				session,
+			});
+
+			const running = session.prompt("go");
+			await firstStarted;
+			const send = await new HubTool(makeToolSession(registry, "Main")).execute("call-send", {
+				op: "send",
+				to: "0-Child",
+				message: "ordinary note",
+			});
+			expect(send.isError).toBeFalsy();
+			expect(session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			releaseFirst();
+			await running;
+			await session.waitForIdle();
+
+			expect(executed).toEqual(["first", "second"]);
+			expect(mock.calls.length).toBe(2);
+			expect(countMessageBody(mock.calls[1]?.context.messages, "ordinary note")).toBe(1);
+			expect(
+				session.agent.state.messages.filter(
+					message => message.role === "custom" && message.customType === "irc:incoming",
+				),
+			).toHaveLength(1);
+			expect(session.drainPendingIrcInboxMessages("0-Child")).toEqual([]);
+		});
+
+		it("interrupt:true parent send skips the second tool and injects steering on the next model request", async () => {
+			const { session, mock, executed, firstStarted, releaseFirst } = createBatchSession();
+			sessions.push(session);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: null });
+			registry.register({
+				id: "0-Child",
+				displayName: "task",
+				kind: "sub",
+				parentId: "Main",
+				session,
+			});
+
+			const running = session.prompt("go");
+			await firstStarted;
+			const send = await new HubTool(makeToolSession(registry, "Main")).execute("call-send", {
+				op: "send",
+				to: "0-Child",
+				message: "stop now",
+				interrupt: true,
+			});
+			expect(send.isError).toBeFalsy();
+			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
+			releaseFirst();
+			await running;
+			await session.waitForIdle();
+
+			expect(executed).toEqual(["first"]);
+			expect(mock.calls.length).toBe(2);
+			expect(countMessageBody(mock.calls[1]?.context.messages, "stop now")).toBe(1);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(
+				session.agent.state.messages.filter(
+					message => message.role === "custom" && message.customType === "irc:incoming",
+				),
+			).toHaveLength(0);
+		});
+
+		it("human user steering still skips remaining tools in the current batch", async () => {
+			const { session, executed, firstStarted, releaseFirst } = createBatchSession();
+			sessions.push(session);
+
+			const running = session.prompt("go");
+			await firstStarted;
+			session.agent.steer({
+				role: "user",
+				content: [{ type: "text", text: "user stop" }],
+				attribution: "user",
+				timestamp: Date.now(),
+				steering: true,
+			});
+			releaseFirst();
+			await running;
+			await session.waitForIdle();
+
+			expect(executed).toEqual(["first"]);
 		});
 	});
 });

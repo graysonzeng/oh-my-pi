@@ -162,6 +162,7 @@ export type HubRenderArgs = {
 	message?: string;
 	replyTo?: string;
 	await?: boolean;
+	interrupt?: boolean;
 	from?: string;
 	timeoutMs?: number;
 	peek?: boolean;

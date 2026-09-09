@@ -137,6 +137,7 @@ export function createPersistedSubagentReviverFactory(
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool,
+				workerClass: performanceClass === "worker",
 				systemPrompt: () => [init.systemPrompt],
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").

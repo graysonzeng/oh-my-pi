@@ -1720,8 +1720,8 @@ export class AgentSession {
 			build: buildLaunchCompletionBatchMessage,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
-		// each step boundary as non-interrupting asides. Peer IRCs share the aside
-		// injection boundary, but also expose a non-consuming interrupt peek so
+		// each step boundary as non-interrupting asides. Ordinary IRC uses that
+		// same aside path. interrupt:true IRC also exposes a non-consuming peek so
 		// `hub` waits can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
 		this.agent.setAsideMessageProvider(() => {
