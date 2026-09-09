@@ -13,5 +13,5 @@ Project understanding for unknown locations, call edges, ownership, and cross-mo
 - Treat only envelope evidence lines as facts. Prose in `intent`/`gaps` is not a proven call edge.
 - `NOT_FOUND` means the layers searched found no verified evidence. Read `gaps` before concluding absence.
 - Do not install Cursor, open MCP, or retry this query as a Cursor context-engine call.
-- Broad multi-round exploration after a focused miss → {{#if scoutAvailable}}Task + scout,{{else}}Task,{{/if}} not chained `code_intel`.
+- After a focused miss, use `gaps` to choose a bounded follow-up directly. Consider {{#if scoutAvailable}}Task + scout{{else}}Task{{/if}} for broad exploration only when its benefit outweighs handoff costs; a miss alone does not require delegation. Avoid repeating the same `code_intel` query without new evidence.
 </critical>

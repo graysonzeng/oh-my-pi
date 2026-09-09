@@ -13,5 +13,5 @@ Matches are newest-first and grouped by directory; directories end in `/`.
 </output>
 
 <avoid>
-Open-ended multi-round discovery → {{#if scoutAvailable}}Task + scout.{{else}}Task.{{/if}}
+Handle bounded discovery directly. Broad multi-round discovery → consider {{#if scoutAvailable}}Task + scout{{else}}Task{{/if}} only when delegation benefits outweigh handoff costs.
 </avoid>

@@ -41,27 +41,27 @@ describe("proactive delegation guidance", () => {
 	it("toggles auto-parallel guidance independently", async () => {
 		const rendered = await renderDelegationPrompt({ taskProactiveAutoParallel: true });
 
-		expect(rendered).toContain("Auto-parallelize only real width.");
-		expect(rendered).toContain("at least 2 independent runnable slices");
+		expect(rendered).toContain("Benefit before parallelism.");
+		expect(rendered).toContain("Independent slices are candidates, not a delegation mandate.");
 		expect(rendered).not.toContain("Escalate complete gated delivery to workflow.");
-		expect(rendered).not.toContain("Route through existing agents.");
+		expect(rendered).not.toContain("Route after deciding to delegate.");
 	});
 
 	it("toggles pipeline guidance independently", async () => {
 		const rendered = await renderDelegationPrompt({ taskProactivePipelineGuidance: true });
 
-		expect(rendered).not.toContain("Auto-parallelize only real width.");
+		expect(rendered).not.toContain("Benefit before parallelism.");
 		expect(rendered).toContain("Escalate complete gated delivery to workflow.");
-		expect(rendered).not.toContain("Route through existing agents.");
+		expect(rendered).not.toContain("Route after deciding to delegate.");
 	});
 
 	it("toggles stage routing guidance independently", async () => {
 		const rendered = await renderDelegationPrompt({ taskProactiveStageRouting: true });
 
-		expect(rendered).not.toContain("Auto-parallelize only real width.");
+		expect(rendered).not.toContain("Benefit before parallelism.");
 		expect(rendered).not.toContain("Escalate complete gated delivery to workflow.");
-		expect(rendered).toContain("Route through existing agents.");
-		expect(rendered).toContain("Mechanical implementation");
+		expect(rendered).toContain("Route after deciding to delegate.");
+		expect(rendered).toContain("Delegated mechanical work");
 		expect(rendered).toContain("`sonic`");
 	});
 
@@ -73,10 +73,10 @@ describe("proactive delegation guidance", () => {
 			taskProactiveStageRouting: true,
 		});
 
-		expect(rendered).toContain("Proactive multi-agent delegation is active.");
-		expect(rendered).toContain("Auto-parallelize only real width.");
+		expect(rendered).toContain("Proactive multi-agent delegation active;");
+		expect(rendered).toContain("Benefit before parallelism.");
 		expect(rendered).toContain("Escalate complete gated delivery to workflow.");
-		expect(rendered).toContain("Route through existing agents.");
+		expect(rendered).toContain("Route after deciding to delegate.");
 	});
 
 	it("gates every proactive block behind eagerTasks", async () => {
@@ -88,12 +88,10 @@ describe("proactive delegation guidance", () => {
 			taskProactiveStageRouting: true,
 		});
 
-		expect(rendered).toContain(
-			"Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask",
-		);
-		expect(rendered).not.toContain("Auto-parallelize only real width.");
+		expect(rendered).toContain("No subagents unless user or applicable AGENTS.md/skill explicitly requests");
+		expect(rendered).not.toContain("Benefit before parallelism.");
 		expect(rendered).not.toContain("Escalate complete gated delivery to workflow.");
-		expect(rendered).not.toContain("Route through existing agents.");
+		expect(rendered).not.toContain("Route after deciding to delegate.");
 	});
 
 	it("preflights and reuses an exact late reviewer when IRC is available", async () => {

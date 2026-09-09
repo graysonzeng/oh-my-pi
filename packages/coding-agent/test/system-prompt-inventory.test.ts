@@ -753,34 +753,6 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("- `rule://adaptive-delivery` ():");
 		expect(text).not.toContain("delivery-route skill");
 	});
-	it("omits the read-only scout delegation gate when scout is unavailable", async () => {
-		const opts = { toolNames: ["read", "bash", "task"], tools: TOOLS };
-		const withScout = (
-			await buildSystemPrompt({
-				...opts,
-				cwd: tempDir,
-				contextFiles: [],
-				skills: [],
-				rules: [],
-				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
-				scoutAvailable: true,
-			})
-		).systemPrompt.join("\n\n");
-		const withoutScout = (
-			await buildSystemPrompt({
-				...opts,
-				cwd: tempDir,
-				contextFiles: [],
-				skills: [],
-				rules: [],
-				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
-				scoutAvailable: false,
-			})
-		).systemPrompt.join("\n\n");
-
-		expect(withScout).toContain("one read-only scout while working is allowed");
-		expect(withoutScout).not.toContain("read-only scout");
-	});
 
 	it("does not require browser verification when the browser tool is absent (issue #8139)", async () => {
 		const opts = {

@@ -29,13 +29,14 @@ import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" 
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import consultInstructionsPrompt from "./prompts/system/consult-instructions.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
+import astraPersonality from "./prompts/system/personalities/astra.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
-import { usesCodexTaskPrompt } from "./task/prompt-policy";
+import { getSystemPromptPolicy } from "./task/prompt-policy";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -842,7 +843,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const cpuModelPromise = logger.time("getCpuModel", getCpuModel);
 	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
 	// "none" (explicit off — and every subagent) omits the block and skips the file lookup.
-	const bundledPersonality = personality === "none" ? "" : PERSONALITY_SPECS[personality].trim();
+	const systemPromptPolicy = getSystemPromptPolicy(model);
+	const bundledPersonality =
+		personality === "none"
+			? ""
+			: (personality === "default" && systemPromptPolicy === "astra"
+					? astraPersonality
+					: PERSONALITY_SPECS[personality]
+				).trim();
 	const personalityPromise: Promise<string> =
 		personality === "none"
 			? Promise.resolve("")
@@ -1003,7 +1011,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		cwd: promptCwd,
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
-		useCodexTaskPrompt: usesCodexTaskPrompt(model),
+		useCodexTaskPrompt: systemPromptPolicy === "codex",
+		useAstraSystemPrompt: systemPromptPolicy === "astra",
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",

@@ -1,8 +1,17 @@
 import { bareModelId, parseOpenAIModel, semverEqual } from "@oh-my-pi/pi-catalog/identity";
 
-/** Whether task guidance should follow Codex's GPT-5.6-specific delegation policy. */
-export function usesCodexTaskPrompt(modelId: string | undefined): boolean {
-	if (!modelId) return false;
+export type SystemPromptPolicy = "default" | "codex" | "astra";
+
+/**
+ * Model-specific system-prompt policy. GPT-5.6 keeps Codex task guidance;
+ * GPT-6.0 base (including `gpt-6-astra`) selects the Astra template.
+ * Mini/codex/other versions stay on the default template.
+ */
+export function getSystemPromptPolicy(modelId: string | undefined): SystemPromptPolicy {
+	if (!modelId) return "default";
 	const parsed = parseOpenAIModel(bareModelId(modelId));
-	return parsed !== null && semverEqual(parsed.version, "5.6");
+	if (!parsed) return "default";
+	if (semverEqual(parsed.version, "5.6")) return "codex";
+	if (semverEqual(parsed.version, "6.0") && parsed.variant === "base") return "astra";
+	return "default";
 }

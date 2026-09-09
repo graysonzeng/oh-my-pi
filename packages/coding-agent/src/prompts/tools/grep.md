@@ -12,5 +12,5 @@ Searches files/internal URLs: Rust regex, PCRE2 fallback.
 
 <critical>
 - MUST use instead of shell `grep`/`rg`.
-- Open-ended multi-round search MUST use {{#if scoutAvailable}}Task + scout,{{else}}Task,{{/if}} not chained calls.
+- Handle bounded searches directly. Consider {{#if scoutAvailable}}Task + scout{{else}}Task{{/if}} for broad multi-round exploration only when delegation benefits outweigh handoff costs.
 </critical>

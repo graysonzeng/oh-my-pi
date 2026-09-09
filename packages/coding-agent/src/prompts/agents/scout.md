@@ -1,6 +1,6 @@
 ---
 name: scout
-description: MUST be used for exploratory codebase research, rapid code analysis, and broad pattern searches. Fast read-only scout returning compressed context for handoff.
+description: Fast read-only scout for broad codebase exploration when delegation saves time or context. Handle bounded lookups directly; an unknown path alone does not require a scout.
 tools: read, grep, glob, ast_grep, code_intel, web_search
 model:
   - "gateway/deepseek-v4-flash:max"
