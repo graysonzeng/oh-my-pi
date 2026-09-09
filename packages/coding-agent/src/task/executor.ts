@@ -39,7 +39,6 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSoftRuntimeNoticeTemplate from "../prompts/system/subagent-soft-runtime-notice.md" with { type: "text" };
-import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
@@ -89,6 +88,7 @@ import {
 	type SubagentPerformanceClass,
 	type SubagentReviewMetrics,
 } from "./review-performance";
+import { assembleSubagentSystemPrompt } from "./subagent-prompt";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -3646,8 +3646,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				rules: options.rules,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+				systemPrompt: defaultPrompt =>
+					assembleSubagentSystemPrompt(defaultPrompt, {
 						agent: agent.systemPrompt,
 						context: options.context?.trim() ?? "",
 						planReference: options.planReference?.content ?? "",
@@ -3659,11 +3659,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						ircSelfId: ircEnabled ? id : "",
 						exploreClass: options.performanceClass === "explore",
 						reviewClass: options.performanceClass === "review",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
+					}),
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
 				prewalk,

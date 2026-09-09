@@ -196,6 +196,7 @@ function createParentToolSession(options: {
 function createSettings(cap: number): Settings {
 	return Settings.isolated({
 		"task.maxConcurrency": cap,
+		"task.agentModelOverrides": { task: `${MOCK_PROVIDER}/${MOCK_MODEL_ID}` },
 		// Deterministic runs: no wall-clock kill, no park timers, no auto-retry,
 		// no compaction/model-optimization churn, sync (non-async) fan-out.
 		"task.maxRuntimeMs": 0,
@@ -269,9 +270,6 @@ async function runBatch(options: BatchOptions): Promise<BatchResult> {
 				const result = await tool.execute(`bench-call-${namePrefix}-${index}`, {
 					agent: "task",
 					name: `bench-${namePrefix}-${index}`,
-					// Explicit model pattern: resolution hits the benchmock provider in
-					// the registry, so child sessions stream through the mock API.
-					model: `${MOCK_PROVIDER}/${MOCK_MODEL_ID}`,
 					task: "Return the string bench-ok.",
 				} as TaskParams);
 				const details = result.details as { results?: SingleResult[] } | undefined;

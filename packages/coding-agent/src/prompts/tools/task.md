@@ -16,14 +16,14 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - **Agent typing:** After deciding to delegate, pick each item's most specific available agent.{{#if scoutAvailable}} Delegated read-only research uses `scout`.{{/if}}{{#if sonicAvailable}} Delegated mechanical implementation uses `sonic`; complex implementation, design, or multi-file contracts use `task`.{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly. These routing rules do not require delegation.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
 - **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} use a separate scout only when broad exploration justifies the handoff, not merely because paths are unknown.{{/if}}
-- **Acceptance boundary:** Split by independently verifiable behavior, not repository ownership alone. Supply known paths, existing evidence, shared API inputs/outputs and failure semantics before dispatch. Keep changes requiring the same file with one integration owner.
+- **Acceptance boundary:** Split by independently verifiable behavior, not repository ownership alone. Supply known paths, versioned evidence fragments, failed attempts, modification boundaries, verification ownership, and shared API inputs/outputs before dispatch. Do not pass full parent history. Reviewers receive original materials (source, diff, acceptance), not the author's reasoning. Keep changes requiring the same file with one integration owner.
 - **Overlap:** Parallelize independent ownership. Concurrent work MUST stay on disjoint surfaces. While a subagent job is running, its declared target files are mid-run state — not success or failure evidence — and MUST NOT be overwritten by main or peers until delivery or cancellation. Waiting is allowed when blocked on those owned files. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
   1. Every task MUST skip validation (build/lint/tests) — validating mid-flight blocks agents on each other's edits.
   2. Decide cross-task contracts up front (e.g. the interface A implements and B consumes) and state them in the {{#if batchEnabled}}batch `context`{{else}}task{{/if}}, not left for agents to negotiate.
 
 # Inputs
 {{#if batchEnabled}}
-- `context`: Shared project state, constraints, and contracts. Applies to the entire batch; do not duplicate this background into individual tasks.
+- `context`: Shared project state, constraints, contracts, versioned evidence fragments, failed attempts, and verification ownership. Applies to the entire batch; do not duplicate this background into individual tasks or pass full parent history.
 - `tasks[]`: Array of subagents to spawn.
   - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
   - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
@@ -65,13 +65,13 @@ Subagents start blank — no conversation history.{{#if ircEnabled}} Ordinary pa
 Pass large payloads via `local://<path>` URIs, NEVER inline text.
 {{#if ircEnabled}}- NEVER ping an agent still running without new information; only send necessary recovery after a confirmed stall, park, or interrupt.{{/if}}
 - Label follow-up messages as corrections to the current assignment or explicit new work. Defer unrelated additions until the current result is delivered; an urgent replacement MUST state which acceptance criteria it supersedes. Never silently accumulate new criteria in a nearly finished run.
-- Reuse still-valid {{#if batchEnabled}}batch `context` / {{/if}}`local://` evidence instead of redundant re-exploration; re-read when it is stale, conflicts with current files, was truncated, after a tool-failure strategy change, or for independent acceptance.
+- Reuse still-valid {{#if batchEnabled}}batch `context` / {{/if}}`local://` evidence instead of re-gathering it; re-read when it is stale, incomplete, conflicts with current files, was truncated, after a tool-failure strategy change, or for independent acceptance.
 
 # Format Contracts
 {{#if batchEnabled}}
 `context` format:
 # Goal         ← what the batch accomplishes
-# Constraints  ← rules and session decisions
+# Constraints  ← rules, session decisions, modification boundaries, verification ownership
 # Contract     ← shared interfaces
 {{/if}}
 
