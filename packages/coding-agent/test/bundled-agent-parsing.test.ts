@@ -22,24 +22,25 @@ describe("bundled agent parsing", () => {
 		expect(reviewer?.maxEffort).toBe(Effort.XHigh);
 	});
 
-	it("routes scout, sonic, and librarian to deepseek-v4-flash max then grok-4.6 high", () => {
+	it("routes scout to deepseek-flash max then grok-4.6 high, and keeps sonic/librarian on the v4 flash pair", () => {
 		const scout = getBundledAgent("scout");
 		const sonic = getBundledAgent("sonic");
 		const librarian = getBundledAgent("librarian");
-		const fastPath = ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"];
+		const scoutPath = ["gateway/deepseek-flash:max", "gateway/grok-4.6:high"];
+		const v4FlashPath = ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"];
 
 		expect(scout).toBeDefined();
 		expect(scout?.source).toBe("bundled");
-		expect(scout?.model).toEqual(fastPath);
+		expect(scout?.model).toEqual(scoutPath);
 		expect(scout?.thinkingLevel).toBe(Effort.Medium);
 		expect(scout?.maxEffort).toBe(Effort.Medium);
 		expect(scout?.readSummarize).toBe(true);
 
-		expect(sonic?.model).toEqual(fastPath);
-		expect(librarian?.model).toEqual(fastPath);
+		expect(sonic?.model).toEqual(v4FlashPath);
+		expect(librarian?.model).toEqual(v4FlashPath);
 	});
 
-	it("resolves scout to deepseek-v4-flash:max first, then grok-4.6:high", () => {
+	it("resolves scout to deepseek-flash:max first, then grok-4.6:high", () => {
 		const flashOverlay = buildCustomModelOverlay(
 			"gateway",
 			"https://gateway.example.com/v1",
@@ -50,7 +51,7 @@ describe("bundled agent parsing", () => {
 			undefined,
 			undefined,
 			undefined,
-			{ id: "deepseek-v4-flash", name: "deepseek-v4-flash", api: "openai-completions" },
+			{ id: "deepseek-flash", name: "deepseek-flash", api: "openai-completions" },
 		);
 		const grokOverlay = buildCustomModelOverlay(
 			"gateway",
@@ -79,12 +80,12 @@ describe("bundled agent parsing", () => {
 		const settings = Settings.isolated();
 		const scout = getBundledAgent("scout");
 		const patterns = resolveAgentModelPatterns({ agentModel: scout?.model, settings });
-		expect(patterns).toEqual(["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"]);
+		expect(patterns).toEqual(["gateway/deepseek-flash:max", "gateway/grok-4.6:high"]);
 
 		const both = { getAvailable: () => [grok, flash] } as Parameters<typeof resolveModelOverride>[1];
 		const first = resolveModelOverride(patterns, both, settings);
 		expect(first.model?.provider).toBe("gateway");
-		expect(first.model?.id).toBe("deepseek-v4-flash");
+		expect(first.model?.id).toBe("deepseek-flash");
 		expect(first.explicitThinkingLevel).toBe(true);
 		expect(first.thinkingLevel).toBe(Effort.Max);
 
@@ -202,14 +203,20 @@ describe("bundled agent parsing", () => {
 			});
 		}
 
-		const fastPath = {
+		const scoutPath = {
+			patterns: ["gateway/deepseek-flash:max", "gateway/grok-4.6:high"],
+			role: undefined,
+		};
+		const v4FlashPath = {
 			patterns: ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"],
 			role: undefined,
 		};
-		expect(resolveAgentModelSelection({ agentModel: getBundledAgent("scout")?.model, settings })).toEqual(fastPath);
-		expect(resolveAgentModelSelection({ agentModel: getBundledAgent("sonic")?.model, settings })).toEqual(fastPath);
+		expect(resolveAgentModelSelection({ agentModel: getBundledAgent("scout")?.model, settings })).toEqual(scoutPath);
+		expect(resolveAgentModelSelection({ agentModel: getBundledAgent("sonic")?.model, settings })).toEqual(
+			v4FlashPath,
+		);
 		expect(resolveAgentModelSelection({ agentModel: getBundledAgent("librarian")?.model, settings })).toEqual(
-			fastPath,
+			v4FlashPath,
 		);
 	});
 });

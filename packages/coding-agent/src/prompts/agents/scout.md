@@ -3,7 +3,7 @@ name: scout
 description: Fast read-only scout for broad codebase exploration when delegation saves time or context. Handle bounded lookups directly; an unknown path alone does not require a scout.
 tools: read, grep, glob, ast_grep, code_intel, web_search
 model:
-  - "gateway/deepseek-v4-flash:max"
+  - "gateway/deepseek-flash:max"
   - "gateway/grok-4.6:high"
 thinking-level: medium
 max-effort: medium

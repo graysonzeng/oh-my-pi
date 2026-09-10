@@ -61,10 +61,13 @@ describe("getSystemPromptPolicy", () => {
 			["gateway/grok-4.6", "concise"],
 			["deepseek-v4-flash", "concise"],
 			["openrouter/deepseek/deepseek-v4-flash", "concise"],
+			["deepseek-flash", "concise"],
+			["gateway/deepseek-flash", "concise"],
 			["grok-4.60", "default"],
 			["grok-4.6-fast", "default"],
 			["deepseek-v4-pro", "default"],
 			["deepseek-v4-flash-preview", "default"],
+			["deepseek-flash-v4", "default"],
 		];
 		for (const [modelId, policy] of cases) {
 			expect(getSystemPromptPolicy(modelId), String(modelId)).toBe(policy);

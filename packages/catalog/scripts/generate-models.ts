@@ -40,6 +40,7 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	DEEPSEEK_CURATED_FALLBACK_MODELS,
 	fetchWellKnownModels,
 	GMI_CLOUD_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
@@ -687,6 +688,13 @@ async function generateModels() {
 	}
 
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	// Seed DeepSeek V4.1 Flash (`deepseek-flash`) while models.dev still only
+	// lists the retired `deepseek-v4-flash` ids. Unshift so a metadata-sparse
+	// live `/v1/models` row cannot replace the documented card. Skip when
+	// models.dev already ships the id so upstream metadata wins.
+	if (!modelsDevModels.some(model => model.provider === "deepseek" && model.id === "deepseek-flash")) {
+		allModels.unshift(...DEEPSEEK_CURATED_FALLBACK_MODELS);
+	}
 	// Seed QwenCloud's documented Token Plan models when credentialed
 	// discovery is unavailable. A successful `/models` response is authoritative
 	// for the subscribed edition and must not be widened by the fallback.

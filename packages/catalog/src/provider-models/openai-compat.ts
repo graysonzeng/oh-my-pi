@@ -1965,6 +1965,41 @@ export function aimlApiModelManagerOptions(
 // 6.5 DeepSeek
 // ---------------------------------------------------------------------------
 
+/**
+ * Official DeepSeek V4.1 Flash (`deepseek-flash`). Live on api.deepseek.com
+ * as of 2026-09-10 but not yet in models.dev, which still lists only the
+ * retired `deepseek-v4-flash` / vision-exp ids. Seeded so generation without
+ * a DeepSeek key, and generation whose live `/v1/models` row is metadata-sparse,
+ * still ships the documented id. Deduped behind a models.dev row once one
+ * appears. Pricing is the documented off-peak USD / 1M-token card
+ * (https://api-docs.deepseek.com/quick_start/pricing); peak hours are 2×.
+ * Context, output, and vision match the same page.
+ */
+export const DEEPSEEK_CURATED_FALLBACK_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "deepseek-flash",
+		name: "DeepSeek V4.1 Flash",
+		api: "openai-completions",
+		provider: "deepseek",
+		baseUrl: "https://api.deepseek.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+		compat: {
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			maxTokensField: "max_tokens",
+			supportsToolChoice: false,
+			extraBody: { thinking: { type: "enabled" } },
+			reasoningContentField: "reasoning_content",
+			requiresReasoningContentForToolCalls: true,
+			requiresAssistantContentForToolCalls: true,
+		},
+	},
+];
+
 export interface DeepSeekModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -2310,7 +2345,7 @@ export function stripFireworksDeepSeekThinkingToggle(
 	model: ModelSpec<"openai-completions">,
 	publicModelId: string,
 ): ModelSpec<"openai-completions"> {
-	if (!publicModelId.startsWith("deepseek-v4")) return model;
+	if (!publicModelId.startsWith("deepseek-v4") && !isDeepseekV4FlashModelId(publicModelId)) return model;
 	const compat = model.compat;
 	if (!compat?.extraBody || !("thinking" in compat.extraBody)) return model;
 
@@ -6574,9 +6609,10 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 	}),
 	// --- DeepSeek ---
 	openAiCompletionsDescriptor("deepseek", "deepseek", "https://api.deepseek.com", {
-		// Only ship the v4 family as built-ins; older deepseek-chat / deepseek-reasoner
-		// ids are kept off the catalog until the issue thread asks for them.
-		filterModel: (id, m) => m.tool_call === true && id.startsWith("deepseek-v4"),
+		// Ship the v4 family plus the V4.1 `deepseek-flash` id; older
+		// deepseek-chat / deepseek-reasoner ids stay off the catalog until
+		// the issue thread asks for them.
+		filterModel: (id, m) => m.tool_call === true && (id.startsWith("deepseek-v4") || id === "deepseek-flash"),
 		compat: {
 			// DeepSeek V4 effort remapping is derived in model-thinking metadata; this
 			// descriptor keeps only transport-shape compat.

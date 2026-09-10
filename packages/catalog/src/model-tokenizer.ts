@@ -4,6 +4,7 @@ import type { ModelTokenizer } from "./types";
 const DEEPSEEK_V3_ALIASES: Record<string, true> = {
 	"deepseek-chat": true,
 	"deepseek-reasoner": true,
+	"deepseek-flash": true,
 };
 const KIMI_K2_ALIASES: Record<string, true> = {
 	"kimi-for-coding": true,

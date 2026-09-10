@@ -103,12 +103,17 @@ export const isDeepseekModelIdOrName = memo((value: string): boolean => {
 });
 
 /**
- * DeepSeek V4 Flash SKU in any host/namespace form (`deepseek-v4-flash`, dated
- * `deepseek-v4-flash-0731`, `deepseek-ai/DeepSeek-V4-Flash`). Effort policy
- * uses this identity to enforce the model-wide mandatory `max` tier.
+ * DeepSeek Flash SKU in any host/namespace form (`deepseek-v4-flash`, dated
+ * `deepseek-v4-flash-0731`, `deepseek-ai/DeepSeek-V4-Flash`, official V4.1
+ * `deepseek-flash`). Effort policy uses this identity to enforce the
+ * model-wide mandatory `max` tier. Does not match `deepseek-flash-v4`
+ * (Yolo-Auto's unrelated SKU).
  */
 export const isDeepseekV4FlashModelId = memo((modelId: string): boolean => {
-	return bareModelId(modelId).toLowerCase().includes("deepseek-v4-flash");
+	const bare = bareModelId(modelId).toLowerCase();
+	if (bare.includes("deepseek-v4-flash")) return true;
+	const untagged = bare.split(":")[0] ?? bare;
+	return untagged === "deepseek-flash";
 });
 
 /** Xiaomi MiMo family by id or display name. */

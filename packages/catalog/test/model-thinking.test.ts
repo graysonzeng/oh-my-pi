@@ -223,6 +223,23 @@ describe("model thinking derivation", () => {
 		expect(openRouterAnthropic.thinking?.effortMap).toBeUndefined();
 	});
 
+	it("treats official deepseek-flash as mandatory max-only Flash, not Yolo-Auto's ladder", () => {
+		const flash = createModel({
+			id: "deepseek-flash",
+			api: "openai-completions",
+			provider: "deepseek",
+			baseUrl: "https://api.deepseek.com",
+		});
+		expect(flash.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
+		expect(clampThinkingLevelForModel(flash, Effort.Low)).toBe(Effort.Max);
+		expect(() => requireSupportedEffort(flash, Effort.High)).toThrow(/Supported efforts: max/);
+	});
+
 	it("derives Anthropic adaptive thinking for SAP hai-proxy version-first Claude ids", () => {
 		const opus48 = createModel({
 			id: "anthropic--claude-4.8-opus",
