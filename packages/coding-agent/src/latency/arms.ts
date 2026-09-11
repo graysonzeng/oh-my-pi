@@ -275,6 +275,7 @@ export type LatencyQualityStopReason =
 	| "completion_drop"
 	| "rework_rise"
 	| "missing_attribution"
+	| "missing_quality"
 	| "cost_breach"
 	| "latency_miss"
 	| "spawned_agents_breach"
@@ -292,11 +293,13 @@ export type LatencyQualityStopDecision =
  * Covers every documented threshold (design A §6.5): P0/P1 zero-tolerance, completion drop,
  * rework rise, cost P50/P95 multiples, latency improvement, and spawned-agent P95 multiple.
  * Missing attribution is itself a stop: an unregistered multi-arm state cannot be rolled back
- * causally, so it fails closed.
+ * causally, so it fails closed. `requireQualityMetrics` (off by default) is for cohort
+ * promotion: omitted completion/rework must not pass as if those thresholds were met.
  */
 export function evaluateLatencyQualityStop(input: {
 	treatmentAttributedP0P1Escapes: number;
 	attributionKnown: boolean;
+	requireQualityMetrics?: boolean;
 	completionDropPp?: number;
 	reworkRisePct?: number;
 	costP50Multiple?: number;
@@ -341,6 +344,12 @@ export function evaluateLatencyQualityStop(input: {
 	}
 	if ((input.dshA4CapViolations ?? 0) > 0) {
 		return { stop: true, reason: "dsh_a4_cap" };
+	}
+	if (
+		input.requireQualityMetrics === true &&
+		(typeof input.completionDropPp !== "number" || typeof input.reworkRisePct !== "number")
+	) {
+		return { stop: true, reason: "missing_quality" };
 	}
 	if (input.dshMinSampleMet === false) return { stop: false, reason: null };
 	if (
@@ -387,10 +396,10 @@ export const LATENCY_ROLLOUT_DECISION_KIND = "latency-rollout-decision" as const
 
 export interface LatencyRolloutObservedV1 {
 	completion: boolean;
-	repairCycles: number;
-	treatmentAttributedP0P1Escapes: number;
+	repairCycles: number | null;
+	treatmentAttributedP0P1Escapes: number | null;
 	costUsd: number | null;
-	stageTimeMs: number;
+	stageTimeMs: number | null;
 	spawnedAgents: number | null;
 }
 
@@ -476,8 +485,9 @@ export function buildLatencyRolloutDecision(input: {
 		attributionKnown = registeredCombination;
 	}
 	const decision = evaluateLatencyQualityStop({
-		treatmentAttributedP0P1Escapes: input.observed.treatmentAttributedP0P1Escapes,
+		treatmentAttributedP0P1Escapes: input.observed.treatmentAttributedP0P1Escapes ?? 0,
 		attributionKnown,
+		requireQualityMetrics: input.cohort !== undefined,
 		completionDropPp: input.cohort?.completionDropPp,
 		reworkRisePct: input.cohort?.reworkRisePct,
 		costP50Multiple: input.cohort?.costP50Multiple,

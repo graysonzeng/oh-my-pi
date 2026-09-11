@@ -1,9 +1,11 @@
-/** Bundled reviewer-class agents whose request budget must fire before the 30m wall. */
+/** Dedicated reviewer-class agents whose request budget must fire before the 30m wall. */
 export const REVIEWER_SOFT_REQUEST_BUDGET: Record<string, number> = {
 	reviewer: 80,
 	"subagent-sol": 80,
 	"sol-xhigh-reviewer": 80,
 	"security-reviewer": 80,
+	"grok46-reviewer": 80,
+	"flash-reviewer": 80,
 };
 
 const EXPLORE_AGENT_NAMES: Record<string, true> = {

@@ -187,4 +187,47 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.cacheRead).toBe(200);
 		expect(usage.cost).toBeCloseTo(18, 8);
 	});
+
+	it("keeps billed cost from off-leaf entries after the current branch is cut back", async () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const firstAssistantId = session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "first" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4",
+			usage: {
+				input: 1,
+				output: 2,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3,
+				cost: { input: 1, output: 8, cacheRead: 0, cacheWrite: 0, total: 9 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendMessage({ role: "user", content: "again", timestamp: 3 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "second" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4",
+			usage: {
+				input: 1,
+				output: 2,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3,
+				cost: { input: 1, output: 8, cacheRead: 0, cacheWrite: 0, total: 9 },
+			},
+			stopReason: "stop",
+			timestamp: 4,
+		});
+		expect(session.getUsageStatistics().cost).toBeCloseTo(18, 8);
+		await session.branch(firstAssistantId);
+		expect(session.getUsageStatistics().cost).toBeCloseTo(18, 8);
+	});
 });

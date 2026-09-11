@@ -206,6 +206,7 @@ import {
 	LATENCY_BASELINE_COHORT_KEY,
 	LatencyRolloutCohortStore,
 	replayObservations,
+	resolveOrdinaryLatencyObservationFields,
 	summarizeDshDimensionMetrics,
 } from "../latency/rollout-cohort";
 import type { DaemonCompletionNotification } from "../launch/protocol";
@@ -6259,6 +6260,10 @@ export class AgentSession {
 			const endedAt = new Date().toISOString();
 			const firedArms = this.getFiredLatencyArms();
 			const ordinaryJoin = this.#ordinarySessionObservationJoin(endedAt);
+			const ordinaryCore = resolveOrdinaryLatencyObservationFields({
+				workMetrics: ordinaryJoin.workMetrics,
+				costUsd: this.sessionManager.getUsageStatistics().cost,
+			});
 			const slices = snapshot.dimensions?.filter(slice => slice.role !== "excluded") ?? [];
 			if (slices.length > 0) {
 				for (const slice of slices) {
@@ -6272,11 +6277,7 @@ export class AgentSession {
 						key: slice.cohortKey ?? deriveLatencyCohortKey(snapshot),
 						status: exitKind ?? "unknown",
 						completed,
-						repairCycles: 0,
-						p0p1Escapes: 0,
-						costUsd: null,
-						stageTimeMs: null,
-						spawnedAgents: null,
+						...ordinaryCore,
 						firedArms,
 						endedAt,
 						event_id: eventId,
@@ -6322,11 +6323,7 @@ export class AgentSession {
 					key: deriveLatencyCohortKey(snapshot),
 					status: exitKind ?? "unknown",
 					completed,
-					repairCycles: 0,
-					p0p1Escapes: 0,
-					costUsd: null,
-					stageTimeMs: null,
-					spawnedAgents: null,
+					...ordinaryCore,
 					firedArms,
 					endedAt,
 					phase: "metrics",
@@ -6340,11 +6337,11 @@ export class AgentSession {
 			if (active.length === 0 && slices.length === 0) return;
 			const observed = {
 				completion: completed,
-				repairCycles: 0,
-				treatmentAttributedP0P1Escapes: 0,
-				costUsd: null,
-				stageTimeMs: 0,
-				spawnedAgents: null,
+				repairCycles: ordinaryCore.repairCycles,
+				treatmentAttributedP0P1Escapes: ordinaryCore.p0p1Escapes,
+				costUsd: ordinaryCore.costUsd,
+				stageTimeMs: ordinaryCore.stageTimeMs,
+				spawnedAgents: ordinaryCore.spawnedAgents,
 			};
 			const persistStop = (decision: LatencyRolloutDecisionV1): void => {
 				if (!decision.decision.stop) return;

@@ -40,6 +40,13 @@ describe("subagent performance class", () => {
 			"review",
 		);
 		expect(resolveSubagentPerformanceClass({ agentName: "task" })).toBe("worker");
+		expect(resolveSubagentPerformanceClass({ agentName: "grok46-reviewer" })).toBe("review");
+		expect(resolveSubagentPerformanceClass({ agentName: "flash-reviewer", spawnShadowReview: "off" })).toBe("review");
+		expect(resolveSubagentPerformanceClass({ agentName: "subagent-astra" })).toBe("worker");
+		expect(resolveSubagentPerformanceClass({ agentName: "subagent-astra", spawnShadowReview: "off" })).toBe("worker");
+		expect(resolveSubagentPerformanceClass({ agentName: "subagent-astra", spawnShadowReview: "code" })).toBe(
+			"review",
+		);
 		expect(resolveSubagentPerformanceClass({ agentName: "subagent-grok", spawnShadowReview: "off" })).toBe("worker");
 		expect(resolveSubagentPerformanceClass({ agentName: "subagent-grok", spawnShadowReview: "code" })).toBe("review");
 		expect(

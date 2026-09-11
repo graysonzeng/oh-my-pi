@@ -204,6 +204,26 @@ export function buildOrdinarySessionObservationJoin(
 	};
 }
 
+/**
+ * Ordinary sessions have no workflow repair ledger, finding tracker, or spawn
+ * census. Unknown quality counters stay null so cohort aggregation cannot
+ * treat missing evidence as zero. `costUsd` must be file-wide billed usage
+ * (`SessionManager.getUsageStatistics`), not live-message `getSessionStats().cost`,
+ * which drops rewound turns. Wall-clock copies a known runtime value only.
+ */
+export function resolveOrdinaryLatencyObservationFields(input: {
+	workMetrics: OrdinaryWorkMetricsV1;
+	costUsd?: number | null;
+}): Pick<LatencyRolloutObservationV1, "repairCycles" | "p0p1Escapes" | "costUsd" | "stageTimeMs" | "spawnedAgents"> {
+	return {
+		repairCycles: null,
+		p0p1Escapes: null,
+		costUsd: nullableCount(input.costUsd),
+		stageTimeMs: input.workMetrics.wallClockMs,
+		spawnedAgents: null,
+	};
+}
+
 export interface DshArmAssignmentRecordV1 {
 	kind: typeof DSH_ARM_ASSIGNMENT_KIND;
 	event_id: string;
@@ -348,8 +368,9 @@ export function summarizeLatencyCohort(observations: LatencyRolloutObservationV1
 /**
  * Compare a treatment cohort against the baseline cohort and produce the
  * guardrail inputs for `evaluateLatencyQualityStop`. Each metric is emitted
- * only when both sides have a real value; a missing side disables that
- * threshold rather than inventing a number.
+ * only when both sides have a real value; a missing side omits that field
+ * rather than inventing a number. Promotion evaluation fail-closes on omitted
+ * completion/rework instead of treating absence as a pass.
  */
 export function computeLatencyCohortMetrics(
 	treatment: LatencyCohortSummary,

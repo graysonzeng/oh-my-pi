@@ -160,6 +160,49 @@ describe("latency quality stop", () => {
 		).toEqual({ stop: true, reason: "rework_rise" });
 	});
 
+	it("fails closed on omitted completion or rework only when promotion requires them", () => {
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				requireQualityMetrics: true,
+			}),
+		).toEqual({ stop: true, reason: "missing_quality" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				requireQualityMetrics: true,
+				completionDropPp: 1,
+			}),
+		).toEqual({ stop: true, reason: "missing_quality" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				requireQualityMetrics: true,
+				reworkRisePct: 5,
+			}),
+		).toEqual({ stop: true, reason: "missing_quality" });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				requireQualityMetrics: true,
+				completionDropPp: 1,
+				reworkRisePct: 5,
+			}),
+		).toEqual({ stop: false, reason: null });
+		expect(
+			evaluateLatencyQualityStop({
+				treatmentAttributedP0P1Escapes: 0,
+				attributionKnown: true,
+				requireQualityMetrics: true,
+				completionDropPp: 3,
+			}),
+		).toEqual({ stop: true, reason: "completion_drop" });
+	});
+
 	it("covers cost P50/P95, latency improvement, and spawned-agent thresholds", () => {
 		expect(
 			evaluateLatencyQualityStop({
@@ -365,6 +408,61 @@ describe("latency quality stop", () => {
 		expect(cohortBreach.decision).toEqual({ stop: true, reason: "completion_drop" });
 	});
 
+	it("fails closed when a promotion cohort omits completion or rework", () => {
+		const snapshot = freezeLatencyArmSnapshot({
+			arms: { ...emptyLatencyArms(), bash_advisory: true, bash_bounded_injection: true },
+			combinedArmId: "combined:bash_advisory+bash_bounded_injection",
+			childArms: ["bash_advisory", "bash_bounded_injection"],
+			codeRevision: "rev-1",
+			configHash: "cfg-1",
+			frozenAt: "2026-08-07T00:00:00.000Z",
+		});
+		const observed = {
+			completion: true,
+			repairCycles: 0,
+			treatmentAttributedP0P1Escapes: 0,
+			costUsd: 0.1,
+			stageTimeMs: 1000,
+			spawnedAgents: null,
+		};
+		expect(
+			buildLatencyRolloutDecision({
+				workflowId: "wf-incomplete-empty",
+				status: "completed",
+				snapshot,
+				observed,
+				cohort: {},
+			}).decision,
+		).toEqual({ stop: true, reason: "missing_quality" });
+		expect(
+			buildLatencyRolloutDecision({
+				workflowId: "wf-incomplete-completion",
+				status: "completed",
+				snapshot,
+				observed,
+				cohort: { completionDropPp: 1 },
+			}).decision,
+		).toEqual({ stop: true, reason: "missing_quality" });
+		expect(
+			buildLatencyRolloutDecision({
+				workflowId: "wf-incomplete-rework",
+				status: "completed",
+				snapshot,
+				observed,
+				cohort: { reworkRisePct: 5 },
+			}).decision,
+		).toEqual({ stop: true, reason: "missing_quality" });
+		expect(
+			buildLatencyRolloutDecision({
+				workflowId: "wf-complete-cohort",
+				status: "completed",
+				snapshot,
+				observed,
+				cohort: { completionDropPp: 1, reworkRisePct: 5 },
+			}).decision,
+		).toEqual({ stop: false, reason: null });
+	});
+
 	it("fails closed on an unregistered multi-arm snapshot", () => {
 		const unregistered = freezeLatencyArmSnapshot({
 			arms: { ...emptyLatencyArms(), context_optimization: true, read_dedupe: true },
@@ -471,7 +569,9 @@ describe("latency quality stop", () => {
 			stop: true,
 			reason: "spawned_agents_breach",
 		});
-		expect(buildLatencyRolloutDecision({ ...base, cohort: { completionDropPp: 1 } }).decision).toEqual({
+		expect(
+			buildLatencyRolloutDecision({ ...base, cohort: { completionDropPp: 1, reworkRisePct: 5 } }).decision,
+		).toEqual({
 			stop: false,
 			reason: null,
 		});

@@ -13,6 +13,7 @@ import {
 	type LatencyRolloutObservationV1,
 	parseCohortFileRecords,
 	percentile,
+	resolveOrdinaryLatencyObservationFields,
 	summarizeDshDimensionMetrics,
 	summarizeLatencyCohort,
 } from "../../src/latency/rollout-cohort";
@@ -104,6 +105,66 @@ describe("ordinary session observation join", () => {
 		expect(parsed.observations[0]?.ordinaryAttribution).toBeUndefined();
 		expect(parsed.observations[0]?.verifier).toBeUndefined();
 		expect(parsed.observations[0]?.workMetrics).toBeUndefined();
+	});
+});
+
+describe("resolveOrdinaryLatencyObservationFields", () => {
+	it("copies known cost and wall-clock and keeps unknown quality counters null", () => {
+		const join = buildOrdinarySessionObservationJoin({
+			startedAt: "2026-08-26T00:00:00.000Z",
+			endedAt: "2026-08-26T00:00:10.000Z",
+		});
+		const fields = resolveOrdinaryLatencyObservationFields({
+			workMetrics: join.workMetrics,
+			costUsd: 1.25,
+		});
+		expect(fields).toEqual({
+			repairCycles: null,
+			p0p1Escapes: null,
+			costUsd: 1.25,
+			stageTimeMs: 10_000,
+			spawnedAgents: null,
+		});
+		const serialized = JSON.parse(
+			JSON.stringify({
+				schemaVersion: 1,
+				kind: LATENCY_ROLLOUT_OBSERVATION_KIND,
+				key: "baseline",
+				status: "completed",
+				completed: true,
+				...fields,
+				firedArms: [],
+				endedAt: "2026-08-26T00:00:10.000Z",
+				...join,
+			}),
+		) as LatencyRolloutObservationV1;
+		expect(serialized.repairCycles).toBeNull();
+		expect(serialized.p0p1Escapes).toBeNull();
+		expect(serialized.spawnedAgents).toBeNull();
+		expect(serialized.costUsd).toBe(1.25);
+		expect(serialized.stageTimeMs).toBe(10_000);
+		expect(serialized.workMetrics?.wallClockMs).toBe(10_000);
+	});
+
+	it("does not invent zero cost or wall-clock when those signals are missing", () => {
+		const join = buildOrdinarySessionObservationJoin({ endedAt: "2026-08-26T00:00:00.000Z" });
+		expect(
+			resolveOrdinaryLatencyObservationFields({
+				workMetrics: join.workMetrics,
+			}),
+		).toEqual({
+			repairCycles: null,
+			p0p1Escapes: null,
+			costUsd: null,
+			stageTimeMs: null,
+			spawnedAgents: null,
+		});
+		expect(
+			resolveOrdinaryLatencyObservationFields({
+				workMetrics: join.workMetrics,
+				costUsd: 0,
+			}).costUsd,
+		).toBe(0);
 	});
 });
 
