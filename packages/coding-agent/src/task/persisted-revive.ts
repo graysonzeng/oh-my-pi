@@ -14,6 +14,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+import { resolveRequireYieldTool, resolveSubagentPerformanceClass } from "./review-performance";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -80,6 +81,9 @@ export function createPersistedSubagentReviverFactory(
 			return undefined;
 		}
 		const init = peek.init;
+		const performanceClass =
+			init.performanceClass ?? resolveSubagentPerformanceClass({ agentName: init.agent ?? ref.displayName });
+		const requireYieldTool = resolveRequireYieldTool(performanceClass);
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
 		// assuming a fixed level.
@@ -97,6 +101,7 @@ export function createPersistedSubagentReviverFactory(
 		// createSubagentSettings default).
 		const subagentSettings = createSubagentSettings(ctx.settings, {
 			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			...(init.outputTruncation === false ? { "modelOptimization.outputTruncation.enabled": false } : undefined),
 			...(init.advisor
 				? {
 						"advisor.enabled": true,
@@ -169,7 +174,8 @@ export function createPersistedSubagentReviverFactory(
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
-				requireYieldTool: true,
+				requireYieldTool,
+				workerClass: performanceClass === "worker",
 				systemPrompt: () => [init.systemPrompt],
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
@@ -227,6 +233,8 @@ export function createPersistedSubagentReviverFactory(
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				artifactsDir: ctx.session.sessionFile?.slice(0, -6),
+				performanceClass,
+				settings: ctx.settings,
 			});
 			return session;
 		};

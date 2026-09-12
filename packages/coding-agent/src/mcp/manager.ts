@@ -565,6 +565,8 @@ export class MCPManager {
 
 		// Prepare connection tasks
 		const connectionTasks: ConnectionTask[] = [];
+		/** Servers with `lazy: true` — config kept, no transport at startup. */
+		const lazyServers: Array<{ name: string; config: MCPServerConfig }> = [];
 
 		for (const [name, config] of Object.entries(configs)) {
 			if (sources[name]) {
@@ -589,11 +591,10 @@ export class MCPManager {
 				continue;
 			}
 
-			statusServerNames.push(name);
-
 			// Validate config
 			const validationErrors = validateServerConfig(name, config);
 			if (validationErrors.length > 0) {
+				statusServerNames.push(name);
 				const message = validationErrors.join("; ");
 				errors.set(name, message);
 				validationFailures.push({ name, message });
@@ -605,6 +606,16 @@ export class MCPManager {
 			// and falls back to cached/deferred tools.
 			this.#serverConfigs.set(name, config);
 			const connectionEpoch = this.#epoch;
+
+			// Explicit lazy: never open a transport at startup. Tools come from
+			// MCPToolCache as DeferredMCPTool; first execute (or manual reconnect)
+			// opens the real connection. Unrelated to tool loadMode/discoverable.
+			if (config.lazy === true) {
+				lazyServers.push({ name, config });
+				continue;
+			}
+
+			statusServerNames.push(name);
 
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
@@ -736,6 +747,23 @@ export class MCPManager {
 			for (const { name, message } of validationFailures) {
 				notify(createMcpStartupFailure(name, message, sources[name]));
 			}
+		}
+
+		// Mount cached tools for lazy servers without ever creating a transport.
+		// No cache → no fake tools; config/source stay available for /mcp status.
+		if (lazyServers.length > 0) {
+			await Promise.all(
+				lazyServers.map(async ({ name, config }) => {
+					const cached = this.toolCache ? await this.toolCache.get(name, config) : null;
+					if (!cached) return;
+					const source = this.#sources.get(name);
+					const reconnect = () => this.reconnectServer(name);
+					this.#replaceServerTools(
+						name,
+						DeferredMCPTool.fromTools(name, cached, () => this.ensureConnected(name), source, reconnect),
+					);
+				}),
+			);
 		}
 
 		if (connectionTasks.length > 0) {
@@ -986,6 +1014,33 @@ export class MCPManager {
 	}
 
 	/**
+	 * Ensure a server is connected, starting a single shared connect if needed.
+	 * Used by lazy DeferredMCPTool on first execute so concurrent calls reuse
+	 * one transport handshake.
+	 */
+	async ensureConnected(name: string): Promise<MCPServerConnection> {
+		try {
+			return await this.waitForConnection(name);
+		} catch {
+			// not connected / not pending
+		}
+
+		const config = this.#serverConfigs.get(name);
+		if (!config) {
+			throw new Error(`MCP server not connected: ${name}`);
+		}
+
+		// Reuse the reconnect path (manual) so concurrent callers share one
+		// attempt via #pendingReconnections and crash-breaker is not tripped
+		// by a deliberate first connect.
+		const connection = await this.reconnectServer(name, { manual: true });
+		if (!connection) {
+			throw new Error(`MCP server not connected: ${name}`);
+		}
+		return connection;
+	}
+
+	/**
 	 * Resolve auth and shell-command substitutions in config before connecting.
 	 * Pass `oauth: false` to skip OAuth credential injection (used by reauth's
 	 * unauthenticated probe, which must observe the server's bare 401).
@@ -1002,11 +1057,17 @@ export class MCPManager {
 	}
 
 	/**
-	 * Get all known server names (connected, connecting, or discovered).
+	 * Get all known server names (connected, connecting, discovered, or
+	 * lazy-held with config only).
 	 */
 	getAllServerNames(): string[] {
 		return Array.from(
-			new Set([...this.#sources.keys(), ...this.#connections.keys(), ...this.#pendingConnections.keys()]),
+			new Set([
+				...this.#sources.keys(),
+				...this.#connections.keys(),
+				...this.#pendingConnections.keys(),
+				...this.#serverConfigs.keys(),
+			]),
 		);
 	}
 
@@ -1277,8 +1338,8 @@ export class MCPManager {
 		connection.config = config;
 		if (source) connection._source = source;
 
-		// Bail out if the server was disconnected or the manager was reset
-		// while we were connecting (e.g. /mcp reload called disconnectAll).
+		// Bail out if this exact server definition was disconnected/replaced or
+		// the manager was reset while the transport handshake was in flight.
 		if (this.#serverConfigs.get(name) !== config || this.#epoch !== reconnectEpoch) {
 			this.#detachConnection(name, connection);
 			void disconnectServer(connection).catch(() => {});

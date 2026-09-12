@@ -1,9 +1,12 @@
 import { type BaseType, type } from "@oh-my-pi/omptype";
-import type { Usage } from "@oh-my-pi/pi-ai";
+import type { Effort, Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel, TaskEffort } from "../thinking";
+import type { SubagentRequestPhase, SubagentReviewMetrics, SubagentToolPhase } from "./review-performance";
 import type { NestedRepoPatch } from "./worktree";
+
+export type { SubagentRequestPhase, SubagentReviewMetrics, SubagentToolPhase };
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
@@ -84,6 +87,8 @@ export interface SubagentEventPayload {
 	event: AgentSessionEvent;
 }
 
+/** Terminal completion provenance for a subagent run. Distinct from lifecycle `status`. */
+export type SubagentCompletionKind = "completed" | "budget_stop" | "timeout" | "hard_abort";
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
 export interface SubagentLifecyclePayload {
 	id: string;
@@ -91,6 +96,8 @@ export interface SubagentLifecyclePayload {
 	agentSource: AgentSource;
 	description?: string;
 	status: "started" | "completed" | "failed" | "aborted";
+	/** Required on terminal status (completed/failed/aborted); omit on `started`. */
+	completionKind?: SubagentCompletionKind;
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;
@@ -118,6 +125,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -128,6 +136,7 @@ const taskItemSchemaIsolated = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"isolated?": "boolean",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 
@@ -149,6 +158,8 @@ export interface TaskItem {
 	tools?: string[];
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/** Request a code-review shadow cohort (`code`) or force it off. Non-explore `"code"` is also a review performance opt-in (80 req; task+omitted runtime cap has a 30 min ceiling). */
+	shadowReview?: "code" | "off";
 }
 
 export const taskSchema = type({
@@ -159,6 +170,7 @@ export const taskSchema = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"isolated?": "boolean",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskSchemaNoIsolation = type({
@@ -168,6 +180,7 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskSchemaBatch = type({
@@ -219,6 +232,7 @@ function createTaskSchema(options: {
 				"schemaMode?": '"permissive" | "strict"',
 				...toolsField,
 				"isolated?": "boolean",
+				"shadowReview?": '"code" | "off"',
 				"+": "delete",
 			});
 			return type.raw({
@@ -235,6 +249,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			"shadowReview?": '"code" | "off"',
 			"+": "delete",
 		});
 		return type.raw({
@@ -253,6 +268,7 @@ function createTaskSchema(options: {
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
 			"isolated?": "boolean",
+			"shadowReview?": '"code" | "off"',
 			"+": "delete",
 		});
 	}
@@ -264,6 +280,7 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
+		"shadowReview?": '"code" | "off"',
 		"+": "delete",
 	});
 }
@@ -319,6 +336,8 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+	/** Request a code-review shadow cohort (`code`) or force it off. Non-explore `"code"` is also a review performance opt-in (80 req; task+omitted runtime cap has a 30 min ceiling). */
+	shadowReview?: "code" | "off";
 }
 
 /**
@@ -381,13 +400,19 @@ export interface AgentDefinition {
 	spawns?: string[] | "*";
 	model?: string[];
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Maximum provider reasoning effort this agent may use, including caller overrides and fallback models. */
+	maxEffort?: Effort;
 	output?: unknown;
 	blocking?: boolean;
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
 	readSummarize?: boolean;
+	/** When `false`, the spawned session does not apply model-family tool-output truncation. */
+	outputTruncation?: boolean;
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;
+	/** Opt-in code-review shadow cohort. Only `"code"` is recognized. */
+	shadowReview?: "code";
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
 	advisor?: boolean | string;
 	source: AgentSource;
@@ -413,6 +438,9 @@ export interface YieldItem {
 	schemaOverridden?: boolean;
 }
 
+/** Live activity of a subagent, evidenced by real execution events observed by the run monitor. */
+export type AgentActivityPhase = "working" | "model" | "thinking" | "responding" | "tool";
+
 /** Progress tracking for a single agent */
 export interface AgentProgress {
 	index: number;
@@ -424,6 +452,27 @@ export interface AgentProgress {
 	assignment?: string;
 	description?: string;
 	lastIntent?: string;
+	/**
+	 * Live activity phase, evidenced only by real execution events observed by
+	 * the run monitor: assistant `message_start` → `model`, thinking stream
+	 * deltas → `thinking`, text/toolcall/image stream deltas → `responding`,
+	 * `tool_execution_start` → `tool` until the tool ends, and
+	 * every other execution event (turn boundaries, message ends, tool end,
+	 * auto-retry transitions) → `working`. Never reports a tool as still
+	 * running after its end event, and is cleared (undefined) once the run
+	 * settles into a terminal status. Optional so existing snapshots, fixtures,
+	 * and observers keep working — a UI must not invent a phase on its own.
+	 */
+	activityPhase?: AgentActivityPhase;
+	/**
+	 * `Date.now()` of the most recent real execution event observed (message /
+	 * stream-delta / tool / auto-retry events). NOT refreshed by progress
+	 * emission, the 150ms coalescing timer, or serving-model publication —
+	 * observers can therefore detect a stalled child by comparing this against
+	 * their own wall clock without conflating "still emitting snapshots" with
+	 * "still making progress". Optional; absent until the first event.
+	 */
+	lastActivityAtMs?: number;
 	currentTool?: string;
 	currentToolArgs?: string;
 	currentToolStartMs?: number;
@@ -493,6 +542,8 @@ export interface AgentProgress {
 	 * `extractedToolData.task` after that.
 	 */
 	inflightTaskDetails?: TaskToolDetails;
+	/** Reviewer-class request/tool/shadow latency sampled during the run. */
+	reviewMetrics?: SubagentReviewMetrics;
 }
 
 /** Result from a single agent execution */
@@ -519,6 +570,8 @@ export interface SingleResult {
 	tokens: number;
 	/** Count of assistant requests (assistant message_end events) across the run. */
 	requests: number;
+	/** Number of tool calls executed across the run when counted; omit when unknown. */
+	toolCalls?: number;
 	/** Latest per-turn context size at task completion. See `AgentProgress.contextTokens`. */
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. */
@@ -539,6 +592,12 @@ export interface SingleResult {
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
+	/**
+	 * Terminal provenance. Successful 1.5× forced-yield is `budget_stop` even when
+	 * `status`/`exitCode` still look completed. Timeout and grace budget abort
+	 * outrank a still-true `budgetStopRequested`.
+	 */
+	completionKind?: SubagentCompletionKind;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
 	/** Output path for the task result */
@@ -587,6 +646,8 @@ export interface SingleResult {
 	};
 	/** Output metadata for agent:// URL integration */
 	outputMeta?: { lineCount: number; charCount: number };
+	/** Reviewer-class request/tool/shadow latency sampled during the run. */
+	reviewMetrics?: SubagentReviewMetrics;
 }
 
 /** Tool details for TUI rendering */

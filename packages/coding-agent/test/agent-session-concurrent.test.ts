@@ -253,6 +253,47 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(session.isStreaming).toBe(false);
 	});
 
+	it("bounds explicit ordinary obligation continuations before settling blocked", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const authStorage = await AuthStorage.create(path.join(tempDir, "obligation-auth.db"));
+		try {
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "obligation-models.yml"));
+			authStorage.setRuntimeApiKey("anthropic", "test-key");
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+			session.registerOrdinaryTaskObligation({
+				id: "publish-artifact",
+				source: "extension",
+				status: "open",
+				label: "Publish the required artifact",
+			});
+
+			await session.prompt("Complete the work");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(4);
+			expect(
+				mock.calls[1]?.context.messages.some(message =>
+					typeof message.content === "string"
+						? message.content.includes("Publish the required artifact")
+						: message.content.some(
+								block => block.type === "text" && block.text.includes("Publish the required artifact"),
+							),
+				),
+			).toBe(true);
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	it("uses non-empty session_stop reason when additional context is empty", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({

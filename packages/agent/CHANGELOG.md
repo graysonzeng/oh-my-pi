@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added workflow-aware tool scheduling and recoverable structured-compaction metadata while retaining provider-native compaction.
+
 ## [18.1.18] - 2026-09-11
 
 ### Added

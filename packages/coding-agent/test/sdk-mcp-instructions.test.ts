@@ -26,6 +26,8 @@ import {
 // instructions and the installed Context Mode server's absent instructions.
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "instructions-mcp.ts");
 const MCP_TOOL_NAME = "mcp__instr_do_thing";
+const MCP_MAPPING_FALLBACK =
+	"Additional mounted MCP tool mappings were omitted to keep this prompt bounded. Inspect `xd://` for the exact current paths.";
 const MCP_ROUTE_SECTION = "## MCP Tool Routes";
 const CONTEXT_MODE_ROUTE = '- "ctx_execute" → `xd://mcp__context_mode_ctx_execute`';
 const CONTEXT_MODE_MCP_TOOL_NAME = "mcp__context_mode_ctx_execute";
@@ -83,7 +85,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		mock.restore();
 	});
 
-	it("folds server instructions into the prompt once deferred discovery connects", async () => {
+	it("folds server instructions into the prompt after the first deferred tool execution", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
@@ -106,20 +108,33 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			// instructions are not yet present.
 			expect(session.systemPrompt.join("\n")).not.toContain(SERVER_INSTRUCTIONS);
 
-			// Background connect + `refreshMCPTools` rebuild must surface the
-			// instructions. This is a genuine integration wait: discovery spawns
+			// Background connect + `refreshMCPTools` must mount the route without
+			// activating the server instructions. This is a genuine integration wait: discovery spawns
 			// the fixture as a real subprocess and connects asynchronously, and
 			// the SDK fires that work fire-and-forget with no completion promise
 			// or event exposed to await — so fake timers cannot drive it and we
 			// poll the live prompt with a generous ceiling, exiting the instant
-			// the rebuilt prompt carries the instructions.
+			// the rebuilt prompt carries the route.
 			const deadline = Date.now() + 12_000;
 			let prompt = session.systemPrompt.join("\n");
-			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
+			while (!prompt.includes(`xd://${MCP_TOOL_NAME}`) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				prompt = session.systemPrompt.join("\n");
 			}
 
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
+			const write = session.getToolByName("write");
+			expect(write).toBeDefined();
+			const result = await write!.execute("deferred-mcp-activation", {
+				path: `xd://${MCP_TOOL_NAME}`,
+				content: "{}",
+			});
+			expect(result.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
+
+			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
+				await Bun.sleep(50);
+				prompt = session.systemPrompt.join("\n");
+			}
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			// The instructions are framed under the MCP section, and guidance keeps
 			// the escaped original tool name while routing through the exact
@@ -223,12 +238,12 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			// cannot advance it, so retain the established polling bounds above.
 			const deadline = Date.now() + 12_000;
 			let prompt = session.systemPrompt.join("\n");
-			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
+			while (!prompt.includes(MCP_MAPPING_FALLBACK) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				prompt = session.systemPrompt.join("\n");
 			}
 
-			expect(prompt).toContain(SERVER_INSTRUCTIONS);
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
 			const renderedMappings = prompt.split("\n").filter(line => line.startsWith('- "row_'));
 			expect(renderedMappings).toHaveLength(64);
 			expect(renderedMappings[0]).toBe('- "row_aa" → `xd://mcp__instr_row_aa`');
@@ -313,15 +328,23 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		});
 		try {
 			const deadline = Date.now() + 12_000;
+			let activeNames = session.getActiveToolNames();
+			while (!activeNames.includes(MCP_TOOL_NAME) && Date.now() < deadline) {
+				await Bun.sleep(50);
+				activeNames = session.getActiveToolNames();
+			}
+
+			expect(activeNames).toContain(MCP_TOOL_NAME);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(MCP_TOOL_NAME);
 			let prompt = session.systemPrompt.join("\n");
+			expect(prompt).not.toContain("## MCP Server Instructions");
+			const tool = session.getToolByName(MCP_TOOL_NAME);
+			expect(tool).toBeDefined();
+			await tool!.execute("deferred-mcp-top-level-activation", {});
 			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				prompt = session.systemPrompt.join("\n");
 			}
-			const activeNames = session.getActiveToolNames();
-
-			expect(activeNames).toContain(MCP_TOOL_NAME);
-			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(MCP_TOOL_NAME);
 			expect(prompt).toContain("## MCP Server Instructions");
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			expect(prompt).not.toContain(`xd://${MCP_TOOL_NAME}`);

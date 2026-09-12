@@ -5,7 +5,18 @@
  * - rule://<name> - Reads rule content
  */
 import { getActiveRules } from "../capability/rule";
+import { getActiveSkills } from "../extensibility/skills";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+
+/** Fail-closed unknown-rule message. Suggests `skill://` only on an exact skill name match. */
+export function formatUnknownRuleError(ruleName: string, available: readonly string[]): string {
+	const availableStr = available.length > 0 ? available.join(", ") : "none";
+	const lines = [`Unknown rule: ${ruleName}`, `Available: ${availableStr}`];
+	if (getActiveSkills().some(skill => skill.name === ruleName)) {
+		lines.push(`Did you mean skill://${ruleName}?`);
+	}
+	return lines.join("\n");
+}
 
 export class RuleProtocolHandler implements ProtocolHandler {
 	readonly scheme = "rule";
@@ -22,8 +33,7 @@ export class RuleProtocolHandler implements ProtocolHandler {
 		const rule = rules.find(r => r.name === ruleName);
 		if (!rule) {
 			const available = rules.map(r => r.name);
-			const availableStr = available.length > 0 ? available.join(", ") : "none";
-			throw new Error(`Unknown rule: ${ruleName}\nAvailable: ${availableStr}`);
+			throw new Error(formatUnknownRuleError(ruleName, available));
 		}
 
 		return {

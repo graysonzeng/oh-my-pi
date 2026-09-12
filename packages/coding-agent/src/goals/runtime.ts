@@ -1,8 +1,17 @@
 import { escapeXmlText, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with { type: "text" };
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
+import goalFalseCompletionPrompt from "../prompts/goals/goal-false-completion.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
-import type { Goal, GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "./state";
+import type {
+	Goal,
+	GoalBudgetSteering,
+	GoalHostGateDecisionKind,
+	GoalHostGateState,
+	GoalModeState,
+	GoalRuntimeEvent,
+	GoalTokenUsage,
+} from "./state";
 
 export interface GoalRuntimeHost {
 	getState(): GoalModeState | undefined;
@@ -15,7 +24,10 @@ export interface GoalRuntimeHost {
 		content: string;
 		deliverAs?: "steer" | "followUp" | "nextTurn";
 	}): Promise<void>;
+	omitGoalTime?(): boolean;
+	markOmitGoalTimeFired?(): void;
 	now?(): number;
+	getPromptGeneration?(): number;
 }
 
 export interface GoalTurnSnapshot {
@@ -37,12 +49,25 @@ export interface GoalRuntimeSnapshot {
 
 export type GoalPromptKind = "active" | "continuation" | "budget-limit";
 
+function cloneHostGate(hostGate: GoalHostGateState | undefined): GoalHostGateState | undefined {
+	if (!hostGate) return undefined;
+	return {
+		...hostGate,
+		lastReasons: hostGate.lastReasons?.slice(),
+		lastGaps: hostGate.lastGaps?.slice(),
+	};
+}
+
 function cloneGoal(goal: Goal): Goal {
-	return { ...goal };
+	return { ...goal, hostGate: cloneHostGate(goal.hostGate) };
 }
 
 function cloneState(state: GoalModeState): GoalModeState {
 	return { ...state, goal: cloneGoal(state.goal) };
+}
+
+function emptyHostGate(): GoalHostGateState {
+	return { goalRevision: 0, pendingVerification: false, consecutiveContinueCount: 0 };
 }
 
 function budgetValue(goal: Goal): string {
@@ -76,19 +101,27 @@ export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage
 	);
 }
 
-export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
+export function renderGoalPrompt(
+	kind: GoalPromptKind,
+	goal: Goal,
+	options?: { omitTimeUsedSeconds?: boolean },
+): string {
 	const template =
 		kind === "active"
 			? goalModeActivePrompt
 			: kind === "continuation"
 				? goalContinuationPrompt
 				: goalBudgetLimitPrompt;
+	const omitTime = options?.omitTimeUsedSeconds === true && kind !== "budget-limit";
 	return prompt.render(template, {
 		objective: escapeXmlText(goal.objective),
 		tokensUsed: String(goal.tokensUsed),
 		tokenBudget: budgetValue(goal),
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
+		showTimeUsed: !omitTime,
+		lastNextStep: goal.hostGate?.lastNextStep ?? "",
+		hasLastNextStep: Boolean(goal.hostGate?.lastNextStep),
 	});
 }
 
@@ -117,9 +150,11 @@ function isAccountingStatus(goal: Goal): boolean {
 export class GoalRuntime {
 	readonly #host: GoalRuntimeHost;
 	#turnSnapshot: GoalTurnSnapshot | undefined;
+	#lastTurnId: string | undefined;
 	#wallClock: GoalWallClockSnapshot;
 	#budgetReportedFor: string | undefined;
 	#accountingTail: Promise<void> = Promise.resolve();
+	#inFlightNominations = new Map<string, { controller: AbortController; promise: Promise<void> }>();
 
 	constructor(host: GoalRuntimeHost) {
 		this.#host = host;
@@ -202,6 +237,7 @@ export class GoalRuntime {
 	}
 
 	onTurnStart(turnId: string, baselineUsage: GoalTokenUsage): void {
+		this.#lastTurnId = turnId;
 		this.#turnSnapshot = { turnId, baselineUsage: { ...baselineUsage } };
 		const state = this.#host.getState();
 		if (state?.enabled && isAccountingStatus(state.goal)) {
@@ -233,22 +269,38 @@ export class GoalRuntime {
 	}
 
 	async onTaskAborted(options?: { reason?: "interrupted" | "internal" }): Promise<void> {
+		this.cancelInFlightNominations(options?.reason ?? "interrupted");
 		const state = this.#host.getState();
 		const needsAccounting = state?.enabled && isAccountingStatus(state.goal);
 		const needsPause = options?.reason === "interrupted" && state?.enabled && state.goal.status === "active";
 		if (!needsAccounting && !needsPause) {
 			this.#turnSnapshot = undefined;
+			await this.recoverPendingVerification();
 			return;
 		}
 		await this.#withAccounting(async () => {
 			await this.#flushUsageLocked("suppressed", undefined, options?.reason === "internal");
 			this.#turnSnapshot = undefined;
-			if (options?.reason !== "interrupted") return;
+			if (options?.reason !== "interrupted") {
+				await this.#recoverPendingVerificationLocked();
+				return;
+			}
 			const cloned = this.#getStateClone();
 			if (!cloned?.enabled || cloned.goal.status !== "active") return;
 			cloned.enabled = false;
 			cloned.goal.status = "paused";
 			cloned.goal.updatedAt = this.#now();
+			if (cloned.goal.hostGate?.pendingVerification) {
+				cloned.goal.hostGate = {
+					...cloned.goal.hostGate,
+					pendingVerification: false,
+					nominationId: undefined,
+					turnId: undefined,
+					generation: undefined,
+					lastDecision: "continue",
+					lastNextStep: "verification interrupted; keep working from current repo evidence",
+				};
+			}
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(cloned, { persist: "goal_paused" });
@@ -375,8 +427,10 @@ export class GoalRuntime {
 			tokenBudget,
 			tokensUsed: 0,
 			timeUsedSeconds: 0,
+			headlessContinuationCount: 0,
 			createdAt: now,
 			updatedAt: now,
+			hostGate: emptyHostGate(),
 		};
 		return { enabled: true, mode: "active", goal };
 	}
@@ -402,6 +456,7 @@ export class GoalRuntime {
 		const objective = input.objective.trim();
 		if (!objective) throw new Error("objective is required when op=replace");
 		validateTokenBudget(input.tokenBudget);
+		this.cancelInFlightNominations("replaced");
 		return await this.#withAccounting(async () => {
 			const existing = this.#host.getState();
 			if (!existing?.enabled || !isAccountingStatus(existing.goal)) {
@@ -421,6 +476,17 @@ export class GoalRuntime {
 			const state = this.#getStateClone();
 			if (!state?.goal) throw new Error("No paused goal.");
 			if (state.goal.status === "complete") throw new Error("Goal is already complete.");
+			if (state.goal.hostGate?.pendingVerification) {
+				state.goal.hostGate = {
+					...state.goal.hostGate,
+					pendingVerification: false,
+					nominationId: undefined,
+					turnId: undefined,
+					generation: undefined,
+					lastDecision: "continue",
+					lastNextStep: "verification interrupted; keep working from current repo evidence",
+				};
+			}
 			state.enabled = true;
 			state.mode = "active";
 			state.reason = undefined;
@@ -434,6 +500,7 @@ export class GoalRuntime {
 	}
 
 	async pauseGoal(): Promise<GoalModeState | undefined> {
+		this.cancelInFlightNominations("paused");
 		return await this.#withAccounting(async () => {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
@@ -444,6 +511,17 @@ export class GoalRuntime {
 			if (state.goal.status === "active" || state.goal.status === "budget-limited") {
 				state.goal.status = "paused";
 			}
+			if (state.goal.hostGate?.pendingVerification) {
+				state.goal.hostGate = {
+					...state.goal.hostGate,
+					pendingVerification: false,
+					nominationId: undefined,
+					turnId: undefined,
+					generation: undefined,
+					lastDecision: "continue",
+					lastNextStep: "verification interrupted; keep working from current repo evidence",
+				};
+			}
 			state.goal.updatedAt = this.#now();
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
@@ -453,6 +531,7 @@ export class GoalRuntime {
 	}
 
 	async dropGoal(): Promise<Goal | undefined> {
+		this.cancelInFlightNominations("dropped");
 		return await this.#withAccounting(async () => {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
@@ -471,6 +550,7 @@ export class GoalRuntime {
 	}
 
 	async completeGoalFromTool(): Promise<Goal> {
+		this.cancelInFlightNominations("user_confirmed");
 		return await this.#withAccounting(async () => {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
@@ -495,18 +575,236 @@ export class GoalRuntime {
 		});
 	}
 
+	currentTurnId(): string | undefined {
+		return this.#turnSnapshot?.turnId ?? this.#lastTurnId;
+	}
+
+	currentGeneration(): number {
+		return this.#host.getPromptGeneration?.() ?? 0;
+	}
+
+	async nominateComplete(input: { nominationId: string; turnId: string; generation: number }): Promise<{
+		accepted: boolean;
+		shared: boolean;
+		goal: Goal;
+		flight?: Promise<void>;
+		settle?: { resolve: () => void; controller: AbortController };
+	}> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.goal) throw new Error("cannot complete goal because no goal is active");
+			if (state.goal.status === "complete") throw new Error("goal is already complete");
+			if (state.goal.status === "dropped") throw new Error("cannot complete a dropped goal");
+			const existing = state.goal.hostGate;
+			if (
+				existing?.pendingVerification === true &&
+				existing.turnId === input.turnId &&
+				existing.generation === input.generation &&
+				existing.nominationId
+			) {
+				return {
+					accepted: true,
+					shared: true,
+					goal: state.goal,
+					flight: this.#inFlightNominations.get(state.goal.id)?.promise,
+				};
+			}
+			this.#abortInFlightLocked(state.goal.id, "replaced");
+			const revision = (existing?.goalRevision ?? 0) + 1;
+			state.goal.hostGate = {
+				goalRevision: revision,
+				pendingVerification: true,
+				nominationId: input.nominationId,
+				turnId: input.turnId,
+				generation: input.generation,
+				consecutiveContinueCount: existing?.consecutiveContinueCount ?? 0,
+				lastGaps: existing?.lastGaps,
+			};
+			state.goal.updatedAt = this.#now();
+			await this.#commitState(state, { persist: "goal" });
+			const controller = new AbortController();
+			const settle = Promise.withResolvers<void>();
+			this.#inFlightNominations.set(state.goal.id, { controller, promise: settle.promise });
+			void settle.promise.finally(() => {
+				const current = this.#inFlightNominations.get(state.goal.id);
+				if (current?.promise === settle.promise) this.#inFlightNominations.delete(state.goal.id);
+			});
+			return {
+				accepted: true,
+				shared: false,
+				goal: state.goal,
+				settle: { resolve: settle.resolve, controller },
+			};
+		});
+	}
+
+	trackInFlightNomination(goalId: string, controller: AbortController, promise: Promise<void>): void {
+		if (this.#inFlightNominations.has(goalId)) return;
+		this.#inFlightNominations.set(goalId, { controller, promise });
+		void promise.finally(() => {
+			const current = this.#inFlightNominations.get(goalId);
+			if (current?.promise === promise) this.#inFlightNominations.delete(goalId);
+		});
+	}
+
+	inFlightNomination(goalId: string): Promise<void> | undefined {
+		return this.#inFlightNominations.get(goalId)?.promise;
+	}
+
+	cancelInFlightNominations(reason: string): void {
+		for (const [goalId] of this.#inFlightNominations) {
+			this.#abortInFlightLocked(goalId, reason);
+		}
+	}
+
+	async applyNominationResult(input: {
+		goalId: string;
+		goalRevision: number;
+		nominationId: string;
+		turnId: string;
+		generation: number;
+		decision: GoalHostGateDecisionKind;
+		evidence: string;
+		nextStep: string;
+		blockerKey?: string;
+		reasons?: string[];
+	}): Promise<"applied" | "stale"> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			const gate = state?.goal.hostGate;
+			if (
+				!state?.goal ||
+				state.goal.id !== input.goalId ||
+				state.goal.status === "dropped" ||
+				state.goal.status === "complete" ||
+				gate?.pendingVerification !== true ||
+				gate.nominationId !== input.nominationId ||
+				gate.goalRevision !== input.goalRevision ||
+				gate.turnId !== input.turnId ||
+				gate.generation !== input.generation
+			) {
+				return "stale";
+			}
+			if (input.decision === "user_confirmed") {
+				return "applied";
+			}
+			state.goal.hostGate = {
+				...gate,
+				pendingVerification: false,
+				lastDecision: input.decision,
+				lastEvidence: input.evidence,
+				lastNextStep: input.nextStep,
+				lastBlockerKey: input.blockerKey,
+				lastReasons: input.reasons,
+				consecutiveContinueCount: input.decision === "continue" ? (gate.consecutiveContinueCount ?? 0) + 1 : 0,
+			};
+			state.goal.updatedAt = this.#now();
+			await this.#commitState(state, { persist: state.enabled ? "goal" : "goal_paused" });
+			return "applied";
+		});
+	}
+
+	async recordHostAdvice(input: { nextStep: string; evidence: string; reasons?: string[] }): Promise<void> {
+		await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.goal) return;
+			const gate = state.goal.hostGate ?? emptyHostGate();
+			state.goal.hostGate = {
+				...gate,
+				lastDecision: "continue",
+				lastEvidence: input.evidence,
+				lastNextStep: input.nextStep,
+				lastReasons: input.reasons,
+				consecutiveContinueCount: (gate.consecutiveContinueCount ?? 0) + 1,
+			};
+			state.goal.updatedAt = this.#now();
+			await this.#commitState(state, { persist: state.enabled ? "goal" : "goal_paused" });
+		});
+	}
+
+	async recoverPendingVerification(): Promise<boolean> {
+		return await this.#withAccounting(() => this.#recoverPendingVerificationLocked());
+	}
+
+	async #recoverPendingVerificationLocked(): Promise<boolean> {
+		const state = this.#getStateClone();
+		if (!state?.goal.hostGate?.pendingVerification) return false;
+		state.goal.hostGate = {
+			...state.goal.hostGate,
+			pendingVerification: false,
+			nominationId: undefined,
+			turnId: undefined,
+			generation: undefined,
+			lastDecision: "continue",
+			lastNextStep: "verification interrupted; keep working from current repo evidence",
+		};
+		state.goal.updatedAt = this.#now();
+		await this.#commitState(state, { persist: state.enabled ? "goal" : "goal_paused" });
+		return true;
+	}
+
+	buildFalseCompletionPrompt(): string | undefined {
+		const state = this.#host.getState();
+		if (!state?.enabled || state.goal.status !== "active") return undefined;
+		return prompt.render(goalFalseCompletionPrompt, {
+			objective: escapeXmlText(state.goal.objective),
+			lastNextStep: state.goal.hostGate?.lastNextStep ?? "",
+			lastEvidence: state.goal.hostGate?.lastEvidence ?? "",
+		});
+	}
+
+	#abortInFlightLocked(goalId: string, reason: string): void {
+		const inFlight = this.#inFlightNominations.get(goalId);
+		if (!inFlight) return;
+		inFlight.controller.abort(reason);
+		this.#inFlightNominations.delete(goalId);
+	}
+
+	#omitTimeUsedSeconds(): boolean {
+		return this.#host.omitGoalTime?.() === true;
+	}
+
 	buildActivePrompt(): string | undefined {
 		const state = this.#host.getState();
-		return state?.enabled && state.goal && state.goal.status === "active"
-			? renderGoalPrompt("active", state.goal)
-			: undefined;
+		if (!state?.enabled || !state.goal || state.goal.status !== "active") return undefined;
+		const omit = this.#omitTimeUsedSeconds();
+		if (omit) this.#host.markOmitGoalTimeFired?.();
+		return renderGoalPrompt("active", state.goal, { omitTimeUsedSeconds: omit });
 	}
 
 	buildContinuationPrompt(): string | undefined {
 		const state = this.#host.getState();
-		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal)
-			: undefined;
+		if (!state?.enabled || state.goal.status !== "active") return undefined;
+		const omit = this.#omitTimeUsedSeconds();
+		if (omit) this.#host.markOmitGoalTimeFired?.();
+		return renderGoalPrompt("continuation", state.goal, { omitTimeUsedSeconds: omit });
+	}
+
+	async reserveHeadlessContinuation(cap: number): Promise<"accepted" | "cap"> {
+		return await this.#withAccounting(async () => {
+			const state = this.#host.getState();
+			if (!state) return "cap";
+			const count = state.goal.headlessContinuationCount ?? 0;
+			if (count >= cap) return "cap";
+			state.goal.headlessContinuationCount = count + 1;
+			try {
+				await this.#commitState(state, { persist: "goal" });
+			} catch (error) {
+				state.goal.headlessContinuationCount = count;
+				this.#host.setState(state);
+				throw error;
+			}
+			return "accepted";
+		});
+	}
+
+	async rollbackHeadlessContinuation(to: number): Promise<void> {
+		await this.#withAccounting(async () => {
+			const state = this.#host.getState();
+			if (!state) return;
+			state.goal.headlessContinuationCount = Math.max(0, to);
+			await this.#commitState(state, { persist: "goal" });
+		});
 	}
 
 	async #sendBudgetLimitSteer(goal: Goal): Promise<void> {

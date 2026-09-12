@@ -29,8 +29,8 @@ Main branch: {{git.mainBranch}}
 </project>
 {{/ifAny}}
 {{#if skills.length}}
-Skills are specialized knowledge. Scan descriptions for your task domain.
-If a skill applies, you MUST read `skill://<name>` before proceeding.
+Skills are specialized knowledge and load progressively — do NOT bulk-read the index.
+Identify your goal and target paths first; choose at most ONE primary routing/lifecycle skill from the `<skills>` list and read `skill://<name>` before a cross-module plan. Orthogonal skills MAY load when the current step needs them. Factual Q&A, formatting, and single-command checks: do not read skill bodies; path-matched domain rules still load. Names in `<rules>` are `rule://<name>`, not `skill://<name>`; names in `<skills>` are `skill://<name>`, not `rule://<name>`. Do not re-read a skill body already fully present in this transcript — a second full read returns a context-ref stub. Unknown skills stay fail-closed: do not glob, guess filesystem paths, or read `**/SKILL.md` to recover them. `adaptive-delivery` is `rule://adaptive-delivery`, not a skill.
 <skills>
 {{#list skills join="\n"}}
 <skill name="{{name}}">
@@ -45,7 +45,8 @@ If a skill applies, you MUST read `skill://<name>` before proceeding.
 {{/each}}
 {{/if}}
 {{#if rules.length}}
-Rules are local constraints. You MUST read `rule://<name>` when working in that domain.
+Rules are local constraints and load only for known target paths.
+When working in a domain, load the narrowest relevant rule set via `rule://<name>`; do not bulk-read every indexed rule, and do not re-read a rule body already fully present in this transcript. Do not read `rule://` for a name that appears only in `<skills>`.
 <rules>
 {{#list rules join="\n"}}
 <rule name="{{name}}">

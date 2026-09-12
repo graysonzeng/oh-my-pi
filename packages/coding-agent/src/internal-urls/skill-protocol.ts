@@ -11,8 +11,10 @@ import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { getActiveRules } from "../capability/rule";
 import { resolveContainedPath } from "../discovery/contained-path";
 import { getActiveSkills } from "../extensibility/skills";
+import { getBundledAgent } from "../task/agents";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
@@ -20,6 +22,22 @@ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, Ur
 function getContentType(filePath: string): InternalResource["contentType"] {
 	if (isMarkdownPath(filePath)) return "text/markdown";
 	return "text/plain";
+}
+
+const UNKNOWN_SKILL_NO_SCAN = "Do not glob, guess filesystem paths, or read **/SKILL.md to recover unknown skills.";
+
+/** Fail-closed unknown-skill message. Suggests `rule://` or a task agent only on an exact name match. */
+export function formatUnknownSkillError(skillName: string, available: readonly string[]): string {
+	const availableStr = available.length > 0 ? available.join(", ") : "none";
+	const lines = [`Unknown skill: ${skillName}`, `Available: ${availableStr}`];
+	if (getActiveRules().some(rule => rule.name === skillName)) {
+		lines.push(`Did you mean rule://${skillName}?`);
+	}
+	if (getBundledAgent(skillName)) {
+		lines.push(`Did you mean task agent ${skillName}?`);
+	}
+	lines.push(UNKNOWN_SKILL_NO_SCAN);
+	return lines.join("\n");
 }
 
 /**
@@ -59,8 +77,7 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		const skill = skills.find(s => s.name === skillName);
 		if (!skill) {
 			const available = skills.map(s => s.name);
-			const availableStr = available.length > 0 ? available.join(", ") : "none";
-			throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
+			throw new Error(formatUnknownSkillError(skillName, available));
 		}
 
 		let targetPath: string;

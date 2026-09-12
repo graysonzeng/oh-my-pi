@@ -219,4 +219,30 @@ describe("composer chrome span recording", () => {
 			composer.stop();
 		}
 	});
+
+	it("maps clicks on a custom-render chrome root that is itself the row target", () => {
+		const term = new VirtualTerminal(80, 24);
+		const composer = new Composer({ terminal: term, preferences: { ...COMPOSER_DEFAULTS, quiet: true } });
+		composer.start();
+		try {
+			const transcript = new TranscriptContainer();
+			const hud = new (class extends Container {
+				override render(): readonly string[] {
+					return ["", "Subagents", "Alpha"];
+				}
+				getClickAgentAtRow(row: number): string | undefined {
+					return row === 2 ? "Alpha" : undefined;
+				}
+			})();
+			composer.setRuntimeChildren([transcript, hud]);
+
+			const frame = composer.renderFrame({ columns: 80, rows: 24 });
+			const hudRow = frame.viewport.findIndex(line => line.includes("Alpha"));
+			expect(hudRow).toBeGreaterThanOrEqual(0);
+			expect(composer.viewportClickCandidates(hudRow)).toEqual(["Alpha"]);
+			expect(composer.viewportClickCandidates(hudRow - 1)).toEqual([]);
+		} finally {
+			composer.stop();
+		}
+	});
 });

@@ -92,7 +92,7 @@ describe("SessionManager cwd adoption on resume", () => {
 		await manager.setSessionFile(fileB);
 		expect(manager.getCwd()).toBe(path.resolve(projectB));
 
-		manager.restoreState(snapshot);
+		await manager.restoreState(snapshot);
 		expect(manager.getCwd()).toBe(path.resolve(projectA));
 		expect(manager.getSessionDir()).toBe(path.resolve(sessionsA));
 	});

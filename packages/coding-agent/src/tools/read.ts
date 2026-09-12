@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { notebookToEditableText } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -23,7 +24,11 @@ import {
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
-import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
+import {
+	MAX_INLINE_ARTIFACT_BYTES,
+	type ResolvedArtifactFile,
+	resolveArtifactFile,
+} from "../internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { getExperimentalContextSession } from "./context-notes";
@@ -51,6 +56,7 @@ import {
 import { askImageQuestion, resolveImageQuestionModel } from "../utils/image-question";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
+import { workflowToolWireName } from "../workflow/tool-optimization";
 import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import {
 	type ConflictEntry,
@@ -95,6 +101,7 @@ import {
 	lineNumbersFromSpans,
 	markMarkdownContentType,
 	prependHashlineHeader,
+	prependLineNumbers,
 	prependSuffixResolutionNotice,
 	RANGE_LEADING_CONTEXT_LINES,
 	RANGE_TRAILING_CONTEXT_LINES,
@@ -140,6 +147,7 @@ import { REPORT_ISSUE_DEVICE_NAME, reportIssueDeviceUsage } from "./report-tool-
 import { isResolutionDeviceName, resolutionDeviceUsage } from "./resolve";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import type { WorkflowToolOptimization } from "./workflow-session-fields";
 import { xdevDocs, xdevListing } from "./xdev";
 
 export { readToolRenderer } from "./read-renderer";
@@ -634,6 +642,11 @@ export interface ReadToolDetails {
 	truncation?: TruncationResult;
 	isDirectory?: boolean;
 	resolvedPath?: string;
+	branchOrWorktreeScope?: string;
+	providerViewIdentity?: string;
+	contentOrRevisionIdentity?: string;
+	canonicalSource?: string;
+	outputMode?: "raw" | "converted" | "decoded" | "summary" | "unknown";
 	suffixResolution?: { from: string; to: string };
 	url?: string;
 	finalUrl?: string;
@@ -659,10 +672,63 @@ export interface ReadToolDetails {
 	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
 	displayReadTargets?: string[];
 }
+
+type ReadIdentityOutputMode = NonNullable<ReadToolDetails["outputMode"]>;
+
+function readBranchOrWorktreeScope(cwd?: string): string {
+	const normalizedCwd = cwd?.trim();
+	if (!normalizedCwd) return "";
+	try {
+		const head = vcs.git(normalizedCwd)?.headSync();
+		if (head?.commit) return `git:${head.commit}`;
+		if (head?.kind === "ref" && head.branch) return `git:${head.branch}`;
+	} catch {
+		// Fall back to the absolute worktree when git metadata is unavailable.
+	}
+	return `worktree:${path.resolve(normalizedCwd)}`;
+}
+
+async function attachReadIdentity(
+	result: AgentToolResult<ReadToolDetails>,
+	options: {
+		absolutePath: string;
+		cwd?: string;
+		outputMode: ReadIdentityOutputMode;
+		canonicalSource?: string;
+		providerViewIdentity?: string;
+	},
+): Promise<AgentToolResult<ReadToolDetails>> {
+	const textBlocks = result.content.filter((content): content is TextContent => content.type === "text");
+	if (textBlocks.length === 0) return result;
+
+	let providerViewIdentity = options.providerViewIdentity ?? result.details?.providerViewIdentity ?? "";
+	if (!providerViewIdentity) {
+		try {
+			const stat = await fs.stat(options.absolutePath);
+			providerViewIdentity = `fs:${stat.mtimeMs}:${stat.size}`;
+		} catch {
+			// Identity production is fail-open when the source disappears after reading.
+		}
+	}
+
+	const returnedText = textBlocks.map(content => content.text).join("\n");
+	const contentOrRevisionIdentity = new Bun.CryptoHasher("sha256").update(returnedText).digest("hex");
+	const details: ReadToolDetails = {
+		...(result.details ?? {}),
+		resolvedPath: options.absolutePath,
+		canonicalSource: options.canonicalSource ?? result.details?.canonicalSource ?? options.absolutePath,
+		branchOrWorktreeScope: readBranchOrWorktreeScope(options.cwd),
+		providerViewIdentity,
+		contentOrRevisionIdentity,
+		outputMode: options.outputMode,
+	};
+	return { ...result, details };
+}
+
 type ReadParams = ReadToolInput;
 
-/** Identical reads tolerated before the loop hint is appended. */
-const REPEAT_READ_HINT_THRESHOLD = 3;
+/** Identical reads tolerated before the loop hint is appended. Second identical read hints. */
+const REPEAT_READ_HINT_THRESHOLD = 2;
 /** Per-session cap on tracked read keys; the map resets when exceeded. */
 const REPEAT_READ_TRACKER_CAP = 64;
 
@@ -705,8 +771,36 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
  * Reads files with support for images, converted documents (via markit), and text.
  * Directories return a formatted listing with modification times.
  */
+
+/**
+ * Resolve a workflow-catalog `xd://tools/{name}` locator from the prepare-time
+ * capture when the child session has no xd registry mounted.
+ * - Non-allowlisted names are refused (catalog never elevates privileges).
+ * - Allowlisted names with no captured schema fail observably (no fake recovery).
+ */
+export function resolveWorkflowCatalogToolDocs(
+	name: string,
+	workflowOpt: Pick<WorkflowToolOptimization, "presentationToolSchemas" | "presentationAllowedTools">,
+): string {
+	const allowed = workflowOpt.presentationAllowedTools;
+	if (allowed && !allowed.includes(name)) {
+		throw new ToolError(`Tool "${name}" is outside the role allowlist; catalog expand refused.`);
+	}
+	const schema = workflowOpt.presentationToolSchemas?.get(name);
+	if (schema === undefined) {
+		throw new ToolError(`No full schema registered for allowlisted tool "${name}".`, {
+			path: `xd://tools/${name}`,
+		});
+	}
+	const schemaJson = typeof schema === "string" ? schema : JSON.stringify(schema, null, 2);
+	return [`# Tool: ${name}`, "", "```json", schemaJson, "```", ""].join("\n");
+}
+
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
+	get customWireName(): string | undefined {
+		return workflowToolWireName(this.session, this.name);
+	}
 	readonly approval = (args: unknown): ToolTier => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
@@ -1259,7 +1353,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
-		appendRepeatReadHint(this.session, params.path, result);
+		if (!result.details?.providerViewIdentity) {
+			appendRepeatReadHint(this.session, params.path, result);
+		}
 		return result;
 	}
 
@@ -1310,18 +1406,42 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			const urlSel = parsedUrlTarget.sel;
 			const urlRaw = isRawSelector(urlSel);
+			const urlOutputMode = (details: { contentType?: string }, raw?: boolean): ReadIdentityOutputMode =>
+				raw === true ? "raw" : details.contentType === "text/markdown" ? "converted" : "raw";
 			if (urlSel.kind === "lines" || urlSel.kind === "tail") {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				return buildInMemorySelectorResult(this.session, entry.output, urlSel, {
-					details: { ...entry.details },
-					sourceUrl: entry.details.finalUrl,
-					entityLabel: "URL output",
-					immutable: true,
-				});
+				return attachReadIdentity(
+					buildInMemorySelectorResult(this.session, entry.output, urlSel, {
+						details: { ...entry.details },
+						sourceUrl: entry.details.finalUrl,
+						entityLabel: "URL output",
+						immutable: true,
+					}),
+					{
+						absolutePath: entry.details.finalUrl,
+						cwd: this.session.cwd,
+						canonicalSource: entry.details.finalUrl,
+						providerViewIdentity: `url-content:${new Bun.CryptoHasher("sha256").update(entry.output).digest("hex")}`,
+						outputMode: urlOutputMode(entry.details, urlRaw),
+					},
+				);
 			}
-			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
+			const urlResult = await executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
+			const finalUrl = urlResult.details?.finalUrl ?? parsedUrlTarget.path;
+			const urlText = urlResult.content
+				.filter((content): content is TextContent => content.type === "text")
+				.map(content => content.text)
+				.join("\n");
+			// F4: plain URL path must stamp read identity (was completely missing).
+			return attachReadIdentity(urlResult, {
+				absolutePath: finalUrl,
+				cwd: this.session.cwd,
+				canonicalSource: finalUrl,
+				providerViewIdentity: `url-content:${new Bun.CryptoHasher("sha256").update(urlText).digest("hex")}`,
+				outputMode: urlOutputMode(urlResult.details ?? {}, urlRaw),
+			});
 		}
 
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
@@ -1541,11 +1661,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (isSampleProfilePath(absolutePath)) rendered = renderSampleProfile(await Bun.file(absolutePath).text());
 			else if (isCpuProfilePath(absolutePath)) rendered = renderCpuProfile(await Bun.file(absolutePath).text());
 			if (rendered) {
-				return buildInMemorySelectorResult(this.session, rendered, parsed, {
-					details: { resolvedPath: absolutePath },
-					sourcePath: absolutePath,
-					entityLabel: "profile summary",
-				});
+				return attachReadIdentity(
+					buildInMemorySelectorResult(this.session, rendered, parsed, {
+						details: { resolvedPath: absolutePath },
+						sourcePath: absolutePath,
+						entityLabel: "profile summary",
+					}),
+					{ absolutePath, cwd: this.session.cwd, outputMode: "summary" },
+				);
 			}
 		}
 		// Read the file based on type
@@ -1597,11 +1720,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				throw error;
 			}
 			const notebookText = notebookToEditableText(notebookJson, resolvedDisplayPath);
-			return buildInMemorySelectorResult(this.session, notebookText, parsed, {
-				details: { resolvedPath: absolutePath },
-				sourcePath: absolutePath,
-				entityLabel: "notebook",
-			});
+			return attachReadIdentity(
+				buildInMemorySelectorResult(this.session, notebookText, parsed, {
+					details: { resolvedPath: absolutePath },
+					sourcePath: absolutePath,
+					entityLabel: "notebook",
+				}),
+				{ absolutePath, cwd: this.session.cwd, outputMode: "converted" },
+			);
 		} else if (shouldConvertWithMarkit) {
 			// Convert document via markit.
 			const result = await convertFileWithMarkit(absolutePath, signal);
@@ -1612,14 +1738,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// raw mode apply against the converted output. Without this,
 				// `file.pdf:50-100` silently returned the head of the document
 				// because only `truncateHead` was being applied.
-				return buildInMemorySelectorResult(this.session, renderedContent, parsed, {
-					details: {
-						resolvedPath: absolutePath,
-						contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
-					},
-					sourcePath: absolutePath,
-					entityLabel: "document",
-				});
+				return attachReadIdentity(
+					buildInMemorySelectorResult(this.session, renderedContent, parsed, {
+						details: {
+							resolvedPath: absolutePath,
+							contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
+						},
+						sourcePath: absolutePath,
+						entityLabel: "document",
+					}),
+					{ absolutePath, cwd: this.session.cwd, outputMode: "converted" },
+				);
 			} else if (result.error) {
 				content = [{ type: "text", text: `[Cannot read ${ext} file: ${result.error || "conversion failed"}]` }];
 			} else {
@@ -1717,7 +1846,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 					);
-					if (multiResult.bridgeResult) return multiResult.bridgeResult;
+					if (multiResult.bridgeResult) {
+						return attachReadIdentity(multiResult.bridgeResult, {
+							absolutePath,
+							cwd: this.session.cwd,
+							outputMode: "raw",
+						});
+					}
 					content = [{ type: "text", text: multiResult.outputText }];
 					sourcePath = absolutePath;
 					details = multiResult.displayContent ? { displayContent: multiResult.displayContent } : {};
@@ -1748,7 +1883,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
 								if (firstText) firstText.text = `${notice}\n${firstText.text}`;
 							}
-							return bridgeResult;
+							return attachReadIdentity(bridgeResult, {
+								absolutePath,
+								cwd: this.session.cwd,
+								outputMode: "raw",
+							});
 						} catch (error) {
 							logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
 						}
@@ -2097,7 +2236,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (columnTruncated > 0) {
 			resultBuilder.limits({ columnMax: columnTruncated });
 		}
-		return resultBuilder.done();
+		const result = resultBuilder.done();
+		if (sourcePath && !mimeType) {
+			const identified = await attachReadIdentity(result, {
+				absolutePath,
+				cwd: this.session.cwd,
+				outputMode: details.summary ? "summary" : details.contentType === "text/markdown" ? "converted" : "raw",
+			});
+			return identified;
+		}
+		return result;
 	}
 
 	/**
@@ -2182,11 +2330,61 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		)}). Reading the whole artifact verbatim can exhaust memory. Use ${artifactUrl}:raw:1-3000 for bounded verbatim chunks, ${artifactUrl}:1-3000 for numbered exploration, and the artifact file path for search/copy workflows: ${displayPath}`;
 	}
 
+	async #readInMemoryArtifact(
+		id: string,
+		url: InternalUrl,
+		parsedSel: ParsedSelector,
+		content: string,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		if (parsedSel.kind === "conflicts") {
+			throw new ToolError("Artifact conflict selectors are unavailable for in-memory artifacts.");
+		}
+		const lines = content.split("\n");
+		let text = content;
+		if (parsedSel.kind === "lines") {
+			text = parsedSel.ranges
+				.map(range => {
+					const start = Math.max(1, range.startLine);
+					const end = Math.min(lines.length, range.endLine ?? lines.length);
+					const selected = lines.slice(start - 1, end).join("\n");
+					return parsedSel.raw ? selected : prependLineNumbers(selected, start);
+				})
+				.join("\n");
+		}
+		const byteLength = Buffer.byteLength(text, "utf8");
+		if (byteLength > MAX_INLINE_ARTIFACT_BYTES) {
+			throw new ToolError(
+				`Artifact ${id} is ${formatBytes(byteLength)}; full internal resolution is blocked. Use bounded selectors such as artifact://${id}:1-3000 or artifact://${id}:raw:1-3000.`,
+			);
+		}
+		const artifactUrl = `artifact://${id}`;
+		const details: ReadToolDetails = { resolvedPath: artifactUrl, contentType: "text/plain" };
+		const result = toolResult<ReadToolDetails>(details)
+			.text(text)
+			.sourcePath(artifactUrl)
+			.sourceInternal(url.href)
+			.done();
+		return attachReadIdentity(result, {
+			absolutePath: artifactUrl,
+			cwd: this.session.cwd,
+			canonicalSource: artifactUrl,
+			providerViewIdentity: `artifact:${id}`,
+			outputMode: "raw",
+		});
+	}
+
 	async #readArtifactFile(
 		url: InternalUrl,
 		parsed: ParsedSelector,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		const sessionFile = this.session.getSessionFile?.() ?? null;
+		if (!sessionFile && this.session.getArtifactContent) {
+			const id = url.rawHost || url.hostname;
+			const content = id ? await this.session.getArtifactContent(id) : null;
+			if (content !== null) return this.#readInMemoryArtifact(id, url, parsed, content);
+			throw new ToolError(`Artifact ${id || "unknown"} not found in the current session.`);
+		}
 		const artifact = await resolveArtifactFile(url, {
 			cwd: this.session.cwd,
 			settings: this.session.settings,
@@ -2241,7 +2439,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				.sourcePath(artifact.path)
 				.sourceInternal(url.href);
 			if (read.columnTruncated > 0) resultBuilder.limits({ columnMax: read.columnTruncated });
-			return resultBuilder.done();
+			return attachReadIdentity(resultBuilder.done(), {
+				absolutePath: artifact.path,
+				cwd: this.session.cwd,
+				canonicalSource: artifactUrl,
+				providerViewIdentity: `artifact:${artifact.id}`,
+				outputMode: "raw",
+			});
 		}
 
 		const { offset, limit } = selToOffsetLimit(parsedSel);
@@ -2393,7 +2597,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (truncationInfo) {
 			resultBuilder.truncation(truncationInfo.result, { ...truncationInfo.options, maxBytes: maxBytesForRead });
 		}
-		return resultBuilder.done();
+		return attachReadIdentity(resultBuilder.done(), {
+			absolutePath: artifact.path,
+			cwd: this.session.cwd,
+			canonicalSource: artifactUrl,
+			providerViewIdentity: `artifact:${artifact.id}`,
+			outputMode: "raw",
+		});
 	}
 
 	/**
@@ -2454,6 +2664,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			getSessionBranch: () => getExperimentalContextSession(this.session).getBranch(),
 			sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 			agentRegistry: this.session.agentRegistry,
+			lineage: this.session.getLineageContext ? await this.session.getLineageContext() : undefined,
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
 			rules: this.session.activeRules,
@@ -2462,12 +2673,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
 					if (name && isResolutionDeviceName(name)) return resolutionDeviceUsage(name);
 					const xdev = this.session.xdev;
-					if (!xdev) throw new ToolError("xd:// is not mounted in this session.");
+					if (!xdev) {
+						// Workflow catalog mode runs in structured children that never mount an
+						// xd registry (restrictToolNames). Resolve the locators the workflow itself
+						// advertised from the prepare-time capture instead of a dead xd:// URL.
+						const workflowOpt = this.session.workflowToolOptimization;
+						if (name !== null && workflowOpt?.presentationToolSchemas) {
+							return resolveWorkflowCatalogToolDocs(name, workflowOpt);
+						}
+						throw new ToolError("xd:// is not mounted in this session.");
+					}
 					return name === null ? xdevListing(xdev) : xdevDocs(xdev, name);
 				},
 			},
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
+		this.#attestCanonicalSkillFullText(scheme, urlMeta, parsedSel, resource, details);
 
 		// If extraction was used, return directly (no pagination)
 		if (hasExtraction) {
@@ -2482,6 +2703,34 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			ignoreResultLimits: scheme === "skill",
 			immutable: resource.immutable,
 		});
+	}
+
+	/**
+	 * Restricted attested identity for canonical `skill://<name>` full-text views
+	 * so `#dedupeOrdinaryReadResult` can stub a second identical read. Ranged,
+	 * raw, query, fragment, and `rule://` views stay fail-open.
+	 * Digest is the model-visible `originalText` fallback in `#dedupeOrdinaryReadResult`,
+	 * not pre-renderer `resource.content`.
+	 */
+	#attestCanonicalSkillFullText(
+		scheme: string,
+		urlMeta: InternalUrl,
+		parsedSel: ParsedSelector,
+		resource: { content: string; contentType?: string; immutable?: boolean },
+		details: ReadToolDetails,
+	): void {
+		if (scheme !== "skill") return;
+		if (!resource.immutable) return;
+		if (urlMeta.search || urlMeta.hash) return;
+		const name = urlMeta.rawHost || urlMeta.hostname;
+		if (!name) return;
+		const urlPath = urlMeta.pathname;
+		if (urlPath && urlPath !== "/" && urlPath !== "") return;
+		if (parsedSel.kind !== "none") return;
+		details.canonicalSource = `${scheme}://${name}`;
+		details.branchOrWorktreeScope = readBranchOrWorktreeScope(this.session.cwd) || "immutable:session";
+		details.outputMode = resource.contentType === "text/markdown" ? "converted" : "raw";
+		details.providerViewIdentity = `${scheme}-immutable:${name}`;
 	}
 
 	/**

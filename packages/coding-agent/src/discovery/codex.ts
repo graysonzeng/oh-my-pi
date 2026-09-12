@@ -189,12 +189,9 @@ function extractMCPServersFromToml(
 		// command="./bin/mcp" resolves to <configDir>/server/bin/mcp.
 		const rooted = resolvePluginStdioPaths({ command: config.command, cwd: config.cwd }, configDir, "cwd");
 		const server: Partial<MCPServer> = {
-			// Carry `enabled: false` through rather than dropping the entry: the
-			// central MCP loader (`loadAllMCPConfigs`) suppresses disabled servers
-			// so they still claim their dedupe key (keeping a same-named,
-			// lower-priority source disabled) and remain overridable via the user
-			// force-enable allowlist. Dropping here would defeat both.
-			...(config.enabled === false && { enabled: false }),
+			// Carry Codex `enabled` through so the central MCP loader can skip disabled
+			// servers while preserving their dedupe key and user force-enable behavior.
+			...(typeof config.enabled === "boolean" && { enabled: config.enabled }),
 			...(rooted.command !== undefined && { command: rooted.command }),
 			args: config.args,
 			url: config.url,

@@ -106,6 +106,87 @@ import {
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	evidenceFidelity?: CompactionEvidenceFidelityReceiptV1;
+}
+
+export type CompactionEvidenceKind = "file_paths" | "artifact_references" | "unresolved_failures";
+
+export interface CompactionEvidenceFidelityReceiptV1 {
+	schemaVersion: 1;
+	status: "pass" | "fail" | "unavailable";
+	summarySha256: string;
+	evidenceSha256: string;
+	checked: Record<CompactionEvidenceKind, number>;
+	missing: Record<CompactionEvidenceKind, string[]>;
+	unavailableKinds: CompactionEvidenceKind[];
+}
+
+export interface CompactionEvidenceFidelityInput {
+	summary: string;
+	filePaths: readonly string[];
+	artifactReferences: readonly string[];
+	/** Omit when the caller cannot prove which historical failures remain unresolved. */
+	unresolvedFailureAnchors?: readonly string[];
+}
+
+function uniqueEvidence(values: readonly string[]): string[] {
+	return [...new Set(values.map(value => value.trim()).filter(Boolean))];
+}
+
+function sha256(value: string): string {
+	return new Bun.CryptoHasher("sha256").update(value).digest("hex");
+}
+
+/** Deterministic, fail-open verifier; callers persist the receipt instead of blocking compaction. */
+export function validateCompactionEvidenceFidelity(
+	input: CompactionEvidenceFidelityInput,
+): CompactionEvidenceFidelityReceiptV1 {
+	const evidence = {
+		file_paths: uniqueEvidence(input.filePaths),
+		artifact_references: uniqueEvidence(input.artifactReferences),
+		unresolved_failures: uniqueEvidence(input.unresolvedFailureAnchors ?? []),
+	};
+	const missing = {
+		file_paths: evidence.file_paths.filter(value => !input.summary.includes(value)),
+		artifact_references: evidence.artifact_references.filter(value => !input.summary.includes(value)),
+		unresolved_failures: evidence.unresolved_failures.filter(value => !input.summary.includes(value)),
+	};
+	const unavailableKinds: CompactionEvidenceKind[] =
+		input.unresolvedFailureAnchors === undefined ? ["unresolved_failures"] : [];
+	const hasMissing = Object.values(missing).some(values => values.length > 0);
+	return {
+		schemaVersion: 1,
+		status: hasMissing ? "fail" : unavailableKinds.length > 0 ? "unavailable" : "pass",
+		summarySha256: sha256(input.summary),
+		evidenceSha256: sha256(JSON.stringify(evidence)),
+		checked: {
+			file_paths: evidence.file_paths.length,
+			artifact_references: evidence.artifact_references.length,
+			unresolved_failures: evidence.unresolved_failures.length,
+		},
+		missing,
+		unavailableKinds,
+	};
+}
+
+const ARTIFACT_REFERENCE_PATTERN = /\bartifact:\/\/[A-Za-z0-9._/-]+/g;
+
+function messageTextForEvidence(message: AgentMessage): string {
+	if (!("content" in message)) return "";
+	if (typeof message.content === "string") return message.content;
+	if (!Array.isArray(message.content)) return "";
+	const text: string[] = [];
+	for (const block of message.content) {
+		if (block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block) {
+			if (typeof block.text === "string") text.push(block.text);
+		}
+	}
+	return text.join("\n");
+}
+
+function collectArtifactReferences(messages: readonly AgentMessage[], previousSummary?: string): string[] {
+	const source = [...messages.map(messageTextForEvidence), previousSummary ?? ""].join("\n");
+	return uniqueEvidence(source.match(ARTIFACT_REFERENCE_PATTERN) ?? []);
 }
 
 /**
@@ -229,7 +310,7 @@ export const MAX_SUMMARY_TOKENS = DEFAULT_RESERVE_TOKENS;
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	strategy: "context-full",
-	thresholdPercent: -1,
+	thresholdPercent: 55,
 	thresholdTokens: -1,
 	midTurnEnabled: true,
 	keepRecentTokens: 20000,
@@ -574,6 +655,69 @@ export function findCutPoint(
 // ============================================================================
 // Summarization
 // ============================================================================
+
+export const REQUIRED_CHECKPOINT_SUMMARY_HEADINGS = [
+	"## Goal",
+	"## Constraints & Preferences",
+	"## Progress",
+	"## Key Decisions",
+	"## Verification",
+	"## Artifact & Source Pointers",
+	"## Next Steps",
+	"## Critical Context",
+	"## Additional Notes",
+] as const;
+
+function extractCheckpointSummaryHeadings(summary: string): string[] {
+	const headings: string[] = [];
+	let fence: { character: "`" | "~"; length: number } | undefined;
+
+	for (const line of summary.split(/\r?\n/)) {
+		const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+		if (fence) {
+			if (
+				fenceMatch &&
+				fenceMatch[1][0] === fence.character &&
+				fenceMatch[1].length >= fence.length &&
+				fenceMatch[2].trim() === ""
+			) {
+				fence = undefined;
+			}
+			continue;
+		}
+
+		if (fenceMatch) {
+			const character = fenceMatch[1][0];
+			if (character === "`" || character === "~") {
+				fence = { character, length: fenceMatch[1].length };
+			}
+			continue;
+		}
+
+		const headingMatch = line.match(/^ {0,3}##[ \t]+(.+?)[ \t]*$/);
+		if (headingMatch) {
+			headings.push(`## ${headingMatch[1].trimEnd()}`);
+		}
+	}
+
+	return headings;
+}
+
+export function validateCheckpointSummaryStructure(summary: string): void {
+	const headings = extractCheckpointSummaryHeadings(summary);
+	const missingHeadings = REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.filter(heading => !headings.includes(heading));
+	if (missingHeadings.length > 0) {
+		throw new Error(
+			`Summarization failed: checkpoint summary missing required heading(s): ${missingHeadings.join(", ")}`,
+		);
+	}
+
+	if (headings.join("\n") !== REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.join("\n")) {
+		throw new Error(
+			`Summarization failed: checkpoint summary has invalid heading structure: expected required headings in order exactly once; found ${headings.join(", ")}`,
+		);
+	}
+}
 
 const SUMMARIZATION_PROMPT = prompt.render(compactionSummaryPrompt);
 
@@ -987,7 +1131,11 @@ async function summarizeConversationWindow(
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
-		return remote.summary;
+		const summary = remote.summary;
+		if (!options?.promptOverride) {
+			validateCheckpointSummaryStructure(summary);
+		}
+		return summary;
 	}
 
 	const response = await instrumentedCompleteSimple(
@@ -1022,6 +1170,10 @@ async function summarizeConversationWindow(
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
 		.join("\n");
+
+	if (!options?.promptOverride) {
+		validateCheckpointSummaryStructure(textContent);
+	}
 
 	return textContent;
 }
@@ -1986,6 +2138,17 @@ export async function compact(
 			usedTokens: nativeUsedTokens,
 		});
 	}
+	const evidenceFidelity = validateCompactionEvidenceFidelity({
+		summary,
+		filePaths: [...readFiles, ...modifiedFiles],
+		artifactReferences: collectArtifactReferences(
+			[...messagesToSummarize, ...turnPrefixMessages],
+			previousSummaryForCompaction,
+		),
+		// Determining whether a historical failure is still unresolved needs task-state semantics.
+		// Leave this unavailable rather than treating every historical error as current.
+		unresolvedFailureAnchors: undefined,
+	});
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no ID - session may need migration");
@@ -2004,7 +2167,7 @@ export async function compact(
 		shortSummary,
 		firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
+		details: { readFiles, modifiedFiles, evidenceFidelity } as CompactionDetails,
 		preserveData: finalPreserveData,
 	};
 }

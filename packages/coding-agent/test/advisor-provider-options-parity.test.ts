@@ -64,6 +64,7 @@ describe("AgentSession advisor provider-options parity", () => {
 	const settings = () =>
 		Settings.isolated({
 			"compaction.enabled": false,
+			"advisor.allowSameModel": true,
 			"providers.openrouterVariant": "floor",
 			"model.loopGuard.enabled": true,
 		});

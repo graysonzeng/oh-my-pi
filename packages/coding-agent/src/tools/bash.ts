@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -22,6 +23,17 @@ import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
+import {
+	appendBashAttempt,
+	type BashAttemptTerminal,
+	buildBashCommandFingerprint,
+	buildBashFailureFingerprint,
+	buildBashStateFingerprint,
+	createBashAttemptLedger,
+	digestBashStream,
+	getBashAttemptLedgerStore,
+	lookupRepeatedBashFailure,
+} from "../latency/bash-attempt-ledger";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
@@ -34,8 +46,11 @@ import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer 
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
+import { worktreeReceiptSync } from "../utils/worktree-receipt";
 import { getSixelLineMask } from "../utils/sixel";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
+import { applySessionToolOutput, workflowToolWireName } from "../workflow/tool-optimization";
+import { assertWorkflowCommandAllowed } from "../workflow/tool-policy";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
@@ -68,6 +83,30 @@ import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function digestBashExecutionState(input: {
+	env: Record<string, string> | undefined;
+	cwd: string;
+	requestedTimeoutSec: number | undefined;
+	pty: boolean;
+}): string {
+	const envEntries = Object.entries(input.env ?? {}).sort(([left], [right]) => left.localeCompare(right));
+	const hasher = createHash("sha256");
+	for (const [name, value] of envEntries) {
+		hasher.update(name);
+		hasher.update("\0");
+		hasher.update(value);
+		hasher.update("\0");
+	}
+	return digestBashStream(
+		JSON.stringify({
+			envReceipt: hasher.digest("hex"),
+			cwd: input.cwd,
+			requestedTimeoutSec: input.requestedTimeoutSec ?? null,
+			pty: input.pty,
+		}),
+	);
+}
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"\n": true,
 	"\r": true,
@@ -126,7 +165,6 @@ function hasBashApprovalShellControl(command: string): boolean {
 	// otherwise literal quoted or escaped arguments as executable code.
 	return hasReinterpretableShellControl && BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE.test(command);
 }
-
 const BASH_PATTERN_APPROVAL_VALUES = new Set(["allow", "deny", "prompt"]);
 
 /**
@@ -593,6 +631,10 @@ function stripBackgroundNotice(text: string, async: BashToolDetails["async"] | u
  */
 export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSchemaWithAsync, BashToolDetails> {
 	readonly name = "bash";
+	/** Model wire name when workflow toolAliases remaps bash (e.g. run_command). */
+	get customWireName(): string | undefined {
+		return workflowToolWireName(this.session, this.name);
+	}
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
@@ -730,6 +772,121 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const outputText = normalizeResultOutput(result);
 		return outputText || "(no output)";
 	}
+	#recordBashAttempt(input: {
+		command: string;
+		cwd: string;
+		env?: Record<string, string>;
+		requestedTimeoutSec?: number;
+		pty: boolean;
+		result: BashResult | BashInteractiveResult;
+		startedAt: string;
+		/** Launch-time session id for late background completions after session switch. */
+		sessionId?: string;
+	}): string[] {
+		let advisoryEnabled = false;
+		let boundedInjectionEnabled = false;
+		try {
+			if (this.session.isLatencyArmEnabled) {
+				advisoryEnabled = this.session.isLatencyArmEnabled("bash_advisory");
+				boundedInjectionEnabled = this.session.isLatencyArmEnabled("bash_bounded_injection");
+			} else {
+				advisoryEnabled = this.session.settings.get("latency.arms.bashAdvisory");
+				boundedInjectionEnabled = this.session.settings.get("latency.arms.bashBoundedInjection");
+			}
+		} catch {
+			return [];
+		}
+		if (!advisoryEnabled && !boundedInjectionEnabled) return [];
+
+		try {
+			const terminal: BashAttemptTerminal = input.result.timedOut
+				? { kind: "timeout" }
+				: input.result.cancelled
+					? { kind: "cancelled" }
+					: input.result.exitCode !== undefined
+						? { kind: "exit", exitCode: input.result.exitCode }
+						: { kind: "error", messageDigest: digestBashStream(normalizeResultOutput(input.result)) };
+			const failureFingerprint = buildBashFailureFingerprint({
+				terminal,
+				stdoutExcerpt: normalizeResultOutput(input.result),
+			});
+			if (!failureFingerprint) return [];
+			const commandFingerprint = buildBashCommandFingerprint({ command: input.command, cwd: input.cwd });
+			const worktreeReceipt = worktreeReceiptSync(input.cwd);
+			const executionReceipt = digestBashExecutionState({
+				cwd: input.cwd,
+				env: input.env,
+				requestedTimeoutSec: input.requestedTimeoutSec,
+				pty: input.pty,
+			});
+			const stateAuthoritative = worktreeReceipt !== null;
+			const stateFingerprint = buildBashStateFingerprint({
+				cwd: input.cwd,
+				envNames: Object.keys(input.env ?? {}),
+				executionReceipt,
+				worktreeReceipt: worktreeReceipt?.digest,
+			});
+			const store = getBashAttemptLedgerStore(
+				input.sessionId ? { getSessionId: () => input.sessionId as string } : this.session,
+			);
+			if (!store) return [];
+			const priorLedger = store.get(commandFingerprint, stateFingerprint);
+			const prior = lookupRepeatedBashFailure(priorLedger ? [priorLedger] : [], {
+				commandFingerprint,
+				stateFingerprint,
+				failureFingerprint,
+			});
+			const mode = boundedInjectionEnabled ? "bounded_injection" : "advisory";
+			const ledger = appendBashAttempt(
+				priorLedger
+					? { ...priorLedger, mode }
+					: createBashAttemptLedger({
+							sessionId: input.sessionId ?? this.session.getSessionId?.() ?? "unknown",
+							commandFingerprint,
+							stateFingerprint,
+							mode,
+						}),
+				{
+					attemptId: randomUUID(),
+					startedAt: input.startedAt,
+					endedAt: new Date().toISOString(),
+					terminal,
+					failureFingerprint,
+					stdoutDigest: digestBashStream(normalizeResultOutput(input.result)),
+					stderrDigest: digestBashStream(""),
+					cwdIdentity: input.cwd,
+					changedInputReceipt: worktreeReceipt?.digest ?? null,
+				},
+			);
+			store.upsert(ledger);
+
+			// Fail open when state identity is not authoritative: still keep the
+			// attempt for observability, but do not claim a repeated identical retry.
+			if (!stateAuthoritative) return [];
+
+			const notices: string[] = [];
+			if (prior.repeatedFailure && advisoryEnabled && prior.advisoryText) {
+				notices.push(prior.advisoryText);
+			}
+			if (prior.repeatedFailure && boundedInjectionEnabled && failureFingerprint) {
+				notices.push(
+					`[bash-attempt-ledger] bounded summary: prior identical failure; priorAttempts=${prior.priorAttempts}; failureFingerprint=${failureFingerprint.slice(0, 12)}…`,
+				);
+			}
+			// Treatment receipts: an advisory or bounded summary was actually emitted.
+			if (notices.some(text => text.includes("bounded summary"))) {
+				this.session.markLatencyArmFired?.("bash_bounded_injection");
+			}
+			if (notices.some(text => text.startsWith("[bash-attempt-ledger] repeated identical failure"))) {
+				this.session.markLatencyArmFired?.("bash_advisory");
+			}
+			return notices;
+		} catch {
+			// Ledger evidence is advisory only. Never prevent the command from
+			// completing when fingerprinting or storage is unavailable.
+			return [];
+		}
+	}
 
 	/**
 	 * Throw for outcomes that are *not* a completed command: user aborts and a
@@ -771,6 +928,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		timeoutSec: number | undefined,
 		options: {
 			requestedTimeoutSec?: number;
+			prefixNotices?: readonly string[];
 			notices?: readonly string[];
 			wallTimeMs?: number;
 		} = {},
@@ -778,7 +936,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const exitCode = result.exitCode;
 		const failedExit = exitCode !== undefined && exitCode !== 0;
 
-		const outputLines = [this.#formatResultOutput(result)];
+		const outputLines: string[] = [];
+		if (options.prefixNotices) {
+			for (const notice of options.prefixNotices) {
+				if (notice) outputLines.push(notice);
+			}
+		}
+		if (outputLines.length > 0) outputLines.push("");
+		outputLines.push(this.#formatResultOutput(result));
 		const notices: string[] = [];
 		if (options.wallTimeMs !== undefined) {
 			notices.push(formatWallTimeNotice(options.wallTimeMs));
@@ -836,7 +1001,12 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			if (!normalizeResultOutput(result).startsWith(`[${message}]\n`)) {
 				outputLines.push("", `[${message}]`);
 			}
-			const timeoutOutputText = await enforceInlineByteCap(outputLines.join("\n"), inlineCap);
+			const timeoutOutputText = applySessionToolOutput(
+				this.session,
+				"bash",
+				await enforceInlineByteCap(outputLines.join("\n"), inlineCap),
+				{ exitCode, timedOut: true },
+			);
 			return toolResult(details)
 				.content([{ type: "text", text: timeoutOutputText }, ...(result.images ?? [])])
 				.truncationFromSummary(result, { direction: "tail" })
@@ -847,8 +1017,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// Non-timeout cancellations and missing exit status still propagate as thrown errors.
 		this.#throwIfUnfinished(result, timeoutSec, outputText);
 
-		// No-op for already-bounded output; see `inlineCap` above.
-		const cappedOutputText = await enforceInlineByteCap(outputText, inlineCap);
+		// No-op for already-bounded output; then apply the workflow profile transform.
+		const cappedOutputText = applySessionToolOutput(
+			this.session,
+			"bash",
+			await enforceInlineByteCap(outputText, inlineCap),
+			{ exitCode },
+		);
 
 		const resultBuilder = toolResult(details)
 			.content([{ type: "text", text: cappedOutputText }, ...(result.images ?? [])])
@@ -923,10 +1098,28 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 				const wallTimeStart = performance.now();
+				// Bind ledger ownership to the session that launched this job so a
+				// mid-flight session switch cannot re-attribute late completions.
+				const launchSessionId = this.session.getSessionId?.() ?? "unknown";
+				let outcomeRecorded = false;
+				const recordTerminalOnce = (result: BashResult | BashInteractiveResult, startedAt: string): string[] => {
+					if (outcomeRecorded) return [];
+					outcomeRecorded = true;
+					return this.#recordBashAttempt({
+						command: options.command,
+						cwd: options.commandCwd,
+						env: options.resolvedEnv,
+						requestedTimeoutSec: options.requestedTimeoutSec,
+						pty: false,
+						result,
+						startedAt,
+						sessionId: launchSessionId,
+					});
+				};
 				try {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
-						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+						sessionKey: `${launchSessionId}:async:${jobId}`,
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						env: options.resolvedEnv,
@@ -940,8 +1133,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					});
 					const wallTimeMs = performance.now() - wallTimeStart;
+					const startedAt = new Date(Date.now() - wallTimeMs).toISOString();
+					// Exactly one terminal ledger row for the executor outcome; notices
+					// must reach the final text even when isError re-throws below.
+					const ledgerPrefixNotices = recordTerminalOnce(result, startedAt);
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						requestedTimeoutSec: options.requestedTimeoutSec,
+						prefixNotices: ledgerPrefixNotices,
 						notices: options.notices ?? [],
 						wallTimeMs,
 					});
@@ -960,6 +1158,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						// A non-zero exit is a completed command that failed. Re-enter
 						// the failure path so the job manager records it as failed and
 						// delivers the error text, matching prior throw-based behavior.
+						// Do NOT re-record ledger here — terminal outcome already landed.
 						throw new ToolError(finalText);
 					}
 					await reportProgress(finalText, {
@@ -970,6 +1169,27 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;
+					const wallTimeMs = performance.now() - wallTimeStart;
+					// Only synthesize an error/cancel record when no terminal result
+					// was recorded (executor throw before a settled BashResult).
+					if (!outcomeRecorded) {
+						recordTerminalOnce(
+							{
+								exitCode: undefined,
+								timedOut: false,
+								cancelled: runSignal.aborted,
+								stdout: message,
+								stderr: "",
+								output: message,
+								truncated: false,
+								totalLines: 1,
+								totalBytes: Buffer.byteLength(message, "utf8"),
+								noOutput: message.length === 0,
+								durationMs: wallTimeMs,
+							} as unknown as BashResult,
+							new Date(Date.now() - wallTimeMs).toISOString(),
+						);
+					}
 					completion.resolve({ kind: "failed", error });
 					await reportProgress(message, {
 						...latestProgressDetails,
@@ -1018,6 +1238,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	): Promise<AgentToolResult<BashToolDetails>> {
 		let command = rawCommand;
 		const env = normalizeBashEnv(rawEnv);
+		if (this.session.workflowCommandPolicy) {
+			assertWorkflowCommandAllowed(command, this.session.workflowCommandPolicy);
+		}
 
 		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
 		// cwd parameter. The scanner captures only a single path token and defers
@@ -1251,6 +1474,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 			const bridgeWallTimeStart = performance.now();
 			const bridgeGraphics = new TerminalSnapshotDecoder();
+			const startedAt = new Date().toISOString();
 			const killGraceMs = 1000;
 			const outputSnapshotGraceMs = 2000;
 			// Cancellable timeout: a bare Bun.sleep(timeoutMs) would leave a live,
@@ -1265,6 +1489,23 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			const { promise: abortedP, resolve: resolveAborted } = Promise.withResolvers<void>();
 			let handle: ClientBridgeTerminalHandle | undefined;
 			let killStarted = false;
+			let bridgeOutcomeRecorded = false;
+			const recordBridgeTerminal = (
+				result: BashResult | BashInteractiveResult,
+				bridgeEnv?: Record<string, string>,
+			): string[] => {
+				if (bridgeOutcomeRecorded) return [];
+				bridgeOutcomeRecorded = true;
+				return this.#recordBashAttempt({
+					command,
+					cwd: commandCwd,
+					env: bridgeEnv,
+					requestedTimeoutSec,
+					pty: false,
+					result,
+					startedAt,
+				});
+			};
 			const fireKill = (): Promise<void> => {
 				if (killStarted) return Promise.resolve();
 				const currentHandle = handle;
@@ -1320,6 +1561,20 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				]);
 				if (createRaced.kind === "aborted" || signal?.aborted) {
 					cleanupLateCreate(createP);
+					recordBridgeTerminal(
+						{
+							output: "",
+							exitCode: undefined,
+							cancelled: true,
+							timedOut: false,
+							truncated: false,
+							totalLines: 0,
+							totalBytes: 0,
+							outputLines: 0,
+							outputBytes: 0,
+						},
+						bridgeEnv,
+					);
 					throw new ToolAbortError("Command aborted");
 				}
 				if (createRaced.kind === "timeout") {
@@ -1335,6 +1590,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						outputLines: 0,
 						outputBytes: 0,
 					};
+					recordBridgeTerminal(timedOutResult, bridgeEnv);
 					return this.#buildCompletedResult(timedOutResult, timeoutSec, {
 						requestedTimeoutSec,
 						notices: pendingNotices,
@@ -1376,6 +1632,21 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 					if (raced.kind === "aborted" || signal?.aborted) {
 						await Promise.race([fireKill(), Bun.sleep(killGraceMs)]);
+						recordBridgeTerminal(
+							{
+								output: lastPolledOutput.output,
+								exitCode: undefined,
+								cancelled: true,
+								timedOut: false,
+								truncated: lastPolledOutput.truncated,
+								totalLines: lastPolledOutput.output.length > 0 ? lastPolledOutput.output.split("\n").length : 0,
+								totalBytes: lastPolledOutput.output.length,
+								outputLines:
+									lastPolledOutput.output.length > 0 ? lastPolledOutput.output.split("\n").length : 0,
+								outputBytes: lastPolledOutput.output.length,
+							},
+							bridgeEnv,
+						);
 						throw new ToolAbortError("Command aborted");
 					}
 
@@ -1410,6 +1681,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							outputBytes: decoded.text.length,
 							...(decoded.images.length > 0 ? { images: decoded.images } : {}),
 						};
+						recordBridgeTerminal(timedOutResult, bridgeEnv);
 						return this.#buildCompletedResult(timedOutResult, timeoutSec, {
 							requestedTimeoutSec,
 							notices: pendingNotices,
@@ -1475,14 +1747,38 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				};
 
 				const bridgeNotices: string[] = [];
+				const ledgerPrefixNotices = recordBridgeTerminal(bridgeResult, bridgeEnv);
 				if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
 					requestedTimeoutSec,
+					prefixNotices: ledgerPrefixNotices,
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 				});
+			} catch (error) {
+				// createTerminal / waitForExit rejections and other unexpected bridge
+				// failures must still land exactly one terminal ledger row.
+				if (!bridgeOutcomeRecorded) {
+					const message = error instanceof Error ? error.message : String(error);
+					const cancelled = signal?.aborted === true || error instanceof ToolAbortError;
+					recordBridgeTerminal(
+						{
+							output: message,
+							exitCode: undefined,
+							cancelled,
+							timedOut: false,
+							truncated: false,
+							totalLines: message.length > 0 ? message.split("\n").length : 0,
+							totalBytes: Buffer.byteLength(message, "utf8"),
+							outputLines: message.length > 0 ? message.split("\n").length : 0,
+							outputBytes: Buffer.byteLength(message, "utf8"),
+						},
+						backendPreflight?.env ?? resolvedEnv,
+					);
+				}
+				throw error;
 			} finally {
 				clearTimeout(timeoutTimer);
 				signal?.removeEventListener("abort", onAbortSignal);
@@ -1511,34 +1807,71 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
 		}
 		const wallTimeStart = performance.now();
-		const result: BashResult | BashInteractiveResult = interactiveUi
-			? await runInteractiveBashPty(interactiveUi, {
-					// PTY bypasses executeBash, so feed it the direnv-transformed
-					// command + merged env (backendPreflight is defined whenever this
-					// branch runs, since both gate on canUseInteractiveBashPty).
-					command: backendPreflight?.command ?? command,
-					cwd: commandCwd,
-					timeoutMs,
-					signal,
-					env: backendPreflight?.env ?? resolvedEnv,
-					artifactPath,
-					artifactId,
-				})
-			: // executeBash runs its OWN direnv preflight internally — pass the RAW
-				// command + resolvedEnv here so the unset prefix / env merge is not
-				// applied twice.
-				await executeBash(command, {
-					cwd: commandCwd,
-					sessionKey: this.session.getSessionId?.() ?? undefined,
-					timeout: timeoutMs ?? 0,
-					signal,
-					env: resolvedEnv,
-					artifactPath,
-					artifactId,
-					onChunk: streamTailUpdates(tailBuffer, onUpdate),
-					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-				});
+		const startedAt = new Date().toISOString();
+		let result: BashResult | BashInteractiveResult;
+		try {
+			result = interactiveUi
+				? await runInteractiveBashPty(interactiveUi, {
+						// PTY bypasses executeBash, so feed it the direnv-transformed
+						// command + merged env (backendPreflight is defined whenever this
+						// branch runs, since both gate on canUseInteractiveBashPty).
+						command: backendPreflight?.command ?? command,
+						cwd: commandCwd,
+						timeoutMs,
+						signal,
+						env: backendPreflight?.env ?? resolvedEnv,
+						artifactPath,
+						artifactId,
+					})
+				: // executeBash runs its OWN direnv preflight internally — pass the RAW
+					// command + resolvedEnv here so the unset prefix / env merge is not
+					// applied twice.
+					await executeBash(command, {
+						cwd: commandCwd,
+						sessionKey: this.session.getSessionId?.() ?? undefined,
+						timeout: timeoutMs ?? 0,
+						signal,
+						env: resolvedEnv,
+						artifactPath,
+						artifactId,
+						onChunk: streamTailUpdates(tailBuffer, onUpdate),
+						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+					});
+		} catch (error) {
+			// Executor/PTY rejections leave before the normal post-await ledger write.
+			const message = error instanceof Error ? error.message : String(error);
+			const cancelled = signal?.aborted === true || error instanceof ToolAbortError;
+			this.#recordBashAttempt({
+				command,
+				cwd: commandCwd,
+				env: interactiveUi ? (backendPreflight?.env ?? resolvedEnv) : resolvedEnv,
+				requestedTimeoutSec,
+				pty,
+				result: {
+					output: message,
+					exitCode: undefined,
+					cancelled,
+					timedOut: false,
+					truncated: false,
+					totalLines: message.length > 0 ? message.split("\n").length : 0,
+					totalBytes: Buffer.byteLength(message, "utf8"),
+					outputLines: message.length > 0 ? message.split("\n").length : 0,
+					outputBytes: Buffer.byteLength(message, "utf8"),
+				},
+				startedAt,
+			});
+			throw error;
+		}
 		const wallTimeMs = performance.now() - wallTimeStart;
+		const ledgerPrefixNotices = this.#recordBashAttempt({
+			command,
+			cwd: commandCwd,
+			env: interactiveUi ? (backendPreflight?.env ?? resolvedEnv) : resolvedEnv,
+			requestedTimeoutSec,
+			pty,
+			result,
+			startedAt,
+		});
 		if (result.cancelled) {
 			// A cancelled result is either a timeout (the command's deadline fired)
 			// or a user/system abort. Timeouts are handled by #buildCompletedResult
@@ -1564,6 +1897,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		}
 		return this.#buildCompletedResult(result, timeoutSec, {
 			requestedTimeoutSec,
+			prefixNotices: ledgerPrefixNotices,
 			notices: pendingNotices,
 			wallTimeMs,
 		});

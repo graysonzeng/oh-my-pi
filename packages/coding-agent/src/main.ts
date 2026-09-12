@@ -1584,6 +1584,13 @@ export async function runRootCommand(
 		if (parsedArgs.advisor) {
 			settingsInstance.override("advisor.enabled", true);
 		}
+		if (parsedArgs.consult) {
+			settingsInstance.override("consult.enabled", true);
+		}
+		if (parsedArgs.consultModel) {
+			settingsInstance.override("consult.enabled", true);
+			settingsInstance.override("consult.model", parsedArgs.consultModel);
+		}
 		// Apply --external-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.externalThinking) {
 			settingsInstance.override("externalThinking", true);
@@ -1842,6 +1849,7 @@ export async function runRootCommand(
 		sessionOptions.authStorage = authStorage;
 		sessionOptions.modelRegistry = modelRegistry;
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+		if (isInteractive) sessionOptions.allowHeadlessGoalContinuation = false;
 		sessionOptions.settings = settingsInstance;
 
 		// OTEL: register global OTLP exporters when an endpoint is configured via

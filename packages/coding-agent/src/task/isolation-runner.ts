@@ -201,6 +201,8 @@ export interface IsolatedRunOptions {
 	buildFailureResult: (err: unknown) => SingleResult;
 	/** Observe the real child result before post-run isolation work. */
 	onSubprocessResult?: (result: SingleResult) => void;
+	/** Takes ownership of cleanup that may complete after the visible task result. */
+	onCleanupDeferred?: (completion: Promise<void>) => void;
 }
 
 /**
@@ -341,7 +343,16 @@ function renderIsolationError(context: IsolationErrorContext): string {
 }
 
 /**
- * Run a subagent inside an isolation worktree and capture its changes.
+ * Generic isolation lifecycle for any callback that mutates a worktree.
+ * Shared by subprocess runners and external CLI adapters.
+ */
+export interface IsolatedExecutionOptions extends Omit<IsolatedRunOptions, "baseOptions"> {
+	/** Execute inside the isolation worktree directory; return a SingleResult. */
+	run: (worktree: string, onCleanupDeferred: (completion: Promise<void>) => void) => Promise<SingleResult>;
+}
+
+/**
+ * Run a callback inside an isolation worktree and capture its changes.
  *
  * Branch mode: on success, commits the diff onto `omp/task/${agentId}` and
  * returns `branchName` + `nestedPatches` (+ `nestedPatchPaths`). On commit
@@ -363,7 +374,7 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * only remaining copy and is retained under a unique `.retained-*` sibling
  * (its path is named in `result.error`), out of reach of later same-id runs.
  */
-export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
+export async function runIsolatedExecution(opts: IsolatedExecutionOptions): Promise<SingleResult> {
 	let handle: IsolationHandle | undefined;
 	let deferredCleanup: Promise<void> | undefined;
 	let retainWorkspace = false;
@@ -372,16 +383,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
-		const result = await runSubprocess({
-			...opts.baseOptions,
-			worktree: isolationDir,
-			preloadedExtensionPaths: undefined,
-			preloadedPreparedExtensions: undefined,
-			preloadedCustomToolPaths: undefined,
-			onCleanupDeferred: completion => {
-				deferredCleanup = completion;
-				opts.baseOptions.onCleanupDeferred?.(completion);
-			},
+		const result = await opts.run(isolationDir, completion => {
+			deferredCleanup = completion;
+			opts.onCleanupDeferred?.(completion);
 		});
 		opts.onSubprocessResult?.(result);
 		// A successful result cannot be captured while deferred owner jobs or
@@ -514,10 +518,30 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	}
 }
 
-export interface IsolationMergeOptions {
-	result: SingleResult;
-	repoRoot: string;
-	mergeMode: "patch" | "branch";
+/**
+ * Run a subagent subprocess inside an isolation worktree (compatibility wrapper).
+ */
+export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
+	return runIsolatedExecution({
+		context: opts.context,
+		preferredBackend: opts.preferredBackend,
+		agentId: opts.agentId,
+		mergeMode: opts.mergeMode,
+		artifactsDir: opts.artifactsDir,
+		description: opts.description,
+		buildCommitMessage: opts.buildCommitMessage,
+		buildFailureResult: opts.buildFailureResult,
+		onSubprocessResult: opts.onSubprocessResult,
+		run: (worktree, onCleanupDeferred) =>
+			runSubprocess({
+				...opts.baseOptions,
+				worktree,
+				preloadedExtensionPaths: undefined,
+				preloadedPreparedExtensions: undefined,
+				preloadedCustomToolPaths: undefined,
+				onCleanupDeferred,
+			}),
+	});
 }
 
 export interface IsolationMergeOutcome {
@@ -533,6 +557,12 @@ export interface IsolationMergeOutcome {
 	hadAnyChanges: boolean;
 	/** True iff the root branch actually merged — gates nested-repo patch application. */
 	mergedBranchForNestedPatches: boolean;
+}
+
+export interface IsolationMergeOptions {
+	result: SingleResult;
+	repoRoot: string;
+	mergeMode: "patch" | "branch";
 }
 
 /**

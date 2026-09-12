@@ -77,6 +77,8 @@ provider "openai" {
 	// stay 1.25x the long input rate (25.0). The Codex subscription route stays
 	// exempt (credit-equivalent, free cache writes) — see openai-codex.kdl.
 	models "gpt-6-astra*" {
+		thinking-requires-effort #true
+		apply-patch-tool-type "freeform"
 		long-context-cost {
 			input-threshold 272000
 			input 20.0

@@ -98,7 +98,7 @@ built-in defaults  <-  global config  <-  project config  <-  CLI overlays  <-  
 
 From highest to lowest:
 
-1. **Runtime overrides** — dedicated CLI flags and feature env vars applied in memory for the current process: `--model`, `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--no-pty`, `--api-key`, and protocol-mode defaults. Never persisted.
+1. **Runtime overrides** — dedicated CLI flags and feature env vars applied in memory for the current process: `--model`, `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--consult`, `--consult-model`, `--no-pty`, `--api-key`, and protocol-mode defaults. Never persisted.
 2. **CLI config overlays** — each `--config <file>`; later overlay files override earlier ones.
 3. **Project settings** — `<cwd>/.omp/settings.json` then `<cwd>/.omp/config.yml` (and contributions from other discovery providers at project level).
 4. **Global settings** — `~/.omp/agent/config.yml`.
@@ -390,6 +390,23 @@ See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATC
 | `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
 | `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
 
+### Consult
+
+Consult is a mid-turn tool that asks a stronger model for strategic guidance. It is independent of the turn-by-turn advisor. Enable it with `consult.enabled`, `/consult on`, `--consult`, or `--consult-model`.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `consult.enabled` | boolean | `false` | Expose the `consult` tool on top-level sessions. Subagents never receive it. |
+| `consult.model` | string | unset | Optional model pattern. Empty uses `modelRoles.advisor`, then the slow chain. Never inherits the primary model. |
+| `consult.allowSameModel` | boolean | `false` | Allow consult when the resolved model is the same as the primary. |
+| `consult.maxUsesPerTurn` | number | `2` | Successful plus failed consult executes in the current primary turn. |
+| `consult.maxUsesPerSession` | number | `12` | Cumulative consult executes in this session. |
+| `consult.timeoutMs` | number | `300000` | Wall-clock timeout for the entire consult oneshot, including first-token wait and answer generation. `0` disables. |
+| `consult.firstEventTimeoutMs` | number | `60000` | Timeout waiting for the first model event (thinking or text). `0` disables. |
+| `consult.maxTokens` | number | `2048` | Hard output token budget passed to the consult oneshot. |
+| `consult.maxFocusChars` | number | `2000` | Maximum characters for the optional `focus` argument. |
+
+
 ### Thinking
 
 ```yaml
@@ -432,6 +449,7 @@ A value of `-1` means "use the provider/model default" — `omp` does not send t
 | `tier.openai`       | enum   | `none`    | `none`, `auto`, `default`, `flex`, `scale`, `priority`. Sent as `service_tier` for OpenAI / OpenAI-Codex and OpenAI-family OpenRouter models. Launch with `--service-tier <value>` for a one-session OpenAI override; the flag is not persisted (`none` omits `service_tier`). |
 | `tier.anthropic`    | enum   | `none`    | `none`, `priority`. `priority` realizes fast mode on supported direct Claude models (ignored on Bedrock/Vertex and via OpenRouter).                                                                                                                                            |
 | `tier.google`       | enum   | `none`    | `none`, `flex`, `priority`. Gemini API sends it in the body; Vertex sends `priority` via header (`flex` is a no-op on Vertex).                                                                                                                                                 |
+| `tier.xai`          | enum   | `none`    | `none`, `priority`. Processing tier for Grok on xAI-capable hosts (`xai`, `xai-oauth`, gateway Grok, and `api.x.ai` OpenAI-compat relays). `priority` sends `service_tier: "priority"` (xAI Priority Processing). Ignored on OpenRouter for `fastModeActive` until forwarding is verified; omitted on other Grok proxies. |
 | `tier.subagent`     | enum   | `inherit` | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the spawned model's family; `inherit` tracks the main agent.                                                                                                                                     |
 | `tier.advisor`      | enum   | `none`    | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the advisor model's family.                                                                                                                                                                      |
 | `personality`       | enum   | `default` | `default`, `friendly`, `pragmatic`, `none`. A user-level `<agent dir>/PERSONALITY.md` replaces the selected preset's text; `none` still omits the block. See [system-prompt-customization](./system-prompt-customization.md).                                                  |
@@ -636,10 +654,12 @@ contextPromotion:
 
 compaction:
   enabled: true
+  strategy: snapcompact     # context-full, handoff, shake, snapcompact, off
   methodOrder: [remote, snapcompact, handoff, shake, soft]
-  midTurnEnabled: true # check thresholds between tool-loop provider requests
-  thresholdPercent: -1 # -1 = default reserve-based behavior
-  thresholdTokens: -1 # fixed token limit when > 0
+  midTurnEnabled: true      # check thresholds between tool-loop provider requests
+  thresholdPercent: 55       # percent-of-context trigger (default 55%; -1 = reserve-based)
+  thresholdTokens: -1        # fixed token limit when > 0
+  remoteEnabled: true
 memory:
   backend: off # off, local, hindsight, mnemopi
 ```
@@ -652,7 +672,7 @@ memory:
 | `compaction.asyncEnabled`     | boolean | `true`                                   | Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed.                                                                                        |
 | `compaction.midTurnEnabled`   | boolean | `true`                                   | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request.                                                                                                                                                  |
 | `compaction.methodOrder`      | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta); unavailable or failed methods advance. |
-| `compaction.thresholdPercent` | number  | `-1`                                     | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                 |
+| `compaction.thresholdPercent` | number | `55` | Percent-of-context trigger; `-1` = reserve-based default. |
 | `compaction.thresholdTokens`  | number  | `-1`                                     | Fixed token trigger when `> 0`.                                                                                                                                                                                                           |
 | `compaction.reserveTokens`    | number  | _(unset)_                                | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
 | `compaction.keepRecentTokens` | number  | `20000`                                  | Recent tokens always preserved.                                                                                                                                                                                                           |
@@ -791,6 +811,7 @@ Every schema path not individually tabulated in this catalog is explicitly defer
 - Execution and content: `commit.*`, `completion.*`, `edit.*`, `error.*`, `extensionHandlers.*`, `generate_image.*`, `git.*`, `images.*`, `live.*`, `paste.*`, `power.*`, `read.*`, `shellMinimizer.*`, `speech.*`, `terminal.*`, and `title.*`.
 - Interface and startup: `display.*`, `statusLine.*`, `startup.*`, `stt.*`, `tui.*`, and `ttsr.*`.
 - Ungrouped keys: `setupVersion`, `proseOnlyThinking`, `omitThinking`, `externalThinking`, `includeWorkspaceTree`, `autocompleteMaxVisible`, `emojiAutocomplete`, `disabledExtensions`, `inlineToolDescriptors`, and `treeFilterMode`.
+- Integrations, storage, and discovery: `async.*`, `bashInterceptor.*`, `codexResets.*`, `collab.*`, `commands.*`, `dev.*`, `exa.*`, `gc.*`, `github.*`, `hindsight.*`, `magicKeywords.*`, `mcp.*`, `memories.*`, `mnemopi.*`, `providers.*`, `searxng.*`, `share.*`, `skills.*`, `task.*`, `todo.*`, `tts.*`, `workflow.*` (multi-model coding workflow; see [workflow.md](./workflow.md)), and `workspace.*`.
 
 These settings follow the same schema-defined type and default rules shown above.
 

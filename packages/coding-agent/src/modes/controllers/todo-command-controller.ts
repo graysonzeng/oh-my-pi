@@ -7,7 +7,6 @@ import {
 	resolveTodoMarkdownPath,
 	type TodoItem,
 	type TodoPhase,
-	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -444,14 +443,11 @@ export class TodoCommandController {
 	}
 
 	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
-		// 1. In-memory + UI state
+		// Commit the durable state; update this view immediately for slash-command callers.
 		this.ctx.session.setTodoPhases(nextPhases);
 		this.ctx.setTodos(nextPhases);
 
-		// 2. Persist for reload survival via custom session entry.
-		this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: nextPhases });
-
-		// 3. Inject system reminder so the agent learns about the change next turn.
+		// Inject a system reminder so the agent learns about the change next turn.
 		//    Removals carry explicit intent so the agent does not rebuild the
 		//    cleared/removed items on its next turn (issue #5258).
 		const reminderText = buildSystemReminder(action, nextPhases, opts?.removed ?? false);

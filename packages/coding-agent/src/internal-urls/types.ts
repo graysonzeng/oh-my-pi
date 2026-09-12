@@ -8,6 +8,7 @@
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { LineageContext } from "../session/session-lineage";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
 
@@ -126,6 +127,14 @@ export interface ResolveContext {
 	 * file, or on-disk transcript.
 	 */
 	getSessionBranch?: () => readonly SessionEntry[];
+	/**
+	 * Session-scoped lineage of the calling session, derived live per resolve.
+	 * `agent://` and `history://` consult these explicit bounded roots before
+	 * any registry-derived current-process roots, so a fresh process without a
+	 * registered `Main` can still reach persisted ancestors, and two top-level
+	 * sessions never cross-prioritize each other's lineage.
+	 */
+	lineage?: LineageContext;
 	/**
 	 * Calling session's `local://` root mapping. When present, the local-protocol
 	 * handler resolves the URL against THIS session's artifacts dir instead of

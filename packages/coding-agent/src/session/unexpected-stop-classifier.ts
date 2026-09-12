@@ -7,6 +7,7 @@ import type { Settings } from "../config/settings";
 import unexpectedStopClassifierPrompt from "../prompts/system/unexpected-stop-classifier.md" with { type: "text" };
 import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
+import { isAuthenticatedThinkingSignature } from "./messages";
 
 const CLASSIFIER_SYSTEM_PROMPT = prompt.render(unexpectedStopClassifierPrompt);
 
@@ -51,11 +52,15 @@ export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 		}
 		// A signed thinking-only stop is still a candidate: reasoning models can
 		// trap the intended response (or a truncated fragment) in a thinking block
-		// with no text. #isEmptyAssistantStop treats a non-whitespace signature as
+		// with no text. `isEmptyAssistantStop` treats an authenticated signature as
 		// terminal (not empty), so such stops bypass the empty-stop path entirely.
-		// Match that predicate here — unsigned thinking-only stops stay with the
-		// empty-stop retry path (and its cap) rather than being re-handled here.
-		if (content.type === "thinking" && /\S/.test(content.thinking) && /\S/.test(content.thinkingSignature ?? "")) {
+		// OpenAI reasoning field names are replay coordinates, not authentication —
+		// those unsigned thinking-only stops stay with the empty-stop retry path.
+		if (
+			content.type === "thinking" &&
+			/\S/.test(content.thinking) &&
+			isAuthenticatedThinkingSignature(content.thinkingSignature)
+		) {
 			hasContent = true;
 		}
 	}

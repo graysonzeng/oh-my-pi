@@ -507,6 +507,54 @@ describe("OpenAI Responses transient stream retry", () => {
 		expect(result.stopReason).toBe("error");
 	});
 
+	it("retries a pre-output SSE bad_response_status_code error with a fresh request", async () => {
+		let attempt = 0;
+		const fetchMock = vi.fn(async () => {
+			attempt++;
+			if (attempt === 1) {
+				return createSseResponse([
+					{
+						type: "error",
+						error: { code: "bad_response_status_code", message: "openai_error" },
+					},
+				]);
+			}
+			return createCompletedTextResponse("Recovered", "resp_recovered");
+		}) as FetchImpl;
+
+		const responseStream = streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		});
+		const events = await collectEvents(responseStream);
+		const result = await responseStream.result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(result.stopReason).toBe("stop");
+		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+	});
+
+	it("does not retry a pre-output SSE invalid_request_error", async () => {
+		const fetchMock = vi.fn(async () =>
+			createSseResponse([
+				{
+					type: "error",
+					error: { code: "invalid_request_error", message: "Tool schema is invalid" },
+				},
+			]),
+		) as FetchImpl;
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+	});
+
 	it("honors caller abort during the retry wait", async () => {
 		const controller = new AbortController();
 		const fetchMock = vi.fn(async () => createTruncatedPendingToolResponse()) as FetchImpl;

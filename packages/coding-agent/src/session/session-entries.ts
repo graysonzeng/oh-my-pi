@@ -255,10 +255,14 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** The agent's `outputTruncation` setting (`false` = model-family tool-output clamps disabled); absent uses the session default. */
+	outputTruncation?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
 	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
 	isolated?: boolean;
+	/** Structured-policy performance class resolved at first spawn; absent on pre-class files. */
+	performanceClass?: "review" | "explore" | "worker";
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

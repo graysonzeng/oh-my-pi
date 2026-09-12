@@ -11,6 +11,7 @@ import {
 	__physicalTargetSegmentsForTesting,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
+	onConsultationSettingsChanged,
 	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
@@ -1093,6 +1094,29 @@ describe("Settings", () => {
 				expect(signalCount).toBe(1);
 				expect(settings.getModelRole("default")).toBe("openai/updated");
 				expect(settings.getModelRole("runtime")).toBe("openai/runtime");
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("notifies consultation availability changes without unmasking runtime overrides", async () => {
+			await writeSettings({ consult: { enabled: true, allowSameModel: false } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const observed: boolean[] = [];
+			const unsubscribe = onConsultationSettingsChanged(() => {
+				observed.push(settings.get("consult.allowSameModel"));
+			});
+			try {
+				await settings.reloadFromDisk();
+				expect(observed).toEqual([]);
+				await writeSettings({ consult: { enabled: true, allowSameModel: true } });
+				await settings.reloadFromDisk();
+				expect(observed).toEqual([true]);
+				settings.override("consult.allowSameModel", false);
+				await settings.reloadFromDisk();
+				expect(observed).toEqual([true, false]);
+				settings.clearOverride("consult.allowSameModel");
+				expect(observed).toEqual([true, false, true]);
 			} finally {
 				unsubscribe();
 			}

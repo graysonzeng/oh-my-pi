@@ -9,19 +9,22 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - Job IDs are process-local and expire roughly five minutes after settlement. Afterward, use the agent ID with `hub send`, `agent://<id>`, or `history://<id>`.
 - With `outputSchema`, a result's parsed payload — when present — is served at `agent://<id>` (fields via `agent://<id>?q=.<field>`) regardless of validity; a schema-violating (invalid) result also previews the payload inline in the auto-delivered follow-up.
 - `completed` means successful yield/job exit, not artifact acceptance. Verify claimed changes.
+- Do not spawn then immediately enter a wait loop; continue other work until blocked. Review/Gate dual-axis MUST be one `tasks[]` batch. Runtime budgets are executor-enforced, not brief-width limits.
 {{/if}}
 
 # Task Design
-- **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Read-only research MUST run on `scout` (faster model).{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly.
+- **Benefit gate:** Handle small, clear work and bounded lookups directly. Delegate only when expected time savings, necessary independent evidence, or specialist capability outweighs startup, context reconstruction, waiting, and integration costs; honor explicit user requests for agents.
+- **Agent typing:** After deciding to delegate, pick each item's most specific available agent.{{#if scoutAvailable}} Delegated read-only research uses `scout`.{{/if}}{{#if sonicAvailable}} Delegated mechanical implementation uses `sonic`; complex implementation, design, or multi-file contracts use `task`.{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly. These routing rules do not require delegation.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
-- **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} spin a read-only scout only when affected files are genuinely unknown.{{/if}}
-- **Overlap:** Parallelize independent ownership. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
+- **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} use a separate scout only when broad exploration justifies the handoff, not merely because paths are unknown.{{/if}}
+- **Acceptance boundary:** Split by independently verifiable behavior, not repository ownership alone. Supply known paths, versioned evidence fragments, failed attempts, modification boundaries, verification ownership, and shared API inputs/outputs before dispatch. Do not pass full parent history. Reviewers receive original materials (source, diff, acceptance), not the author's reasoning. Keep changes requiring the same file with one integration owner.
+- **Overlap:** Parallelize independent ownership. Concurrent work MUST stay on disjoint surfaces. While a subagent job is running, its declared target files are mid-run state — not success or failure evidence — and MUST NOT be overwritten by main or peers until delivery or cancellation. Waiting is allowed when blocked on those owned files. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
   1. Every task MUST skip validation (build/lint/tests) — validating mid-flight blocks agents on each other's edits.
   2. Decide cross-task contracts up front (e.g. the interface A implements and B consumes) and state them in the {{#if batchEnabled}}batch `context`{{else}}task{{/if}}, not left for agents to negotiate.
 
 # Inputs
 {{#if batchEnabled}}
-- `context`: Shared project state, constraints, and contracts. Applies to the entire batch; do not duplicate this background into individual tasks.
+- `context`: Shared project state, constraints, contracts, versioned evidence fragments, failed attempts, and verification ownership. Applies to the entire batch; do not duplicate this background into individual tasks or pass full parent history.
 - `tasks[]`: Array of subagents to spawn.
   - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
   - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
@@ -33,7 +36,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
-  - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
+  - `schemaMode`: Default accepts a retry-exhausted invalid result with a warning; strict fails it.
 {{#if isolationEnabled}}
 {{#if applyIsolatedChanges}}
   - `isolated`: Run in a dedicated worktree; successful changes are automatically applied to the parent checkout.
@@ -52,7 +55,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
-- `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
+- `schemaMode`: Default accepts a retry-exhausted invalid result with a warning; strict fails it.
 {{#if isolationEnabled}}
 {{#if applyIsolatedChanges}}
 - `isolated`: Run in a dedicated worktree; successful changes are automatically applied to the parent checkout.
@@ -63,14 +66,17 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 
 # Communication
-Subagents start blank — no conversation history.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{/if}}
+Subagents start blank — no conversation history.{{#if ircEnabled}} Ordinary parent-to-subagent IRC arrives after the current tool batch; use `hub send` with `interrupt: true` for urgent corrections that must skip pending tools.{{/if}}
 Pass large payloads via `local://<path>` URIs, NEVER inline text.
+{{#if ircEnabled}}- NEVER ping an agent still running without new information; only send necessary recovery after a confirmed stall, park, or interrupt.{{/if}}
+- Label follow-up messages as corrections to the current assignment or explicit new work. Defer unrelated additions until the current result is delivered; an urgent replacement MUST state which acceptance criteria it supersedes. Never silently accumulate new criteria in a nearly finished run.
+- Reuse still-valid {{#if batchEnabled}}batch `context` / {{/if}}`local://` evidence instead of re-gathering it; re-read when it is stale, incomplete, conflicts with current files, was truncated, after a tool-failure strategy change, or for independent acceptance.
 
 # Format Contracts
 {{#if batchEnabled}}
 `context` format:
 # Goal         ← what the batch accomplishes
-# Constraints  ← rules and session decisions
+# Constraints  ← rules, session decisions, modification boundaries, verification ownership
 # Contract     ← shared interfaces
 {{/if}}
 

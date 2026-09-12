@@ -248,6 +248,8 @@ export interface SessionAdvisorsHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	/** The session's current active model, used for same-model suspension. */
+	getActiveModel(): Model | undefined;
 	yieldQueue: YieldQueue;
 	obfuscator: SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
@@ -400,6 +402,37 @@ export class SessionAdvisors {
 		this.#buildAdvisorRuntime(true);
 	}
 
+	/**
+	 * Re-evaluates advisor availability when the primary active model — or the
+	 * consultation settings that gate same-model suspension
+	 * (`advisor.allowSameModel`) — changes. Advisors whose resolved model equals
+	 * the new active model are suspended (`same_model`: no runtime is built while
+	 * the enabled config stays intact); as soon as the models diverge again the
+	 * runtime rebuilds from the current transcript tail. Mirrors
+	 * {@link onModelRolesChanged} but rebuilds quietly so high-frequency setting
+	 * signals never re-notify while an advisor is already suspended; one notice
+	 * marks the explicit running → same-model transition.
+	 */
+	onPrimaryModelChanged(): void {
+		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		const wasActive = this.#advisors.length > 0;
+		if (wasActive && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+		const started = this.#buildAdvisorRuntime(true, false);
+		if (wasActive && !started) {
+			const statuses = [...this.#advisorStatuses.values()];
+			if (
+				statuses.length > 0 &&
+				statuses.some(entry => entry.status === "same_model") &&
+				statuses.every(entry => entry.status === "same_model" || entry.status === "paused")
+			) {
+				this.#host.emitNotice(
+					"warning",
+					"Advisor paused: its resolved model now matches the active model. Set advisor.allowSameModel to run it anyway.",
+					"advisor",
+				);
+			}
+		}
+	}
 	/**
 	 * True when the enabled advisor roster still has an entry left at `no_model`.
 	 *
@@ -781,6 +814,25 @@ export class SessionAdvisors {
 				}
 				model = sel.model;
 				thinkingLevel = concreteThinkingLevel(sel.thinkingLevel);
+			}
+
+			// Same-model suspension: an advisor whose resolved model equals the
+			// primary's active model would only re-review that model's own output, so
+			// it stays off (status `same_model`) unless the user opts in via
+			// `advisor.allowSameModel`. The enabled config is preserved — a later
+			// active-model change (or role reassignment / setting toggle) rebuilds the
+			// runtime without user action.
+			const activeModel = this.#host.getActiveModel();
+			if (activeModel && modelsAreEqual(activeModel, model) && !this.#host.settings.get("advisor.allowSameModel")) {
+				this.#advisorStatuses.set(slug, { name: config.name, status: "same_model" });
+				if (emitWarnings) {
+					this.#host.emitNotice(
+						"warning",
+						`Advisor "${config.name}" paused: it resolves to the active model (${formatModelString(model)}). Set advisor.allowSameModel to run it anyway.`,
+						"advisor",
+					);
+				}
+				continue;
 			}
 			// Clamp the effort against the resolved model. Historically we defaulted
 			// to `ThinkingLevel.Medium` unconditionally, which threw at first stream
@@ -2161,6 +2213,11 @@ export class SessionAdvisors {
 					? "Advisor setting is enabled, but no model is assigned to the 'advisor' role."
 					: "Advisor is disabled.";
 			}
+			if (s.status === "same_model") {
+				return stats.configured
+					? `Advisor "${s.name}" is paused: it resolves to the same model as the active model. Set advisor.allowSameModel to run it anyway.`
+					: "Advisor is disabled.";
+			}
 			const contextLine =
 				s.contextWindow > 0
 					? `Context: ${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} tokens (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
@@ -2179,7 +2236,7 @@ export class SessionAdvisors {
 					? `${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
 					: `${s.contextTokens.toLocaleString()}`;
 			lines.push(
-				`  • ${s.name}${s.model && s.status === "running" ? ` (${s.model.provider}/${s.model.id})` : ` [${s.status}]`} — context ${ctx} tokens, $${s.cost.toFixed(4)}`,
+				`  • ${s.name}${s.model && s.status === "running" ? ` (${s.model.provider}/${s.model.id})` : ` [${s.status === "same_model" ? "same model" : s.status}]`} — context ${ctx} tokens, $${s.cost.toFixed(4)}`,
 			);
 		}
 		lines.push(

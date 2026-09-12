@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
@@ -1065,5 +1066,21 @@ describe("computer supervisor recovery", () => {
 		expect(result.returnValue).toBe("fresh");
 		expect(workers).toBe(2);
 		await supervisor.close();
+	});
+});
+
+describe("computer worker module graph", () => {
+	it("keeps the eval worker graph importable after computer renderer registration", async () => {
+		const processHandle = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				'await import("./src/eval/js/context-manager.ts"); const { toolRenderers } = await import("./src/tools/renderers.ts"); if (typeof toolRenderers.hub.renderCall !== "function") process.exit(2)',
+			],
+			{ cwd: path.resolve(import.meta.dir, "../.."), stdout: "ignore", stderr: "pipe" },
+		);
+		const [exitCode, stderr] = await Promise.all([processHandle.exited, new Response(processHandle.stderr).text()]);
+		if (exitCode !== 0) throw new Error(`eval worker graph import failed:\n${stderr}`);
+		expect(exitCode).toBe(0);
 	});
 });

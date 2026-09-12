@@ -45,7 +45,7 @@ export interface StreamGuardsHost {
 	localProtocolOptions(): LocalProtocolOptions;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>): void;
-	discardAssistantTurn(message: AssistantMessage): void;
+	discardAssistantTurn(message: AssistantMessage): Promise<void> | void;
 }
 
 /** Guards streamed edit calls against generated files and invalid final previews. */
@@ -293,7 +293,7 @@ export class LoopGuards {
 				(message): message is AssistantMessage =>
 					message.role === "assistant" && message.timestamp === targetTimestamp,
 			);
-			if (aborted) this.#host.discardAssistantTurn(aborted);
+			if (aborted) await this.#host.discardAssistantTurn(aborted);
 			const content = prompt.render(geminiToolReminderTemplate, { count: headerCount });
 			const details = { headers: headerCount };
 			this.#host.agent.appendMessage({

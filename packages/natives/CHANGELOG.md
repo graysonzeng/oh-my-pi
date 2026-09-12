@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added native code-intelligence indexing for evidence-backed repository queries.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

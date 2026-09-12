@@ -5,14 +5,15 @@
  * generating anything. Delivery resolves the recipient via the global
  * AgentRegistry — parked agents are revived through the
  * AgentLifecycleManager, idle agents are woken with a real turn, and busy
- * agents receive the message as a non-interrupting aside at the next step
- * boundary (see AgentSession.deliverIrcMessage). Replies are real turns by
- * the recipient, observed via `wait` — with one exception: when the sender
- * awaits a reply and the recipient cannot run a real reply turn in time
- * (mid-turn with async execution disabled — possibly blocked in a
- * synchronous task spawn whose batch includes the sender — or idle in plan
- * mode, where autonomous wake turns are suppressed), the recipient session
- * generates an ephemeral side-channel auto-reply.
+ * agents receive an ordinary message as a non-interrupting aside at the
+ * next step boundary (see AgentSession.deliverIrcMessage). `interrupt: true`
+ * keeps the original mid-batch skip (parent steering / peer IRC interrupt).
+ * Replies are real turns by the recipient, observed via `wait` — with one
+ * exception: when the sender awaits a reply and the recipient cannot run a
+ * real reply turn in time (mid-turn with async execution disabled — possibly
+ * blocked in a synchronous task spawn whose batch includes the sender — or
+ * idle in plan mode, where autonomous wake turns are suppressed), the
+ * recipient session generates an ephemeral side-channel auto-reply.
  */
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
@@ -39,6 +40,12 @@ export interface IrcMessage {
 	 * ping-pong forever.
 	 */
 	wakeRelay?: boolean;
+	/**
+	 * When true, skip remaining tools in the current batch and inject immediately
+	 * (parent steering or peer IRC interrupt). Omitted/false: visible on the next
+	 * model request after the current tool batch finishes.
+	 */
+	interrupt?: boolean;
 }
 
 export interface IrcDeliveryReceipt {

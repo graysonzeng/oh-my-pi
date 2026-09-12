@@ -53,6 +53,7 @@ import { resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { planLocalProtocolOptions } from "../tools/plan-mode-guard";
 import { ToolError } from "../tools/tool-errors";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
+import { assertWorkflowPathAllowed } from "../workflow/tool-policy";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
@@ -468,6 +469,11 @@ export class EditTool implements AgentTool<TInput> {
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
+		if (this.session.workflowWritePolicy) {
+			for (const targetPath of this.#inspect(params).paths) {
+				assertWorkflowPathAllowed(targetPath, this.session.workflowWritePolicy);
+			}
+		}
 		let editSession = this.#sessions.get(toolCallId);
 		if (!editSession) {
 			// No deltas were streamed (non-streaming provider, inline recovery,

@@ -11,6 +11,8 @@ export const BUILTIN_TOOL_NAMES = [
 	"glob",
 	"grep",
 	"lsp",
+	"code_intel",
+	"consult",
 	"checkpoint",
 	"rewind",
 	"context_notes",
@@ -27,6 +29,9 @@ export const BUILTIN_TOOL_NAMES = [
 	"reflect",
 	"learn",
 	"manage_skill",
+	"workflow",
+	"session_search",
+	"read_omitted_content",
 ] as const;
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];

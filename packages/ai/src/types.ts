@@ -34,6 +34,7 @@ import type {
 	WriteResult,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
 import type { ApiKey } from "./auth-retry";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
@@ -140,7 +141,7 @@ export type CacheRetention = "none" | "short" | "long";
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
 
 /** Provider families that expose an independent service-tier knob. */
-export type ServiceTierFamily = "openai" | "anthropic" | "google";
+export type ServiceTierFamily = "openai" | "anthropic" | "google" | "xai";
 
 /**
  * Per-family service-tier selection. A request consults only the entry for the
@@ -150,7 +151,7 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
  */
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
-type ServiceTierModel = Pick<Model, "provider" | "api" | "identity">;
+type ServiceTierModel = Pick<Model, "provider" | "api" | "identity"> & { id?: string; baseUrl?: string };
 // The service-tier matrix below intentionally stays in TypeScript rather than
 // the KDL compat tree: `shouldSendServiceTier` accepts bare provider strings
 // (agent telemetry, google-shared header placement) and the stats parser
@@ -178,16 +179,35 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 	);
 }
 
+function isXaiChatServiceModel(model: ServiceTierModel): boolean {
+	if (model.identity.class !== "xai") return false;
+	const id = model.id;
+	if (id !== undefined && /(^|[/.])grok[-.](imagine|stt|voice)\b/i.test(id)) return false;
+	return true;
+}
+
+function isXaiServiceTierModel(model: ServiceTierModel): boolean {
+	if (excludesInferredOpenAIServiceTier(model.provider)) return false;
+	if (!isOpenAIServiceTierApi(model.api)) return false;
+	if (!isXaiChatServiceModel(model)) return false;
+	if (model.provider === "xai" || model.provider === "xai-oauth") return true;
+	if (model.provider === "gateway") return true;
+	if (model.baseUrl && hostMatchesUrl(model.baseUrl, "xai")) return true;
+	return false;
+}
+
 /**
  * Classify a model into the service-tier family whose knob governs it, or
  * `undefined` when the model exposes no serving-priority control.
  *
  * OpenRouter models are classified by id namespace (`anthropic/`, `google/`,
- * `openai/`); Claude on Bedrock/Vertex (api `anthropic-messages`) is the
+ * `openai/`, `x-ai/` Grok text ids); Claude on Bedrock/Vertex (api `anthropic-messages`) is the
  * anthropic family even though its provider is `amazon-bedrock`/`google-vertex`.
  * Custom OpenAI-compatible relays that serve OpenAI model ids are OpenAI family
  * too unless the provider owns a separate tier control (Fireworks) or rejects
- * OpenAI's service-tier field (GitHub Copilot).
+ * OpenAI's service-tier field (GitHub Copilot). xAI-capable Grok text models
+ * (bundled `xai`/`xai-oauth`, gateway Grok on OpenAI-compat APIs, and
+ * `api.x.ai` relays) are the `xai` family.
  */
 export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | undefined {
 	const provider = model.provider;
@@ -195,11 +215,13 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
 		if (model.identity.class === "anthropic") return "anthropic";
 		if (model.identity.class === "gemini") return "google";
 		if (model.identity.class === "openai") return "openai";
+		if (model.identity.class === "xai") return isXaiChatServiceModel(model) ? "xai" : undefined;
 		return undefined;
 	}
 	if (provider === "openai" || provider === "openai-codex") return "openai";
 	if (model.api === "anthropic-messages") return "anthropic";
 	if (provider === "google" || provider === "google-vertex") return "google";
+	if (isXaiServiceTierModel(model)) return "xai";
 	if (isOpenAIServiceTierModel(model)) return "openai";
 	return undefined;
 }
@@ -232,7 +254,13 @@ export function shouldSendServiceTier(
 	target: Provider | ServiceTierModel | undefined,
 ): boolean {
 	if (!serviceTier || serviceTier === "auto") return false;
+	if (typeof target !== "string" && target && serviceTierFamily(target) === "xai") {
+		return serviceTier === "priority";
+	}
 	const provider = typeof target === "string" ? target : target?.provider;
+	if (provider === "xai" || provider === "xai-oauth") {
+		return serviceTier === "priority";
+	}
 	if (provider === "openai" || provider === "openai-codex") return true;
 	if (provider === "openrouter") {
 		return serviceTier === "flex" || serviceTier === "scale" || serviceTier === "priority";
@@ -307,7 +335,7 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 	if (typeof value === "object") {
 		const src = value as Record<string, unknown>;
 		const out: ServiceTierByFamily = {};
-		for (const family of ["openai", "anthropic", "google"] as const) {
+		for (const family of ["openai", "anthropic", "google", "xai"] as const) {
 			const tier = src[family];
 			if (tier === "auto" || tier === "default" || tier === "flex" || tier === "scale" || tier === "priority") {
 				out[family] = tier;
@@ -1079,8 +1107,16 @@ export interface ToolResultMessage<TDetails = unknown> {
 	toolCallId: string;
 	toolName: string;
 	content: (TextContent | ImageContent)[]; // Supports text and images
+	/** Stored recovery data; never part of the provider-visible result content. */
+	omittedOriginal?: (TextContent | ImageContent)[];
 	details?: TDetails;
 	isError: boolean;
+	/**
+	 * Materialized presentation status for surfaces that strip `details`
+	 * (sanitized share/export). Never a causal source: the structured details
+	 * remain the source of truth wherever they survive.
+	 */
+	presentationStatus?: "running" | "succeeded" | "failed" | "aborted" | "skipped";
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Timestamp when output was pruned (ms since epoch). Undefined if unpruned. */

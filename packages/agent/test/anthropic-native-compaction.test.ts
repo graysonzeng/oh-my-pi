@@ -32,6 +32,7 @@ import type { AssistantMessage, Context, Message, Model, SimpleStreamOptions, Us
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { checkpointSummary } from "./helpers";
 
 const ZERO_USAGE: Usage = {
 	input: 0,
@@ -411,8 +412,9 @@ describe("compact() Anthropic native lane", () => {
 
 	test("summarizes locally below the trigger floor instead of issuing a request that cannot compact", async () => {
 		const model = makeAnthropicModel();
+		const localSummaryText = checkpointSummary({ "## Goal": "local summary" });
 		const { calls, completeImpl } = recordingCompleteImpl(() =>
-			assistantMessage(model, { content: [{ type: "text", text: "local summary" }] }),
+			assistantMessage(model, { content: [{ type: "text", text: localSummaryText }] }),
 		);
 		const preparation = makePreparation({ tokensBefore: ANTHROPIC_COMPACTION_MIN_CONTEXT_TOKENS - 1 });
 

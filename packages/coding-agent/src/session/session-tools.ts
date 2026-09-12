@@ -21,6 +21,7 @@ import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
+import { type ConsultSelectionHost, isConsultActivationAllowed } from "../tools/consult-model";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -62,6 +63,8 @@ export interface SessionToolsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
+	getConsultModelOverride(): string | undefined;
+	setConsultModelOverride(pattern: string | undefined): void;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
 }
@@ -72,6 +75,10 @@ interface SessionToolsOptions {
 	createVibeTools?: () => AgentTool[];
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
+	/** Creates session_search for session-scoped kill/re-enable after arm invalidation. */
+	createSessionSearchTool?: () => Promise<AgentTool | null>;
+	/** Creates the built-in `consult` tool for session-scoped runtime enablement. */
+	createConsultTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
@@ -88,6 +95,7 @@ interface SessionToolsOptions {
 		options?: { directToolNames?: readonly string[] },
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	wrapMcpInstructionActivation?: (tool: AgentTool) => AgentTool;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
@@ -192,6 +200,8 @@ export class SessionTools {
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
+	#createSessionSearchTool: SessionToolsOptions["createSessionSearchTool"];
+	#createConsultTool: SessionToolsOptions["createConsultTool"];
 	#installedVibeToolNames = new Set<string>();
 	#builtInToolNames: Set<string>;
 	#rpcHostToolNames = new Set<string>();
@@ -259,6 +269,7 @@ export class SessionTools {
 		settings: this.#host.settings,
 		localProtocolOptions: this.#host.localProtocolOptions(),
 	});
+	#wrapMcpInstructionActivation: SessionToolsOptions["wrapMcpInstructionActivation"];
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
 	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
@@ -282,6 +293,8 @@ export class SessionTools {
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createVibeTools = options.createVibeTools;
 		this.#createThinkTool = options.createThinkTool;
+		this.#createSessionSearchTool = options.createSessionSearchTool;
+		this.#createConsultTool = options.createConsultTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
 		if (options.mcpManagerToolNames === undefined) {
@@ -303,6 +316,7 @@ export class SessionTools {
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
+		this.#wrapMcpInstructionActivation = options.wrapMcpInstructionActivation;
 		this.#xdev = options.xdev;
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
@@ -1464,6 +1478,123 @@ export class SessionTools {
 			return true;
 		});
 	}
+	async setSessionSearchToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const active = this.getEnabledToolNames();
+			if (!enabled) {
+				if (active.includes("session_search")) {
+					await this.#applyActiveToolsByName(active.filter(name => name !== "session_search"));
+				}
+				return true;
+			}
+			if (!this.#toolRegistry.has("session_search")) {
+				const tool = await this.#createSessionSearchTool?.();
+				if (tool?.name !== "session_search") return false;
+				const wrapped = this.#wrapRuntimeTool(tool);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+				this.#builtInToolNames.add(wrapped.name);
+			}
+			if (!active.includes("session_search")) {
+				await this.#applyActiveToolsByName([...active, "session_search"]);
+			}
+			return true;
+		});
+	}
+
+	/** Explicit session toggle; automatic same-model pauses preserve this intent. */
+	setConsultToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.runToolRegistryMutation(() => this.#setConsultToolEnabled(enabled));
+	}
+
+	async #setConsultToolEnabled(enabled: boolean): Promise<boolean> {
+		if (enabled && this.#host.agentKind() !== "main") return false;
+		this.#host.settings.override("consult.enabled", enabled);
+		if (!enabled) {
+			const active = this.getEnabledToolNames();
+			if (active.includes("consult")) {
+				await this.#applyActiveToolsByName(active.filter(name => name !== "consult"));
+			}
+			return true;
+		}
+		return this.#reconcileConsultTool();
+	}
+
+	/** Re-evaluate availability without changing the user's enabled setting. */
+	reconcileConsultTool(): Promise<boolean> {
+		return this.runToolRegistryMutation(() => this.#reconcileConsultTool());
+	}
+
+	#consultSelectionHost(): ConsultSelectionHost {
+		return {
+			settings: this.#host.settings,
+			modelRegistry: this.#host.modelRegistry,
+			getConsultModelOverride: () => this.#host.getConsultModelOverride(),
+			getActiveModel: () => this.#host.model(),
+		};
+	}
+
+	async #reconcileConsultTool(): Promise<boolean> {
+		if (this.#consultShouldBeActive()) {
+			return this.#setConsultToolActive();
+		}
+		const active = this.getEnabledToolNames();
+		if (active.includes("consult")) {
+			await this.#applyActiveToolsByName(active.filter(name => name !== "consult"));
+		}
+		// A same-model/disabled pause is a successful no-op; a session that can
+		// never host consult (subagent) reports unavailability.
+		return this.#host.agentKind() === "main";
+	}
+
+	#consultShouldBeActive(): boolean {
+		if (this.#host.settings.get("consult.enabled") !== true) return false;
+		if (this.#host.agentKind() !== "main") return false;
+		return isConsultActivationAllowed(this.#consultSelectionHost());
+	}
+
+	async #setConsultToolActive(): Promise<boolean> {
+		const active = this.getEnabledToolNames();
+		if (!this.#toolRegistry.has("consult")) {
+			const tool = await this.#createConsultTool?.();
+			if (tool?.name !== "consult") {
+				logger.warn("consult tool could not be created", {
+					model: this.#host.model()?.id,
+				});
+				return false;
+			}
+			// The primary model can switch while the async factory awaits. Re-check
+			// the same-model pause before touching the registry so a tool built
+			// under a permissive model never re-enters the surface under a
+			// same-model primary.
+			if (!this.#consultShouldBeActive()) return true;
+			const wrapped = this.#wrapRuntimeTool(tool);
+			this.#toolRegistry.set(wrapped.name, wrapped);
+			this.#builtInToolNames.add(wrapped.name);
+		}
+		if (!active.includes("consult")) {
+			await this.#applyActiveToolsByName([...active, "consult"]);
+		}
+		return true;
+	}
+
+	/**
+	 * Session-scoped `/consult <model>` override. Setting one activates consult
+	 * for this session (overriding `consult.enabled`), then defers to the same
+	 * reconcile gate: an override targeting the active primary pauses the tool
+	 * instead of exposing a call that can only fail `same_model`.
+	 */
+	setConsultModelOverride(pattern: string | undefined): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			if (pattern !== undefined && this.#host.agentKind() !== "main") {
+				return false;
+			}
+			this.#host.setConsultModelOverride(pattern);
+			if (pattern !== undefined) {
+				this.#host.settings.override("consult.enabled", true);
+			}
+			return this.#reconcileConsultTool();
+		});
+	}
 
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	refreshBaseSystemPrompt(): Promise<void> {
@@ -1653,7 +1784,10 @@ export class SessionTools {
 			const wrapped = wrapToolWithMetaNotice(
 				CustomToolAdapter.wrap(customTool, this.#getCustomToolContext) as AgentTool,
 			);
-			return (extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped) as AgentTool;
+			const activationWrapped = this.#wrapMcpInstructionActivation?.(wrapped) ?? wrapped;
+			return (
+				extensionRunner ? new ExtensionToolWrapper(activationWrapped, extensionRunner) : activationWrapped
+			) as AgentTool;
 		});
 		const managerToolSet = new Set(managerTools);
 		const reconciledTools = deduplicateMCPToolsByName([...this.#extensionMcpTools.values(), ...managerTools]);

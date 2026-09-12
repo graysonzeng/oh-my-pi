@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -109,5 +109,35 @@ describe("assertEditableFile path handling", () => {
 	it("handles missing files gracefully", async () => {
 		const filePath = path.join(tempDir, "does-not-exist.ts");
 		await expect(assertEditableFile(filePath, undefined, testSettings)).resolves.toBeUndefined();
+	});
+});
+
+/**
+ * Contract: workflow-bench / Settings.isolated never call Settings.init on the
+ * global singleton. edit/write still hit assertEditableFile*; the guard must
+ * fall back to getDefault instead of throwing "Settings not initialized".
+ * Uses per-test reset + restore so full-suite order stays safe.
+ */
+describe("assertEditableFile* without global Settings.init", () => {
+	beforeEach(() => {
+		resetSettingsForTest();
+	});
+
+	afterEach(async () => {
+		resetSettingsForTest();
+		// Restore singleton for later files / sibling describes in this file.
+		await Settings.init({ inMemory: true, cwd: tempDir });
+	});
+
+	it("blocks generated files without initializing global settings", async () => {
+		const filePath = path.join(tempDir, "isolated-generated.ts");
+		await Bun.write(filePath, GENERATED_TYPESCRIPT);
+		await expect(assertEditableFile(filePath)).rejects.toBeInstanceOf(ToolError);
+	});
+
+	it("assertEditableFile does not throw Settings-not-initialized", async () => {
+		const filePath = path.join(tempDir, "isolated-normal.ts");
+		await Bun.write(filePath, "// Regular source\nexport const y = 2;");
+		await expect(assertEditableFile(filePath)).resolves.toBeUndefined();
 	});
 });

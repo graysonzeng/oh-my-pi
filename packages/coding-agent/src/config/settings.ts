@@ -726,6 +726,15 @@ export class Settings {
 		codeModeSignal.fire();
 	}
 
+	#consultationSignalSnapshot(): unknown[] {
+		return CONSULTATION_SIGNAL_PATHS.map(path => this.get(path));
+	}
+
+	#fireConsultationChangeIfNeeded(previous: unknown[]): void {
+		if (Bun.deepEquals(this.#consultationSignalSnapshot(), previous)) return;
+		consultationSettingsSignal.fire();
+	}
+
 	#fireEffectiveSettingChanged(path: SettingPath, value: unknown, prev: unknown): void {
 		if (Object.is(value, prev)) return;
 		for (const listener of Array.from(this.#effectiveChangeListeners)) {
@@ -740,6 +749,9 @@ export class Settings {
 		}
 		if (path === "modelRoles") {
 			modelRolesSignal.fire();
+		}
+		if (CONSULTATION_SIGNAL_PATHS.includes(path)) {
+			consultationSettingsSignal.fire();
 		}
 		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
 			codeModeSignal.fire();
@@ -850,6 +862,7 @@ export class Settings {
 				sessionAccent: this.get("statusLine.sessionAccent"),
 			};
 			const previousCodeModeValues = this.#codeModeSignalSnapshot();
+			const previousConsultationValues = this.#consultationSignalSnapshot();
 			const previousHookValues = new Map<SettingPath, unknown>();
 			for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
 				previousHookValues.set(key, this.get(key));
@@ -887,6 +900,7 @@ export class Settings {
 				);
 			}
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
+			this.#fireConsultationChangeIfNeeded(previousConsultationValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
 				if (!Bun.deepEquals(next, previous)) {
@@ -916,6 +930,7 @@ export class Settings {
 		this.#restoreRuntimeModelRoleOverrides();
 		const prevModelRoles = this.get("modelRoles");
 		const prevCodeModeValues = this.#codeModeSignalSnapshot();
+		const prevConsultationValues = this.#consultationSignalSnapshot();
 		this.#cwd = normalized;
 		if (this.#persist) {
 			this.#project = await this.#loadProjectSettings();
@@ -923,6 +938,7 @@ export class Settings {
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
 		this.#fireCodeModeChangeIfNeeded(prevCodeModeValues);
+		this.#fireConsultationChangeIfNeeded(prevConsultationValues);
 		this.#fireAllHooks();
 	}
 
@@ -2451,7 +2467,8 @@ export class Settings {
 		// serviceTier (single enum with scoped openai-only/claude-only sentinels)
 		// → per-family tier.openai/tier.anthropic/tier.google; serviceTierSubagent
 		// → tier.subagent; serviceTierAdvisor → tier.advisor. `fastModeScope` is
-		// dropped — per-family scoping is now expressed by the three tier settings.
+		// dropped — per-family scoping is now expressed by the family tier settings.
+		// Legacy unscoped `priority` does not fill tier.xai (no retroactive xAI 2×).
 		const tierObj = isRecord(raw.tier) ? raw.tier : {};
 		let tierTouched = false;
 		const setTier = (family: string, value: unknown): void => {
@@ -3143,6 +3160,17 @@ const modelRolesSignal = new SettingSignal("modelRoles");
 
 /** Subscribe to model role changes. Returns an unsubscribe function. */
 export const onModelRolesChanged: (cb: () => void) => () => void = modelRolesSignal.on.bind(modelRolesSignal);
+
+const consultationSettingsSignal = new SettingSignal("consultation settings");
+const CONSULTATION_SIGNAL_PATHS: readonly SettingPath[] = [
+	"advisor.allowSameModel",
+	"consult.enabled",
+	"consult.model",
+	"consult.allowSameModel",
+];
+
+/** Subscribe to settings that change advisor/consult availability without changing model roles. */
+export const onConsultationSettingsChanged = (cb: () => void) => consultationSettingsSignal.on(cb);
 
 /** Fires when Code Mode activation or its direct keep-set changes at runtime. */
 const codeModeSignal = new SettingSignal("providers.openai-codex.codeMode");

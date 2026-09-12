@@ -32,13 +32,13 @@ After each successful state-changing op: if nothing is `in_progress`, the earlie
 
 ## Create a list
 
-- Task requires 3+ distinct steps.
-- User explicitly requests one.
-- User provides a set of tasks.
-- New instructions arrive mid-task: capture before proceeding.
+- Substantial multi-stage work benefits from tracking; step count alone is not a trigger.
+- User explicitly requests a task list or progress tracking.
+- For bounded work, proceed directly even when it needs several tool calls or contains multiple small items.
+- When using a list, capture new in-scope work before proceeding.
 
 <critical>
-User gives multi-step plan—phased todo, numbered/bulleted checklist, or "N bugs/items/tasks":
-- MUST `init` every item as its own task before working.
-- Enumerate all; NEVER summarize into fewer tasks, sample "the important ones", drop items, or track the rest from memory.
+When a task list is requested or warranted by substantial multi-stage work:
+- MUST `init` every user-requested item as its own task before working.
+- Enumerate all; NEVER sample or silently drop items. Without a list, still complete every requested item.
 </critical>

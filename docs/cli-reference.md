@@ -103,6 +103,9 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--hide-thinking` | Hide thinking blocks in TUI output (display only; does not disable model thinking). |
 | `--print-thoughts` | Include thinking blocks in print-mode text output. |
 | `--external-thinking` | Use a private scratchpad while disabling supported GPT/Claude/Gemini reasoning. Use at your own risk: providers have flagged this request shape as abuse. |
+| `--advisor` | Enable the shadow advisor for this process (not persisted). |
+| `--consult` | Enable the mid-turn consult tool for this process (not persisted). |
+| `--consult-model <pattern>` | Consult model pattern for this process; also enables consult. |
 
 #### Prewalk and plan modes
 

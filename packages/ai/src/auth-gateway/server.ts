@@ -801,6 +801,29 @@ async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal)
 }
 
 /**
+ * Map a model's native {@link Api} onto the new-api / one-api style
+ * `supported_endpoint_types` tags advertised on `GET /v1/models`.
+ *
+ * Clients (proxy discovery, dual-protocol SDKs) use these tags to pick a wire
+ * against this gateway:
+ *   - `"anthropic"` -> `POST /v1/messages`
+ *   - `"openai"`    -> `POST /v1/chat/completions`
+ *
+ * Only APIs whose natural gateway route is one of those two are tagged.
+ * Responses-family and unrelated transports stay empty — the gateway can still
+ * translate them via any format route, but we don't over-claim tags the proxy
+ * discovery contract would mis-map.
+ */
+function supportedEndpointTypes(api: Api): string[] {
+	if (api === "anthropic-messages") return ["anthropic"];
+	// OpenAI chat-compatible APIs the `/v1/chat/completions` route services.
+	if (api === "openai-completions" || api === "openrouter" || api === "ollama-chat") {
+		return ["openai"];
+	}
+	return [];
+}
+
+/**
  * Row shape for `GET /v1/models`. Beyond the OpenAI-standard `id`/`object`/
  * `owned_by`, rows advertise the catalog metadata OpenAI-compatible clients
  * (omp's own proxy discovery, Zed's openai_compatible provider, ...) read to
@@ -818,6 +841,7 @@ interface ModelListRow {
 	max_output_tokens?: number;
 	input_modalities: ("text" | "image")[];
 	supports_tools?: boolean;
+	supported_endpoint_types: string[];
 }
 
 function handleModelsList(opts: AuthGatewayBootOptions): Response {
@@ -834,6 +858,7 @@ function handleModelsList(opts: AuthGatewayBootOptions): Response {
 			api: model.api,
 			display_name: model.name,
 			input_modalities: model.input,
+			supported_endpoint_types: supportedEndpointTypes(model.api),
 		};
 		if (model.contextWindow != null) row.context_length = model.contextWindow;
 		if (model.maxTokens != null) row.max_output_tokens = model.maxTokens;

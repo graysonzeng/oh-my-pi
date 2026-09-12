@@ -730,7 +730,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 				entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "checkpoint",
 		);
 		if (!checkpointEntry) throw new Error("Expected checkpoint tool result entry");
-		harness.session.sessionManager.branch(checkpointEntry.id);
+		await harness.session.sessionManager.branch(checkpointEntry.id);
 
 		const reloadedMock = createMockModel({ responses: [] });
 		const reloadedSettings = Settings.isolated({
@@ -864,7 +864,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 			return details?.xdev?.tool === "checkpoint";
 		});
 		if (!checkpointEntry) throw new Error("Expected xdev checkpoint tool result entry");
-		harness.session.sessionManager.branch(checkpointEntry.id);
+		await harness.session.sessionManager.branch(checkpointEntry.id);
 
 		const reloadedMock = createMockModel({ responses: [] });
 		const reloadedSettings = Settings.isolated({

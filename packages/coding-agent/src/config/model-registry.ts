@@ -1403,6 +1403,7 @@ export class ModelRegistry {
 					headers: resolvedProviderHeaders,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
+					referenceProvider: providerConfig.referenceProvider,
 					discovery: providerConfig.discovery,
 					optional: false,
 				});
@@ -2866,6 +2867,7 @@ export interface ProviderConfigInput {
 	baseUrl?: string;
 	apiKey?: string;
 	api?: Api;
+	referenceProvider?: string;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
@@ -2894,6 +2896,7 @@ export interface ProviderConfigInput {
 	models?: Array<{
 		id: string;
 		name: string;
+		requestModelId?: string;
 		api?: Api;
 		baseUrl?: string;
 		reasoning: boolean;

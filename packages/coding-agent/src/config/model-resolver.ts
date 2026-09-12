@@ -1059,6 +1059,32 @@ export function parseModelPattern(
 	);
 }
 
+/**
+ * Stable “does this selector match the active model?” entry for profile resolution.
+ * Reuses the same matching pipeline as model selection:
+ * - glob selectors (`*`, `?`, `[…]`) via {@link matchingGlobModels}
+ * - otherwise {@link parseModelPattern} + {@link modelsAreEqual}
+ *
+ * Callers must pass an `availableModels` list that includes the active model
+ * (or an equivalent identity) so fuzzy/exact resolution can see it.
+ */
+export function modelMatchesSelector(
+	model: Model<Api>,
+	selector: string,
+	availableModels: Model<Api>[],
+	preferences?: ModelMatchPreferences,
+): boolean {
+	const trimmed = selector.trim();
+	if (!trimmed) return false;
+
+	if (trimmed.includes("*") || trimmed.includes("?") || trimmed.includes("[")) {
+		return matchingGlobModels(trimmed, availableModels).some(candidate => modelsAreEqual(candidate, model));
+	}
+
+	const matched = parseModelPattern(trimmed, availableModels, preferences).model;
+	return matched !== undefined && modelsAreEqual(matched, model);
+}
+
 const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 
@@ -1133,7 +1159,7 @@ function isSessionInheritedAgentPattern(value: string): boolean {
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
-	return role === "smol" || role === "slow";
+	return role === "slow";
 }
 
 /**
@@ -1144,7 +1170,8 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
  * model, so it stays a distinct strong model out of the box. The `tiny` role —
  * the override for online title/memory/classifier tasks — reuses the `smol`
  * fast chain so an unset tiny role auto-resolves to the same fast model smol
- * would pick.
+ * would pick. Unset `smol`/`tiny` skip default-first inheritance and use the
+ * smol priority chain; an explicit `modelRoles.smol` still wins.
  */
 const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
 	advisor: "slow",
@@ -1314,9 +1341,25 @@ function resolveEffectiveAgentModelSelection(
 	}
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
-	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
 	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
+
+	// A multi-candidate agent model may list a session-inherited marker (e.g.
+	// "@task") as one fallback among literal candidates. Role expansion cannot
+	// resolve that marker — only the single-pattern form inherits — so expand it
+	// to the session fallback pattern (the main agent's model) here, keeping it
+	// a real candidate. Without a session pattern the marker is dropped.
+	let resolvedAgentModel = agentModel;
+	if (singleAgentPattern === undefined && normalizedAgentPatterns.some(isSessionInheritedAgentPattern)) {
+		const sessionFallback =
+			activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
+		const expanded = normalizedAgentPatterns.flatMap(pattern =>
+			isSessionInheritedAgentPattern(pattern) ? (sessionFallback ? [sessionFallback] : []) : [pattern],
+		);
+		resolvedAgentModel = expanded;
+	}
+
+	const configuredAgentPatterns = resolveConfiguredModelPatterns(resolvedAgentModel, settings);
 	if (configuredAgentPatterns.length > 0) {
 		if (
 			singleAgentPattern === formatModelRoleAlias("task") ||

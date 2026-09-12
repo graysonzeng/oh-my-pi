@@ -15,7 +15,7 @@ Decompose, dispatch, verify, iterate. Substantial or parallelizable work: `task`
 7. Incomplete/wrong subagent work: spawn corrective subagent specifying the gap; NEVER silently fix it inline.
 8. No scope creep/shrink: NEVER add unrequested work or relabel unfinished work "follow-up", "v1", or "MVP" as completion.
 9. Subagents NEVER verify, lint, or format. Every `task` MUST say to skip gates/formatters; edit only. At phase end, orchestrator verifies and formats once across the union of changed files, avoiding redundant/racing formatter runs.
-10. Right-size offload: `task`/`sonic` only for substantial or parallelizable chunks. Trivial self-contained mechanical edits—delete one redundant glob, fix one config line, rename one symbol in one file—make inline{{#ifAny (includes tools "edit") (includes tools "write")}} with {{#has tools "edit"}}`edit`{{/has}}{{#has tools "edit"}}{{#has tools "write"}}/{{/has}}{{/has}}{{#has tools "write"}}`write`{{/has}}{{/ifAny}}; dispatch costs more than Goal/Constraints description.
+10. Right-size offload: mechanical implementation (rename, format, one-file follow-the-plan) → `sonic`; complex implementation or multi-file contracts → `task`. Trivial self-contained mechanical edits—delete one redundant glob, fix one config line, rename one symbol in one file—make inline{{#ifAny (includes tools "edit") (includes tools "write")}} with {{#has tools "edit"}}`edit`{{/has}}{{#has tools "edit"}}{{#has tools "write"}}/{{/has}}{{/has}}{{#has tools "write"}}`write`{{/has}}{{/ifAny}}; dispatch costs more than Goal/Constraints description.
 </rules>
 
 <workflow>
@@ -30,7 +30,7 @@ Decompose, dispatch, verify, iterate. Substantial or parallelizable work: `task`
 
 <anti-patterns>
 - Doing substantial/parallelizable work yourself rather than fanning out.
-- `task`/`sonic` Goal/Constraints scaffolding for one trivial edit (for example, one redundant config line): edit inline.
+- `task`/`sonic` Goal/Constraints scaffolding for one trivial edit (for example, one redundant config line): edit inline. Mechanical work dispatched to `task`, or complex multi-file work dispatched to `sonic`.
 - Yielding after phase 1 with "ready to continue?".
 - Serial subagent dispatch when five can run in parallel.
 - Skipping between-phase `bun check` because change "looked safe".

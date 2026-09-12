@@ -1928,15 +1928,21 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			const sessionFile = session.sessionFile;
 			if (!sessionFile) throw new Error("Expected persisted session file");
 
-			session.setTodoPhases([]);
-			expect(session.getTodoPhases()).toEqual([]);
-			expect(await session.switchSession(sessionFile)).toBe(true);
-			expect(session.getTodoPhases()).toMatchObject([
-				{
-					name: "Worker flow",
-					tasks: [{ content: "Reconcile worker result", status: "completed" }],
-				},
-			]);
+			await session.dispose();
+			const { session: resumed } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager: await SessionManager.open(sessionFile, tempDir),
+			});
+			try {
+				expect(resumed.getTodoPhases()).toMatchObject([
+					{
+						name: "Worker flow",
+						tasks: [{ content: "Reconcile worker result", status: "completed" }],
+					},
+				]);
+			} finally {
+				await resumed.dispose();
+			}
 		} finally {
 			await session.dispose();
 		}
@@ -2510,7 +2516,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
-				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "deny" } }),
+				settings: Settings.isolated({
+					"advisor.enabled": true,
+					"advisor.allowSameModel": true,
+					"tools.approval": { write: "deny" },
+				}),
 			});
 			try {
 				// The default advisor roster is read-only (read/grep/glob); the
@@ -2542,7 +2552,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
-				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "allow" } }),
+				settings: Settings.isolated({
+					"advisor.enabled": true,
+					"advisor.allowSameModel": true,
+					"tools.approval": { write: "allow" },
+				}),
 				toolNames: ["read"],
 			});
 			try {

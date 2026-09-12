@@ -122,6 +122,7 @@
 		"providers/deepseek.kdl",
 		"providers/firepass.kdl",
 		"providers/fireworks.kdl",
+		"providers/gateway.kdl",
 		"providers/github-copilot.kdl",
 		"providers/gitlab-duo.kdl",
 		"providers/gmi-cloud.kdl",
@@ -10008,6 +10009,16 @@
 				}
 			},
 			{
+				"source": "providers/gateway.kdl:4",
+				"class": "xai",
+				"providers": [
+					"gateway"
+				],
+				"wire": {
+					"reasoningDeltasMayBeCumulative": true
+				}
+			},
+			{
 				"source": "providers/github-copilot.kdl:11",
 				"class": "anthropic",
 				"providers": [
@@ -12997,7 +13008,11 @@
 						"value": "gpt-6-astra*"
 					}
 				],
+				"thinking": {
+					"requiresEffort": true
+				},
 				"catalog": {
+					"applyPatchToolType": "freeform",
 					"longContext": {
 						"inputThreshold": 272000,
 						"input": 20,
@@ -13008,7 +13023,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:90",
+				"source": "providers/openai.kdl:92",
 				"providers": [
 					"openai"
 				],

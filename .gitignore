@@ -54,6 +54,13 @@ compaction-results/
 changes/
 __pycache__/
 
+# Local runtime artifacts
+.agent-artifacts/
+*.bun-build
+workflow.db
+workflow.db.bak-*
+/packages/coding-agent/undefined/
+
 # Scratch files
 syntax.jsonl
 out.jsonl

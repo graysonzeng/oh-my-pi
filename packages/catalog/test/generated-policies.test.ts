@@ -212,6 +212,20 @@ describe("generated model policies", () => {
 		expect(models[4]?.cost.longContext).toBeUndefined();
 	});
 
+	it("applies GPT-6 Astra long-context pricing and mandatory reasoning on first-party Responses", () => {
+		const firstParty = buildGenerated(createSpec({ id: "gpt-6-astra", api: "openai-responses", provider: "openai" }));
+		const openrouter = buildGenerated(
+			createSpec({ id: "gpt-6-astra", api: "openai-completions", provider: "openrouter" }),
+		);
+
+		expect(firstParty.thinking?.requiresEffort).toBe(true);
+		expect(firstParty.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 20, output: 75 });
+		expect(firstParty.applyPatchToolType).toBe("freeform");
+		expect(openrouter.thinking?.requiresEffort).not.toBe(true);
+		expect(openrouter.cost.longContext).toBeUndefined();
+		expect(openrouter.applyPatchToolType).toBeUndefined();
+	});
+
 	it("floors GPT-5.6 Codex-transport context windows at 1M (openai/codex#38917)", () => {
 		const models = [
 			// Codex discovery/registry still reports the stale 272000 for these.
@@ -646,6 +660,7 @@ describe("generated model policies", () => {
 	it("sets freeform apply_patch metadata for first-party GPT-5 Responses models", () => {
 		const models = [
 			createSpec({ id: "gpt-5.4", api: "openai-responses", provider: "openai" }),
+			createSpec({ id: "gpt-6-astra", api: "openai-responses", provider: "openai" }),
 			createSpec({ id: "gpt-5.3-codex-spark", api: "openai-codex-responses", provider: "openai-codex" }),
 		].map(model => buildGenerated(model));
 

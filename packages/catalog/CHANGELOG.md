@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added offline model-policy rebaking and explicit Codex gateway endpoint configuration.
+
 ## [18.1.18] - 2026-09-11
 
 ### Added

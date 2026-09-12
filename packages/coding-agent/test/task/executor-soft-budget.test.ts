@@ -91,6 +91,7 @@ function createMockSession(
 			return true;
 		},
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
+		hasPendingAsyncWork: () => false,
 		sendUserMessage: async () => {},
 		setIrcWakeTurnObserver: observer => {
 			ircWakeTurnObserver = observer;
@@ -270,6 +271,7 @@ describe("runSubprocess soft request budget", () => {
 		// The forced yield finalizes as a normal completion, not an abort.
 		expect(result.aborted).toBe(false);
 		expect(result.exitCode).toBe(0);
+		expect(result.completionKind).toBe("budget_stop");
 		expect(result.abortReason).toBeUndefined();
 		expect(JSON.parse(result.output)).toEqual({ report: "partial findings" });
 		// The agent stays a live, adopted peer.
@@ -614,23 +616,24 @@ describe("runSubprocess soft request budget", () => {
 });
 
 describe("resolveSoftRequestBudget", () => {
-	it("lets a configured budget lower a bundled agent's ceiling", () => {
-		expect(resolveSoftRequestBudget("scout", 20)).toBe(20);
-		expect(resolveSoftRequestBudget("sonic", 20)).toBe(20);
+	it("lets a configured budget lower a class ceiling", () => {
+		expect(resolveSoftRequestBudget("explore", 20)).toBe(20);
+		expect(resolveSoftRequestBudget("review", 20)).toBe(20);
 	});
 
-	it("keeps the bundled ceiling when the configured budget is higher", () => {
-		expect(resolveSoftRequestBudget("scout", 200)).toBe(100);
-		expect(resolveSoftRequestBudget("sonic", 200)).toBe(100);
+	it("caps explore at 40 and review at 80", () => {
+		expect(resolveSoftRequestBudget("explore", 200)).toBe(40);
+		expect(resolveSoftRequestBudget("review", 200)).toBe(80);
 	});
 
-	it("uses the configured budget for agents without a bundled entry", () => {
-		expect(resolveSoftRequestBudget("task", 20)).toBe(20);
+	it("uses the configured budget for workers", () => {
+		expect(resolveSoftRequestBudget("worker", 20)).toBe(20);
+		expect(resolveSoftRequestBudget("worker", 200)).toBe(200);
 	});
 
 	it("keeps 0 disabled and normalizes negative or fractional budgets", () => {
-		expect(resolveSoftRequestBudget("scout", 0)).toBe(0);
-		expect(resolveSoftRequestBudget("scout", -5)).toBe(0);
-		expect(resolveSoftRequestBudget("scout", 20.9)).toBe(20);
+		expect(resolveSoftRequestBudget("explore", 0)).toBe(0);
+		expect(resolveSoftRequestBudget("explore", -5)).toBe(0);
+		expect(resolveSoftRequestBudget("explore", 20.9)).toBe(20);
 	});
 });

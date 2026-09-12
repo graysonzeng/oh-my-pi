@@ -166,7 +166,11 @@
 		"gen:bundle": "bun --cwd=packages/coding-agent run gen:bundle",
 		"gen:native": "bun --cwd=packages/natives run gen:native",
 		"gen:native:reset": "bun --cwd=packages/natives run gen:native:reset",
-		"check-spoofed-versions": "bun scripts/check-spoofed-versions.ts"
+		"check-spoofed-versions": "bun scripts/check-spoofed-versions.ts",
+		"workflow-bench": "bun --cwd=packages/coding-agent src/cli.ts workflow-bench",
+		"test:latency:smoke": "bun packages/coding-agent/test/task/product-latency-fixture.ts --mode smoke",
+		"test:latency:release": "bun packages/coding-agent/test/task/product-latency-fixture.ts --mode release",
+		"stats:subagents": "bun scripts/session-stats/subagent-report.ts"
 	},
 	"dependencies": {
 		"sherpa-onnx": "1.13.2",

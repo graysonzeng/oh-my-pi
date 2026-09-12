@@ -18,6 +18,7 @@ import type {
 	FetchImpl,
 	Model,
 	ModelSpec,
+	ProviderResponseMetadata,
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
@@ -251,6 +252,8 @@ class MockWebSocket {
 	onerror: ((event: Event) => void) | null = null;
 	onclose: ((event: Event) => void) | null = null;
 
+	#listeners = new Map<WsEventType, Set<(event: Event) => void>>();
+
 	constructor(
 		public readonly url: string,
 		public readonly options?: WsOptions,
@@ -262,10 +265,27 @@ class MockWebSocket {
 		this.readyState = MockWebSocket.CLOSED;
 	}
 
-	/** Dispatch an event to the matching `on{type}` handler. */
+	addEventListener(type: WsEventType, listener: (event: Event) => void): void {
+		let bucket = this.#listeners.get(type);
+		if (!bucket) {
+			bucket = new Set();
+			this.#listeners.set(type, bucket);
+		}
+		bucket.add(listener);
+	}
+
+	removeEventListener(type: WsEventType, listener: (event: Event) => void): void {
+		this.#listeners.get(type)?.delete(listener);
+	}
+
+	/** Dispatch an event to the matching `on{type}` handler and listeners. */
 	emit(type: WsEventType, event: Event): void {
 		const handler = (this as unknown as Record<string, unknown>)[`on${type}`];
 		if (typeof handler === "function") (handler as (e: Event) => void).call(this, event);
+		const listeners = this.#listeners.get(type);
+		if (listeners) {
+			for (const listener of listeners) listener.call(this, event);
+		}
 	}
 
 	/** Asynchronously transition to OPEN and emit `open`. */
@@ -293,6 +313,8 @@ class MockWebSocket {
 		text: string;
 		terminalType?: "response.done" | "response.completed";
 		includeCreated?: boolean;
+		model?: string;
+		checkpoint?: string;
 		usage?: CodexTestUsage;
 	}): void {
 		const {
@@ -301,10 +323,12 @@ class MockWebSocket {
 			text,
 			terminalType = "response.done",
 			includeCreated = false,
+			model,
+			checkpoint,
 			usage = DEFAULT_USAGE,
 		} = opts;
 		if (includeCreated) {
-			this.sendJson({ type: "response.created", response: { id: responseId } });
+			this.sendJson({ type: "response.created", response: { id: responseId, model } });
 		}
 		this.sendJson({
 			type: "response.output_item.added",
@@ -327,6 +351,8 @@ class MockWebSocket {
 			response: {
 				id: responseId,
 				status: "completed",
+				model,
+				checkpoint,
 				usage,
 			},
 		});
@@ -366,6 +392,152 @@ describe("openai-codex streaming", () => {
 			"https://chatgpt.com/backend-api/codex/responses",
 			"https://chatgpt.com/backend-api/codex/responses",
 		]);
+	});
+
+	it("propagates the Codex response envelope model as provider response metadata", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const servedModel = "served-codex-model";
+		const responseId = "resp_provider_identity";
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.in_progress", response: { id: responseId, status: "in_progress" } })}`,
+			`data: ${JSON.stringify({ type: "response.created", response: { id: responseId, status: "in_progress" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_provider_identity", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_provider_identity", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ok" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { id: responseId, status: "completed", model: servedModel, checkpoint: "checkpoint-terminal", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream", "x-request-id": "req_codex_body" },
+			});
+		const seen: ProviderResponseMetadata[] = [];
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			fetch: fetchMock,
+			onResponse: response => {
+				seen.push(response);
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.headers["x-request-id"]).toBe("req_codex_body");
+		expect(seen[0]?.metadata).toEqual({ model: servedModel, checkpoint: "checkpoint-terminal" });
+	});
+	it("propagates the Codex WebSocket response.done model after a preamble", async () => {
+		const servedModel = "served-codex-websocket-model";
+		class IdentityWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(): void {
+				this.sendJson({
+					type: "response.in_progress",
+					response: { id: "resp_ws_identity", status: "in_progress" },
+				});
+				this.emitCodexResponse({
+					messageId: "msg_ws_identity",
+					responseId: "resp_ws_identity",
+					text: "ok",
+					includeCreated: false,
+					model: servedModel,
+					checkpoint: "checkpoint-terminal",
+				});
+			}
+		}
+		Object.defineProperty(globalThis, "WebSocket", {
+			configurable: true,
+			writable: true,
+			value: IdentityWebSocket,
+		});
+		const seen: ProviderResponseMetadata[] = [];
+
+		const result = await streamOpenAICodexResponses(createCodexTestModel(), createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-provider-identity",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			onResponse: response => {
+				seen.push(response);
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(seen).toEqual([
+			{ status: 101, headers: {}, metadata: { model: servedModel, checkpoint: "checkpoint-terminal" } },
+		]);
+	});
+	it("rejects conflicting Codex identity envelopes and notifies once", async () => {
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.created", response: { id: "resp_codex_conflict", model: "served-model-a" } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_codex_conflict", status: "completed", model: "served-model-b", usage: DEFAULT_USAGE } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream", "x-request-id": "req_codex_conflict" },
+			});
+		const seen: ProviderResponseMetadata[] = [];
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			fetch: fetchMock,
+			onResponse: response => {
+				seen.push(response);
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Conflicting Codex model identity coordinates");
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.headers["x-request-id"]).toBe("req_codex_conflict");
+		expect(seen[0]?.metadata).toBeUndefined();
+	});
+
+	it("does not couple a slow Codex response callback to the first-event watchdog", async () => {
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const servedModel = "served-codex-watchdog-model";
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_codex_watchdog", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_codex_watchdog", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ok" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_codex_watchdog", status: "completed", model: servedModel, usage: DEFAULT_USAGE } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		const seen: ProviderResponseMetadata[] = [];
+		const callbackEntered = Promise.withResolvers<void>();
+		const releaseCallback = Promise.withResolvers<void>();
+		vi.useFakeTimers();
+		try {
+			const resultPromise = streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				streamFirstEventTimeoutMs: 10,
+				streamIdleTimeoutMs: 1000,
+				onResponse: async response => {
+					callbackEntered.resolve();
+					await releaseCallback.promise;
+					seen.push(response);
+				},
+			}).result();
+			await callbackEntered.promise;
+			vi.advanceTimersByTime(25);
+			releaseCallback.resolve();
+			const result = await resultPromise;
+
+			expect(result.stopReason).toBe("stop");
+			expect(seen).toHaveLength(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("omits chatgpt account headers for opaque custom provider API keys", async () => {
@@ -3027,7 +3199,7 @@ describe("openai-codex streaming", () => {
 
 		const fetchMock = vi.fn(async (input: string | URL) => {
 			const url = typeof input === "string" ? input : input.toString();
-			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+			if (url === "https://gateway.example.com/v1/responses") {
 				return new Response(sse, {
 					status: 200,
 					headers: { "content-type": "text/event-stream" },
@@ -3038,12 +3210,13 @@ describe("openai-codex streaming", () => {
 		class FailingWebSocket extends MockWebSocket {
 			constructor(url: string, options?: { headers?: WsHeaders }) {
 				super(url, options);
+				expect(url).toBe("wss://gateway.example.com/v1/responses");
 				setTimeout(() => {
 					expect(this.options?.headers?.["OpenAI-Beta"] ?? this.options?.headers?.["openai-beta"]).toStartWith(
 						"responses_websockets=",
 					);
-					this.emit("error", new Event("error"));
-					this.emit("close", new Event("close"));
+					this.emit("error", Object.assign(new Event("error"), { message: "websocket error" }) as Event);
+					this.emit("close", Object.assign(new Event("close"), { code: 1006 }) as Event);
 					this.readyState = MockWebSocket.CLOSED;
 				}, 0);
 			}
@@ -3054,8 +3227,9 @@ describe("openai-codex streaming", () => {
 			id: "gpt-5.3-codex-spark",
 			name: "GPT-5.3 Codex Spark",
 			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
+			provider: "responses-gateway",
+			baseUrl: "https://gateway.example.com/v1",
+			compat: { codexResponsesEndpoint: "standard" },
 			reasoning: true,
 			preferWebsockets: true,
 			input: ["text"],
@@ -3076,7 +3250,9 @@ describe("openai-codex streaming", () => {
 		});
 		const result = await streamResult.result();
 		expect(result.role).toBe("assistant");
-		expect(fetchMock).toHaveBeenCalled();
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 		const fallbackDetails = getOpenAICodexTransportDetails(model, { sessionId: "ws-session", providerSessionState });
 		expect(fallbackDetails.lastTransport).toBe("sse");
 		expect(fallbackDetails.websocketDisabled).toBe(true);
@@ -5432,35 +5608,94 @@ describe("openai-codex streaming", () => {
 		// Prewarm starts the handshake; the stream call races it before the socket
 		// opens. Tearing down the CONNECTING socket would reject the prewarm with a
 		// fatal "websocket closed before open" and disable websockets for the session.
+		const cleanupController = new AbortController();
 		const prewarmPromise = prewarmOpenAICodexResponses(model, {
 			apiKey: token,
 			sessionId: "ws-join-session",
 			providerSessionState,
+			signal: cleanupController.signal,
 		});
 		const streamResult = streamOpenAICodexResponses(model, createCodexTestContext(), {
 			fetch: fetchMock as FetchImpl,
 			apiKey: token,
 			sessionId: "ws-join-session",
 			providerSessionState,
+			signal: cleanupController.signal,
 		}).result();
 
-		// Let both callers reach the handshake before the socket opens.
-		await Bun.sleep(5);
-		for (const socket of sockets) socket.open();
+		let prewarmSettled = false;
+		const prewarmOutcome = prewarmPromise.then(
+			() => {
+				prewarmSettled = true;
+				return { ok: true as const };
+			},
+			reason => {
+				prewarmSettled = true;
+				return { ok: false as const, reason };
+			},
+		);
+		let streamSettled = false;
+		const streamOutcome = streamResult.then(
+			value => {
+				streamSettled = true;
+				return { ok: true as const, value };
+			},
+			reason => {
+				streamSettled = true;
+				return { ok: false as const, reason };
+			},
+		);
+		const openPendingSockets = (): void => {
+			for (const pendingSocket of sockets) {
+				if (pendingSocket.readyState === MockWebSocket.CONNECTING) pendingSocket.open();
+			}
+		};
+		const closeSockets = (): void => {
+			for (const pendingSocket of sockets) {
+				if (pendingSocket.readyState !== MockWebSocket.CLOSED) pendingSocket.close();
+			}
+		};
 
-		await prewarmPromise;
-		const result = await streamResult;
+		try {
+			// Let both callers reach the handshake before the socket opens. A real
+			// timer yield is required here: under full-suite load, repeated zero-time
+			// sleeps can exhaust before the async websocket constructor runs.
+			const socketDeadline = Date.now() + 1000;
+			while (sockets.length < 1 && Date.now() < socketDeadline) await Bun.sleep(1);
+			const [socket] = sockets;
+			expect(socket).toBeDefined();
+			if (!socket) throw new Error("websocket handshake did not create a socket");
 
-		expect(constructorCount).toBe(1);
-		expect(result.stopReason).toBe("stop");
-		expect(result.errorMessage).toBeUndefined();
-		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "Joined" })]);
-		const details = getOpenAICodexTransportDetails(model, {
-			sessionId: "ws-join-session",
-			providerSessionState,
-		});
-		expect(details.websocketDisabled).toBe(false);
-		expect(fetchMock).not.toHaveBeenCalled();
+			const settleDeadline = Date.now() + 1000;
+			while ((!prewarmSettled || !streamSettled) && Date.now() < settleDeadline) {
+				openPendingSockets();
+				if (!prewarmSettled || !streamSettled) await Bun.sleep(1);
+			}
+			expect(prewarmSettled).toBe(true);
+			expect(streamSettled).toBe(true);
+			const prewarmResult = await prewarmOutcome;
+			if (!prewarmResult.ok) throw prewarmResult.reason;
+			const streamResultOutcome = await streamOutcome;
+			if (!streamResultOutcome.ok) throw streamResultOutcome.reason;
+			const result = streamResultOutcome.value;
+
+			expect(constructorCount).toBe(1);
+			expect(result.stopReason).toBe("stop");
+			expect(result.errorMessage).toBeUndefined();
+			expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "Joined" })]);
+			const details = getOpenAICodexTransportDetails(model, {
+				sessionId: "ws-join-session",
+				providerSessionState,
+			});
+			expect(details.websocketDisabled).toBe(false);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			openPendingSockets();
+			cleanupController.abort();
+			closeSockets();
+			await Promise.allSettled([prewarmOutcome, streamOutcome]);
+			closeSockets();
+		}
 	}, 15_000); // real handshake join; 5s default flakes under full-suite load
 
 	it("surfaces a whitespace flood arriving after a delivered tool call instead of replaying", async () => {
@@ -6060,6 +6295,7 @@ describe("openai-codex streaming", () => {
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const options = {
 			fetch: fetchMock as FetchImpl,
+			preferWebsockets: false,
 			apiKey: token,
 			sessionId: "turn-state-session",
 			providerSessionState,

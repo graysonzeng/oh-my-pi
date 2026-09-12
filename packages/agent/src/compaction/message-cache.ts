@@ -43,10 +43,9 @@ export function registerMessageCacheInvalidator(invalidate: (message: AgentMessa
 }
 
 /**
- * Estimate-version tag riding on the message itself. Symbol-keyed, so JSON
- * session persistence and default iteration never see it. Object spread copies
- * the tag onto derived clones — harmless, because estimate memos key on message
- * *identity* and a fresh clone starts with no memo entries anywhere.
+ * Estimate-version tag riding on the message itself. Non-enumerable so
+ * cloning or comparing session content never treats cache bookkeeping as
+ * history changes. Fresh message identities start with fresh estimate memos.
  */
 const kEstimateVersion = Symbol("omp.messageEstimateVersion");
 
@@ -86,6 +85,10 @@ export function isEstimateCacheable(message: AgentMessage): boolean {
  */
 export function invalidateMessageCache(message: AgentMessage): void {
 	const versioned = message as VersionedMessage;
-	versioned[kEstimateVersion] = ((versioned[kEstimateVersion] ?? 0) + 1) | 0;
+	if (versioned[kEstimateVersion] === undefined) {
+		Object.defineProperty(versioned, kEstimateVersion, { value: 1, writable: true });
+	} else {
+		versioned[kEstimateVersion] = (versioned[kEstimateVersion]! + 1) | 0;
+	}
 	for (const invalidate of externalInvalidators) invalidate(message);
 }

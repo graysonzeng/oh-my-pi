@@ -69,6 +69,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const stats = runtime.ctx.session.getAdvisorStats();
 			if (stats.active && stats.advisors.length > 1) return `Advisor: on (${stats.advisors.length} advisors)`;
 			if (stats.active && stats.model) return `Advisor: on (${stats.model.provider}/${stats.model.id})`;
+			if (stats.advisors.some(a => a.status === "same_model")) return "Advisor: on, paused (same model as active)";
 			if (stats.configured) return "Advisor: configured, no model";
 			return "Advisor: off";
 		},
@@ -80,7 +81,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				if (active) {
 					await runtime.output("Advisor enabled.");
 				} else if (configured) {
-					await runtime.output("Advisor setting enabled, but no model is assigned to the 'advisor' role.");
+					await runtime.output(
+						runtime.session.getAdvisorStats().advisors.some(a => a.status === "same_model")
+							? "Advisor enabled, but paused: it resolves to the same model as the active model. Set advisor.allowSameModel to run it anyway."
+							: "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
+					);
 				} else {
 					await runtime.output("Advisor disabled.");
 				}
@@ -89,7 +94,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			if (verb === "on") {
 				const active = runtime.session.setAdvisorEnabled(true);
 				await runtime.output(
-					active ? "Advisor enabled." : "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
+					active
+						? "Advisor enabled."
+						: runtime.session.getAdvisorStats().advisors.some(a => a.status === "same_model")
+							? "Advisor enabled, but paused: it resolves to the same model as the active model. Set advisor.allowSameModel to run it anyway."
+							: "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
 				);
 				return commandConsumed();
 			}
@@ -124,7 +133,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				if (active) {
 					runtime.ctx.showStatus("Advisor enabled.");
 				} else if (configured) {
-					runtime.ctx.showStatus("Advisor setting enabled, but no model is assigned to the 'advisor' role.");
+					runtime.ctx.showStatus(
+						runtime.ctx.session.getAdvisorStats().advisors.some(a => a.status === "same_model")
+							? "Advisor enabled, but paused: it resolves to the same model as the active model. Set advisor.allowSameModel to run it anyway."
+							: "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
+					);
 				} else {
 					runtime.ctx.showStatus("Advisor disabled.");
 				}
@@ -135,7 +148,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			if (verb === "on") {
 				const active = runtime.ctx.session.setAdvisorEnabled(true);
 				runtime.ctx.showStatus(
-					active ? "Advisor enabled." : "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
+					active
+						? "Advisor enabled."
+						: runtime.ctx.session.getAdvisorStats().advisors.some(a => a.status === "same_model")
+							? "Advisor enabled, but paused: it resolves to the same model as the active model. Set advisor.allowSameModel to run it anyway."
+							: "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
 				);
 				refreshStatusLine(runtime.ctx);
 				runtime.ctx.editor.setText("");

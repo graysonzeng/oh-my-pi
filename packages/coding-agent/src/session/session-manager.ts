@@ -1,5 +1,7 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	ImageContent,
 	Message,
@@ -60,6 +62,7 @@ import {
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
+import { type LineageContext, type LineageRoot, MAX_LINEAGE_DEPTH, normalizeParentSessionRef } from "./session-lineage";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
 import {
 	loadEntriesFromFile,
@@ -94,6 +97,46 @@ import { recordSessionTitle } from "./title-index";
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
+/**
+ * A rewrite of message bodies within the captured branch prefix, produced by
+ * structured compaction preparation. `prefix` is an immutable deep snapshot of
+ * the ENTIRE captured branch (not just the modified messages); `replacements`
+ * target entries inside it and modify only message bodies, preserving every
+ * entry ID and parent link.
+ */
+export interface SessionMessageRewrite {
+	prefix: readonly SessionEntry[];
+	replacements: readonly {
+		id: string;
+		message: SessionMessageEntry["message"];
+	}[];
+}
+
+/** Options for {@link SessionManager.runExclusive} waiters. */
+export interface MutationOwnerOptions {
+	/**
+	 * Cancel a queued wait. The cancellation races the FIFO predecessor, so an
+	 * aborted waiter rejects promptly even while a slow publish holds the
+	 * owner, and releases its queue reservation (later waiters still never
+	 * overtake the predecessor). Re-checked at grant; after grant, abort never
+	 * shortens the lease or the in-flight publish/repair.
+	 */
+	signal?: AbortSignal;
+}
+
+/**
+ * Async-local lease context for the serialized mutation/persistence owner. The
+ * lease object is created per acquisition and injected only inside the admitted
+ * operation's async scope, so reentrancy is recognized ONLY for the current
+ * acquiring chain — and only while its lease is still live. A concurrent caller
+ * or a chain whose lease was already released never matches and must queue FIFO.
+ */
+interface AtomicOwnerLeaseContext {
+	manager: SessionManager;
+	lease: object;
+}
+
+const atomicOwnerContext = new AsyncLocalStorage<AtomicOwnerLeaseContext>();
 
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
@@ -386,6 +429,7 @@ export type ReadonlySessionManager = Pick<
 	| "allocateArtifactPath"
 	| "saveArtifact"
 	| "getArtifactPath"
+	| "getArtifactContent"
 	| "getLeafId"
 	| "getLeafEntry"
 	| "getEntry"
@@ -397,9 +441,10 @@ export type ReadonlySessionManager = Pick<
 	| "getUsageStatistics"
 	| "putBlob"
 	| "putBlobSync"
+	| "getLineageContext"
 >;
 
-interface SessionManagerStateSnapshot {
+export interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
 	sessionId: string;
@@ -529,6 +574,8 @@ export class SessionManager {
 	#diskFailureLogged = false;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
 	#atomicPersistenceTail: Promise<void> = Promise.resolve();
+	/** Live owner lease of the serialized mutation/persistence lock, or `null`. */
+	#atomicOwnerLease: object | null = null;
 	/** Observer notifications withheld until their entries are proven durable. */
 	#pendingDurabilityNotifications: SessionEntry[] = [];
 	/** Bumped on every sync rewrite / chain reset so stale queued tasks become no-ops. */
@@ -642,15 +689,115 @@ export class SessionManager {
 		return reported;
 	}
 
-	async #withAtomicPersistenceLock<T>(operation: () => Promise<T>): Promise<T> {
+	async #withAtomicPersistenceLock<T>(
+		operation: () => T | Promise<T>,
+		options: MutationOwnerOptions & { ignoreLatch?: boolean } = {},
+	): Promise<T> {
+		// Reentrancy: only the current async chain that still holds this
+		// manager's live lease may bypass the FIFO queue. A concurrent caller —
+		// including a chain whose lease was already released — never matches.
+		if (this.#currentChainHoldsLease()) {
+			// A reentrant call still honors the indeterminate latch (fail
+			// closed; only private recovery's ignoreLatch is exempt) and an
+			// already-aborted signal, so a chain cannot mutate past a latched
+			// disk or run work whose wait was canceled.
+			if (options.signal?.aborted) throw options.signal.reason;
+			const reentrantLatch =
+				this.#diskFailure instanceof SessionPersistenceIndeterminateError ? this.#diskFailure : undefined;
+			if (reentrantLatch && !options.ignoreLatch) throw reentrantLatch;
+			return operation();
+		}
+
+		const latched = this.#diskFailure instanceof SessionPersistenceIndeterminateError ? this.#diskFailure : undefined;
+		if (latched && !options.ignoreLatch) throw latched;
+
 		const predecessor = this.#atomicPersistenceTail;
 		const turn = Promise.withResolvers<void>();
-		this.#atomicPersistenceTail = predecessor.catch(() => undefined).then(() => turn.promise);
-		await predecessor.catch(() => undefined);
-		try {
-			return await operation();
-		} finally {
+		const reservation = predecessor.catch(() => undefined).then(() => turn.promise);
+		this.#atomicPersistenceTail = reservation;
+
+		// Cancellation races the predecessor: an aborted waiter rejects without
+		// waiting out a slow publish and releases its reservation immediately
+		// (the composite chain still waits on `predecessor`, so later waiters
+		// never overtake it). The signal is re-checked at grant before the
+		// operation runs; once granted, abort never shortens the lease nor the
+		// in-flight publish/repair.
+		let cancelledUntilGrant = false;
+		if (options.signal) {
+			const signal = options.signal;
+			const cancel = Promise.withResolvers<void>();
+			const onAbort = (): void => {
+				cancelledUntilGrant = true;
+				cancel.resolve();
+			};
+			if (signal.aborted) onAbort();
+			else signal.addEventListener("abort", onAbort, { once: true });
+			try {
+				await Promise.race([predecessor.catch(() => undefined), cancel.promise]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+			if (cancelledUntilGrant) {
+				turn.resolve();
+				throw signal.reason;
+			}
+		} else {
+			await predecessor.catch(() => undefined);
+		}
+
+		// Post-predecessor admission gate: a canceled waiter exits without
+		// mutation; an indeterminate latch rejects new work (only recovery may
+		// proceed).
+		if (options.signal?.aborted) {
 			turn.resolve();
+			throw options.signal.reason;
+		}
+		const admittedLatch =
+			this.#diskFailure instanceof SessionPersistenceIndeterminateError ? this.#diskFailure : undefined;
+		if (admittedLatch && !options.ignoreLatch) {
+			turn.resolve();
+			throw admittedLatch;
+		}
+
+		const lease: object = {};
+		this.#atomicOwnerLease = lease;
+		try {
+			return await atomicOwnerContext.run({ manager: this, lease }, () => operation());
+		} finally {
+			if (this.#atomicOwnerLease === lease) this.#atomicOwnerLease = null;
+			turn.resolve();
+		}
+	}
+
+	/**
+	 * True only when the current async execution chain holds this manager's live
+	 * owner lease — the admitted chain whose lease has not yet been released.
+	 * This is the ONLY reentrancy bypass; it can never be reached by a
+	 * concurrent external caller, and a chain outliving its released lease is
+	 * treated as a fresh waiter.
+	 */
+	#currentChainHoldsLease(): boolean {
+		const context = atomicOwnerContext.getStore();
+		return (
+			context !== undefined &&
+			context.manager === this &&
+			context.lease !== null &&
+			context.lease === this.#atomicOwnerLease
+		);
+	}
+
+	/**
+	 * Compaction/reset boundaries are NOT pure appends: per the structured
+	 * compaction contract they must enter the session owner before their first
+	 * live mutation, so a boundary can never pierce the lease window of a
+	 * pending structured publish/repair. Held leases are reentrant — callers
+	 * already inside the owner (directly or via a wrapping runExclusive) pass.
+	 */
+	#requireBoundaryOwner(kind: "compaction" | "reset"): void {
+		if (this.#atomicOwnerLease !== null && !this.#currentChainHoldsLease()) {
+			throw new Error(
+				`Cannot append a ${kind} boundary while another operation holds the session mutation owner; acquire it via runExclusive before the first live mutation.`,
+			);
 		}
 	}
 
@@ -1334,7 +1481,7 @@ export class SessionManager {
 		const persist = options?.persist ?? this.#persist;
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
-		clone.restoreState(this.captureState());
+		clone.#restoreStateCore(this.captureState());
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#fileIsCurrent = false;
@@ -1344,10 +1491,19 @@ export class SessionManager {
 		return clone;
 	}
 
-	restoreState(snapshot: SessionManagerStateSnapshot): void {
+	restoreState(snapshot: SessionManagerStateSnapshot): Promise<void> {
+		return this.runExclusive(() => this.#restoreStateCore(snapshot));
+	}
+
+	/**
+	 * Replace the manager's in-memory session state from a snapshot. Never
+	 * clears the indeterminate persistence latch: memory rollback is not disk
+	 * success, and only authoritative recovery may restore consistency.
+	 */
+	#restoreStateCore(snapshot: SessionManagerStateSnapshot): void {
 		this.#closeWriterEventually();
 		this.#diskTail = Promise.resolve();
-		this.#clearDiskError();
+		if (!(this.#diskFailure instanceof SessionPersistenceIndeterminateError)) this.#clearDiskError();
 
 		this.#cwd = snapshot.cwd;
 		this.#sessionDir = snapshot.sessionDir;
@@ -1403,9 +1559,9 @@ export class SessionManager {
 			await this.#rewriteAtomically();
 		}
 	}
-	/** Switch to a different session file (resume / branch). */
+	/** Switch to a different session file (resume / branch). Runs under the owner. */
 	async setSessionFile(sessionFile: string): Promise<void> {
-		await this.#setSessionFile(sessionFile);
+		return this.runExclusive(() => this.#setSessionFile(sessionFile));
 	}
 
 	async #setSessionFile(sessionFile: string, loadedSession?: SessionLoadResult): Promise<void> {
@@ -1483,10 +1639,12 @@ export class SessionManager {
 	 * from selecting the previous conversation as the most recent session.
 	 */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
-		await this.#drainAndCloseWriter();
-		const sessionFile = this.#resetToNewSession(options);
-		await this.ensureOnDisk();
-		return sessionFile;
+		return this.runExclusive(async () => {
+			await this.#drainAndCloseWriter();
+			const sessionFile = this.#resetToNewSession(options);
+			await this.ensureOnDisk();
+			return sessionFile;
+		});
 	}
 
 	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
@@ -1524,7 +1682,9 @@ export class SessionManager {
 			timestamp,
 			cwd: this.#cwd,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
-			parentSession: parentSessionId,
+			// New writes persist a canonical absolute session-file path so
+			// fresh-process lineage resolution never depends on the registry.
+			parentSession: path.resolve(oldSessionFile),
 			providerPromptCacheKey: this.#header.providerPromptCacheKey ?? parentSessionId,
 		};
 		this.#sessionName = this.#header.title;
@@ -1792,14 +1952,187 @@ export class SessionManager {
 	 * entry remains intended (for example, an explicit terminal tombstone).
 	 */
 	recoverPersistenceFromCurrentState(): Promise<void> {
-		return this.#withAtomicPersistenceLock(async () => {
-			if (!this.#persist || !this.#sessionFile) return;
-			if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
-			const operationError =
-				this.#diskFailure ?? new Error("Authoritative session persistence recovery was requested.");
+		return this.#withAtomicPersistenceLock(
+			async () => {
+				if (!this.#persist || !this.#sessionFile) return;
+				if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
+				const operationError =
+					this.#diskFailure ?? new Error("Authoritative session persistence recovery was requested.");
+				await this.#authoritativelyRewriteCurrentStateLocked(operationError);
+				this.#notifyDurableEntries();
+			},
+			// Recovery is the only path exempt from the indeterminate latch: it
+			// IS the mechanism that clears the latch. Never exposed publicly.
+			{ ignoreLatch: true },
+		);
+	}
+
+	/**
+	 * Run `operation` while holding the session's single serialized
+	 * mutation/persistence ownership — the same FIFO reservation used by atomic
+	 * batches, authoritative recovery, and {@link rewriteMessageEntriesAtomically}.
+	 * Every entrypoint that can mutate the current prefix, an existing message,
+	 * or the branch selection MUST call this before its first live mutation and
+	 * keep the call active through durable publish or completed authoritative
+	 * repair.
+	 *
+	 * The lock is reentrant ONLY for the current acquiring async chain: the
+	 * admitted operation runs inside an AsyncLocalStorage lease scope, so nested
+	 * `runExclusive` calls from that same chain execute inline and never
+	 * requeue. Concurrent callers (and chains whose lease was already released)
+	 * always wait FIFO and re-read live state before mutating.
+	 *
+	 * `options.signal` cancels a queued wait — the cancellation races the FIFO
+	 * predecessor and is re-checked at grant; a canceled waiter exits without
+	 * executing its operation.
+	 */
+	async runExclusive<T>(operation: () => T | Promise<T>, options: MutationOwnerOptions = {}): Promise<T> {
+		return this.#withAtomicPersistenceLock(operation, options);
+	}
+
+	/**
+	 * Atomically replace message bodies within the current branch, reusing the
+	 * existing serialized mutation/persistence ownership.
+	 *
+	 * The commit section is synchronous: CAS-compare the complete captured
+	 * `prefix` against the live branch by full value (entry IDs, parent links,
+	 * and complete content), reject compaction/reset boundaries appended after
+	 * it, run the caller-owned synchronous `validate` (model/settings/tool
+	 * authorization and current merged-request budget), capture live replacement
+	 * preimages, then apply — with no await between those steps. The same owner
+	 * lease stays held through durable publish or completed authoritative
+	 * repair, so concurrently appended entries are retained and no other
+	 * prefix/message/branch mutation can interleave.
+	 *
+	 * Returns `false` when nothing was applied (stale prefix, boundary appended,
+	 * or `validate` rejected). Returns `true` only for an actual commit —
+	 * including a publish that succeeds despite caller cancellation after
+	 * application. Exceptions mean an existing operation failure or
+	 * {@link SessionPersistenceIndeterminateError}; they are never converted to
+	 * `false`.
+	 */
+	async rewriteMessageEntriesAtomically(rewrite: SessionMessageRewrite, validate: () => boolean): Promise<boolean> {
+		return this.#withAtomicPersistenceLock(() => this.#rewriteMessageEntriesAtomicallyLocked(rewrite, validate));
+	}
+
+	async #rewriteMessageEntriesAtomicallyLocked(
+		rewrite: SessionMessageRewrite,
+		validate: () => boolean,
+	): Promise<boolean> {
+		if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
+		// A rewrite with nothing (or duplicate targets) to apply is NOT a
+		// commit: reject up front so a no-op can never report true.
+		if (rewrite.replacements.length === 0) return false;
+		const seenTargets = new Set<string>();
+		for (const replacement of rewrite.replacements) {
+			if (seenTargets.has(replacement.id)) return false;
+			seenTargets.add(replacement.id);
+		}
+		if (!this.#persist || !this.#sessionFile) {
+			// Non-persistent manager: a successful in-memory commit still reports
+			// the actual commit, guarded by the same CAS and validator.
+			if (!this.#rewritePrefixMatches(rewrite)) return false;
+			if (!validate()) return false;
+			this.#captureAndApplyRewrite(rewrite);
+			return true;
+		}
+
+		try {
+			await this.ensureOnDisk();
+			await this.flush();
+		} catch (error) {
+			const operationError = toError(error);
 			await this.#authoritativelyRewriteCurrentStateLocked(operationError);
 			this.#notifyDurableEntries();
-		});
+			throw error;
+		}
+
+		// ---- synchronous commit section: no awaits until the publish below ----
+		if (!this.#rewritePrefixMatches(rewrite)) return false;
+		if (!validate()) return false;
+		const preimages = this.#captureAndApplyRewrite(rewrite);
+		// -----------------------------------------------------------------------
+
+		try {
+			await this.#rewriteAtomically();
+			if (!this.#fileIsCurrent || this.#rewriteRequired) {
+				throw new Error("Atomic session rewrite was superseded before commit.");
+			}
+			return true;
+		} catch (error) {
+			const operationError = toError(error);
+			this.#restoreRewritePreimages(preimages);
+			try {
+				await this.#authoritativelyRewriteCurrentStateLocked(operationError);
+			} catch (repairError) {
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				if (repairError instanceof SessionPersistenceIndeterminateError) throw repairError;
+				throw this.#latchIndeterminate(operationError, [toError(repairError)]);
+			}
+			this.#notifyDurableEntries();
+			throw error;
+		}
+	}
+
+	/** Full-value CAS of the live branch against the captured rewrite prefix. */
+	#rewritePrefixMatches(rewrite: SessionMessageRewrite): boolean {
+		const branch = this.getBranch();
+		const prefix = rewrite.prefix;
+		if (branch.length < prefix.length) return false;
+		for (let index = 0; index < prefix.length; index++) {
+			if (!isDeepStrictEqual(branch[index], prefix[index])) return false;
+		}
+		// Compaction/reset boundaries are not pure appends: a patch prepared
+		// before a boundary must never commit across it.
+		for (let index = prefix.length; index < branch.length; index++) {
+			const entry = branch[index];
+			if (entry.type === "compaction" || entry.type === "reset_boundary") return false;
+		}
+		// Every replacement must target an entry captured in the prefix.
+		const prefixIds = new Set<string>();
+		for (const entry of prefix) prefixIds.add(entry.id);
+		for (const replacement of rewrite.replacements) {
+			if (!prefixIds.has(replacement.id)) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Validate every replacement target, then capture the preimage of each
+	 * replaced message and apply the rewrite in place. All targets are checked
+	 * before any mutation so a malformed rewrite can never leave a partial
+	 * application. Synchronous.
+	 */
+	#captureAndApplyRewrite(rewrite: SessionMessageRewrite): Map<string, SessionMessageEntry["message"]> {
+		for (const replacement of rewrite.replacements) {
+			const entry = this.#index.get(replacement.id);
+			if (entry?.type !== "message") {
+				throw new Error(`Rewrite target ${replacement.id} is not a current message entry.`);
+			}
+		}
+		const preimages = new Map<string, SessionMessageEntry["message"]>();
+		for (const replacement of rewrite.replacements) {
+			const entry = this.#index.get(replacement.id);
+			if (entry?.type !== "message") continue;
+			if (!preimages.has(replacement.id)) preimages.set(replacement.id, entry.message);
+			entry.message = replacement.message;
+		}
+		return preimages;
+	}
+
+	/**
+	 * Restore replaced message preimages after a failed publish. Only the
+	 * preimages captured by this rewrite are touched; concurrently appended
+	 * entries are retained untouched, and a later same-message mutation cannot
+	 * interleave while the owner lease is still held. Never restores an old
+	 * full branch.
+	 */
+	#restoreRewritePreimages(preimages: ReadonlyMap<string, SessionMessageEntry["message"]>): void {
+		for (const [id, message] of preimages) {
+			const entry = this.#index.get(id);
+			if (entry?.type === "message") entry.message = message;
+		}
 	}
 
 	/** Flush pending writes. Call before switching sessions or on shutdown. */
@@ -2113,6 +2446,47 @@ export class SessionManager {
 		return artifactsDirectoryFor(this.#sessionFile);
 	}
 
+	/**
+	 * Lineage roots for the current session: ordered ancestor session files
+	 * (nearest-first) resolved read-only from the persisted `parentSession`
+	 * chain, bounded by depth and cycle/missing/malformed/unsafe diagnostics.
+	 * Sessions without a file (in-memory) degrade to an empty context.
+	 */
+	async getLineageContext(): Promise<LineageContext> {
+		const file = this.getSessionFile();
+		if (!file) return { currentSessionFile: null, lineageRoots: [] };
+
+		const roots: LineageRoot[] = [];
+		const seen = new Set<string>([path.resolve(file)]);
+		let cursor = path.resolve(file);
+		for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth++) {
+			let headerParent: string | undefined;
+			try {
+				const entries = await loadEntriesFromFile(cursor, this.#storage);
+				headerParent = entries.find(entry => entry.type === "session")?.parentSession;
+			} catch {
+				// Missing/deleted/malformed parent: stop the walk, keep inline
+				// conclusions reachable.
+				break;
+			}
+			if (headerParent === undefined) break;
+			const { ref, diagnostic } = normalizeParentSessionRef(headerParent, this.#sessionDir, this.#cwd);
+			if (diagnostic) break;
+			if (!ref) break;
+			if (ref.kind === "legacy-session-id") {
+				// Legacy IDs resolve through bounded store lookup; no path is
+				// derivable from the header alone.
+				break;
+			}
+			const canonical = ref.canonicalPath;
+			if (seen.has(canonical)) break; // cycle
+			seen.add(canonical);
+			roots.push({ canonicalPath: canonical, depth });
+			cursor = canonical;
+		}
+		return { currentSessionFile: file, lineageRoots: roots };
+	}
+
 	adoptArtifactManager(manager: ArtifactManager): void {
 		this.#adoptedArtifactManager = manager;
 	}
@@ -2138,6 +2512,23 @@ export class SessionManager {
 
 	async getArtifactPath(id: string): Promise<string | null> {
 		return (await this.#artifactManagerForSession()?.getPath(id)) ?? null;
+	}
+
+	/**
+	 * Resolve artifact body for path-backed or in-memory (no-session) stores.
+	 * Read dedupe / recovery must verify immutable SHA against this content.
+	 */
+	async getArtifactContent(id: string): Promise<string | null> {
+		const normalized = id.startsWith("artifact://") ? id.slice("artifact://".length) : id;
+		const onDisk = await this.getArtifactPath(normalized);
+		if (onDisk) {
+			try {
+				return await Bun.file(onDisk).text();
+			} catch {
+				return null;
+			}
+		}
+		return this.#inMemoryArtifacts?.get(normalized) ?? null;
 	}
 
 	async saveDraft(text: string): Promise<void> {
@@ -2411,8 +2802,10 @@ export class SessionManager {
 		restrictToolNames?: boolean;
 		spawns?: string;
 		readSummarize?: boolean;
+		outputTruncation?: boolean;
 		advisor?: string;
 		isolated?: boolean;
+		performanceClass?: SessionInitEntry["performanceClass"];
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -2433,6 +2826,8 @@ export class SessionManager {
 			tokensAfter?: number;
 		} = {},
 	): string {
+		this.#requireBoundaryOwner("compaction");
+
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			...this.#freshEntryFields(),
@@ -2458,6 +2853,8 @@ export class SessionManager {
 	 * `transcript:true` export walks it unchanged).
 	 */
 	appendResetBoundary(): string {
+		this.#requireBoundaryOwner("reset");
+
 		const entry: ResetBoundaryEntry = { type: "reset_boundary", ...this.#freshEntryFields() };
 		this.#recordEntry(entry);
 		return entry.id;
@@ -2666,16 +3063,21 @@ export class SessionManager {
 
 	/**
 	 * Move the leaf to an earlier entry so the next append forms a new branch.
-	 * Existing entries are never modified or deleted.
+	 * Existing entries are never modified or deleted. Runs under the serialized
+	 * owner so a branch selection can never interleave a pending publish/repair.
 	 */
-	branch(branchFromId: string): void {
+	async branch(branchFromId: string): Promise<void> {
+		return this.runExclusive(() => this.#branchCore(branchFromId));
+	}
+
+	#branchCore(branchFromId: string): void {
 		if (!this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
 		this.#setLeaf(branchFromId);
 	}
 
 	/** Reset the leaf to null so the next append creates a new root entry. */
-	resetLeaf(): void {
-		this.#setLeaf(null);
+	async resetLeaf(): Promise<void> {
+		return this.runExclusive(() => this.#setLeaf(null));
 	}
 
 	/**
@@ -2689,6 +3091,10 @@ export class SessionManager {
 	 * rewrite the journal, making the selected path durable.
 	 */
 	async discardEntryDurably(entryId: string): Promise<void> {
+		return this.runExclusive(() => this.#discardEntryDurablyCore(entryId));
+	}
+
+	async #discardEntryDurablyCore(entryId: string): Promise<void> {
 		const entry = this.#index.get(entryId);
 		if (!entry) return;
 		const children = this.#index.childrenOf(entryId);
@@ -2702,7 +3108,7 @@ export class SessionManager {
 			this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
 			this.#index.rebuild(this.#entries);
 		}
-		this.branchWithSummary(leafId, "", {
+		this.#branchWithSummaryCore(leafId, "", {
 			kind: DISCARDED_ENTRY_BRANCH_MARKER,
 			discardedEntryId: entryId,
 		});
@@ -2710,7 +3116,21 @@ export class SessionManager {
 	}
 
 	/** Like branch(), but also records a branch_summary of the abandoned path. */
-	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromExtension?: boolean): string {
+	async branchWithSummary(
+		branchFromId: string | null,
+		summary: string,
+		details?: unknown,
+		fromExtension?: boolean,
+	): Promise<string> {
+		return this.runExclusive(() => this.#branchWithSummaryCore(branchFromId, summary, details, fromExtension));
+	}
+
+	#branchWithSummaryCore(
+		branchFromId: string | null,
+		summary: string,
+		details?: unknown,
+		fromExtension?: boolean,
+	): string {
 		if (branchFromId !== null && !this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
 
 		this.#setLeaf(branchFromId);
@@ -2730,9 +3150,15 @@ export class SessionManager {
 
 	/**
 	 * Create a new session file containing only the path from root to `leafId`.
-	 * Returns the new file path, or undefined when not persisting.
+	 * Returns the new file path, or undefined when not persisting. Runs under
+	 * the serialized owner so the branch switch + state replacement can never
+	 * interleave a pending publish/repair.
 	 */
-	createBranchedSession(leafId: string): string | undefined {
+	async createBranchedSession(leafId: string): Promise<string | undefined> {
+		return this.runExclusive(() => this.#createBranchedSessionCore(leafId));
+	}
+
+	#createBranchedSessionCore(leafId: string): string | undefined {
 		const sourceSessionFile = this.#sessionFile;
 		const branchPath = this.getBranch(leafId);
 		if (branchPath.length === 0) throw new Error(`Entry ${leafId} not found`);
@@ -2878,7 +3304,9 @@ export class SessionManager {
 		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
 		manager.#resetToNewSession(
 			{
-				parentSession: sourceHeader?.id,
+				// forkFrom persists the canonical absolute source path so
+				// fresh-process lineage resolution stays registry-free.
+				parentSession: path.resolve(sourcePath),
 				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
 			},
 			options?.sessionFile,
@@ -2977,8 +3405,10 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			outputTruncation?: boolean;
 			advisor?: string;
 			isolated?: boolean;
+			performanceClass?: SessionInitEntry["performanceClass"];
 		} | null;
 	} | null> {
 		let header: SessionHeader | undefined;
@@ -2995,8 +3425,10 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			outputTruncation?: boolean;
 			advisor?: string;
 			isolated?: boolean;
+			performanceClass?: SessionInitEntry["performanceClass"];
 		} | null = null;
 		const visit = (entry: FileEntry): void => {
 			if (entry.type === "session") {
@@ -3016,9 +3448,11 @@ export class SessionManager {
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
 					readSummarize: entry.readSummarize,
+					outputTruncation: entry.outputTruncation,
 					spawns: entry.spawns,
 					advisor: entry.advisor,
 					isolated: entry.isolated,
+					performanceClass: entry.performanceClass,
 				};
 			}
 		};

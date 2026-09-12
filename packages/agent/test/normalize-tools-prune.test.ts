@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { normalizeTools } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core/types";
+import { ValidationError } from "@oh-my-pi/pi-ai/error";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 const toolSchema = type({
@@ -168,5 +169,31 @@ describe("normalizeTools — union-shaped schemas", () => {
 		const params = out?.parameters as Record<string, unknown>;
 		expect(params.properties).toBeUndefined();
 		expect(params.required).toBeUndefined();
+	});
+});
+
+describe("normalizeTools — provider schema preflight", () => {
+	it("rejects a non-object parameter schema before provider dispatch", () => {
+		const invalidTool: AgentTool = {
+			name: "invalid-root",
+			label: "Invalid root",
+			description: "invalid fixture",
+			parameters: { type: "array", items: { type: "string" } },
+			async execute() {
+				return { content: [{ type: "text", text: "unreachable" }] };
+			},
+		};
+
+		let failure: unknown;
+		try {
+			normalizeTools([invalidTool], { injectIntent: false });
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toBeInstanceOf(ValidationError);
+		expect(failure).toMatchObject({
+			fieldPath: "tools.invalid-root.parameters.type",
+			expectedType: "object",
+		});
 	});
 });

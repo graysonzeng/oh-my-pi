@@ -7,6 +7,7 @@
  */
 
 import type { Type } from "@oh-my-pi/omptype";
+import { ValidationError } from "../../error";
 import type { Tool, TSchema } from "../../types";
 import { upgradeJsonSchemaTo202012 } from "./draft";
 import { stamp } from "./stamps";
@@ -606,6 +607,66 @@ export function toolWireSchema(tool: Tool): Record<string, unknown> {
 		const upgraded = upgradeJsonSchemaTo202012(raw) as Record<string, unknown>;
 		return postProcessJsonSchema(upgraded);
 	});
+}
+
+function assertJsonSchemaValue(value: unknown, path: string, active: WeakSet<object>): void {
+	if (
+		value === undefined ||
+		typeof value === "function" ||
+		typeof value === "symbol" ||
+		typeof value === "bigint" ||
+		(typeof value === "number" && !Number.isFinite(value))
+	) {
+		throw new ValidationError(`Tool schema contains a non-JSON value at ${path}`, {
+			fieldPath: path,
+			expectedType: "JSON-serializable schema value",
+		});
+	}
+	if (value === null || typeof value !== "object") return;
+	if (active.has(value)) {
+		throw new ValidationError(`Tool schema contains a cycle at ${path}`, {
+			fieldPath: path,
+			expectedType: "acyclic JSON Schema",
+		});
+	}
+	active.add(value);
+	if (Array.isArray(value)) {
+		for (let index = 0; index < value.length; index++) {
+			assertJsonSchemaValue(value[index], `${path}[${index}]`, active);
+		}
+	} else {
+		for (const [key, child] of Object.entries(value)) {
+			assertJsonSchemaValue(child, `${path}.${key}`, active);
+		}
+	}
+	active.delete(value);
+}
+
+/** Fail before a provider request when normalized tool parameters cannot be a wire object schema. */
+export function preflightToolWireSchema(toolName: string, schema: Record<string, unknown>): void {
+	assertJsonSchemaValue(schema, `tools.${toolName}.parameters`, new WeakSet<object>());
+	if (schema.type !== undefined && schema.type !== "object") {
+		throw new ValidationError(`Tool "${toolName}" parameters must use an object schema`, {
+			fieldPath: `tools.${toolName}.parameters.type`,
+			expectedType: "object",
+		});
+	}
+	const properties = schema.properties;
+	if (
+		properties !== undefined &&
+		(typeof properties !== "object" || properties === null || Array.isArray(properties))
+	) {
+		throw new ValidationError(`Tool "${toolName}" parameters.properties must be an object`, {
+			fieldPath: `tools.${toolName}.parameters.properties`,
+			expectedType: "object map",
+		});
+	}
+	if (schema.required !== undefined && !Array.isArray(schema.required)) {
+		throw new ValidationError(`Tool "${toolName}" parameters.required must be an array`, {
+			fieldPath: `tools.${toolName}.parameters.required`,
+			expectedType: "string[]",
+		});
+	}
 }
 
 /**

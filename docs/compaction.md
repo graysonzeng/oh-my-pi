@@ -487,7 +487,7 @@ From `settings-schema.ts`:
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.remoteStreamingV2Enabled` = `true`
 - `compaction.v2RetainedMessageBudget` = `64000`
-- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; a positive fixed token limit takes precedence over percentage, and otherwise the reserve-based threshold is used.
+- `compaction.thresholdPercent` = `55`; `compaction.thresholdTokens` = `-1` (unset). When no positive override is set, the threshold is `floor(contextWindow * 0.55)`; setting `thresholdPercent` to `-1` restores the reserve-based threshold `contextWindow - max(15% of contextWindow, reserveTokens)`.
 - `compaction.idleEnabled` = `false`
 - `compaction.idleThresholdTokens` = `200000`
 - `compaction.idleTimeoutSeconds` = `300`

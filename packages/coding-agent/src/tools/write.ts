@@ -36,6 +36,7 @@ import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" w
 import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
+import { assertWorkflowPathAllowed } from "../workflow/tool-policy";
 import { routeWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
@@ -200,11 +201,15 @@ function throwReadSelectorListMisfire(target: string, count: number): never {
 	);
 }
 
-async function assertNotReadSelectorMisfire(target: string, content: string, cwd: string): Promise<void> {
+async function assertNotReadSelectorListMisfire(target: string, cwd: string): Promise<void> {
 	const listCount = readSelectorListMisfire(target);
 	if (listCount !== undefined && (await probeLiteralPathExists(target, cwd)) === "missing") {
 		throwReadSelectorListMisfire(target, listCount);
 	}
+}
+
+async function assertNotReadSelectorMisfire(target: string, content: string, cwd: string): Promise<void> {
+	await assertNotReadSelectorListMisfire(target, cwd);
 	const sel = readSelectorForEmptyWrite(target, content);
 	if (sel === undefined) return;
 	if ((await probeLiteralPathExists(target, cwd)) !== "missing") return;
@@ -835,6 +840,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	}
 
 	/**
+	 * Fail closed on every resolved conflict target before any disk write.
+	 * `conflict://` URIs are not filesystem paths; policy must see the
+	 * registered absolute path. Bulk callers pass the full selected set
+	 * so a forbidden sibling cannot land after an allowed file.
+	 */
+	#assertConflictWriteTargetsAllowed(entries: readonly ConflictEntry[]): void {
+		const policy = this.session.workflowWritePolicy;
+		if (!policy) return;
+		for (const entry of entries) {
+			assertWorkflowPathAllowed(entry.absolutePath, policy);
+		}
+	}
+	/**
 	 * Resolve a single `conflict://<N>` write by splicing the recorded
 	 * marker region in the registered file with `replacementContent`.
 	 * The write deliberately bypasses the LSP writethrough: the file may
@@ -852,6 +870,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		stripped: boolean,
 		signal: AbortSignal | undefined,
 	): Promise<AgentToolResult<WriteToolDetails>> {
+		this.#assertConflictWriteTargetsAllowed([entry]);
 		const absolutePath = entry.absolutePath;
 		if (!(await fs.exists(absolutePath))) {
 			throw new ToolError(`Conflict #${entry.id} target '${entry.displayPath}' no longer exists.`);
@@ -939,6 +958,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	 * left untouched and the error is surfaced. Files that succeed are
 	 * still written. The result text reports per-file counts so the agent
 	 * can re-read the failed files and retry.
+	 * Workflow write policy is checked on every resolved real path before
+	 * any file is written; mixed allowed/forbidden bulk does not partially land.
 	 */
 	async #resolveAllConflicts(
 		replacementContent: string,
@@ -971,6 +992,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 		}
 		const selectedEntries = directives ? allEntries.filter(entry => directives.has(entry.id)) : allEntries;
+		this.#assertConflictWriteTargetsAllowed(selectedEntries);
 		const contentFor = (entry: ConflictEntry): string =>
 			directives ? (directives.get(entry.id) as string) : replacementContent;
 
@@ -1136,6 +1158,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
 			);
 		}
+		if (this.session.workflowWritePolicy && parseConflictUri(path) === null) {
+			assertWorkflowPathAllowed(path, this.session.workflowWritePolicy);
+		}
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
@@ -1184,6 +1209,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 								}
 								if (!name) {
 									throw new ToolError(`Cannot write to xd:// itself — pick a device:\n${xdevListing(xdev)}`);
+								}
+								// Restricted workflow children never elevate beyond their role allowlist.
+								const presentationAllow = this.session.workflowToolOptimization?.presentationAllowedTools;
+								if (presentationAllow && !presentationAllow.includes(name)) {
+									throw new ToolError(
+										`Tool "${name}" is outside the role allowlist; catalog expand/dispatch refused.`,
+									);
 								}
 								const { result, xdev: dispatch } = await dispatchXdevTool(
 									xdev,
@@ -1238,6 +1270,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				}
 				return result;
 			}
+			// List-shaped read selectors must be refused before archive/sqlite routing:
+			// `a.zip:1-2;b/c.txt:3-4` would otherwise be treated as an archive member path.
+			// Single-selector empty-content guard stays after archive routing so literal archive members remain writable.
+			await assertNotReadSelectorListMisfire(path, this.session.cwd);
 			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
 			if (resolvedArchivePath) {
 				enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {

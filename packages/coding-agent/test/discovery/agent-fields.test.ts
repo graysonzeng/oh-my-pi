@@ -171,6 +171,31 @@ describe("parseAgentFields", () => {
 	test("returns undefined readSummarize when field absent", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc" })?.readSummarize).toBeUndefined();
 	});
+
+	test("parses outputTruncation from boolean frontmatter", () => {
+		expect(parseAgentFields({ name: "scout", description: "desc", outputTruncation: false })?.outputTruncation).toBe(
+			false,
+		);
+		expect(parseAgentFields({ name: "scout", description: "desc", outputTruncation: true })?.outputTruncation).toBe(
+			true,
+		);
+	});
+
+	test("parses outputTruncation from string frontmatter", () => {
+		expect(
+			parseAgentFields({ name: "scout", description: "desc", outputTruncation: "false" })?.outputTruncation,
+		).toBe(false);
+	});
+
+	test("ignores invalid outputTruncation values", () => {
+		expect(
+			parseAgentFields({ name: "scout", description: "desc", outputTruncation: "nope" })?.outputTruncation,
+		).toBeUndefined();
+	});
+
+	test("returns undefined outputTruncation when field absent", () => {
+		expect(parseAgentFields({ name: "scout", description: "desc" })?.outputTruncation).toBeUndefined();
+	});
 	test("parses prewalk from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: true })?.prewalk).toBe(true);
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: false })?.prewalk).toBe(false);
@@ -192,6 +217,19 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: "  " })?.prewalk).toBeUndefined();
 		expect(parseAgentFields({ name: "worker", description: "desc" })?.prewalk).toBeUndefined();
 	});
+
+	test("parses shadow-review: code", () => {
+		expect(parseAgentFields({ name: "reviewer", description: "desc", shadowReview: "code" })?.shadowReview).toBe(
+			"code",
+		);
+	});
+
+	test("ignores unknown shadowReview values", () => {
+		expect(
+			parseAgentFields({ name: "reviewer", description: "desc", shadowReview: "design" })?.shadowReview,
+		).toBeUndefined();
+	});
+
 	test("parses advisor from boolean frontmatter and boolean strings", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", advisor: true })?.advisor).toBe(true);
 		expect(parseAgentFields({ name: "worker", description: "desc", advisor: false })?.advisor).toBe(false);

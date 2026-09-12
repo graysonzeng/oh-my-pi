@@ -11,6 +11,7 @@ import {
 	EventStream,
 	isApiKeyResolver,
 	type Model,
+	preflightToolWireSchema,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
 	streamSimple,
@@ -49,6 +50,7 @@ import {
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
+import { filterProviderReplayMessages } from "./replay-policy";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
@@ -84,8 +86,14 @@ import type {
 	SteeringInterruptSource,
 	SteeringQueueState,
 	StreamFn,
+	ToolErrorMetadata,
 } from "./types";
-import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, isSoftToolRequirement } from "./types";
+import {
+	ADMIT_TOOL_RESULT_TERMINAL,
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
+	isSoftToolRequirement,
+} from "./types";
 import { yieldIfDue } from "./utils/yield";
 
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
@@ -444,7 +452,10 @@ function hasSubstantiveToolResultContent(content: AgentToolResult["content"]): b
 	return false;
 }
 
-function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; malformed: boolean } {
+function coerceToolResult(
+	raw: unknown,
+	preserveText = false,
+): { result: AgentToolResult<unknown>; malformed: boolean } {
 	const rawObj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
 	const rawContent = rawObj?.content;
 	const details = rawObj && "details" in rawObj ? rawObj.details : {};
@@ -478,8 +489,10 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 			invalidBlocks++;
 			continue;
 		}
-		if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
-			content.push({ type: "text", text: sanitizeText((block as { text: string }).text) });
+		if (block.type === "text" && "text" in block && typeof block.text === "string") {
+			// Addressable recovery text is a byte protocol. The TUI sanitizes its
+			// display separately; stripping CR/controls here corrupts its cursor.
+			content.push({ type: "text", text: preserveText ? block.text : sanitizeText(block.text) });
 		} else if (
 			block.type === "image" &&
 			typeof (block as { data?: unknown }).data === "string" &&
@@ -793,12 +806,13 @@ export function normalizeMessagesForProvider(
 	messages: Context["messages"],
 	model: AgentLoopConfig["model"],
 ): Context["messages"] {
+	const replayableMessages = filterProviderReplayMessages(messages, model);
 	if (model.provider !== "cerebras") {
-		return messages;
+		return replayableMessages;
 	}
 
 	let hasThinking = false;
-	for (const message of messages) {
+	for (const message of replayableMessages) {
 		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (const block of message.content) {
 			if (block.type === "thinking") {
@@ -808,9 +822,9 @@ export function normalizeMessagesForProvider(
 		}
 		if (hasThinking) break;
 	}
-	if (!hasThinking) return messages;
+	if (!hasThinking) return replayableMessages;
 
-	return messages.map(message => {
+	return replayableMessages.map(message => {
 		if (message.role !== "assistant" || !Array.isArray(message.content)) {
 			return message;
 		}
@@ -903,10 +917,12 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		if (pruneDescriptions) {
 			let parameters = stripSchemaDescriptions(toolWireSchema(t)) as TSchema;
 			if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode, false) as TSchema;
+			preflightToolWireSchema(t.name, parameters as Record<string, unknown>);
 			return { ...t, parameters, description: "" };
 		}
 		let parameters = toolWireSchema(t) as TSchema;
 		if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode) as TSchema;
+		preflightToolWireSchema(t.name, parameters as Record<string, unknown>);
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
@@ -1403,6 +1419,10 @@ async function runLoopBody(
 				const softNonCompliant = softGateActive && !calledOnlyRequiredTool;
 
 				const toolResults: ToolResultMessage[] = [];
+				// Set when the serialized final admission returned the terminal
+				// cannot-fit sentinel for this batch; forces a hard run stop
+				// after the turn is emitted (queues stay intact).
+				let batchTerminalAdmission = false;
 				if (softNonCompliant && softRequiredTool !== undefined) {
 					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
 						throw new Error(
@@ -1450,6 +1470,17 @@ async function runLoopBody(
 					for (const result of toolResults) {
 						currentContext.messages.push(result);
 						newMessages.push(result);
+					}
+
+					if (executionResult.terminalAdmission) {
+						// A final admission could not fit a pending recovery result in
+						// ANY emitted form: the batch drains (real results plus the
+						// budget-stop stub for the un-fit record), but no next
+						// provider request may be dispatched — including queued
+						// steering/follow-ups/asides on this run. The run ends with
+						// queues intact for the next safe run.
+						hasMoreToolCalls = false;
+						batchTerminalAdmission = true;
 					}
 				} else if (toolCalls.length > 0) {
 					// Turn ended on a non-runnable reason (`length` truncation) or deadline was exceeded
@@ -1501,6 +1532,18 @@ async function runLoopBody(
 				turnOpen = false;
 
 				if (isDeadlineExceeded(config.deadline)) {
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
+				}
+
+				if (batchTerminalAdmission) {
+					// Run-terminal: never dispatch another provider request —
+					// including queued steering/follow-ups/asides on this run.
+					// The completed batch (real results plus the admission-stop
+					// stub) is already persisted by emitTurnEnd; steering and
+					// follow-up queues stay intact for the next safe run and the
+					// host's existing request-budget recovery/stop path takes
+					// over from here.
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
@@ -1604,7 +1647,15 @@ async function prepareProviderCall(
 	const llmMessages = await config.convertToLlm(messages);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect: Dialect | undefined = config.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
-	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
+	// Owned/in-band dialects carry the catalog in the prompt as text and send no
+	// native `tools`, so description pruning only applies to native tool calling.
+	const pruneRequested =
+		typeof config.pruneToolDescriptions === "function"
+			? config.pruneToolDescriptions()
+			: !!config.pruneToolDescriptions;
+	const pruneToolDescriptions = pruneRequested && !ownedDialect;
+	// Build LLM context — append-only mode caches system prompt + tools
+	// AND keeps an append-only message log so prior-turn bytes are stable.
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
@@ -2237,9 +2288,78 @@ interface PreparedToolCall {
 	/** Validated (possibly hook-revised) execution args; raw args when validation failed. */
 	args: Record<string, unknown>;
 	validationErrorMessage?: string;
+	validationErrorMetadata?: ToolErrorMetadata;
 	blocked?: boolean;
 	blockReason?: string;
 	prepareError?: unknown;
+}
+
+function validationFailureMetadata(error: unknown, toolFound: boolean): ToolErrorMetadata {
+	if (!toolFound) {
+		return {
+			errorCategory: "not_found",
+			fieldPath: "$.name",
+			expectedType: "active tool name",
+			retryable: false,
+			retryGuidance: "Choose a tool name present in the active tool catalog before making a new call.",
+			sideEffectStatus: "none",
+		};
+	}
+	const fieldPath = error instanceof AIError.ValidationError ? error.fieldPath : null;
+	const expectedType = error instanceof AIError.ValidationError ? error.expectedType : null;
+	return {
+		errorCategory: "validation",
+		fieldPath,
+		expectedType,
+		retryable: false,
+		retryGuidance: fieldPath
+			? `Correct the argument at ${fieldPath}${expectedType ? ` to match ${expectedType}` : ""} before making a new call.`
+			: "Change the invalid arguments before making a new call.",
+		sideEffectStatus: "none",
+	};
+}
+
+const TOOL_ERROR_CATEGORIES = new Set<ToolErrorMetadata["errorCategory"]>([
+	"validation",
+	"permission",
+	"not_found",
+	"conflict",
+	"transient_provider",
+	"timeout",
+	"partial_side_effect",
+	"verification_failed",
+]);
+const TOOL_SIDE_EFFECT_STATUSES = new Set<ToolErrorMetadata["sideEffectStatus"]>([
+	"none",
+	"possible",
+	"partial",
+	"completed",
+	"unknown",
+]);
+
+function structuredToolErrorMetadata(error: unknown): ToolErrorMetadata | undefined {
+	if (!error || typeof error !== "object" || !("context" in error)) return undefined;
+	const context = error.context;
+	if (!context || typeof context !== "object") return undefined;
+	const candidate = context as Partial<ToolErrorMetadata>;
+	if (
+		!candidate.errorCategory ||
+		!TOOL_ERROR_CATEGORIES.has(candidate.errorCategory) ||
+		typeof candidate.retryable !== "boolean" ||
+		typeof candidate.retryGuidance !== "string" ||
+		!candidate.sideEffectStatus ||
+		!TOOL_SIDE_EFFECT_STATUSES.has(candidate.sideEffectStatus)
+	) {
+		return undefined;
+	}
+	return {
+		errorCategory: candidate.errorCategory,
+		fieldPath: typeof candidate.fieldPath === "string" ? candidate.fieldPath : null,
+		expectedType: typeof candidate.expectedType === "string" ? candidate.expectedType : null,
+		retryable: candidate.retryable,
+		retryGuidance: candidate.retryGuidance,
+		sideEffectStatus: candidate.sideEffectStatus,
+	};
 }
 
 /**
@@ -2386,6 +2506,7 @@ async function prepareToolCallDispatch(
 				entry.args = "__parseError" in args ? { __parseError: args.__parseError } : args;
 				entry.validationErrorMessage =
 					validationError instanceof Error ? validationError.message : String(validationError);
+				entry.validationErrorMetadata = validationFailureMetadata(validationError, tool !== undefined);
 				return undefined;
 			}
 		};
@@ -2434,7 +2555,7 @@ async function executeToolCalls(
 	config: AgentLoopConfig,
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
-): Promise<{ toolResults: ToolResultMessage[] }> {
+): Promise<{ toolResults: ToolResultMessage[]; terminalAdmission: boolean }> {
 	const tools = currentContext.tools;
 	const {
 		hasSteeringMessages,
@@ -2513,9 +2634,12 @@ async function executeToolCalls(
 			result: undefined as AgentToolResult<any> | undefined,
 			isError: false,
 			skipped: false,
+			/** True only when pre-marked by remainingToolCalls budget (not steering/abort). */
+			budgetSkipped: false,
 			toolResultMessage: undefined as ToolResultMessage | undefined,
 			resultEmitted: false,
 			validationErrorMessage: prepared.validationErrorMessage,
+			validationErrorMetadata: prepared.validationErrorMetadata,
 			blocked: prepared.blocked === true,
 			blockReason: prepared.blockReason,
 			prepareError: prepared.prepareError,
@@ -2578,46 +2702,271 @@ async function executeToolCalls(
 		await checkIrcInterrupts();
 	};
 
-	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult<any>, isError: boolean): void => {
-		if (record.resultEmitted) return;
-		const { toolCall } = record;
+	// When toolScheduling is opted in, buffer concurrent toolResult messages and
+	// flush them in original call order (design: ordered writeback).
+	const orderedWriteback =
+		config.toolScheduling !== undefined && config.toolScheduling.orderedResultWriteback !== false;
+	let nextEmitIndex = 0;
+
+	// Single FIFO emission owner for the whole batch. Every acceptance — admit →
+	// resultEmitted → emittedToolResults.push → stream events — runs serially on
+	// this tail, so concurrent runTool tasks can never observe the same
+	// `emittedToolResults` snapshot, and ordered head-of-line processing cannot
+	// be re-entered while an admission await is in flight.
+	let emissionTail: Promise<void> = Promise.resolve();
+	/**
+	 * Set when a final admission returns the terminal cannot-fit sentinel. The
+	 * batch is STILL drained: the un-fit record gets a bounded budget-stop
+	 * pairing stub (no original data, no cursor), every other executed result
+	 * stays emitted and persisted, and the RUN terminates before any further
+	 * provider request.
+	 */
+	let terminalAdmission = false;
+
+	/**
+	 * Budget-stop pairing stub for a result the final admission could not fit
+	 * in ANY emitted form (not even a metadata-only same-cursor page). Delivers
+	 * no original data and no cursor; keeps the tool_use/tool_result pairing,
+	 * settles the tool's UI state, and marks the run as needing to stop before
+	 * the next provider request so the host's request-budget recovery/stop path
+	 * can run. Never claims the tool did not execute (it did; only delivery was
+	 * withheld on budget).
+	 */
+	const ADMISSION_BUDGET_STOP_RESULT: AgentToolResult = {
+		content: [
+			{
+				type: "text",
+				text: "Tool result withheld: the next request cannot fit this result's budget; the run stopped and request-budget recovery will run before continuing.",
+			},
+		],
+		details: { __admissionBudgetStop: true, source: "final_admission" },
+	};
+	const emitAdmissionStopRecord = (record: (typeof records)[number]): void => {
+		const toolResultMessage = buildToolResultMessage(record, ADMISSION_BUDGET_STOP_RESULT, true);
+		record.result = ADMISSION_BUDGET_STOP_RESULT;
+		record.isError = true;
+		record.toolResultMessage = toolResultMessage;
 		if (!record.started) {
 			stream.push({
 				type: "tool_execution_start",
-				toolCallId: toolCall.id,
-				toolName: toolCall.name,
+				toolCallId: record.toolCall.id,
+				toolName: record.toolCall.name,
 				args: record.args,
-				intent: toolCall.intent,
+				intent: record.toolCall.intent,
 			});
 		}
 		stream.push({
 			type: "tool_execution_end",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			result,
-			isError,
+			toolCallId: record.toolCall.id,
+			toolName: record.toolCall.name,
+			result: ADMISSION_BUDGET_STOP_RESULT,
+			isError: true,
 		});
-
-		const toolResultMessage: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			content: result.content,
-			details: result.details,
-			providerMetadata: result.providerMetadata,
-			isError,
-			...(result.useless && !isError ? { useless: true } : {}),
-			timestamp: Date.now(),
-		};
-		record.result = result;
-		record.isError = isError;
-		record.toolResultMessage = toolResultMessage;
 		record.resultEmitted = true;
 		emittedToolResults.push(toolResultMessage);
-
 		stream.push({ type: "message_start", message: toolResultMessage });
 		stream.push({ type: "message_end", message: toolResultMessage });
 	};
+	const enqueueEmission = (job: () => Promise<void>): Promise<void> => {
+		const next = emissionTail.then(job);
+		// Jobs never reject (admitFinalToolResult converts non-terminal throws
+		// to tool-error results); keep the chain alive defensively.
+		emissionTail = next.catch(() => undefined);
+		return next;
+	};
+
+	const admitFinalToolResult = async (
+		record: (typeof records)[number],
+		result: AgentToolResult<any>,
+		isError: boolean,
+	): Promise<AgentToolResult<any> | typeof ADMIT_TOOL_RESULT_TERMINAL> => {
+		if (!config.admitToolResult) return result;
+		try {
+			const admitted = await config.admitToolResult(
+				{
+					toolCall: record.toolCall,
+					result,
+					isError,
+					context: currentContext,
+					pendingBatch: emittedToolResults,
+				},
+				record.signal,
+			);
+			return admitted ?? result;
+		} catch (e) {
+			// A non-terminal admission throw surfaces as a genuine tool-error
+			// result (`isError: true`), so the rest of the batch keeps running
+			// and the record is settled as failed — never a pass-through with
+			// only an error text while keeping the executed `isError`. The
+			// cannot-fit case is NOT a throw: the hook returns
+			// ADMIT_TOOL_RESULT_TERMINAL so the loop emits the budget-stop
+			// error receipt and stops instead of dispatching the next request.
+			const errorMetadata = structuredToolErrorMetadata(e);
+			return {
+				content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+				details: errorMetadata ? { errorMetadata } : {},
+				isError: true,
+			};
+		}
+	};
+
+	const buildToolResultMessage = (
+		record: (typeof records)[number],
+		result: AgentToolResult<any>,
+		isError: boolean,
+	): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: record.toolCall.id,
+		toolName: record.toolCall.name,
+		content: result.content,
+		details: result.details,
+		providerMetadata: result.providerMetadata,
+		isError,
+		...(result.useless && !isError ? { useless: true } : {}),
+		timestamp: Date.now(),
+	});
+
+	const flushOrderedResults = async (): Promise<void> => {
+		if (!orderedWriteback) return;
+		// The terminal flag does not stop draining: the batch still accepts and
+		// emits every executed record (real results or budget-stop stubs).
+		while (nextEmitIndex < records.length) {
+			const rec = records[nextEmitIndex]!;
+			if (!rec.toolResultMessage || rec.resultEmitted) {
+				if (rec.resultEmitted) {
+					nextEmitIndex++;
+					continue;
+				}
+				break;
+			}
+			// Serialized final admission at the head acceptance point: once a
+			// record becomes head-of-line, its result is admitted against the
+			// current context plus every already-accepted result in this batch
+			// before it joins `emittedToolResults`. Runs on the FIFO emission
+			// tail, so no other acceptance can interleave mid-await.
+			const admittedResult = await admitFinalToolResult(rec, rec.result!, rec.isError);
+			if (admittedResult === ADMIT_TOOL_RESULT_TERMINAL) {
+				// Cannot fit in any emitted form: settle this record with the
+				// budget-stop error receipt (real failed record: keeps pairing,
+				// no cursor, no original data) and mark the run terminal — the
+				// batch still drains so other executed results are persisted,
+				// but no next provider request may be dispatched.
+				terminalAdmission = true;
+				emitAdmissionStopRecord(rec);
+				nextEmitIndex++;
+				continue;
+			}
+			// A hook-replaced result carries its own error flag: reflect it on
+			// the record, the tool_execution_end event, and the emitted message.
+			const finalIsError = rec.isError || admittedResult.isError === true;
+			if (admittedResult !== rec.result || finalIsError !== rec.isError) {
+				rec.result = admittedResult;
+				rec.isError = finalIsError;
+				rec.toolResultMessage = buildToolResultMessage(rec, admittedResult, finalIsError);
+			}
+			// tool_execution_end + toolResult message already prepared on the record;
+			// emit stream events now in order.
+			const { toolCall } = rec;
+			if (!rec.started) {
+				stream.push({
+					type: "tool_execution_start",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: rec.args,
+					intent: toolCall.intent,
+				});
+			}
+			stream.push({
+				type: "tool_execution_end",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				result: rec.result!,
+				isError: rec.isError,
+			});
+			rec.resultEmitted = true;
+			emittedToolResults.push(rec.toolResultMessage);
+			stream.push({ type: "message_start", message: rec.toolResultMessage });
+			stream.push({ type: "message_end", message: rec.toolResultMessage });
+			nextEmitIndex++;
+		}
+	};
+
+	const emitToolResult = async (
+		record: (typeof records)[number],
+		result: AgentToolResult<any>,
+		isError: boolean,
+	): Promise<void> => {
+		if (record.resultEmitted) return;
+		if (record.toolResultMessage) {
+			// Already marked ready (ordered writeback): enqueue a flush. The
+			// serialized emission tail is the single owner, so a concurrent
+			// flush cannot re-process the head mid-await.
+			await enqueueEmission(flushOrderedResults);
+			return;
+		}
+		if (orderedWriteback) {
+			// Defer stream message emission until head-of-line is ready; the
+			// serialized final admission runs in `flushOrderedResults` at the
+			// acceptance point. The readiness marker is written synchronously
+			// (idempotent), but acceptance itself is serialized on the tail.
+			record.result = result;
+			record.isError = isError;
+			record.toolResultMessage = buildToolResultMessage(record, result, isError);
+			await enqueueEmission(flushOrderedResults);
+			return;
+		}
+		// Unordered writeback: the emission itself is the serial admission
+		// point — count current context, results already accepted in this
+		// pending batch, and this candidate before it joins the batch. The
+		// whole accept→emit sequence runs on the FIFO tail. The terminal flag
+		// does NOT stop draining: every executed record is still emitted (real
+		// results or the budget-stop stub); only the next provider request is
+		// suppressed.
+		await enqueueEmission(async () => {
+			if (record.resultEmitted) return;
+			const admittedResult = await admitFinalToolResult(record, result, isError);
+			if (admittedResult === ADMIT_TOOL_RESULT_TERMINAL) {
+				terminalAdmission = true;
+				emitAdmissionStopRecord(record);
+				return;
+			}
+			const { toolCall } = record;
+			// A hook-replaced result carries its own error flag: reflect it on
+			// the record, the tool_execution_end event, and the emitted message.
+			const finalIsError = isError || admittedResult.isError === true;
+			const toolResultMessage = buildToolResultMessage(record, admittedResult, finalIsError);
+			record.result = admittedResult;
+			record.isError = finalIsError;
+			record.toolResultMessage = toolResultMessage;
+
+			if (!record.started) {
+				stream.push({
+					type: "tool_execution_start",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: record.args,
+					intent: toolCall.intent,
+				});
+			}
+			stream.push({
+				type: "tool_execution_end",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				result: admittedResult,
+				isError: finalIsError,
+			});
+
+			record.resultEmitted = true;
+			emittedToolResults.push(toolResultMessage);
+
+			stream.push({ type: "message_start", message: toolResultMessage });
+			stream.push({ type: "message_end", message: toolResultMessage });
+		});
+	};
+
+	// Filled once scheduling opts are known; runTool reads this after validation to
+	// commit remainingToolCalls without racing concurrent starts in the same batch.
+	const budgetGateRef: { current: { tryCommit: () => boolean } | null } = { current: null };
 
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
 		// A pending interrupt preempts not-yet-started *interruptible* waits so
@@ -2650,11 +2999,15 @@ async function executeToolCalls(
 		// failure recorded there surfaces here at the record's scheduled slot so
 		// result emission keeps batch order.
 		if (record.validationErrorMessage !== undefined) {
-			emitToolResult(
+			await emitToolResult(
 				record,
 				{
 					content: [{ type: "text" as const, text: record.validationErrorMessage }],
-					details: { isError: true, error: record.validationErrorMessage },
+					details: {
+						isError: true,
+						error: record.validationErrorMessage,
+						errorMetadata: record.validationErrorMetadata,
+					},
 				},
 				true,
 			);
@@ -2668,8 +3021,17 @@ async function executeToolCalls(
 				toolName: toolCall.name,
 				status: "aborted",
 			});
-			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
+			await emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
 			return;
+		}
+		// Commit one tool-call from the shared remaining budget (cross-batch).
+		// Abort-before-start does not consume. Exhausted budget → ordered skip result.
+		if (budgetGateRef.current) {
+			if (!budgetGateRef.current.tryCommit()) {
+				record.skipped = true;
+				record.budgetSkipped = true;
+				return;
+			}
 		}
 		record.started = true;
 		stream.push({
@@ -2695,7 +3057,6 @@ async function executeToolCalls(
 		let isError = false;
 		let caughtError: unknown;
 		let completedToolExecution = false;
-		let executionStarted = false;
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
@@ -2729,7 +3090,6 @@ async function executeToolCalls(
 							providerMetadata: toolCall.providerMetadata,
 						})
 					: undefined;
-				executionStarted = true;
 				const rawResult = await tool.execute(
 					toolCall.id,
 					executionArgs,
@@ -2740,20 +3100,22 @@ async function executeToolCalls(
 							toolCallId: toolCall.id,
 							toolName: toolCall.name,
 							args: executionArgs,
-							partialResult: coerceToolResult(partialResult).result,
+							partialResult: coerceToolResult(partialResult, record.toolCall.name === "read_omitted_content")
+								.result,
 						});
 					},
 					toolContext,
 				);
 				completedToolExecution = true;
-				const coerced = coerceToolResult(rawResult);
+				const coerced = coerceToolResult(rawResult, record.toolCall.name === "read_omitted_content");
 				result = coerced.result;
 				if (coerced.malformed || result.isError) isError = true;
 			} catch (e) {
 				caughtError = e;
+				const errorMetadata = structuredToolErrorMetadata(e);
 				result = {
 					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-					details: {},
+					details: errorMetadata ? { errorMetadata } : {},
 				};
 				isError = true;
 			}
@@ -2776,36 +3138,43 @@ async function executeToolCalls(
 						// code and may return malformed `content` (non-array / invalid blocks), which
 						// would otherwise be persisted verbatim and corrupt the session — the same
 						// hazard `coerceToolResult` guards on the execute path.
-						const coerced = coerceToolResult({
-							content: after.content ?? result.content,
-							details: after.details ?? result.details,
-							isError: after.isError ?? result.isError,
-							providerMetadata: after.providerMetadata ?? result.providerMetadata,
-							useless: after.useless ?? result.useless,
-						});
+						const coerced = coerceToolResult(
+							{
+								content: after.content ?? result.content,
+								details: after.details ?? result.details,
+								isError: after.isError ?? result.isError,
+								providerMetadata: after.providerMetadata ?? result.providerMetadata,
+								useless: after.useless ?? result.useless,
+							},
+							record.toolCall.name === "read_omitted_content",
+						);
 						result = coerced.result;
 						isError = coerced.malformed || (after.isError ?? isError);
 					}
 				} catch (e) {
 					caughtError = e;
+					const errorMetadata = structuredToolErrorMetadata(e);
 					result = {
 						content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-						details: {},
+						details: errorMetadata ? { errorMetadata } : {},
 					};
 					isError = true;
 				}
 			}
 		});
 
-		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;
 		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
-		if (interrupted && abortedDuringExecution) {
-			// This tool's own signal fired AND it failed to produce a result. The
-			// execution may already have performed partial work before throwing on
-			// abort, so preserve that distinction in the placeholder metadata.
+		if (perToolAborted && isError && !completedToolExecution) {
+			// This tool's own signal fired AND it failed to produce a result:
+			// `tool.execute()` was entered and cut off before producing usable
+			// output. This is a started-abort: side effects may already exist, so
+			// it is aborted (never skipped/not-executed, never walked as a
+			// never-invoked placeholder). The source names the runtime cause:
+			// user/system steering or peer IRC when a steering interrupt fired,
+			// otherwise the external abort.
 			record.skipped = true;
-			emitToolResult(record, createSkippedToolResult(interruptState.source, executionStarted), true);
+			await emitToolResult(record, createStartedAbortedToolResult(interruptState.source), true);
 		} else {
 			// No interrupt on this signal, or the tool finished before the interrupt landed
 			// (`completedToolExecution`) — even if the signal aborted around completion. Keep
@@ -2814,7 +3183,7 @@ async function executeToolCalls(
 			// false "skipped" that discards work the tool performed (#4752). A peer-IRC interrupt
 			// on the batch leaves non-interruptible tools' signals untouched — their genuine
 			// errors survive here too.
-			emitToolResult(record, result, isError);
+			await emitToolResult(record, result, isError);
 		}
 
 		const firstTextBlock = result.content?.[0];
@@ -2843,6 +3212,78 @@ async function executeToolCalls(
 	let lastExclusive: Promise<void> = Promise.resolve();
 	let sharedTasks: Promise<void>[] = [];
 	const tasks: Promise<void>[] = [];
+
+	// Opt-in only: without toolScheduling, keep legacy shared/exclusive barriers
+	// (no claims, limiter, or budget) so default runs stay completion-ordered and
+	// handshake-safe. Scheduling features must not force-serialize unknown tools.
+	const scheduling = config.toolScheduling;
+	const maxConcurrent = scheduling?.maxConcurrentTools;
+	const conflictMode = normalizeResourceConflictMode(scheduling?.resourceConflictMode);
+	// Effective concurrent cap also respects remaining tool-call budget: when only
+	// N calls remain, at most N tools may run concurrently (and at most N total).
+	const remainingBudgetAtBatch =
+		typeof scheduling?.remainingToolCalls === "number" && scheduling.remainingToolCalls >= 0
+			? scheduling.remainingToolCalls
+			: null;
+	const effectiveMax =
+		scheduling && typeof maxConcurrent === "number" && maxConcurrent > 0 && Number.isFinite(maxConcurrent)
+			? Math.max(1, Math.floor(maxConcurrent))
+			: remainingBudgetAtBatch !== null
+				? Math.max(1, remainingBudgetAtBatch)
+				: null;
+	const cappedMax =
+		effectiveMax !== null && remainingBudgetAtBatch !== null
+			? Math.max(1, Math.min(effectiveMax, Math.max(1, remainingBudgetAtBatch || 1)))
+			: effectiveMax;
+	const limiter =
+		scheduling && cappedMax !== null && remainingBudgetAtBatch !== 0
+			? createConcurrencyLimiter(cappedMax)
+			: scheduling && cappedMax !== null
+				? createConcurrencyLimiter(cappedMax)
+				: null;
+	// Cross-batch budget: remainingToolCalls on the config object is mutated after
+	// each committed start so later batches/stages see the reduced remaining count.
+	// Stage deadline: skip all when remainingStageTimeMs ≤ 0 or absolute deadline passed.
+	const stageTime = scheduling?.remainingStageTimeMs;
+	const deadlinePassed =
+		(typeof stageTime === "number" && stageTime <= 0) ||
+		(typeof config.deadline === "number" && Number.isFinite(config.deadline) && Date.now() >= config.deadline);
+	if (deadlinePassed) {
+		for (const record of records) {
+			record.skipped = true;
+			record.budgetSkipped = true;
+		}
+	}
+	// Budget gate: permanent consume on start; unstarted tools never reserve.
+	// Pipeline: tools wait on the concurrency limiter and only start while
+	// remainingToolCalls > 0; when remaining is 0 at start attempt → budget skip.
+	// (Do not pre-skip the whole tail at plan time so abort of a not-yet-started
+	// tool cannot "leak" a reserved slot that was never held.)
+	if (scheduling && typeof scheduling.remainingToolCalls === "number" && !deadlinePassed) {
+		budgetGateRef.current = createToolCallBudgetGate(
+			() => {
+				const n = scheduling.remainingToolCalls;
+				return typeof n === "number" ? n : null;
+			},
+			next => {
+				scheduling.remainingToolCalls = next;
+			},
+		);
+	}
+
+	type ResourceClaim = { paths: string[]; access: "read" | "write" | "unknown"; exclusive?: boolean };
+	const claims: ResourceClaim[] | null = scheduling
+		? records.map(record => {
+				if (scheduling.resolveResourceClaim) {
+					try {
+						return scheduling.resolveResourceClaim(record.toolCall.name, record.args);
+					} catch {
+						return { paths: [], access: "unknown" as const, exclusive: true };
+					}
+				}
+				return inferDefaultResourceClaim(record.toolCall.name, record.args);
+			})
+		: null;
 
 	// While tool calls are in flight, queued steering or interrupting IRC would
 	// otherwise wait out the tools' own window. Poll only non-consuming queues:
@@ -2901,7 +3342,11 @@ async function executeToolCalls(
 				)
 			: undefined;
 	for (let index = 0; index < records.length; index++) {
-		const record = records[index];
+		const record = records[index]!;
+		if (record.skipped) {
+			tasks.push(Promise.resolve());
+			continue;
+		}
 		const concurrencyMode = record.tool?.concurrency;
 		let concurrency: "shared" | "exclusive";
 		if (typeof concurrencyMode === "function") {
@@ -2917,8 +3362,80 @@ async function executeToolCalls(
 		} else {
 			concurrency = concurrencyMode ?? "shared";
 		}
+
+		// Resource conflict only when toolScheduling is opted in.
+		let conflictFail = false;
+		if (claims) {
+			const claim = claims[index]!;
+			let forceExclusive = claim.exclusive === true;
+			if (!forceExclusive && concurrency === "shared") {
+				for (let j = 0; j < index; j++) {
+					if (records[j]?.skipped || records[j]?.budgetSkipped) continue;
+					if (resourceClaimsConflict(claims[j]!, claim, conflictMode)) {
+						if (conflictMode === "fail") {
+							conflictFail = true;
+							break;
+						}
+						forceExclusive = true;
+						break;
+					}
+				}
+			}
+			if (forceExclusive) concurrency = "exclusive";
+		}
+
+		if (conflictFail) {
+			record.skipped = true;
+			record.budgetSkipped = false;
+			const failTask = (async () => {
+				await emitToolResult(
+					record,
+					{
+						content: [
+							{
+								type: "text" as const,
+								text: "Skipped: resource conflict with an earlier tool call in this batch",
+							},
+						],
+						details: { __synthetic: true, source: "prestart_resource_conflict", executed: false },
+					},
+					true,
+				);
+			})();
+			tasks.push(failTask);
+			// Conflict-failed tools do not take exclusive barriers or limiter slots.
+			continue;
+		}
+
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
-		const task = start.then(() => runTool(record, index));
+		const task = start.then(async () => {
+			// Acquire concurrency slot first; abort while waiting releases via finally
+			// (no budget reservation is held while queued — only committed on start).
+			const release = limiter ? await limiter.acquire() : () => {};
+			try {
+				if (record.signal.aborted) {
+					// Steering/IRC abort: do not emit here. Mirror runTool's early
+					// return so the tail sweep is the single path for
+					// createSkippedToolResult wording + recordSkippedTool once.
+					if (interruptState.triggered) {
+						record.skipped = true;
+						return;
+					}
+					// True external abort / user cancel — generic aborted wording.
+					record.skipped = true;
+					recordSkippedTool(telemetry, {
+						toolCallId: record.toolCall.id,
+						toolName: record.toolCall.name,
+						status: "aborted",
+					});
+					await emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
+					return;
+				}
+				await runTool(record, index);
+			} finally {
+				release();
+			}
+		});
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
@@ -2938,76 +3455,217 @@ async function executeToolCalls(
 	// especially when tool results are large (e.g. bash output).
 	await yieldIfDue();
 
+	// Emit missing results in original call order. budgetSkipped is distinct from
+	// steering/abort skipped so those still get createSkippedToolResult wording.
 	for (const record of records) {
-		if (!record.toolResultMessage) {
-			record.skipped = true;
+		if (record.toolResultMessage) continue;
+		if (record.budgetSkipped) {
 			recordSkippedTool(telemetry, {
 				toolCallId: record.toolCall.id,
 				toolName: record.toolCall.name,
 				status: "skipped",
 			});
-			emitToolResult(record, createSkippedToolResult(interruptState.source, false), true);
+			await emitToolResult(
+				record,
+				{
+					content: [{ type: "text", text: "Skipped: tool-call budget exhausted for this stage" }],
+					details: { __synthetic: true, source: "prestart_budget", executed: false },
+				},
+				true,
+			);
+			continue;
 		}
+		record.skipped = true;
+		recordSkippedTool(telemetry, {
+			toolCallId: record.toolCall.id,
+			toolName: record.toolCall.name,
+			status: "skipped",
+		});
+		await emitToolResult(record, createSkippedToolResult(interruptState.source), true);
 	}
 
-	return { toolResults: emittedToolResults };
+	return { toolResults: emittedToolResults, terminalAdmission };
+}
+
+/** Semaphore for max concurrent shared tools within one batch. */
+function createConcurrencyLimiter(max: number): {
+	acquire: () => Promise<() => void>;
+	/** Active count for tests/diagnostics; not a public API. */
+	activeCount: () => number;
+} {
+	let active = 0;
+	const waiters: Array<() => void> = [];
+	const releaseOne = () => {
+		active = Math.max(0, active - 1);
+		const next = waiters.shift();
+		if (next) next();
+	};
+	return {
+		async acquire() {
+			if (active < max) {
+				active++;
+				return releaseOne;
+			}
+			const { promise, resolve } = Promise.withResolvers<void>();
+			waiters.push(resolve);
+			await promise;
+			active++;
+			return releaseOne;
+		},
+		activeCount: () => active,
+	};
+}
+
+/**
+ * Synchronous permanent budget commit gate (JS single-threaded → atomic enough
+ * for concurrent tool starts that only call tryCommit between awaits).
+ */
+function createToolCallBudgetGate(
+	getRemaining: () => number | null,
+	setRemaining: (n: number) => void,
+): { tryCommit: () => boolean } {
+	return {
+		tryCommit() {
+			const n = getRemaining();
+			if (n === null) return true;
+			if (n <= 0) return false;
+			setRemaining(n - 1);
+			return true;
+		},
+	};
+}
+
+type LoopResourceClaim = { paths: string[]; access: "read" | "write" | "unknown"; exclusive?: boolean };
+type LoopConflictMode = "serialize" | "fail" | "permissive";
+
+const WRITE_TOOL_NAMES = new Set(["write", "edit", "apply_patch", "MultiEdit", "str_replace", "patch"]);
+const READ_TOOL_NAMES = new Set(["read", "grep", "ls", "glob", "search"]);
+
+/** Heuristic: bash/shell command likely mutates the workspace (conservative FP ok). */
+function bashLikelyMutatesWorkspace(command: string): boolean {
+	const c = command.trim();
+	if (!c) return true;
+	if (/(?:^|[^0-9])>(?:$|[^>])/.test(c)) return true;
+	if (/(?:^|&&|\|\||;|\n)\s*(?:sudo\s+)?(?:rm|mv|cp|install|dd|truncate|tee|chmod|chown)\b/.test(c)) return true;
+	if (/\b(?:rm|mv|cp)\s+/.test(c)) return true;
+	if (/\b(?:npm|pnpm|bun|yarn)\s+(?:install|add|remove|unlink)\b/.test(c)) return true;
+	if (/\bgit\s+(?:checkout|reset|clean|rebase|merge|apply|am)\b/.test(c)) return true;
+	return false;
+}
+
+function normalizeResourceConflictMode(
+	mode: "serialize" | "fail" | "conservative" | "permissive" | undefined,
+): LoopConflictMode {
+	if (mode === "fail") return "fail";
+	if (mode === "permissive") return "permissive";
+	// serialize | conservative | undefined → serialize
+	return "serialize";
+}
+
+function inferDefaultResourceClaim(toolName: string, args: Record<string, unknown>): LoopResourceClaim {
+	const paths: string[] = [];
+	for (const key of ["path", "file_path", "filePath", "target_file", "file"]) {
+		const v = args[key];
+		if (typeof v === "string" && v) paths.push(v.replace(/\\/g, "/").replace(/^\.\//, ""));
+	}
+	if (WRITE_TOOL_NAMES.has(toolName)) {
+		return { paths, access: "write", exclusive: paths.length === 0 };
+	}
+	if (READ_TOOL_NAMES.has(toolName)) {
+		return { paths, access: "read" };
+	}
+	if (toolName === "bash" || toolName === "run_command" || toolName === "shell") {
+		const cmd = typeof args.command === "string" ? args.command : typeof args.cmd === "string" ? args.cmd : "";
+		if (!cmd || bashLikelyMutatesWorkspace(cmd)) {
+			return { paths, access: "unknown", exclusive: true };
+		}
+		return { paths, access: "read", exclusive: false };
+	}
+	return { paths, access: "unknown" };
+}
+
+function resourceClaimsConflict(a: LoopResourceClaim, b: LoopResourceClaim, mode: LoopConflictMode): boolean {
+	// Exclusive tools already take the exclusive barrier via claim.exclusive →
+	// concurrency force. Pairwise conflict only needs exclusive vs write/unknown
+	// so pure reads after an exclusive tool can still share once the barrier lifts.
+	if (a.exclusive && b.exclusive) return true;
+	if (a.exclusive && (b.access === "write" || b.access === "unknown")) return true;
+	if (b.exclusive && (a.access === "write" || a.access === "unknown")) return true;
+
+	const aWrite = a.access === "write";
+	const bWrite = b.access === "write";
+	if (a.paths.length && b.paths.length) {
+		const bSet = new Set(b.paths);
+		for (const p of a.paths) {
+			if (bSet.has(p) && (aWrite || bWrite)) return true;
+		}
+		return false;
+	}
+	if (mode === "permissive") return false;
+	if (a.access === "read" && b.access === "read") return false;
+	if (a.access === "unknown" && b.access === "unknown") return true;
+	if ((aWrite || a.access === "unknown") && (bWrite || b.access === "unknown")) return true;
+	return false;
 }
 
 /**
  * Discriminator embedded in {@link AgentToolResult.details} and
  * {@link ToolResultMessage.details} for tool calls that were emitted by the
- * assistant but never actually invoked locally.
+ * assistant but never actually invoked locally, or whose local execution was
+ * cut off after `execute()` was entered.
  *
  * The synthetic result exists only to preserve the tool_use / tool_result
- * pairing the provider API requires; no `tool.execute()` ran. UI, telemetry,
- * and history consumers can key on `__synthetic === true` to render or
- * classify these as "call emitted, not executed" instead of a real local
- * tool failure — the mislabeling this discriminator was introduced to fix
- * (#4321): a provider-side stream error after tool-call emission (e.g. Codex
- * websocket close) was surfaced by the CLI as if the local tool had failed.
+ * pairing the provider API requires. UI, telemetry, and history consumers can
+ * key on `__synthetic === true` to render or classify these as "call emitted,
+ * not executed / aborted" instead of a real local tool failure — the
+ * mislabeling this discriminator was introduced to fix (#4321): a
+ * provider-side stream error after tool-call emission (e.g. Codex websocket
+ * close) was surfaced by the CLI as if the local tool had failed.
  *
- * `source` names the state that prevented execution — either an assistant-side
- * turn termination (`assistant_stop_*`) or a mid-batch interrupt that skipped a
- * still-pending call to service queued steering/peer input (`interrupt_skipped`).
- * `upstreamError` is the provider-reported message when the turn ended with
- * `stopReason === "error"`.
+ * `source` is the sole causal discriminator. `executed` owns whether
+ * `tool.execute()` was entered: `executed:false` is legal only when
+ * `tool.execute()` was never invoked (pre-start or assistant-stop causes);
+ * `executed:true` marks a `started_aborted_*` cut-off whose side effects may
+ * already exist. `upstreamError` is the provider-reported message when the
+ * turn ended with `stopReason === "error"`.
  */
+export type SyntheticResultSource =
+	| "assistant_stop_aborted"
+	| "assistant_stop_error"
+	| "assistant_stop_skipped"
+	| "assistant_stop_length"
+	| "prestart_queued_steering"
+	| "prestart_budget"
+	| "prestart_user_cancel"
+	| "prestart_system_cancel"
+	| "prestart_irc_cancel"
+	| "prestart_resource_conflict"
+	| "started_aborted_user"
+	| "started_aborted_system"
+	| "started_aborted_irc"
+	| "started_aborted_external";
+
 export interface SyntheticToolResultDetails {
 	__synthetic: true;
-	source:
-		| "assistant_stop_aborted"
-		| "assistant_stop_error"
-		| "assistant_stop_skipped"
-		| "assistant_stop_length"
-		| "interrupt_skipped";
-	executed: false;
+	source: SyntheticResultSource;
+	executed: boolean;
 	upstreamError?: string;
 }
 
 /**
- * Metadata for an interrupt-aborted call that entered `tool.execute()` but
- * threw before returning a usable result. It may have performed partial work.
- */
-interface InterruptedToolResultDetails {
-	__interrupted: true;
-	source: "interrupt_skipped";
-	execution: "started";
-}
-
-/**
- * Narrow an {@link AgentMessage} to a synthetic {@link ToolResultMessage} —
- * a tool_result emitted for a tool call the assistant never invoked (see
- * {@link SyntheticToolResultDetails}). Consumers use this to look past the
- * placeholder pairing back to the assistant turn that produced it, e.g.
- * `AgentSession.retry()` walking back over the synthetic results a
- * stalled/aborted mid-tool-call turn leaves behind.
+ * Narrow an {@link AgentMessage} to a synthetic {@link ToolResultMessage} that
+ * represents a tool call the assistant never invoked (see
+ * {@link SyntheticToolResultDetails}). Requires `executed === false` so a
+ * `started_aborted_*` result (which may carry side effects) is never treated
+ * as a never-invoked placeholder — retry must not re-execute it.
  */
 export function isSyntheticToolResultMessage(
 	message: AgentMessage | undefined,
 ): message is ToolResultMessage<SyntheticToolResultDetails> {
 	return (
 		message?.role === "toolResult" &&
-		(message.details as SyntheticToolResultDetails | undefined)?.__synthetic === true
+		(message.details as SyntheticToolResultDetails | undefined)?.__synthetic === true &&
+		(message.details as SyntheticToolResultDetails | undefined)?.executed === false
 	);
 }
 
@@ -3096,18 +3754,29 @@ function createAbortedToolResult(
 	return toolResultMessage;
 }
 
-function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<unknown> {
+/**
+ * Map a queued-steering interrupt source to its pre-start synthetic source.
+ * `user` queued steering and the generic `unknown` both use
+ * `prestart_queued_steering`; system advisories and peer IRC get their own
+ * variants so the matrix's "no collapse into queued steering" holds.
+ */
+function prestartSourceFor(source: SteeringInterruptSource | "irc" | undefined): SyntheticResultSource {
+	if (source === "system") return "prestart_system_cancel";
+	if (source === "irc") return "prestart_irc_cancel";
+	return "prestart_queued_steering";
+}
+
+function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<SyntheticToolResultDetails> {
 	const reason = abortReasonText(signal);
 	return {
 		content: [{ type: "text", text: `Tool was not executed because the run was aborted: ${reason}.` }],
-		details: {},
+		details: { __synthetic: true, source: "prestart_user_cancel", executed: false },
 	};
 }
 
 function createSkippedToolResult(
 	source: SteeringInterruptSource | "irc" | undefined,
-	executionStarted: boolean,
-): AgentToolResult<SyntheticToolResultDetails | InterruptedToolResultDetails> {
+): AgentToolResult<SyntheticToolResultDetails> {
 	let reason = "pending steering message";
 	let blocker = "queued message";
 	if (source === "user") {
@@ -3130,8 +3799,34 @@ function createSkippedToolResult(
 				text: `Skipped due to ${reason}. Do not count this skipped result as completed work or verification. After the ${blocker} is handled on the next step, retry the skipped tool if it is still needed.`,
 			},
 		],
-		details: executionStarted
-			? { __interrupted: true, source: "interrupt_skipped", execution: "started" }
-			: { __synthetic: true, source: "interrupt_skipped", executed: false },
+		details: { __synthetic: true, source: prestartSourceFor(source), executed: false },
+	};
+}
+
+/**
+ * Synthetic result for a tool whose `execute()` was entered and then cut off
+ * before usable output (steering/IRC/external abort). `executed:true` is
+ * deliberate: side effects may already have occurred, so this must never be
+ * walked as a never-invoked placeholder or presented as skipped.
+ */
+function createStartedAbortedToolResult(
+	source: SteeringInterruptSource | "irc" | undefined,
+): AgentToolResult<SyntheticToolResultDetails> {
+	const startedSource: SyntheticResultSource =
+		source === "user"
+			? "started_aborted_user"
+			: source === "system"
+				? "started_aborted_system"
+				: source === "irc"
+					? "started_aborted_irc"
+					: "started_aborted_external";
+	return {
+		content: [
+			{
+				type: "text",
+				text: "Tool execution was aborted after it started; its side effects may already have occurred. Treat this as aborted, not as not-executed, and do not blindly retry.",
+			},
+		],
+		details: { __synthetic: true, source: startedSource, executed: true },
 	};
 }

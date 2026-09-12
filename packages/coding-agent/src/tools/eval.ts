@@ -16,6 +16,7 @@ import { getEnabledEvalPreludes } from "../eval/preludes";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
 import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import { mayMigrateEvalGate, recordOrRequireEvalParity } from "../latency/eval-parity";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
@@ -34,6 +35,7 @@ import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
 export { EVAL_DEFAULT_PREVIEW_LINES, evalToolRenderer } from "./eval-render";
+export { mayMigrateEvalGate, recordOrRequireEvalParity };
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
@@ -405,6 +407,23 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
 		const session = this.session;
+		const frozenArm = this.session.isLatencyArmEnabled
+			? this.session.isLatencyArmEnabled("eval_gate_migration")
+			: session.settings.get("latency.arms.evalGateMigration") === true;
+		const evalGateArmEnabled = frozenArm === true;
+		// Optional session-provided parity receipt (tests / offline proven receipt).
+		const sessionReceipt = (session as { evalGateParityReceipt?: unknown }).evalGateParityReceipt;
+		const evalGateControl = recordOrRequireEvalParity(
+			sessionReceipt as import("../latency/eval-parity").EvalGateParityReceiptV1 | undefined,
+			evalGateArmEnabled,
+		);
+		// Treatment receipt: native control actually engaged on this eval gate.
+		if (evalGateControl === "native-control") session.markLatencyArmFired?.("eval_gate_migration");
+		const evalGateNotice = evalGateArmEnabled
+			? evalGateControl === "native-control"
+				? "[eval-gate] native-control selected from proven parity receipt; bridge retained until native owner cutover"
+				: "[eval-gate] migration not proven; parity receipt unavailable/unproven; bridge control retained"
+			: undefined;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
 		const cellLanguage: EvalLanguage = params.language === "py" ? "python" : "js";
@@ -427,7 +446,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			},
 		];
 		const languages = uniqueEvalLanguages(cells);
-		const notice = detailsNotice(cells);
+		const notice = [detailsNotice(cells), evalGateNotice].filter(Boolean).join("\n") || undefined;
 		const sessionAbortController = new AbortController();
 		const emitToolUpdate = onUpdate
 			? (text: string, details: EvalToolDetails): void => {

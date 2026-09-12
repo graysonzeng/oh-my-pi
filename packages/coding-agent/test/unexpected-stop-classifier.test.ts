@@ -80,9 +80,17 @@ describe("isUnexpectedStopCandidate", () => {
 	it("returns true for a signed thinking-only stop", () => {
 		const message = makeAssistantMessage({
 			stopReason: "stop",
-			content: [{ type: "thinking", thinking: " 响应", thinkingSignature: "reasoning_content" }],
+			content: [{ type: "thinking", thinking: " 响应", thinkingSignature: "sig_anthropic" }],
 		});
 		expect(isUnexpectedStopCandidate(message)).toBe(true);
+	});
+
+	it("returns false for an OpenAI reasoning-field-name thinking-only stop (empty-stop path owns it)", () => {
+		const message = makeAssistantMessage({
+			stopReason: "stop",
+			content: [{ type: "thinking", thinking: " 响应", thinkingSignature: "reasoning_content" }],
+		});
+		expect(isUnexpectedStopCandidate(message)).toBe(false);
 	});
 
 	it("returns false for an unsigned thinking-only stop (empty-stop path owns it)", () => {

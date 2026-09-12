@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { REQUIRED_CHECKPOINT_SUMMARY_HEADINGS } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type CompactionSettings,
 	calculateContextTokens,
@@ -71,6 +72,10 @@ function createAssistantMessage(text: string, usage?: Usage): AssistantMessage {
 		provider: "anthropic",
 		model: "claude-sonnet-4-5",
 	};
+}
+
+function checkpointSummary(body: string): string {
+	return REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.map(heading => `${heading}\n${body}`).join("\n\n");
 }
 
 function createOpenAiAssistantMessage(
@@ -451,7 +456,9 @@ describe("bigint tool arguments", () => {
 		});
 		if (!preparation) throw new Error("Expected compaction preparation");
 
-		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		const completeSpy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage(checkpointSummary("summary")));
 		const result = await compact(preparation, model, "test-api-key");
 
 		let renderedPrompts = "";
@@ -493,7 +500,7 @@ describe("remote compaction setting", () => {
 
 		const completeSimpleSpy = vi.spyOn(ai, "completeSimple");
 		completeSimpleSpy
-			.mockResolvedValueOnce(createAssistantMessage("History summary"))
+			.mockResolvedValueOnce(createAssistantMessage(checkpointSummary("History summary")))
 			.mockResolvedValueOnce(createAssistantMessage("Turn prefix summary"))
 			.mockResolvedValueOnce(createAssistantMessage("Short summary"));
 
@@ -542,7 +549,7 @@ describe("remote compaction setting", () => {
 		const fetchSpy = mockFetch(fetchHandler);
 		const completeSpy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce(createAssistantMessage("Local history summary"))
+			.mockResolvedValueOnce(createAssistantMessage(checkpointSummary("Local history summary")))
 			.mockResolvedValueOnce(createAssistantMessage("Local turn summary"))
 			.mockResolvedValueOnce(createAssistantMessage("Local short summary"));
 
@@ -889,7 +896,7 @@ describe("remote compaction setting", () => {
 
 		const completeSimpleSpy = vi.spyOn(ai, "completeSimple");
 		completeSimpleSpy
-			.mockResolvedValueOnce(createAssistantMessage("History summary"))
+			.mockResolvedValueOnce(createAssistantMessage(checkpointSummary("History summary")))
 			.mockResolvedValueOnce(createAssistantMessage("Turn prefix summary"))
 			.mockResolvedValueOnce(createAssistantMessage("Short summary"));
 
@@ -934,7 +941,7 @@ describe("remote compaction setting", () => {
 
 		const completeSimpleSpy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValue(createAssistantMessage("History summary"));
+			.mockResolvedValue(createAssistantMessage(checkpointSummary("History summary")));
 
 		const result = await compact(preparation, model, "test-api-key");
 		const promptText = completeSimpleSpy.mock.calls
@@ -990,7 +997,7 @@ describe("remote compaction setting", () => {
 
 		const completeSimpleSpy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce(createAssistantMessage("Archived history summary"))
+			.mockResolvedValueOnce(createAssistantMessage(checkpointSummary("Archived history summary")))
 			.mockResolvedValueOnce(createAssistantMessage("Turn prefix summary"))
 			.mockResolvedValueOnce(createAssistantMessage("Short summary"));
 
@@ -1043,7 +1050,7 @@ describe("remote compaction setting", () => {
 		});
 		if (!preparation) throw new Error("Expected compaction preparation");
 
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("History summary"));
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage(checkpointSummary("History summary")));
 
 		const result = await compact(preparation, model, "test-api-key");
 

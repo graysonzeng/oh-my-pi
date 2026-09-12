@@ -821,8 +821,56 @@ const streamOpenAICompletionsOnce = (
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
 					clearTimeout(requestTimeout);
-					await notifyProviderResponse(options, response, model, requestId);
-					return events;
+					let peekTimeout: NodeJS.Timeout | undefined;
+					if (requestTimeoutMs !== undefined) {
+						peekTimeout = setTimeout(
+							() => abortTracker.abortLocally(firstEventTimeoutAbortError),
+							requestTimeoutMs,
+						);
+					}
+					const iterator = events[Symbol.asyncIterator]();
+					let first: IteratorResult<ChatCompletionChunk>;
+					try {
+						first = await iterator.next();
+					} finally {
+						clearTimeout(peekTimeout);
+					}
+					let responseNotified = false;
+					const notifyResponse = async (chunk?: ChatCompletionChunk): Promise<void> => {
+						if (responseNotified) return;
+						if (chunk !== undefined) {
+							const responseModel = chunk.model;
+							if (typeof responseModel !== "string" || responseModel.length === 0) return;
+							responseNotified = true;
+							const metadata: Record<string, unknown> = { model: responseModel };
+							const responseProvider = (chunk as ProviderAttributedChatCompletionChunk).provider;
+							if (typeof responseProvider === "string" && responseProvider.length > 0) {
+								metadata.upstreamProvider = responseProvider;
+							}
+							await notifyProviderResponse(options, response, model, requestId, metadata);
+							return;
+						}
+						responseNotified = true;
+						await notifyProviderResponse(options, response, model, requestId);
+					};
+					if (first.done) {
+						await notifyResponse();
+					} else {
+						await notifyResponse(first.value);
+					}
+					return (async function* (): AsyncGenerator<ChatCompletionChunk> {
+						try {
+							if (!first.done) yield first.value;
+							while (true) {
+								const next = await iterator.next();
+								if (next.done) break;
+								await notifyResponse(next.value);
+								yield next.value;
+							}
+						} finally {
+							await notifyResponse();
+						}
+					})();
 				} finally {
 					// Headers arrived (or the request failed); from here the
 					// first-event deadline is enforced by `iterateWithIdleTimeout`.

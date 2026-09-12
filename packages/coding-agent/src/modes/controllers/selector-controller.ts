@@ -567,6 +567,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);
 				});
 				break;
+			case "consult.enabled":
+				void this.ctx.session.applyConsultEnabledChange().catch(err => {
+					this.ctx.showError(`Failed to apply consult: ${err}`);
+				});
+				break;
 			case "externalThinking":
 				void this.ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
 					this.ctx.showError(`Failed to apply external thinking: ${err}`);
@@ -1722,6 +1727,7 @@ export class SelectorController {
 			hasUI: true,
 			settings: this.ctx.settings,
 			getSessionFile: () => this.ctx.sessionManager.getSessionFile() ?? null,
+			getLineageContext: () => this.ctx.sessionManager.getLineageContext(),
 			getSessionSpawns: () => null,
 			getPlanModeState: () => this.ctx.session.getPlanModeState(),
 		};

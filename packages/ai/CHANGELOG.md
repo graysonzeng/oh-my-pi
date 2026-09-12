@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit standard Responses endpoints for Codex-compatible gateways and gateway xAI service tiers.
+
+### Fixed
+
+- Preserved server-reported model identity for workflow verification, rejected conflicting identity reports, and handled cumulative Grok reasoning streams.
+
 ## [18.1.18] - 2026-09-11
 
 ### Added

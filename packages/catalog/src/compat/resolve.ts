@@ -565,6 +565,7 @@ function detectOpenAICompat(
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
 		supportsPromptCacheKey: false,
+		codexResponsesEndpoint: undefined,
 	};
 }
 
@@ -715,6 +716,7 @@ function resolveOpenAIResponsesPolicy(
 		supportsReasoningSummary: !isXaiHost,
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
+		codexResponsesEndpoint: undefined,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
 		thinkingLoopGuard: undefined,

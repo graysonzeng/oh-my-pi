@@ -125,7 +125,11 @@ import {
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import {
+	type AnthropicImageMediaType,
+	NON_VISION_IMAGE_PLACEHOLDER,
+	normalizeAnthropicImageMediaType,
+} from "./vision-guard";
 
 export type AnthropicHeaderOptions = {
 	apiKey: string;
@@ -388,21 +392,6 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 }
 
 type AnthropicCacheControl = NonNullable<TextBlockParam["cache_control"]>;
-type AnthropicImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
-
-function normalizeAnthropicImageMediaType(mimeType: string): AnthropicImageMediaType | undefined {
-	const normalized = mimeType.trim().toLowerCase();
-	if (normalized === "image/jpg") return "image/jpeg";
-	if (
-		normalized === "image/jpeg" ||
-		normalized === "image/png" ||
-		normalized === "image/gif" ||
-		normalized === "image/webp"
-	) {
-		return normalized;
-	}
-	return undefined;
-}
 
 function cloneAnthropicCacheControl(cacheControl: AnthropicCacheControl): AnthropicCacheControl {
 	return { ...cacheControl };
@@ -2725,7 +2714,17 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
-					await notifyProviderResponse(options, response, model, requestId);
+					let responseNotified = false;
+					const notifyResponse = async (event?: AnthropicStreamEvent): Promise<void> => {
+						if (responseNotified) return;
+						responseNotified = true;
+						const responseModel = event?.type === "message_start" ? event.message?.model : undefined;
+						const metadata =
+							typeof responseModel === "string" && responseModel.length > 0
+								? { model: responseModel }
+								: undefined;
+						await notifyProviderResponse(options, response, model, requestId, metadata);
+					};
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
@@ -2795,7 +2794,17 @@ const streamAnthropicOnce = (
 						rawSseObserver && !recordsRawSseEvents
 							? observeDecodedAnthropicSdkEvents(timedAnthropicStream, rawSseObserver)
 							: timedAnthropicStream;
-					for await (const event of observedAnthropicStream) {
+					const responseObservedAnthropicStream = (async function* (): AsyncGenerator<AnthropicStreamEvent> {
+						try {
+							for await (const event of observedAnthropicStream) {
+								if (event.type === "message_start") await notifyResponse(event);
+								yield event;
+							}
+						} finally {
+							await notifyResponse();
+						}
+					})();
+					for await (const event of responseObservedAnthropicStream) {
 						sawEvent = true;
 
 						if (event.type === "message_start") {
@@ -4638,7 +4647,14 @@ function buildToolResultBlock(
 	msg: ToolResultMessage,
 	hoistedImages: ContentBlockParam[],
 ): ContentBlockParam {
-	let content = convertContentBlocks(msg.content, model.input.includes("image"));
+	// A recovery text page may consist entirely of whitespace. Keep it joined
+	// to its explicit metadata envelope so normal empty-block filtering cannot
+	// discard delivered bytes (or send an invalid whitespace-only API block).
+	const contentBlocks: (TextContent | ImageContent)[] =
+		msg.toolName === "read_omitted_content" && msg.content.every(block => block.type === "text")
+			? [{ type: "text", text: msg.content.map(block => (block as TextContent).text).join("\n") }]
+			: msg.content;
+	let content = convertContentBlocks(contentBlocks, model.input.includes("image"));
 	// Anthropic rejects images inside error tool results ("all content must be
 	// type `text` if `is_error` is true") — keep the text in the block and
 	// hoist the images after the message's tool_result run.

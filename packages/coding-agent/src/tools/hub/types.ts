@@ -57,6 +57,14 @@ export interface HubRosterCounts {
 	truncated: number;
 }
 
+/**
+ * Observed execution phase of a running subagent, derived from real streaming
+ * events (`message_start`, stream chunks, tool events). "Working" is the
+ * fallback state between phases; "model" means a request was observed and the
+ * parent is waiting for model output — it never claims the request was sent.
+ */
+export type LiveActivityPhase = "working" | "model" | "thinking" | "responding" | "tool";
+
 /** Background-job row surfaced by `wait`/`cancel`/`jobs` results. */
 export interface JobSnapshot {
 	id: string;
@@ -81,6 +89,34 @@ export interface JobSnapshot {
 	 * on collision, else the job id itself. See {@link AsyncJob.agentId}.
 	 */
 	agentUrlId?: string;
+	/**
+	 * Compact live gist for running TUI rows: what the subagent is doing now,
+	 * or how long it has been silent. Shared verbatim by the subagent HUD and
+	 * the hub jobs renderer (both go through `liveActivityFromProgress` +
+	 * `formatCompactLiveActivityLine`). Omitted when there is nothing truthful
+	 * to show.
+	 */
+	liveActivity?: {
+		/**
+		 * Tool name: the in-flight tool, or the most recent finished tool
+		 * (`last: true`). Only legacy snapshots without phase tracking render
+		 * finished tools, and only with that explicit `last` marker.
+		 */
+		tool?: string;
+		/** True when `tool` is finished history from `recentTools` — never in-flight work. */
+		last?: boolean;
+		detail?: string;
+		/** Milliseconds the in-flight tool has been running (surfaced only once past a small guard). */
+		elapsedMs?: number;
+		/** Observed activity phase from streaming execution events. */
+		phase?: LiveActivityPhase;
+		/** Milliseconds since the last real execution event; only present when a real timestamp was observed. */
+		idleMs?: number;
+		/** Provider auto-retry state while the subagent sleeps between attempts. */
+		retryState?: { attempt: number; maxAttempts: number; delayMs?: number };
+		/** Terminal retry failure once attempts are exhausted. */
+		retryFailure?: { attempt?: number; errorMessage?: string };
+	};
 }
 
 export type CancelStatus = "cancelled" | "not_found" | "already_completed";
@@ -141,6 +177,7 @@ export type HubRenderArgs = {
 	message?: string;
 	replyTo?: string;
 	await?: boolean;
+	interrupt?: boolean;
 	from?: string;
 	timeoutMs?: number;
 	peek?: boolean;

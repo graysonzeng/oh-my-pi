@@ -458,6 +458,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// "freed too little context" warning even though compaction had
 		// genuinely shrunk the context (observed live: 312k → 86k real tokens,
 		// warning still emitted).
+		// Pin the pre-change default threshold (contextWindow − max(15%, reserve)
+		// = 170k on the 200k window) so the ~150k in-flight prompt stays below it:
+		// the pre-prompt maintenance pass must stay quiet and the threshold turn
+		// (assistant usage 190k) must be the one that fires compaction.
+		session.settings.set("compaction.thresholdTokens", 170000);
+		session.settings.set("compaction.thresholdPercent", -1);
+		session.settings.set("compaction.methodOrder", ["soft"]);
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		// Hold the initial prompt in flight so the pending snapshot stays alive
 		// through the compaction, exactly like a live tool-loop run. The second
@@ -526,6 +533,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// freshness proxy (anchorIndex >= cutoffCount), so that stale anchor
 		// out-ranked the rebased estimate and reported a ~2.6x phantom overflow —
 		// tripping the "freed too little context" guard / frame-rescue path.
+		// This regression needs a checkpoint summary, not another available maintenance method.
+		session.settings.set("compaction.methodOrder", ["soft"]);
+		session.settings.set("compaction.thresholdTokens", 180_000);
+		session.settings.set("compaction.thresholdPercent", -1);
 		seedPriorTurns();
 		activateOngoingGoal("stale-anchor");
 		const gate = Promise.withResolvers<void>();
@@ -536,14 +547,14 @@ describe("AgentSession auto-compaction progress guard", () => {
 		});
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 
-		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
-		session.subscribe(event => {
-			if (event.type === "auto_compaction_end") onCompactionDone();
-		});
-
 		// Hold a request in flight so the pending snapshot survives the compaction.
 		const inFlight = session.prompt("x".repeat(600_000));
 		await firstPromptCall.promise;
+		// Ignore any maintenance completed before this request actually started.
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end" && event.result) onCompactionDone();
+		});
 
 		// Mid-run compaction fires and rebases the pending snapshot to the summary.
 		const trigger = highUsageAssistant();

@@ -25,11 +25,11 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `action` | string enum | Yes | One of `diagnostics`, `definition`, `references`, `hover`, `symbols`, `rename`, `rename_file`, `code_actions`, `type_definition`, `implementation`, `status`, `reload`, `capabilities`, `request`. |
+| `action` | string enum | Yes | One of `diagnostics`, `definition`, `references`, `hover`, `symbols`, `rename`, `rename_file`, `code_actions`, `type_definition`, `implementation`, `call_hierarchy`, `status`, `reload`, `capabilities`, `request`. |
 | `file` | string | No | File path; for `diagnostics` also a glob; for workspace forms use `"*"`; for `rename_file` this is the source path. |
 | `line` | number | No | 1-indexed line number for position-based actions. Defaults to `1` on the single-file action path. |
-| `symbol` | string | No | Substring used to resolve the column on `line`. Supports `name#N` occurrence selectors; `N` is 1-indexed and defaults to `1`. Required when `line` is given for `definition`/`references`/`rename` against project-aware servers. |
-| `query` | string | No | Workspace symbol query, code-action selector/filter, or LSP method name for `action=request`. |
+| `symbol` | string | No | Substring used to resolve the column on `line`. Supports `name#N` occurrence selectors; `N` is 1-indexed and defaults to `1`. Required when `line` is given for `definition`/`references`/`rename`/`call_hierarchy` against project-aware servers. |
+| `query` | string | No | Workspace symbol query, code-action selector/filter, `incoming`/`outgoing`/`both` for `call_hierarchy` (default `both`), or LSP method name for `action=request`. |
 | `new_name` | string | No | Required for `rename` and `rename_file`. |
 | `apply` | boolean | No | For `rename`/`rename_file`, apply unless explicitly `false`. For `code_actions`, list unless explicitly `true`. |
 | `timeout` | number | No | Seconds, default `20`; `clampTimeout("lsp", ...)` applies the positive `tools.maxTimeout` cap first, then the tool's `5..300` range (so the 5-second floor still wins over a lower global cap). |

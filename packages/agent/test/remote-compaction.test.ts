@@ -7,6 +7,7 @@ import {
 	DEFAULT_COMPACTION_SETTINGS,
 	NativeCompactionError,
 	prepareCompaction,
+	REQUIRED_CHECKPOINT_SUMMARY_HEADINGS,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
@@ -111,6 +112,9 @@ function sseResponse(events: Array<Record<string, unknown>>): Response {
 	return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
 
+function checkpointSummary(body: string): string {
+	return REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.map(heading => `${heading}\n${body}`).join("\n\n");
+}
 interface CodexCompactionTestSocket {
 	readyState: number;
 	readonly sent: Array<Record<string, unknown>>;
@@ -1504,6 +1508,7 @@ describe("Responses Lite remote compaction", () => {
 		const captured: CapturedLiteExchange[] = [];
 		const fetchMock: FetchImpl = async (_input, init) => {
 			captured.push(captureStreamLite(init));
+			const text = checkpointSummary("local summary");
 			return sseResponse([
 				{
 					type: "response.output_item.added",
@@ -1516,7 +1521,7 @@ describe("Responses Lite remote compaction", () => {
 					content_index: 0,
 					part: { type: "output_text", text: "" },
 				},
-				{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "local summary" },
+				{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: text },
 				{
 					type: "response.output_item.done",
 					output_index: 0,
@@ -1525,7 +1530,7 @@ describe("Responses Lite remote compaction", () => {
 						id: "msg_summary",
 						role: "assistant",
 						status: "completed",
-						content: [{ type: "output_text", text: "local summary" }],
+						content: [{ type: "output_text", text }],
 					},
 				},
 				{
@@ -1594,7 +1599,7 @@ describe("Responses Lite remote compaction", () => {
 				responseCount += 1;
 				const responseId = `response-${responseCount}`;
 				const messageId = `message-${responseCount}`;
-				const text = responseCount === 1 ? "main response" : "local summary";
+				const text = webSocket.sockets[0] === socket ? "main response" : checkpointSummary("local summary");
 				const events: Record<string, unknown>[] = [
 					{
 						type: "response.output_item.added",
@@ -2390,7 +2395,8 @@ describe("compact() remote compaction failure handling", () => {
 			if (typeof init?.body !== "string") throw new Error("missing remote compaction request body");
 			requestBodies.push(JSON.parse(init.body) as unknown);
 			expect(new Headers(init.headers).get("authorization")).toBe("Bearer local-key");
-			const summary = requestBodies.length === 1 ? "remote history summary" : "remote short summary";
+			const summary =
+				requestBodies.length === 1 ? checkpointSummary("remote history summary") : "remote short summary";
 			return new Response(JSON.stringify({ choices: [{ message: { content: summary } }] }), {
 				headers: { "content-type": "application/json" },
 			});
@@ -2429,7 +2435,7 @@ describe("compact() remote compaction failure handling", () => {
 			if (url === preparation.settings.remoteEndpoint) {
 				const summary =
 					requestedUrls.filter(requested => requested === url).length === 1
-						? "configured remote history summary"
+						? checkpointSummary("configured remote history summary")
 						: "configured remote short summary";
 				return Response.json({ choices: [{ message: { content: summary } }] });
 			}

@@ -17,6 +17,7 @@ import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-util
 import { type PerFileDiffPreview, renderStreamingFallback } from "../../edit/renderer";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
+import { classifyToolPresentation } from "../../presentation/tool-status";
 import { taskCardAgentIds } from "../../task/render";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
@@ -951,8 +952,15 @@ export class ToolExecutionComponent extends Container {
 		// (steering/peer interrupt aborted a still-pending call) never ran, so it
 		// gets the neutral pending tint rather than the error tint (#7199).
 		const benignSkip = this.#isBenignSkip();
+		const presentation = this.#result ? classifyToolPresentation(this.#result) : undefined;
 		const stateBgKey =
-			this.#isPartial || benignSkip ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
+			this.#isPartial || benignSkip
+				? "toolPendingBg"
+				: presentation === "aborted"
+					? "toolErrorBg"
+					: this.#result?.isError
+						? "toolErrorBg"
+						: "toolSuccessBg";
 		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
 
 		// A benign skip is a synthetic placeholder for a call that never executed,

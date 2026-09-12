@@ -11,6 +11,7 @@ import {
 	mergeIsolatedChanges,
 	persistNestedPatches,
 	retainIsolationWorkspace,
+	runIsolatedExecution,
 	runIsolatedSubprocess,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -671,6 +672,69 @@ describe("retainIsolationWorkspace", () => {
 		expect(retained.sidecarOk).toBe(false);
 		expect(await Bun.file(path.join(retained.dir, "work.txt")).text()).toBe("unrecovered");
 		tempRoots.push(path.dirname(retained.dir));
+	});
+});
+
+describe("runIsolatedExecution", () => {
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await Promise.all(tempRoots.splice(0).map(tempRoot => fs.rm(tempRoot, { force: true, recursive: true })));
+	});
+
+	it("runs a callback in a worktree and captures a patch", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-iso-callback-"));
+		tempRoots.push(repoRoot);
+		const isolationDir = path.join(repoRoot, "isolated");
+		const artifactsDir = path.join(repoRoot, "artifacts");
+		await fs.mkdir(isolationDir, { recursive: true });
+		await fs.mkdir(artifactsDir, { recursive: true });
+
+		const baseline = {
+			root: {
+				repoRoot,
+				headCommit: "base",
+				staged: "",
+				unstaged: "",
+				untracked: [],
+				untrackedPatch: "",
+			},
+			nested: [],
+		};
+		const rootPatch =
+			"diff --git a/from-cli.txt b/from-cli.txt\n--- /dev/null\n+++ b/from-cli.txt\n@@ -0,0 +1 @@\n+ok\n";
+
+		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+			mergedDir: isolationDir,
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		const captureSpy = vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({
+			rootPatch,
+			nestedPatches: [],
+		});
+		const cleanupSpy = vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+
+		const seenWorktrees: string[] = [];
+		const outcome = await runIsolatedExecution({
+			context: { repoRoot, baseline },
+			preferredBackend: undefined,
+			agentId: "cli-test",
+			mergeMode: "patch",
+			artifactsDir,
+			buildFailureResult: err => result({ exitCode: 1, error: String(err) }),
+			run: async worktree => {
+				seenWorktrees.push(worktree);
+				await Bun.write(path.join(worktree, "from-cli.txt"), "ok\n");
+				return result({ id: "cli-test", exitCode: 0 });
+			},
+		});
+
+		expect(seenWorktrees).toEqual([isolationDir]);
+		expect(outcome.patchPath).toBeTruthy();
+		expect(await Bun.file(outcome.patchPath!).text()).toContain("from-cli.txt");
+		expect(captureSpy).toHaveBeenCalledWith(isolationDir, baseline);
+		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 	});
 });
 

@@ -1118,12 +1118,11 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["anthropic/claude-sonnet-4-6", "zai/glm-5.2:high"]);
 	});
 
-	test("uses default for unconfigured smol and slow agent roles before priority defaults", () => {
+	test("uses default for an unconfigured slow agent role before priority defaults", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "local/llama" },
 		});
 
-		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["local/llama"]);
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["local/llama"]);
 	});
 
@@ -1161,12 +1160,59 @@ describe("resolveAgentModelPatterns", () => {
 		expect(tiny).toEqual(baseline.map(pattern => `${pattern}:high`));
 	});
 
+	test("uses flash then grok-4.6 high for unset smol and tiny even when default is configured", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "local/llama" },
+		});
+		const smol = resolveAgentModelPatterns({ agentModel: "@smol", settings });
+
+		expect(smol.slice(0, 2)).toEqual(["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"]);
+		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(smol);
+	});
+
+	test("keeps an explicit smol override ahead of the flash then grok chain", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "local/llama", smol: "fast/hy3" },
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["fast/hy3"]);
+	});
+
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "@slow", slow: "anthropic/claude-sonnet-4-5" },
 		});
 
-		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings }).slice(0, 2)).toEqual([
+			"gateway/deepseek-v4-flash:max",
+			"gateway/grok-4.6:high",
+		]);
+	});
+
+	test("expands a session-inherited marker inside a candidate list to the session fallback", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: ["gateway/gpt-5.6-sol:xhigh", "gateway/claude-opus-5:max", "@task"],
+			settings,
+			activeModelPattern: "gateway/deepseek-v4-flash",
+		});
+
+		expect(result).toEqual(["gateway/gpt-5.6-sol:xhigh", "gateway/claude-opus-5:max", "gateway/deepseek-v4-flash"]);
+	});
+
+	test("drops a session-inherited marker when no session pattern exists", () => {
+		const settings = Settings.isolated();
+
+		const result = resolveAgentModelPatterns({
+			agentModel: ["gateway/gpt-5.6-sol:xhigh", "@task"],
+			settings,
+		});
+
+		expect(result).toEqual(["gateway/gpt-5.6-sol:xhigh"]);
 	});
 
 	test("slow priority falls forward to Opus 4.8 before older Opus aliases", () => {

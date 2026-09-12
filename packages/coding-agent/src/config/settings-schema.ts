@@ -63,6 +63,8 @@ import {
 	SERVICE_TIER_INHERIT_SETTING_VALUES,
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
+	SERVICE_TIER_XAI_OPTIONS,
+	SERVICE_TIER_XAI_VALUES,
 } from "./service-tier";
 
 /** Unified settings schema - single source of truth for all settings.
@@ -203,7 +205,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Consult", "Prewalk", "Vision", "Model"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -218,7 +220,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
-	files: ["Editing", "Reading", "Read Summaries", "LSP"],
+	files: ["Editing", "Reading", "Read Summaries", "LSP", "Code Intel"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
 		"Available Tools",
@@ -402,6 +404,7 @@ export interface ModelTagsSettings {
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
+const EMPTY_BOOLEAN_RECORD: Record<string, boolean> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
@@ -568,6 +571,18 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.allowSameModel": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Allow Same Model",
+			description:
+				"Run advisors when the resolved advisor model is the same as the active model. Off pauses them (status: same model) until the models differ.",
+			condition: "advisorEnabled",
+		},
+	},
 	"advisor.immuneTurns": {
 		type: "number",
 		default: 3,
@@ -605,6 +620,121 @@ export const SETTINGS_SCHEMA = {
 				{ value: "5", label: "5 notes" },
 			],
 			condition: "advisorEnabled",
+		},
+	},
+	"consult.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Enable Consult Tool",
+			description:
+				"Let the main agent call a stronger model mid-turn for strategic guidance. Independent of the turn-by-turn advisor.",
+		},
+	},
+	"consult.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult Model",
+			description:
+				"Optional model pattern for consult. Empty uses modelRoles.advisor, then the slow chain. Never inherits the primary model.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.allowSameModel": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Allow Same Model",
+			description: "Allow consult when the resolved advisor model is the same as the primary model.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.maxUsesPerTurn": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Max Consults Per Turn",
+			description: "Successful plus failed consult executes in the current primary turn.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.maxUsesPerSession": {
+		type: "number",
+		default: 12,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Max Consults Per Session",
+			description: "Cumulative consult executes in this session.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.timeoutMs": {
+		type: "number",
+		default: 300_000,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult Timeout",
+			description:
+				"Wall-clock timeout for the entire consult oneshot, including first-token wait and answer generation, in milliseconds. Set to 0 to disable.",
+			condition: "consultEnabled",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "60000", label: "1 minute" },
+				{ value: "120000", label: "2 minutes" },
+				{ value: "180000", label: "3 minutes" },
+				{ value: "300000", label: "5 minutes" },
+			],
+		},
+	},
+	"consult.firstEventTimeoutMs": {
+		type: "number",
+		default: 60_000,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult First-Event Timeout",
+			description:
+				"Timeout waiting for the first model event after consult starts, in milliseconds. Thinking or text counts. Set to 0 to disable.",
+			condition: "consultEnabled",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "30000", label: "30 seconds" },
+				{ value: "60000", label: "1 minute" },
+				{ value: "120000", label: "2 minutes" },
+			],
+		},
+	},
+	"consult.maxTokens": {
+		type: "number",
+		default: 2048,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult Max Output Tokens",
+			description: "Hard output token budget passed to the consult oneshot.",
+			condition: "consultEnabled",
+		},
+	},
+	"consult.maxFocusChars": {
+		type: "number",
+		default: 2000,
+		ui: {
+			tab: "model",
+			group: "Consult",
+			label: "Consult Focus Limit",
+			description: "Maximum characters for the optional focus argument.",
+			condition: "consultEnabled",
 		},
 	},
 	shellPath: { type: "string", default: undefined },
@@ -813,7 +943,7 @@ export const SETTINGS_SCHEMA = {
 	"statusLine.contextLine": {
 		type: "enum",
 		values: CONTEXT_LINE_MODE_VALUES,
-		default: "embedded",
+		default: "annotated",
 		ui: {
 			tab: "appearance",
 			group: "Status Line",
@@ -1824,6 +1954,20 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tier.xai": {
+		type: "enum",
+		values: SERVICE_TIER_XAI_VALUES,
+		default: "none",
+		ui: {
+			tab: "model",
+			group: "Sampling",
+			label: "Service Tier — xAI",
+			description:
+				'Processing tier for Grok on xAI-capable hosts (`xai`, `xai-oauth`, gateway Grok, and `api.x.ai` OpenAI-compat relays). `priority` sends `service_tier: "priority"` (xAI Priority Processing). Ignored on OpenRouter for `fastModeActive` until forwarding is verified; omitted on other Grok proxies.',
+			options: SERVICE_TIER_XAI_OPTIONS,
+		},
+	},
+
 	"tier.subagent": {
 		type: "enum",
 		values: SERVICE_TIER_INHERIT_SETTING_VALUES,
@@ -2687,7 +2831,7 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.thresholdPercent": {
 		type: "number",
-		default: -1,
+		default: 55,
 		ui: {
 			tab: "context",
 			group: "Compaction",
@@ -2700,6 +2844,11 @@ export const SETTINGS_SCHEMA = {
 				{ value: "30", label: "30%", description: "Early maintenance" },
 				{ value: "40", label: "40%", description: "Moderately early maintenance" },
 				{ value: "50", label: "50%", description: "Halfway point" },
+				{
+					value: "55",
+					label: "55%",
+					description: "Slightly past halfway, keeps context in the model's efficient range",
+				},
 				{ value: "60", label: "60%", description: "Moderate context usage" },
 				{ value: "70", label: "70%", description: "Balanced" },
 				{ value: "75", label: "75%", description: "Slightly aggressive" },
@@ -3994,6 +4143,78 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"codeIntel.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Code Intel",
+			description: "Enable the code_intel tool for native project understanding without Cursor CCE",
+		},
+	},
+
+	"codeIntel.semantic": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Semantic Index",
+			description: "Use the local embedding worker for unverified similar-chunk candidates",
+		},
+	},
+
+	"codeIntel.depthDefault": {
+		type: "enum",
+		values: ["auto", "focused", "extended"] as const,
+		default: "auto",
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Default Depth",
+			description: "Used when the tool call omits depth. auto infers from relationship words",
+			options: [
+				{ value: "auto", label: "Auto" },
+				{ value: "focused", label: "Focused" },
+				{ value: "extended", label: "Extended" },
+			],
+		},
+	},
+
+	"codeIntel.maxIndexFiles": {
+		type: "number",
+		default: 20000,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Max Index Files",
+			description: "Upper bound on files scanned into the tags generation snapshot",
+		},
+	},
+
+	"codeIntel.maxEmbedFiles": {
+		type: "number",
+		default: 4000,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Max Embed Files",
+			description: "Upper bound on files written into the local embedding matrix",
+		},
+	},
+
+	"codeIntel.timeoutSec": {
+		type: "number",
+		default: 30,
+		ui: {
+			tab: "files",
+			group: "Code Intel",
+			label: "Timeout (seconds)",
+			description: "Per-query budget. Clamped to the code_intel tool range 5–180 seconds",
+		},
+	},
+
 	"bash.enabled": {
 		type: "boolean",
 		default: true,
@@ -4847,13 +5068,13 @@ export const SETTINGS_SCHEMA = {
 	"tools.xdevDocs": {
 		type: "enum",
 		values: ["inline", "builtins", "catalog"] as const,
-		default: "builtins",
+		default: "catalog",
 		ui: {
 			tab: "tools",
 			group: "Discovery & MCP",
 			label: "xd:// Prompt Docs",
 			description:
-				"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on-demand.",
+				"Choose which mounted-device docs and schemas are inlined in the system prompt. Catalog keeps every device on demand; Built-ins keeps core tools inline.",
 			options: [
 				{ value: "inline", label: "All Devices", description: "Inline docs and schemas for every mounted device." },
 				{
@@ -5007,6 +5228,421 @@ export const SETTINGS_SCHEMA = {
 			group: "Modes",
 			label: "Goal Continuation Modes",
 			description: "Run modes where active goals may auto-continue between turns",
+		},
+	},
+
+	"goal.hostGate.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Host Completion Gate",
+			description:
+				'When true, goal({op:"complete"}) only nominates. Deterministic host checks must pass, then the user confirms with /goal complete. False restores immediate tool completion.',
+		},
+	},
+	"goal.hostGate.timeoutMs": {
+		type: "number",
+		default: 15_000,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Evaluator Timeout",
+			description: "Per-request timeout for the advisory goal evaluator, in milliseconds. Set to 0 to disable.",
+			condition: "goalHostGateEnabled",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "15000", label: "15 seconds" },
+				{ value: "30000", label: "30 seconds" },
+			],
+		},
+	},
+	"goal.hostGate.maxOutputTokens": {
+		type: "number",
+		default: 512,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Evaluator Max Output Tokens",
+			description: "Hard output token budget for the advisory goal evaluator.",
+			condition: "goalHostGateEnabled",
+		},
+	},
+	"goal.hostGate.falseCompletion": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal False-Completion Continuation",
+			description:
+				"When true, a completion claim without shipped verification or with open todos injects a hidden next-turn continuation. Independent of the advisory evaluator.",
+			condition: "goalHostGateEnabled",
+		},
+	},
+	"goal.grokOverlayUnload": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Unload Grok Numbered Overlay",
+			description:
+				"When true, ordinary Grok sessions drop numbered/step-by-step overlay instructions. Independent of the goal host gate.",
+		},
+	},
+
+	// Multi-model coding workflow
+	"workflow.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Multi-Model Workflow",
+			description: "Enable the multi-model coding workflow tool (start/status/resume/cancel)",
+		},
+	},
+	"workflow.storagePath": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Storage Path",
+			description: "SQLite path for workflow state; empty uses the default workflow.db in cwd",
+		},
+	},
+	"workflow.degradedMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Degraded Mode",
+			description: "Allow same-vendor code review when an independent reviewer is unavailable",
+		},
+	},
+	"workflow.requireIndependentReview": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Require Independent Review",
+			description: "Require code reviewer vendor to differ from implementer unless degraded mode is on",
+		},
+	},
+	"workflow.maxBudgetUsd": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Budget (USD)",
+			description: "Hard stop when known provider-reported cost reaches this limit",
+		},
+	},
+	"workflow.maxRepairCycles": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Max Repair Cycles",
+			description: "Bounded repair attempts before the workflow blocks",
+		},
+	},
+	"workflow.confidenceThreshold": {
+		type: "number",
+		default: 0.6,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Review Confidence Threshold",
+			description: "Findings below this confidence are advisory for blocking decisions",
+		},
+	},
+	"workflow.isolationMerge": {
+		type: "enum",
+		values: ["patch", "branch"] as const,
+		default: "patch",
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Isolation Merge",
+			description: "How implement/repair isolation merges results back",
+		},
+	},
+	"workflow.verificationCommands": {
+		type: "array",
+		default: ["git diff --check", "bun check"],
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Verification Commands",
+			description:
+				"Trusted deterministic checks after implementation (prefer repo checks + focused tests; full suite is opt-in)",
+		},
+	},
+	"workflow.verificationTimeoutMs": {
+		type: "number",
+		default: 120_000,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Verification Timeout (ms)",
+			description: "Hard timeout per verification command before the workflow fails the check",
+		},
+	},
+	"workflow.maxPlanCycles": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Max Plan Cycles",
+			description: "Bounded plan rejection / replan loops before the workflow blocks",
+		},
+	},
+	"workflow.defaultQualityTier": {
+		type: "enum",
+		values: ["balanced", "critical"] as const,
+		default: "balanced",
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Default Workflow Quality Tier",
+			description: "Default quality route selected by workflow.start when quality routes are configured",
+		},
+	},
+	"workflow.qualityRoutes": {
+		type: "record",
+		default: {} as Record<string, unknown>,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Quality Routes",
+			description: "Ordered model profile ids per workflow role for balanced and critical routes",
+		},
+	},
+	"workflow.profiles": {
+		type: "record",
+		default: {} as Record<string, unknown>,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Model Profiles",
+			description:
+				"Optional model profile map overriding workflow defaults (empty uses built-in planner/reviewer/implementer/repair profiles). Multi-model workflows use the embedded RuntimeAdapter with omp provider models and per-profile strategies; profile.runtime / vendor CLI backends are not supported.",
+		},
+	},
+	"workflow.presentationOptimization.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Lazy Tool/Skill Presentation",
+			description:
+				"When enabled, workflow sessions may use catalog-mode tool/skill presentation (short descriptions + xd:// one-hop schema/body load). Default off; enable only after benchmark quality holds.",
+		},
+	},
+
+	// Ordinary-session model optimization (workflow uses its own profiles independently)
+	"modelOptimization.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Model",
+			label: "Model Optimization",
+			description:
+				"When enabled, ordinary coding sessions apply model-family prompt/tool/context optimization for the active model. Default on with the wired quality stop (cohort + fired-arm attribution + session-end rollback); behavior-changing profile thresholds stay off until their paired matrix passes. Workflow profiles are unaffected.",
+		},
+	},
+	"modelOptimization.profiles": {
+		type: "record",
+		default: {} as Record<string, unknown>,
+		ui: {
+			tab: "model",
+			group: "Model",
+			label: "Model Optimization Profiles",
+			description:
+				"Optional map of model optimization profiles by id (empty uses built-in claude/gpt-5/grok/glm/luna/terra/sol family profiles). Same id overrides a built-in. Does not accept workflow role profiles.",
+		},
+	},
+	"modelOptimization.outputTruncation.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Model",
+			label: "Tool Output Truncation",
+			description:
+				"When enabled, ordinary sessions apply model-family tool-output byte/line clamps. Subagents may disable this with frontmatter `output-truncation: false` without changing the family profile.",
+		},
+	},
+
+	// Latency optimization arms (design A §6.2) — independently rollbackable. Defaults since the
+	// 2026-08-07 quality gate: the low-risk fail-open bash pair, plus the high-benefit ordinary-session
+	// pair (modelOptimization.enabled + readDedupe), are on; every other behavior-changing arm stays
+	// off until its paired ≥30-task matrix passes. Production quality-stop wiring (cohort data plane,
+	// fired-arm attribution, ordinary-session consumer) guards the on-by-default set.
+	// context_optimization reuses modelOptimization.enabled.
+	"latency.arms.readDedupe": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "files",
+			group: "Reading",
+			label: "Read Result Dedupe",
+			description:
+				"When enabled with model optimization, repeated same-view read results may be replaced with verified artifact refs in model-visible context. Fail-open on unknown identity. Default on with the wired quality stop; reverts automatically on an attributed quality regression.",
+		},
+	},
+	"latency.arms.contextBudgetTuning": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Context Budget Tuning",
+			description:
+				"Optional profile threshold tuning after ordinary context optimization is active. Default off until long-session paired quality passes.",
+		},
+	},
+	"latency.arms.roleStaticSplit": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Workflow Mechanical Flash Route",
+			description:
+				"When enabled, caller-declared or previously-accepted mechanical workflow work may route to Flash via the frozen quality-route snapshot. Never downgrades plan reviewer. Default off until false-positive and repair-quality paired tests pass.",
+		},
+	},
+	"latency.arms.bashAdvisory": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "shell",
+			group: "Bash",
+			label: "Bash Failure Advisory",
+			description:
+				"When enabled, repeated identical bash failures show a structured advisory from the single attempt ledger. Does not block execution. Low-risk; remains on by default (2026-08-07 gate).",
+		},
+	},
+	"latency.arms.bashBoundedInjection": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "shell",
+			group: "Bash",
+			label: "Bash Ledger Context Injection",
+			description:
+				"When enabled, inject a bounded bash attempt-ledger summary into model context on repeated failures. Shares the advisory ledger; does not auto-skip. Low-risk; remains on by default (2026-08-07 gate).",
+		},
+	},
+	"latency.arms.concurrencyDeclaration": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Concurrency Declaration",
+			description:
+				"When enabled, accept strict WorkflowConcurrencyDeclarationV1 for DAG/ownership validation. Default off until compatibility/live DAG coverage passes.",
+		},
+	},
+	"latency.arms.concurrencyExecution": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Concurrency Declaration Execution",
+			description:
+				"When enabled, lower validated concurrency declarations onto existing task batch/parallel or workflow RuntimePort. Requires declaration arm. Default off until independent/dependent/cancel-resume quality pairs pass.",
+		},
+	},
+	"latency.arms.evalGateMigration": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Eval Gate Native Migration",
+			description:
+				"When enabled and EvalGateParityReceiptV1 is proven, migrate eligible eval gates to native workflow/task owners with optional independent overlap. Default off until a real native cutover plus parity/cancel-resume live proof exists (bridge control is always retained).",
+		},
+	},
+	"latency.arms.providerHealthBreaker": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Provider Health Breaker",
+			description:
+				"When enabled, skip physical availability probes for workflow profiles that recently failed twice with retryable provider errors (rate_limit, timeout, provider_transient) and treat them as unavailable for 60 seconds. Fail-open when off. Default off until the paired quality matrix passes.",
+		},
+	},
+	"latency.arms.adaptiveThinkingContext": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Adaptive Auto-Thinking Context",
+			description:
+				"When enabled, the existing auto-thinking classifier call receives a bounded trusted envelope (agent role, error count among the 8 most recent tool results, observable context usage percent). No extra model call. Ordinary sessions never invent a deadline. Default off until the paired quality matrix passes.",
+		},
+	},
+	"latency.arms.dshSessionSearch": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Session Search (DSH A1)",
+			description:
+				"When true, register session_search so the model can retrieve compacted raw assistant/tool journal on the current branch. Independently rollbackable. Default off until the DSH quality matrix passes. Control is explicit false; never inferred from a missing key.",
+		},
+	},
+	"latency.arms.dshOmitGoalTime": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Omit Goal Time (DSH A2)",
+			description:
+				"When true, active goal prompts omit timeUsedSeconds so the clock does not force re-injection every turn. EXP-A23 treatment requires this and dshGoalHashShadow both true (dim.a23). Assignment, not this toggle alone, decides treatment vs control. Default off.",
+		},
+	},
+	"latency.arms.dshGoalHashShadow": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Hash Shadow (DSH A3)",
+			description:
+				"When true, persist versioned adjacent-comparison shadow entries for the canonical final goal-mode string. Usage (tokens/time) does not reset the hash. Default off. EXP-A23 treatment requires this and dshOmitGoalTime both true.",
+		},
+	},
+	"latency.arms.dshHeadlessContinuation": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Headless Goal Continuation (DSH A4)",
+			description:
+				'When true, the session may request headless goal continuation. Actual injection also requires goal.continuationModes to include "headless" (array resolver, not a boolean) and the runner capability allowHeadlessGoalContinuation. Independently rollbackable. Default off.',
 		},
 	},
 
@@ -5169,6 +5805,39 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.proactive.autoParallel": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Proactive Auto-Parallel",
+			description: "Recommend batching at least 2 independent runnable slices when proactive delegation is enabled",
+		},
+	},
+
+	"task.proactive.pipelineGuidance": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Proactive Pipeline Guidance",
+			description: "Recommend escalating gated delivery to workflow when proactive delegation is enabled",
+		},
+	},
+
+	"task.proactive.stageRouting": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Proactive Stage Routing",
+			description: "Recommend routing scoped slices through existing task, scout, and reviewer agents",
+		},
+	},
+
 	"task.batch": {
 		type: "boolean",
 		default: true,
@@ -5178,6 +5847,30 @@ export const SETTINGS_SCHEMA = {
 			label: "Batch Task Calls",
 			description:
 				"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
+		},
+	},
+
+	"task.shadowReview.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Reviewer Shadow Review",
+			description:
+				"When enabled, a qualified code-reviewer spawn runs four read-only Shadow Mind dimensions in parallel and injects their report as an async-result. Default off so first-yield completion is not blocked by the cohort. Quality A/B is not yet complete.",
+		},
+	},
+
+	"task.shadowReview.agents": {
+		type: "record",
+		default: EMPTY_BOOLEAN_RECORD,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Shadow Review Per Agent",
+			description:
+				"Per-agent kill switch for shadow review. Set an agent name to false to skip the cohort even when spawn requests shadowReview: code.",
 		},
 	},
 
@@ -5246,19 +5939,38 @@ export const SETTINGS_SCHEMA = {
 
 	"task.maxRuntimeMs": {
 		type: "number",
-		default: 0,
+		default: 3_600_000, // 1h [拟议验收目标]; 0 disables
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
 			label: "Max Subagent Runtime",
 			description:
-				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason.",
+				'Hard wall-clock limit per subagent (ms). 0 disables it. Review-class = floor names (`reviewer`, `subagent-sol`, `sol-xhigh-reviewer`, `security-reviewer`) ∪ frontmatter `"code"` ∪ spawn `"code"` (explore names excluded). Explore-class = `scout`/`sonic`. 10/30 min class ceilings apply only to task invocations that omit a caller runtime cap; an explicit request cap (0 or >0) is authoritative, and eval omitted inherits the fresh setting. Default 1 hour is a proposed acceptance target pending p95 baseline. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a runtime-limit reason.',
 			options: [
-				{ value: "0", label: "Unlimited", description: "Default" },
+				{ value: "0", label: "Unlimited" },
 				{ value: "300000", label: "5 minutes" },
 				{ value: "900000", label: "15 minutes" },
 				{ value: "1800000", label: "30 minutes" },
-				{ value: "3600000", label: "1 hour" },
+				{ value: "3600000", label: "1 hour", description: "Default" },
+			],
+		},
+	},
+
+	"task.queuedStartupTimeoutMs": {
+		type: "number",
+		default: 120_000, // 2min [拟议验收目标]; 0 disables
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Queued Startup Timeout",
+			description:
+				"How long a spawn may wait for a task.maxConcurrency permit before failing (ms). 0 disables the guard. Default 2 minutes is a proposed acceptance target; useful when stuck jobs saturate the semaphore.",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "30000", label: "30 seconds" },
+				{ value: "60000", label: "1 minute" },
+				{ value: "120000", label: "2 minutes", description: "Default" },
+				{ value: "300000", label: "5 minutes" },
 			],
 		},
 	},
@@ -5283,7 +5995,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Soft Subagent Request Budget",
 			description:
-				"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must yield its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them.",
+				'Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must yield its partial findings. 0 disables the guard. All structured invocations use class request budgets and class prompts: explore-class (`scout`/`sonic`) cap at 40, review-class (floor names ∪ frontmatter `"code"` ∪ spawn `"code"`, explore names excluded) cap at 80. 75% of the wall-clock is an advisory steer, not a budget_stop.',
 			options: [
 				{ value: "0", label: "Disabled" },
 				{ value: "90", label: "90 requests" },

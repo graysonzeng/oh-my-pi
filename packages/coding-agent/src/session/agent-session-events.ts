@@ -5,7 +5,7 @@ import type { Rule } from "../capability/rule";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { ConfiguredThinkingLevel } from "../thinking";
-import type { TodoItem } from "../tools/todo";
+import type { TodoItem, TodoPhase } from "../tools/todo";
 import type { CustomMessage } from "./messages";
 
 /** Session-specific events that extend the core AgentEvent. */
@@ -14,15 +14,16 @@ export type AgentSessionEvent =
 	| (Extract<AgentEvent, { type: "agent_end" }> & {
 			/** False when an async delivery will resume the session before its true final settle. */
 			isTerminal?: boolean;
+			deliveryId?: string;
 	  })
 	| {
 			type: "auto_compaction_start";
 			reason: "threshold" | "overflow" | "idle" | "incomplete";
-			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact" | "structured";
 	  }
 	| {
 			type: "auto_compaction_end";
-			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact" | "structured";
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
@@ -54,6 +55,7 @@ export type AgentSessionEvent =
 	| { type: "ttsr_triggered"; rules: Rule[] }
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
+	| { type: "todo_updated"; phases: TodoPhase[] }
 	| { type: "irc_message"; message: CustomMessage }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| {

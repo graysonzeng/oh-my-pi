@@ -7,6 +7,7 @@ import {
 } from "../config/model-resolver";
 import type { SettingPath, Settings } from "../config/settings";
 import { describeLoopCondition } from "../modes/loop-condition";
+import { runDeliveryPipeline } from "../modes/delivery";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
@@ -256,6 +257,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "show", description: "Show current goal details" },
 			{ name: "pause", description: "Pause the current goal" },
 			{ name: "resume", description: "Resume a paused goal" },
+			{ name: "complete", description: "Confirm host-gated completion" },
 			{ name: "drop", description: "Drop the current goal" },
 			{ name: "budget", description: "Adjust the token budget", usage: "<N|off>" },
 		],
@@ -272,6 +274,14 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.handleGoalModeCommand(command.args || undefined, runtime.input),
 			);
 		},
+	},
+	{
+		name: "delivery",
+		icon: "goal",
+		description: "Start the DevFlow autopilot pipeline (grill → plan → review → implement → code review → fix)",
+		inlineHint: "[optional patch]",
+		allowArgs: true,
+		handle: async (command, runtime) => runDeliveryPipeline(runtime, command.args),
 	},
 	{
 		name: "guided-goal",

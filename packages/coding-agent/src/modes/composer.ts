@@ -334,16 +334,19 @@ export class Composer implements TerminalFrameProvider {
 		for (const root of afterRoots) {
 			const start = after.length;
 			// Row targets usually nest one level down: chrome roots are plain
-			// containers (the HUD lives inside `subagentContainer`), and
-			// `Container.render` is a pure concatenation, so child spans tile
-			// the root span exactly. Render those children once and share the
-			// rows for composition and measurement — a second render per frame
-			// would duplicate render-time side effects (image placement
-			// registration). Roots with a custom render keep the composed
-			// output as the source of truth and measure up to the last target.
-			const plainContainer = root instanceof Container && root.render === Container.prototype.render;
-			const targets = root instanceof Container ? root.children : [root];
-			const resolves = targets.map(rowTargetCandidates);
+			// containers, and `Container.render` is a pure concatenation, so
+			// child spans tile the root span exactly. Render those children
+			// once and share the rows for composition and measurement — a
+			// second render per frame would duplicate render-time side effects
+			// (image placement registration). A custom-render root that is
+			// itself the row target (live pinned HUD) keeps composed output as
+			// the source of truth; other custom-render roots measure children
+			// up to the last nested target.
+			const rootRowTarget = rowTargetCandidates(root);
+			const plainContainer =
+				!rootRowTarget && root instanceof Container && root.render === Container.prototype.render;
+			const targets = rootRowTarget ? [root] : root instanceof Container ? root.children : [root];
+			const resolves = rootRowTarget ? [rootRowTarget] : targets.map(rowTargetCandidates);
 			const lastTarget = resolves.findLastIndex(resolve => resolve !== undefined);
 			if (plainContainer) {
 				let offset = start;

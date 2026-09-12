@@ -30,6 +30,7 @@ import {
 	getPaddingX,
 	Loader,
 	Markdown,
+	padding,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -129,6 +130,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
+import { formatCompactLiveActivityLine, liveActivityFromProgress } from "../tools/hub/jobs";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	FEED_MODEL_BADGE_WIDTH,
@@ -337,9 +339,9 @@ function formatHudNoteMarker(count: number): string {
 	return theme.fg("dim", chalk.italic(` \u207a${sub}`));
 }
 
-type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
+type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget" | "complete";
 
-const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
+const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget", "complete"]);
 const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
@@ -415,6 +417,40 @@ export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
 
 /** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
 class AnchoredLiveContainer extends Container {}
+
+class SubagentHudContainer extends AnchoredLiveContainer {
+	readonly #getSessions: () => ObservableSession[];
+	readonly #getExpanded: () => boolean;
+	#hud: SubagentHudComponent | undefined;
+
+	constructor(getSessions: () => ObservableSession[], getExpanded: () => boolean) {
+		super();
+		this.#getSessions = getSessions;
+		this.#getExpanded = getExpanded;
+	}
+
+	override render(width: number): readonly string[] {
+		const mode = settings.get("display.pinnedAgents");
+		if (mode === "off") {
+			this.#hud = undefined;
+			return [];
+		}
+		const paddingX = getPaddingX(1);
+		const contentWidth = Math.max(1, width - paddingX * 2);
+		const hitMap: { order: string[]; toggleRow?: number } = { order: [] };
+		const lines = renderSubagentHudLines(this.#getSessions(), contentWidth, this.#getExpanded(), hitMap);
+		if (lines.length === 0) {
+			this.#hud = undefined;
+			return [];
+		}
+		this.#hud = new SubagentHudComponent(lines, hitMap.order, hitMap.toggleRow);
+		return this.#hud.render(width);
+	}
+
+	getClickAgentAtRow(row: number): string | undefined {
+		return this.#hud?.getClickAgentAtRow(row);
+	}
+}
 
 class TodoHudContainer extends AnchoredLiveContainer {
 	constructor(private readonly mode: InteractiveMode) {
@@ -558,7 +594,6 @@ export class SubagentHudComponent implements Component {
 		this.#physicalOwner = owner;
 	}
 }
-
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
 /** Item rows a collapsed jump list shows before the expander. */
@@ -591,6 +626,16 @@ export function layoutPinnedHud(runningTotal: number, expanded: boolean): Pinned
 }
 
 /**
+ * Bounded low-frequency repaint for the detached subagent HUD. Progress
+ * snapshots coalesce at ~100ms, but while a subagent is silent — no tool
+ * events, no stream chunks — nothing repaints and the row freezes on the last
+ * tool name. The ticker only invalidates the HUD block so elapsed/silence
+ * counters grow; it never emits or fabricates worker activity. Cleared as
+ * soon as no detached active rows remain, and always in `stop()`.
+ */
+export const SUBAGENT_HUD_REFRESH_MS = 2000;
+
+/**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
  * a bounded set of running-agent rows in the same `Id ⟨role⟩: description` shape
  * the inline task rows use (muted task preview when no description was given).
@@ -600,7 +645,12 @@ export function layoutPinnedHud(runningTotal: number, expanded: boolean): Pinned
  * calls alike — so the pinned block doubles as a click jump list.
  * Returns an empty array when nothing is running so the container can clear.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number, expanded = false): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+	expanded = false,
+	hitMap?: { order: string[]; toggleRow?: number },
+): string[] {
 	const running = sessions.filter(isHudSubagent);
 	if (running.length === 0) return [];
 	const layout = layoutPinnedHud(running.length, expanded);
@@ -608,6 +658,7 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	const items = running.slice(0, layout.itemRows);
 	const showModelBadge = isFeedModelBadgeEnabled();
 	const outerIndent = " ";
+	const itemLineCounts: number[] = [];
 	const rows = renderTreeList(
 		{
 			items,
@@ -649,16 +700,34 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 					// the inline task rows when a row has no label.
 					const taskPreview = session.progress?.task?.trim();
 					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
-						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
 						const budget = Math.min(TRUNCATE_LENGTHS.SHORT, Math.max(0, rowWidth - visibleWidth(line) - 1));
+						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
 						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
 					}
 				}
-				return truncateToWidth(line, rowWidth, "");
+				const identity = truncateToWidth(line, rowWidth, "");
+				const activity = liveActivityFromProgress(session.progress, Date.now());
+				if (!activity) {
+					itemLineCounts.push(1);
+					return identity;
+				}
+				itemLineCounts.push(2);
+				return [identity, formatCompactLiveActivityLine(activity, Math.max(1, rowWidth), theme)];
 			},
 		},
 		theme,
 	);
+	const toggleRowIndex = layout.toggle === undefined ? undefined : 2 + rows.length;
+	if (hitMap) {
+		const order: string[] = [];
+		for (let i = 0; i < items.length; i++) {
+			const id = items[i]!.id;
+			const count = itemLineCounts[i] ?? 1;
+			for (let n = 0; n < count; n++) order.push(id);
+		}
+		hitMap.order = order;
+		hitMap.toggleRow = toggleRowIndex;
+	}
 	const toggleRow =
 		layout.toggle === undefined
 			? []
@@ -1022,7 +1091,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#voicePreviousShowHardwareCursor: boolean | null = null;
 	#voicePreviousUseTerminalCursor: boolean | null = null;
 	#resizeHandler?: () => void;
-	#observerRegistry: SessionObserverRegistry;
+	#observerRegistry = new SessionObserverRegistry();
 	/** Click override for the pinned jump-list density; undefined follows `display.pinnedAgents`. */
 	#pinnedHudOverride: boolean | undefined;
 	#eventBus?: EventBus;
@@ -1030,6 +1099,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	/** Low-frequency repaint ticker for the detached subagent HUD; `undefined` when idle. */
+	#subagentHudTicker?: NodeJS.Timeout;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
 	#mcpStatusOrder: string[] = [];
@@ -1151,7 +1222,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.statusContainer = new StatusHudContainer(this);
 		this.todoContainer = new TodoHudContainer(this);
-		this.subagentContainer = new AnchoredLiveContainer();
+		this.subagentContainer = new SubagentHudContainer(
+			() => this.#observerRegistry.getSessions(),
+			() => this.#pinnedHudOverride ?? settings.get("display.pinnedAgents") === "full",
+		);
 		this.btwContainer = new AnchoredLiveContainer();
 		this.omfgContainer = new AnchoredLiveContainer();
 		this.cleanseContainer = new AnchoredLiveContainer();
@@ -1257,7 +1331,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController = new InputController(this);
 		this.session.setTitleGenerationStart?.(() => this.#inputController.notifyTitleGenerationStart());
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
-		this.#observerRegistry = new SessionObserverRegistry();
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -2758,8 +2831,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * without requiring the agent to issue a follow-up `todo`. A todo `block`ed
 	 * while waiting on a detached subagent is included: that subagent completing
 	 * is exactly the unblock signal, and blocked todos are excluded from the stop
-	 * reminder, so leaving it blocked would strand it silently. Failed and aborted
-	 * subagents are intentionally NOT auto-completed — those stay open so the user
+	 * reminder, so leaving it blocked would strand it silently. Failed, aborted,
+	 * and non-ordinary completions (`budget_stop` / `timeout` / `hard_abort`)
+	 * are intentionally NOT auto-completed — those stay open so the user
 	 * (or the next agent turn) can decide what to do.
 	 *
 	 * Idempotent: only flips open tasks, never re-touches completed ones.
@@ -2769,6 +2843,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		for (const session of this.#observerRegistry.getSessions()) {
 			if (session.kind !== "subagent") continue;
 			if (session.status !== "completed") continue;
+			if (session.completionKind && session.completionKind !== "completed") continue;
 			const candidate =
 				session.description?.trim() || session.progress?.description?.trim() || session.label?.trim();
 			if (candidate) completedDescs.push(candidate);
@@ -2913,6 +2988,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#syncTodoAutoClearTimer();
 		this.#renderTodoList();
 		this.#renderSubagentList();
+		this.#ensureSubagentHudTicker();
 		this.ui.requestRender();
 	}
 
@@ -2922,6 +2998,43 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#observerUiSyncTimer = undefined;
 		}
 		this.#observerUiSyncNeedsTodoReconcile = false;
+	}
+	/** Whether the anchored subagent HUD currently has detached active rows to keep alive. */
+	#hasDetachedActiveHudSessions(): boolean {
+		return this.#observerRegistry
+			.getSessions()
+			.some(session => session.kind === "subagent" && session.status === "active" && session.detached === true);
+	}
+
+	/**
+	 * Keep the detached HUD repainting at a bounded low frequency so elapsed /
+	 * silence counters advance without new progress events. Redraw only: never
+	 * emits progress or fabricates worker activity. Self-clears the moment the
+	 * HUD has nothing left to show.
+	 */
+	#ensureSubagentHudTicker(): void {
+		if (this.#subagentHudTicker) return;
+		if (!this.#hasDetachedActiveHudSessions()) {
+			this.#cancelSubagentHudTicker();
+			return;
+		}
+		const ticker = setInterval(() => {
+			if (!this.#hasDetachedActiveHudSessions()) {
+				this.#cancelSubagentHudTicker();
+				return;
+			}
+			this.#renderSubagentList();
+			this.ui.requestRender();
+		}, SUBAGENT_HUD_REFRESH_MS);
+		ticker.unref?.();
+		this.#subagentHudTicker = ticker;
+	}
+
+	#cancelSubagentHudTicker(): void {
+		if (this.#subagentHudTicker) {
+			clearInterval(this.#subagentHudTicker);
+			this.#subagentHudTicker = undefined;
+		}
 	}
 
 	#renderTodoList(): void {
@@ -3154,13 +3267,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const mode = settings.get("display.pinnedAgents");
 		if (mode === "off") return;
 		const sessions = this.#observerRegistry.getSessions();
-		const running = sessions.filter(isHudSubagent);
 		const expanded = this.#pinnedHudOverride ?? mode === "full";
-		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded);
+		const hitMap: { order: string[]; toggleRow?: number } = { order: [] };
+		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, hitMap);
 		if (lines.length === 0) return;
-		const layout = layoutPinnedHud(running.length, expanded);
-		const order = running.map(session => session.id);
-		this.subagentContainer.addChild(new SubagentHudComponent(lines, order, layout.toggleRow));
+		this.subagentContainer.addChild(new SubagentHudComponent(lines, hitMap.order, hitMap.toggleRow));
 	}
 
 	#vibeParentSession(): VibeParentSession {
@@ -3222,6 +3333,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			return undefined;
 		}
+		const rawGate = value.hostGate;
+		let hostGate: Goal["hostGate"];
+		if (rawGate && typeof rawGate === "object") {
+			const gate = rawGate as Record<string, unknown>;
+			hostGate = {
+				goalRevision: typeof gate.goalRevision === "number" ? gate.goalRevision : 0,
+				pendingVerification: gate.pendingVerification === true,
+				nominationId: typeof gate.nominationId === "string" ? gate.nominationId : undefined,
+				turnId: typeof gate.turnId === "string" ? gate.turnId : undefined,
+				generation: typeof gate.generation === "number" ? gate.generation : undefined,
+				lastDecision:
+					gate.lastDecision === "continue" ||
+					gate.lastDecision === "candidate_complete" ||
+					gate.lastDecision === "blocked" ||
+					gate.lastDecision === "user_confirmed"
+						? gate.lastDecision
+						: undefined,
+				lastEvidence: typeof gate.lastEvidence === "string" ? gate.lastEvidence : undefined,
+				lastNextStep: typeof gate.lastNextStep === "string" ? gate.lastNextStep : undefined,
+				lastBlockerKey: typeof gate.lastBlockerKey === "string" ? gate.lastBlockerKey : undefined,
+				lastReasons: Array.isArray(gate.lastReasons)
+					? gate.lastReasons.filter((item): item is string => typeof item === "string")
+					: undefined,
+				consecutiveContinueCount:
+					typeof gate.consecutiveContinueCount === "number" ? gate.consecutiveContinueCount : 0,
+				lastGaps: Array.isArray(gate.lastGaps)
+					? gate.lastGaps.filter((item): item is string => typeof item === "string")
+					: undefined,
+			};
+		}
 		return {
 			id: value.id,
 			objective: value.objective,
@@ -3229,8 +3370,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
 			tokensUsed: value.tokensUsed,
 			timeUsedSeconds: value.timeUsedSeconds,
+			headlessContinuationCount:
+				typeof value.headlessContinuationCount === "number" ? value.headlessContinuationCount : 0,
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
+			hostGate,
 		};
 	}
 
@@ -3471,13 +3615,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				mode: "active",
 				goal,
 			});
+			await this.session.goalRuntime.recoverPendingVerification();
 			const restored = await this.session.goalRuntime.onThreadResumed({
 				preserveActiveGoal: options?.preserveActiveGoal,
 			});
 			this.goalModeEnabled = restored?.enabled === true;
 			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
-			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
-			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
 				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 				this.#goalModePreviousTools = previousTools;
@@ -4788,6 +4931,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			case "drop":
 				await this.#confirmAndDropGoal();
 				return false;
+			case "complete":
+				await this.#confirmAndCompleteGoal();
+				return false;
 			case "budget":
 				if (!this.goalModeEnabled) {
 					this.showWarning(
@@ -4811,7 +4957,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
 		const items =
 			state === "active"
-				? ["Show details", "Adjust budget…", "Pause", "Drop"]
+				? ["Show details", "Adjust budget…", "Pause", "Complete", "Drop"]
 				: ["Resume", "Show details", "Adjust budget…", "Drop"];
 		const choice = await this.showHookSelector(title, items);
 		if (!choice) return;
@@ -4827,6 +4973,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			case "Resume":
 				await this.#resumeGoalAction();
+				return;
+			case "Complete":
+				await this.#confirmAndCompleteGoal();
 				return;
 			case "Drop":
 				await this.#confirmAndDropGoal();
@@ -4898,6 +5047,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!confirmed) return;
 		await this.session.goalRuntime.dropGoal();
 		await this.#exitGoalMode({ reason: "dropped" });
+	}
+
+	async #confirmAndCompleteGoal(): Promise<void> {
+		const state = this.session.getGoalModeState();
+		if (!state?.goal || state.goal.status === "dropped" || state.goal.status === "complete") {
+			this.showWarning("No goal to complete.");
+			return;
+		}
+		const confirmed = await this.showHookConfirm(
+			"Complete goal?",
+			"This marks the goal complete from the host. Use only when the current repo evidence satisfies the objective.",
+		);
+		if (!confirmed) return;
+		this.session.goalRuntime.cancelInFlightNominations("user_confirmed");
+		await this.session.goalRuntime.completeGoalFromTool();
+		await this.#exitGoalMode({ reason: "completed" });
+		this.showStatus("Goal completed.");
 	}
 
 	async #startGoalFromObjective(
@@ -5264,6 +5430,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
+		this.#cancelSubagentHudTicker();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
 			this.#sttController.dispose();

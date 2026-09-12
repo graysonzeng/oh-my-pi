@@ -447,4 +447,12 @@ describe("goal runtime", () => {
 		expect(state?.mode).toBe("exiting");
 		expect(state?.goal.status).toBe("complete");
 	});
+
+	it("omits timeUsedSeconds only when the A2 arm is on", () => {
+		const goal = createGoal({ timeUsedSeconds: 12 });
+		expect(renderGoalPrompt("active", goal)).toContain("Time used: 12 seconds");
+		expect(renderGoalPrompt("active", goal, { omitTimeUsedSeconds: true })).not.toContain("Time used:");
+		expect(renderGoalPrompt("active", goal, { omitTimeUsedSeconds: true })).toContain("Tokens used:");
+		expect(renderGoalPrompt("budget-limit", goal, { omitTimeUsedSeconds: true })).toContain("Time used:");
+	});
 });

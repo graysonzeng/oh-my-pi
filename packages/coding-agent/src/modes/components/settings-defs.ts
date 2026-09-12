@@ -112,6 +112,20 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	consultEnabled: () => {
+		try {
+			return Settings.instance.get("consult.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
+	goalHostGateEnabled: () => {
+		try {
+			return Settings.instance.get("goal.hostGate.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 	hindsightActive: () => {
 		try {
 			return Settings.instance.get("memory.backend") === "hindsight";

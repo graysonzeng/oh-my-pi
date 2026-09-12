@@ -210,7 +210,8 @@ describe("hub wait with no matching jobs", () => {
 
 		const result = await tool.execute("call", { op: "wait" });
 
-		expect(resultText(result)).toBe("No running background jobs to wait for.");
+		expect(resultText(result)).toContain("No running background jobs to wait for.");
+		expect(resultText(result)).toContain("If no jobs are running, do not repeat a bare wait.");
 		expect(result.useless).toBe(true);
 	});
 

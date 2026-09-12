@@ -35,6 +35,7 @@ const clientLocks = new Map<string, PendingClient>();
 const invalidatedClientKeys = new Set<string>();
 const clientReloadBarriers = new Map<string, Promise<unknown>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
+const applyEditHolds = new Map<string, number>();
 
 /** Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call. */
 const INIT_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
@@ -164,7 +165,7 @@ function stopIdleChecker(): void {
 // Client Capabilities
 // =============================================================================
 
-const CLIENT_CAPABILITIES = {
+export const CLIENT_CAPABILITIES = {
 	textDocument: {
 		synchronization: {
 			didSave: true,
@@ -237,6 +238,9 @@ const CLIENT_CAPABILITIES = {
 		},
 		diagnostic: {
 			dynamicRegistration: true,
+		},
+		callHierarchy: {
+			dynamicRegistration: false,
 		},
 	},
 	window: {
@@ -547,6 +551,15 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
  * Handle workspace/applyEdit requests from the server.
  */
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
+	if ((applyEditHolds.get(client.name) ?? 0) > 0) {
+		await sendResponse(
+			client,
+			message.id,
+			{ applied: false, failureReason: "workspace/applyEdit refused during read-only navigation" },
+			"workspace/applyEdit",
+		);
+		return;
+	}
 	const params = message.params as { edit?: WorkspaceEdit };
 	if (!params?.edit) {
 		await sendResponse(
@@ -564,6 +577,29 @@ async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequ
 	} catch (err) {
 		await sendResponse(client, message.id, { applied: false, failureReason: String(err) }, "workspace/applyEdit");
 	}
+}
+
+/** Increment the inbound workspace/applyEdit hold for a client identity. */
+function acquireApplyEditHold(key: string): () => void {
+	applyEditHolds.set(key, (applyEditHolds.get(key) ?? 0) + 1);
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		const next = (applyEditHolds.get(key) ?? 1) - 1;
+		if (next <= 0) applyEditHolds.delete(key);
+		else applyEditHolds.set(key, next);
+	};
+}
+
+/** Hold inbound workspace/applyEdit on a live client for read-only navigation. */
+export function holdLspApplyEdits(client: LspClient): () => void {
+	return acquireApplyEditHold(client.name);
+}
+
+/** Hold inbound workspace/applyEdit before a configured client process exists. */
+export function holdLspApplyEditsForConfig(config: ServerConfig, cwd: string): () => void {
+	return acquireApplyEditHold(clientKey(config, cwd));
 }
 
 function workspaceEditChanges(executed: ExecutedWorkspaceChange[]): {
@@ -1132,52 +1168,71 @@ export async function getOrCreateClient(
 			}
 		});
 
-		// Start background message reader
-		startMessageReader(client);
-
+		const releaseInitHold = acquireApplyEditHold(key);
 		try {
-			// Send initialize request
-			const initResult = (await sendRequest(
-				client,
-				"initialize",
-				{
-					processId: process.pid,
-					rootUri: fileToUri(cwd),
-					rootPath: cwd,
-					capabilities: CLIENT_CAPABILITIES,
-					initializationOptions: config.initOptions ?? {},
-					workspaceFolders: currentWorkspaceFolders(client),
-				},
-				signal,
-				initTimeoutMs,
-			)) as { capabilities?: unknown };
+			// Start background message reader
+			startMessageReader(client);
 
-			if (!initResult) {
-				throw new Error("Failed to initialize LSP: no response");
+			try {
+				// Send initialize request
+				const initResult = (await sendRequest(
+					client,
+					"initialize",
+					{
+						processId: process.pid,
+						rootUri: fileToUri(cwd),
+						rootPath: cwd,
+						capabilities: CLIENT_CAPABILITIES,
+						initializationOptions: config.initOptions ?? {},
+						workspaceFolders: currentWorkspaceFolders(client),
+					},
+					signal,
+					initTimeoutMs,
+				)) as { capabilities?: unknown };
+
+				if (!initResult) {
+					throw new Error("Failed to initialize LSP: no response");
+				}
+
+				client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
+
+				// Finish the initialize handshake before publishing the client as ready.
+				await sendNotification(client, "initialized", {}, signal);
+				await sendNotification(
+					client,
+					"workspace/didChangeConfiguration",
+					{ settings: config.settings ?? {} },
+					signal,
+				);
+
+				client.status = "ready";
+				// Publish only after init succeeds: pre-init clients are reachable
+				// solely through clientLocks, so concurrent callers (warmup vs first
+				// tool call) wait for init instead of using an unacknowledged client.
+				if (invalidatedClientKeys.has(key)) {
+					throw new Error(`LSP configuration was superseded during initialization: ${config.command}`);
+				}
+				clients.set(key, client);
+				maybeStartIdleChecker(client);
+				initFailures.delete(key);
+				return client;
+			} catch (err) {
+				// Clean up on initialization failure
+				client.status = "error";
+				if (clients.get(key) === client) clients.delete(key);
+				proc.kill();
+				const message = err instanceof Error ? err.message : String(err);
+				// Negative-cache deterministic failures. Timeouts under a
+				// caller-shortened deadline (warmup/writethrough) and caller-signal
+				// aborts are transient — the server may simply be slow or the user may
+				// have cancelled, so a later call with a fresh deadline should retry.
+				if (!signal?.aborted && !(initTimeoutMs !== undefined && message.includes("timed out"))) {
+					initFailures.set(key, { at: Date.now(), message });
+				}
+				throw err;
+			} finally {
+				if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			}
-
-			client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
-
-			// Finish the initialize handshake before publishing the client as ready.
-			await sendNotification(client, "initialized", {}, signal);
-			await sendNotification(
-				client,
-				"workspace/didChangeConfiguration",
-				{ settings: config.settings ?? {} },
-				signal,
-			);
-
-			client.status = "ready";
-			// Publish only after init succeeds: pre-init clients are reachable
-			// solely through clientLocks, so concurrent callers (warmup vs first
-			// tool call) wait for init instead of using an unacknowledged client.
-			if (invalidatedClientKeys.has(key)) {
-				throw new Error(`LSP configuration was superseded during initialization: ${config.command}`);
-			}
-			clients.set(key, client);
-			maybeStartIdleChecker(client);
-			initFailures.delete(key);
-			return client;
 		} catch (err) {
 			// Clean up on initialization failure
 			client.status = "error";
@@ -1193,7 +1248,7 @@ export async function getOrCreateClient(
 			}
 			throw err;
 		} finally {
-			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
+			releaseInitHold();
 		}
 	})();
 
@@ -1729,6 +1784,7 @@ export async function shutdownAll(): Promise<void> {
 	stopIdleChecker();
 	invalidatedClientKeys.clear();
 	clientReloadBarriers.clear();
+	applyEditHolds.clear();
 	const clientsToShutdown = Array.from(clients.values());
 	clients.clear();
 	// Mid-initialize clients live only in clientLocks (publication is deferred

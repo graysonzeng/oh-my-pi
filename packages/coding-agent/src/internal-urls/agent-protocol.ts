@@ -25,6 +25,25 @@ import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 /**
+ * Artifacts dirs for the session-scoped lineage roots: each ancestor session
+ * file strips its `.jsonl` suffix to its artifacts dir (matching
+ * `artifactsDirectoryFor`). Ordered nearest-first; duplicates collapse.
+ */
+function artifactsDirsFromLineage(context: ResolveContext | undefined): string[] {
+	const dirs: string[] = [];
+	const addDir = (dir: string | null | undefined) => {
+		if (!dir) return;
+		if (!dirs.includes(dir)) dirs.push(dir);
+	};
+	const lineage = context?.lineage;
+	if (lineage?.currentSessionFile) addDir(lineage.currentSessionFile.slice(0, -6));
+	for (const root of lineage?.lineageRoots ?? []) {
+		addDir(root.canonicalPath.slice(0, -6));
+	}
+	return dirs;
+}
+
+/**
  * Handler for agent:// URLs.
  *
  * Resolves output IDs like "reviewer_0" to their artifact files,
@@ -53,17 +72,15 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(registry, context.sessionFile)
 			: undefined;
-		// The caller root's canonical artifact directory (its session file minus
-		// the `.jsonl` suffix) is scanned FIRST, ahead of every process-global
-		// registry dir. The roster ref this refresh installs for the caller's
-		// parked id contributes only its nested child dir, not the root dir that
-		// actually holds `<id>.md` — and with two coexisting roots the global
-		// `Main` ref can belong to the other root, whose dir would otherwise win
-		// the first-hit id map for a shared id. No caller session file: keep the
-		// pre-existing global scan untouched.
-		const dirs = artifactsDirsFromRegistry(
-			rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined,
-		);
+		// Session-scoped lineage roots win over registry-derived current-process
+		// roots, so a fresh process without a registered `Main` still reaches
+		// persisted ancestors. The caller root's canonical artifact directory
+		// (session file minus `.jsonl`) is still preferred in the registry scan
+		// so two coexisting roots never let the other `Main` win first-hit.
+		const dirs = [
+			...artifactsDirsFromLineage(context),
+			...artifactsDirsFromRegistry(rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined),
+		];
 		if (dirs.length === 0) {
 			throw new Error("No session - agent outputs unavailable");
 		}

@@ -113,7 +113,9 @@ describe("worktree isolation helpers", () => {
 
 		const baseline = await captureBaseline(repo);
 		expect(baseline.root.untracked).toEqual(["large-link.bin"]);
-		expect(baseline.root.untrackedPatch).toContain(target);
+		await fs.unlink(path.join(repo, "large-link.bin"));
+		await vcs.requireGit(repo).applyPatch(baseline.root.untrackedPatch, {});
+		expect(await fs.readlink(path.join(repo, "large-link.bin"))).toBe(target);
 	});
 
 	// Real git worktree/stash/merge I/O is the contract under test and cannot be

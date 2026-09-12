@@ -21,7 +21,13 @@ interface AssembledYieldResult {
 	missingData: boolean;
 }
 
-function isIncrementalYieldType(type: YieldItem["type"]): type is string[] {
+/**
+ * True for an incremental (array-typed) yield `type`: a section contribution
+ * that never decides termination by itself. Exported so the runtime
+ * (`finalizeSubprocessOutput`) can single-source "explicit terminal" detection
+ * with the pure assembly layer.
+ */
+export function isIncrementalYieldType(type: YieldItem["type"]): type is string[] {
 	return Array.isArray(type) && type.length > 0;
 }
 

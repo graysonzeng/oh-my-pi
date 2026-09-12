@@ -85,6 +85,9 @@ const hubSchema = type({
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
+	"interrupt?": type("boolean").describe(
+		"send: true = urgent correction that skips remaining tools in the current batch; default false = visible after this batch on the next model request",
+	),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
@@ -193,6 +196,15 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				op: "send",
 				to: "AuthLoader",
 				message: "Still touching src/server/auth.ts? I need to add a 401 path.",
+			},
+		},
+		{
+			caption: "Urgent correction — skip remaining tools in the current batch",
+			call: {
+				op: "send",
+				to: "AuthLoader",
+				message: "Stop. Use the new auth helper instead.",
+				interrupt: true,
 			},
 		},
 		{

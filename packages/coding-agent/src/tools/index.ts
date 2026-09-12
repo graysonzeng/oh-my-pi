@@ -1,6 +1,12 @@
-import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentMessage,
+	AgentOptions,
+	AgentTelemetryConfig,
+	AgentTool,
+	AgentToolContext,
+} from "@oh-my-pi/pi-agent-core";
 import type { EditStore } from "@oh-my-pi/pi-natives";
-import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
+import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
@@ -17,6 +23,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
+import type { LatencyArmId, LatencyArmSnapshotV1 } from "../latency/arms";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
@@ -24,10 +31,12 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
-import type { UsageStatistics } from "../session/session-entries";
+import type { SessionEntry, UsageStatistics } from "../session/session-entries";
+import type { LineageContext } from "../session/session-lineage";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
@@ -36,6 +45,8 @@ import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/type
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
+import { createEngineFromSessionSettings } from "../workflow/session-engine";
+import { WorkflowTool } from "../workflow/workflow-tool";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
@@ -43,6 +54,10 @@ import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
+import { CodeIntelTool } from "./code-intel";
+import { ConsultTool } from "./consult";
+import { isConsultActivationAllowed } from "./consult-model";
+import type { ConsultUsage } from "./consult-state";
 import { ContextNotesTool, NewContextTool } from "./context-notes";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
@@ -59,10 +74,14 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
+import { ReadOmittedContentTool } from "./read-omitted-content";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
+import { SessionSearchTool } from "./session-search";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
+import { applyWorkflowTransformTools, wrapAgentToolWithWorkflowAliases } from "./workflow-alias-wrap";
+import type { WorkflowAttemptEvidence, WorkflowToolOptimization } from "./workflow-session-fields";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
@@ -73,15 +92,21 @@ export * from "../lsp";
 export * from "../session/streaming-output";
 export * from "../task";
 export * from "../web/search";
+// Workflow tool (new)
+export * from "../workflow/workflow-tool";
 export * from "./ask";
 export * from "./ast-edit";
 export * from "./ast-grep";
 export * from "./bash";
 export * from "./browser";
 export * from "./checkpoint";
+export * from "./code-intel";
+export * from "./code-intel-envelope";
 export * from "./computer";
 export * from "./computer/supervisor";
 export * from "./context-notes";
+export * from "./consult";
+export * from "./consult-state";
 export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
@@ -99,10 +124,12 @@ export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
 export * from "./read";
+export * from "./read-omitted-content";
 export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
 export * from "./security-scan";
+export * from "./session-search";
 export * from "./think";
 export * from "./todo";
 export * from "./tts";
@@ -156,6 +183,14 @@ export interface DeferredDiagnosticsEntry {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/** Workflow-only normalized path guard installed for scoped write stages. */
+	workflowWritePolicy?: { repoRoot: string; forbiddenPaths: string[] };
+	/** Workflow-only command allowlist installed for scoped write stages. */
+	workflowCommandPolicy?: { allowedCommands: string[] };
+	/** Workflow per-model tool optimization installed for scoped stages. */
+	workflowToolOptimization?: WorkflowToolOptimization;
+	/** Attempt-level workflow evidence. */
+	workflowAttemptEvidence?: WorkflowAttemptEvidence;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
 	additionalDirectories?: string[];
 	/** Whether UI is available */
@@ -259,10 +294,18 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Top-level vs nested session. Nested clones (e.g. `/tan`) stay `sub` even at taskDepth 0. */
+	agentKind?: "main" | "sub";
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
+	/**
+	 * Session-scoped lineage context (current file + ordered ancestor roots)
+	 * derived live from the session manager per resolve. Absent on sessions
+	 * without lineage support (in-memory / headless tool hosts).
+	 */
+	getLineageContext?: () => Promise<LineageContext>;
 	/** Owning journal; full SDK managers also supply registered identity without changing advisor-local IDs. */
 	sessionManager?: Pick<
 		SessionManager,
@@ -324,6 +367,8 @@ export interface ToolSession {
 	getArtifactsDir?: () => string | null;
 	/** Get the ArtifactManager backing this session (shared across parent + subagents). */
 	getArtifactManager?: () => ArtifactManager | null;
+	/** Resolve an artifact body from the current session (including in-memory artifacts). */
+	getArtifactContent?: (id: string) => Promise<string | null>;
 	/** Allocate a new artifact path and ID for session-scoped truncated output. */
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
@@ -334,6 +379,14 @@ export interface ToolSession {
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
+	/** Session-scoped `/consult <model>` override; wins over `consult.model`. */
+	getConsultModelOverride?: () => string | undefined;
+	/** Live system prompt + messages for consult oneshot input. */
+	snapshotConsultContext?: () => { systemPrompt: string[]; messages: AgentMessage[] };
+	/** Session secret obfuscator for cross-model consult redaction. */
+	getSecretObfuscator?: () => SecretObfuscator | undefined;
+	/** Per-session consult quota counters; turn is reset on primary turn_start. */
+	consultUsage?: ConsultUsage;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
@@ -363,6 +416,18 @@ export interface ToolSession {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
+	/** Session-frozen latency arm lookup; lightweight test sessions may omit it. */
+	isLatencyArmEnabled?: (arm: LatencyArmId) => boolean;
+	/** Session-frozen latency arm snapshot (attribution for rollout decisions); test sessions may omit it. */
+	getLatencyArmSnapshot?: () => LatencyArmSnapshotV1;
+	/** Record that a latency arm actually engaged (treatment receipt for causal rollback). */
+	markLatencyArmFired?: (arm: LatencyArmId) => void;
+	/** Arms that actually engaged during this run; test sessions may omit it. */
+	getFiredLatencyArms?: () => LatencyArmId[];
+	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
+	invalidateLatencyArmSnapshot?: () => void;
+	/** Record that A1 getBranch threw; consumed as dshGetBranchError at session-end. */
+	recordDshGetBranchError?: () => void;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
@@ -450,6 +515,27 @@ export interface ToolSession {
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
 	getImageAttachments?: () => ImageAttachmentEntry[];
+
+	/**
+	 * Structured-compaction recovery access (read_omitted_content). Present only
+	 * when the session can serve recoverable omitted content. Callbacks read
+	 * live session state; they must never mutate it.
+	 */
+	readOmittedContent?: {
+		/** True only when read_omitted_content is currently authorized in the live tool set. */
+		authorized: () => boolean;
+		/** Current-session branch entries (read-only snapshot) or undefined when the session cannot serve recall right now. */
+		entries: () => readonly SessionEntry[] | undefined;
+		/**
+		 * Conservative pre-emission budget check: whether the full next provider
+		 * request — current context, tool results already accepted in this pending
+		 * batch, and this candidate including its visible metadata envelope —
+		 * fits the current model's usable window. Synchronous snapshot; the agent
+		 * loop re-admits serially at emission and is authoritative over this
+		 * pre-check.
+		 */
+		fits: (content: readonly (TextContent | ImageContent)[]) => boolean;
+	};
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -460,6 +546,7 @@ export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool |
  */
 export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	read: s => new ReadTool(s),
+	read_omitted_content: s => (s.readOmittedContent ? new ReadOmittedContentTool(s) : null),
 	security_scan: s => new SecurityScanTool(s),
 	bash: s => new BashTool(s),
 	edit: s => new EditTool(s),
@@ -472,6 +559,8 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
 	lsp: LspTool.createIf,
+	code_intel: CodeIntelTool.createIf,
+	consult: s => new ConsultTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	context_notes: ContextNotesTool.createIf,
@@ -487,6 +576,11 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	workflow: session => {
+		if (session.settings?.get?.("workflow.enabled" as never) === false) return null;
+		return new WorkflowTool(session, s => createEngineFromSessionSettings(s));
+	},
+	session_search: SessionSearchTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
@@ -586,6 +680,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			requestedTools.push("ast_grep");
 		}
 		if (
+			requestedTools.includes("grep") &&
+			!requestedTools.includes("code_intel") &&
+			session.settings.get("codeIntel.enabled") !== false
+		) {
+			requestedTools.push("code_intel");
+		}
+		if (
 			requestedTools.includes("edit") &&
 			!requestedTools.includes("ast_edit") &&
 			session.settings.get("astEdit.enabled")
@@ -632,6 +733,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
+		if (name === "code_intel") return session.settings.get("codeIntel.enabled") !== false;
 		if (name === "bash") return session.settings.get("bash.enabled");
 		if (name === "eval") return allowEval;
 		if (name === "debug") return session.settings.get("debug.enabled");
@@ -642,6 +744,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
+		if (name === "consult")
+			return (
+				session.settings.get("consult.enabled") &&
+				(session.taskDepth ?? 0) === 0 &&
+				session.agentKind !== "sub" &&
+				isConsultActivationAllowed(session)
+			);
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "security_scan") return session.settings.get("security.enabled");
 		if (name === "think") return externalThinkingActive;
@@ -675,6 +784,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
 		}
+		if (name === "session_search") return session.getLatencyArmSnapshot?.()?.arms.dsh_session_search === true;
 		return true;
 	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
@@ -704,7 +814,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const baseResults = await Promise.all(
 		baseEntries.map(async ([name, factory]) => {
 			const tool = await logger.time(`createTools:${name}`, factory as ToolFactory, session);
-			return tool ? wrapToolWithMetaNotice(tool) : null;
+			if (!tool) return null;
+			// Per-model toolAliases / argumentAliases from workflow stages.
+			return wrapAgentToolWithWorkflowAliases(wrapToolWithMetaNotice(tool), session);
 		}),
 	);
 	let tools = baseResults.filter((r): r is Tool => r !== null);
@@ -774,7 +886,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	) {
 		const writeTool = await logger.time("createTools:write", BUILTIN_TOOLS.write, session);
 		if (writeTool) {
-			const wrapped = wrapToolWithMetaNotice(writeTool);
+			const wrapped = wrapAgentToolWithWorkflowAliases(wrapToolWithMetaNotice(writeTool), session);
 			tools.push(wrapped);
 			toolRegistry.set(wrapped.name, wrapped);
 			builtInNames.add(wrapped.name);
@@ -783,7 +895,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	if (!restrictToolNames && xdevMounted && !tools.some(tool => tool.name === "read")) {
 		const readTool = await logger.time("createTools:read", BUILTIN_TOOLS.read, session);
 		if (readTool) {
-			const wrapped = wrapToolWithMetaNotice(readTool);
+			const wrapped = wrapAgentToolWithWorkflowAliases(wrapToolWithMetaNotice(readTool), session);
 			tools.push(wrapped);
 			toolRegistry.set(wrapped.name, wrapped);
 			builtInNames.add(wrapped.name);
@@ -795,5 +907,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		else session.isToolActive = name => finalActiveNames.has(name);
 	}
 
-	return tools;
+	// Catalog / presentation transform on real AgentTool descriptors (schema drop, filter).
+	// Must run after all tools are assembled so createTools-exposed objects match transformTools.
+	return applyWorkflowTransformTools(tools, session);
 }

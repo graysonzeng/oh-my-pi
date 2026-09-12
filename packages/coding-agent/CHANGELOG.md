@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added resumable, quality-gated multi-model workflows and `/delivery`, with independent review and verified worktree changes.
+- Added optional mid-turn `consult` with isolated context, usage budgets, and same-model auto-pause.
+- Added `code_intel`, structured compaction with recoverable tool output, and optional raw session-history search.
+- Added subagent performance-class budgets, live activity displays, deferred ordinary IRC messages, and offline latency reports.
+
 ### Fixed
 
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).

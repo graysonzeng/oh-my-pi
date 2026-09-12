@@ -1,10 +1,12 @@
 import { invalidateFsScanCache } from "@oh-my-pi/pi-natives";
+import { invalidateCodeIntelPath } from "./code-intel-index";
 
 /**
  * Invalidate shared filesystem scan caches after a content write/update.
  */
 export function invalidateFsScanAfterWrite(path: string): void {
 	invalidateFsScanCache(path);
+	invalidateCodeIntelPath(path);
 }
 
 /**
@@ -12,6 +14,7 @@ export function invalidateFsScanAfterWrite(path: string): void {
  */
 export function invalidateFsScanAfterDelete(path: string): void {
 	invalidateFsScanCache(path);
+	invalidateCodeIntelPath(path);
 }
 
 /**
@@ -22,7 +25,9 @@ export function invalidateFsScanAfterDelete(path: string): void {
  */
 export function invalidateFsScanAfterRename(oldPath: string, newPath: string): void {
 	invalidateFsScanCache(oldPath);
+	invalidateCodeIntelPath(oldPath);
 	if (newPath !== oldPath) {
 		invalidateFsScanCache(newPath);
+		invalidateCodeIntelPath(newPath);
 	}
 }

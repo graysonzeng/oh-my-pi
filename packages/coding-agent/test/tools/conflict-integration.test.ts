@@ -727,4 +727,69 @@ describe("write resolves conflicts via conflict://N", () => {
 		const after = await Bun.file(filePath).text();
 		expect(after).toBe("// extra line\n// another extra\nline 1\nnewApi(x)\nline N\n");
 	});
+
+	it("still resolves an allowed-file conflict when workflow write policy is installed", async () => {
+		const filePath = path.join(tempDir, "src.ts");
+		await Bun.write(filePath, TWO_WAY);
+		const session = createTestSession(tempDir, {
+			workflowWritePolicy: { repoRoot: tempDir, forbiddenPaths: ["package.json"] },
+		});
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-policy-allowed", { path: "src.ts" });
+		const result = await write.execute("write-policy-allowed", {
+			path: "conflict://1",
+			content: "@theirs",
+		});
+
+		expect(getText(result)).toContain("Resolved conflict #1");
+		expect(await Bun.file(filePath).text()).toBe("line 1\nnewApi(x)\nline N\n");
+	});
+
+	it("rejects a forbidden file resolved through conflict:// without mutating it", async () => {
+		const filePath = path.join(tempDir, "package.json");
+		await Bun.write(filePath, TWO_WAY);
+		const session = createTestSession(tempDir, {
+			workflowWritePolicy: { repoRoot: tempDir, forbiddenPaths: ["package.json"] },
+		});
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-policy-forbidden", { path: "package.json" });
+		await expect(
+			write.execute("write-policy-forbidden", {
+				path: "conflict://1",
+				content: "@ours",
+			}),
+		).rejects.toThrow(/Policy violation: workflow_path_forbidden/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_WAY);
+		expect(session.conflictHistory?.get(1)).toBeDefined();
+	});
+
+	it("rejects mixed bulk conflict://* before writing any file when one target is forbidden", async () => {
+		const allowedPath = path.join(tempDir, "allowed.ts");
+		const forbiddenPath = path.join(tempDir, "package.json");
+		await Bun.write(allowedPath, TWO_WAY);
+		await Bun.write(forbiddenPath, TWO_WAY);
+		const session = createTestSession(tempDir, {
+			workflowWritePolicy: { repoRoot: tempDir, forbiddenPaths: ["package.json"] },
+		});
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-policy-bulk-allowed", { path: "allowed.ts" });
+		await read.execute("read-policy-bulk-forbidden", { path: "package.json" });
+		expect(session.conflictHistory?.entries()).toHaveLength(2);
+
+		await expect(
+			write.execute("write-policy-bulk-mixed", {
+				path: "conflict://*",
+				content: "@ours",
+			}),
+		).rejects.toThrow(/Policy violation: workflow_path_forbidden/);
+		expect(await Bun.file(allowedPath).text()).toBe(TWO_WAY);
+		expect(await Bun.file(forbiddenPath).text()).toBe(TWO_WAY);
+		expect(session.conflictHistory?.entries()).toHaveLength(2);
+	});
 });

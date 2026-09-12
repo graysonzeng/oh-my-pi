@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
@@ -15,7 +16,6 @@ import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -52,9 +52,13 @@ interface RevivedSessionHandle {
 	setLastAssistantText: (text: string) => void;
 }
 
-function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
+function createRevivedSession(
+	activeToolNames: string[][],
+	extensionRunner?: unknown,
+	initialLastAssistantText?: string,
+): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
-	let lastAssistantText: string | undefined;
+	let lastAssistantText: string | undefined = initialLastAssistantText;
 	const trackedReplies: Promise<void>[] = [];
 	const session = {
 		...createSessionDefaults(),
@@ -69,10 +73,15 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		trackIrcReply: (pending: Promise<void>) => {
 			trackedReplies.push(pending);
 		},
+		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () =>
 			lastAssistantText === undefined
 				? undefined
-				: { role: "assistant", content: [{ type: "text", text: lastAssistantText }], stopReason: "stop" },
+				: {
+						role: "assistant",
+						content: [{ type: "text", text: lastAssistantText }],
+						stopReason: "stop",
+					},
 		extensionRunner,
 	} as unknown as AgentSession;
 	return {
@@ -90,7 +99,15 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean; agent?: string; isolated?: boolean },
+	contract?: {
+		tools?: string[];
+		readOnly?: boolean;
+		agent?: string;
+		isolated?: boolean;
+		readSummarize?: boolean;
+		performanceClass?: "review" | "explore" | "worker";
+		outputSchema?: unknown;
+	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -106,6 +123,9 @@ async function createPersistedSession(
 		readOnly: contract?.readOnly,
 		agent: contract?.agent,
 		isolated: contract?.isolated,
+		readSummarize: contract?.readSummarize,
+		performanceClass: contract?.performanceClass,
+		...(contract?.outputSchema !== undefined ? { outputSchema: contract.outputSchema } : {}),
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -128,7 +148,7 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, eventBus?: EventBus, settings: Settings = Settings.isolated()) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -142,7 +162,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		session: parentSession,
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
-		settings: Settings.isolated(),
+		settings,
 		enableLsp: true,
 		eventBus,
 	});
@@ -150,6 +170,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	IrcBus.resetGlobalForTests();
 	MCPManager.resetForTests();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
@@ -402,6 +423,35 @@ describe("persisted subagent revival", () => {
 		expect(unadvised.get("advisor.enabled")).toBe(false);
 	});
 
+	it("keeps read summarization false-only when reviving a bundled profile", async () => {
+		const cwd = makeTempDir("@pi-revive-read-summary-");
+		const forcedFalseFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			readSummarize: false,
+		});
+		const declaredTrueFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			readSummarize: true,
+		});
+		const captured: Settings[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options?.settings) captured.push(options.settings);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const parentEnabled = createFactory(cwd, undefined, Settings.isolated({ "read.summarize.enabled": true }));
+		const falseRef = createRef(forcedFalseFile);
+		const falseReviver = await parentEnabled(falseRef);
+		if (!falseReviver) throw new Error("Expected a persisted reviver");
+		await falseReviver(falseRef);
+
+		const parentDisabled = createFactory(cwd, undefined, Settings.isolated({ "read.summarize.enabled": false }));
+		const trueRef = createRef(declaredTrueFile);
+		const trueReviver = await parentDisabled(trueRef);
+		if (!trueReviver) throw new Error("Expected a persisted reviver");
+		await trueReviver(trueRef);
+
+		expect(captured.map(settings => settings.get("read.summarize.enabled"))).toEqual([false, false]);
+	});
+
 	it("restores the persisted custom model role before reopening the session", async () => {
 		const cwd = makeTempDir("@pi-custom-role-revive-");
 		const sessionFile = await createPersistedSession(cwd, false, "review-fast");
@@ -459,9 +509,18 @@ describe("persisted subagent revival", () => {
 		rpcRegistry.setSubscriptionLevel("progress");
 		const ref = createRef(sessionFile);
 		AgentRegistry.global().register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: {
+				deliverIrcMessage: async () => "injected",
+			} as unknown as AgentSession,
+		});
+		AgentRegistry.global().register({
 			id: ref.id,
 			displayName: ref.displayName,
 			kind: "sub",
+			parentId: "Main",
 			session: null,
 			sessionFile,
 			status: "parked",
@@ -676,5 +735,98 @@ describe("persisted subagent revival", () => {
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 		});
+	});
+	it("uses persisted performanceClass on a real wakeAgent stub and does not invent shadowReview", async () => {
+		const cwd = makeTempDir("@pi-revive-class-");
+		const reviewFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			agent: "task",
+			performanceClass: "review",
+		});
+		const workerFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			agent: "task",
+		});
+		const floorFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			agent: "reviewer",
+		});
+		const exploreFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			agent: "scout",
+		});
+		const captured: CreateAgentSessionOptions[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options) captured.push(options);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const factory = createFactory(cwd);
+		for (const sessionFile of [reviewFile, workerFile, floorFile, exploreFile]) {
+			const reviver = await factory(createRef(sessionFile));
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(createRef(sessionFile));
+		}
+
+		expect(captured.map(options => options.requireYieldTool)).toEqual([false, false, false, false]);
+	});
+	it("refreshes the completed artifact when a cold-revived subagent ends a wake turn with a valid schema final", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-valid-final-");
+		const outputSchema = {
+			type: "object",
+			properties: { approved: { type: "boolean" }, verdict: { type: "string" } },
+			required: ["approved", "verdict"],
+		};
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			agent: "reviewer",
+			performanceClass: "review",
+			outputSchema,
+		});
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([], undefined, JSON.stringify({ approved: false, verdict: "needs_revision" }));
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// The completed first run already wrote PASS to <artifactsDir>/<id>.md
+		// (artifactsDir = parent sessionFile sans ".jsonl"; see createFactory).
+		const artifactPath = path.join(cwd, "parent", `${ref.id}.md`);
+		await Bun.write(artifactPath, "# PASS\n\nApproved on first review.\n");
+
+		const observer = handle?.observer();
+		expect(observer).toBeDefined();
+		const record: CustomMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "please revise",
+			display: true,
+			details: { id: "irc-1", from: "Main", message: "please revise" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		// The wake turn ends with a schema-valid NEEDS_REVISION final message
+		// (no yield tool call). That valid final is authoritative: it must
+		// refresh <id>.md so the parent's agent:// link tracks the latest
+		// verdict instead of the stale PASS artifact.
+		const finish = observer?.([record]);
+		await finish?.();
+
+		const refreshed = await Bun.file(artifactPath).text();
+		expect(refreshed).not.toContain("# PASS");
+		expect(JSON.parse(refreshed)).toEqual({ approved: false, verdict: "needs_revision" });
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
 	});
 });

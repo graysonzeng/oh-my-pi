@@ -1,3 +1,9 @@
+{{#if finalizeOnly}}
+<system-reminder>
+The review turn stopped without a terminal verdict. This is the only submission reminder; do not resume investigation or repeat reads.
+Submit the findings already supported by evidence using a tool-free final JSON message matching the required schema, or terminal `yield` with `data` matching it. Mark unreviewed scope incomplete; never invent a passing verdict. If the required verdict cannot be supplied, write a final assistant message or terminal-yield `{ error }` describing the missing evidence and checked scope.
+</system-reminder>
+{{else}}
 {{#if budgetStop}}
 <system-reminder>
 Request budget crossed; in-flight turn stopped → forced wrap-up. MUST call `yield` NOW with best final report from completed work.
@@ -20,4 +26,5 @@ Default option 1 unless work done, blocked, or ready for an incremental section.
 
 NEVER end this turn with text only.
 </system-reminder>
+{{/if}}
 {{/if}}
