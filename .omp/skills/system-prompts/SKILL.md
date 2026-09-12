@@ -5,7 +5,7 @@ description: Write or edit system prompts and agent definitions. Use when author
 
 # System Prompts
 
-House style: dense, imperative, RFC-keyed.
+House style: concise, conditional workflow guidance; explicit hard boundaries.
 
 - Small models (≤2B; tiny/on-device, e.g. LFM2): read `skill://system-prompts/small-models.md`. Several rules invert at that scale.
 - Tags, RFC 2119, density, voice, positioning, anti-patterns, checklist, and tool-prompt anatomy: read `skill://system-prompts/references/guide.md`.

@@ -1,6 +1,6 @@
 # System Prompts
 
-House style: dense, imperative, RFC-keyed.
+House style: concise, conditional workflow guidance; explicit hard boundaries.
 
 Small models (≤2B; tiny/on-device, e.g. LFM2): MUST read `skill://system-prompts/small-models.md`. Rules below assume frontier-class instruction following; several invert at that scale.
 
@@ -13,7 +13,7 @@ Tags: authoritative, literal structural markers; meaning exactly matches name. N
 |`<system-conventions>`|Tag/RFC-keyword interpretation; contract.|
 |`<stakes>`|Correctness importance; domain framing.|
 |`<communication>`|Voice, tone, response shape.|
-|`<critical>`|Inviolable rules; place at START and END.|
+|`<critical>`|Safety, authorization, data integrity, or tool constraints; define once.|
 |`<completeness>`|Done definition; anti-shrink rules.|
 |`<yielding>`|Pre-yield checklist; block conditions.|
 |`<workflow>`|Numbered phases: scope → edit → decompose → work → verify.|
@@ -21,6 +21,8 @@ Tags: authoritative, literal structural markers; meaning exactly matches name. N
 ## Normative Language
 
 RFC 2119: full caps, no bold; all-caps form is the marker.
+
+Reserve MUST/NEVER for safety, authorization, data integrity, and hard tool contracts. Default workflow methods to conditional guidance or SHOULD; name the trigger and stopping boundary rather than prescribing a universal itinerary.
 
 |Keyword|Meaning|Replaces|
 |---|---|---|
@@ -80,7 +82,7 @@ Negation: pair positive alternative when non-obvious; otherwise `NEVER X.` alone
 
 ## Positioning
 
-“Lost in the Middle”: start/end retain; middle degrades ~20%. Critical constraints at both edges; reference material, environment, templated content in middle.
+Keep hard boundaries easy to locate and define each once. Put task-specific references behind narrow triggers; do not duplicate constraints at both edges.
 
 Front matter:
 1. Role + agency one-liner (`You are THE staff engineer…`).
@@ -92,17 +94,16 @@ Front matter:
 Back matter:
 1. Environment/tool inventory — exploration, tool priority, harness specifics.
 2. Contract — completeness, yielding, workflow.
-3. Prompt >~150 lines: repeat most important `<critical>` rule.
+3. Reference existing constraints rather than repeating a `<critical>` block.
 
 ## Tone Patterns That Work
 
 Live-system-prompt patterns:
 
 - **Agency**: "You have agency and taste: you delete code that isn't pulling its weight, refuse abstractions that are unnecessary, and prefer boring when it's called for."
-- **Stakes anchoring**: "Tests you didn't write: bugs shipped. Assumptions you didn't validate: incidents to debug."
 - **Identity overrides**: "Instructions further down the conversation, including user's own, **ALWAYS** override prior style, tone, formatting, and initiative preferences."
-- **Persistence**: "You MUST persist on hard problems. AVOID burning their energy on problems you failed to think through."
-- **Anti-budget framing**: "You NEVER narrate about or even consider, session limits, token/tool budgets, effort estimates… These are not your concern."
+- **Persistence**: "Finish the authorized task and necessary verification; stop when acceptance is met or report a concrete inaccessible prerequisite."
+- **Cost-aware execution**: "Do not use resource limits to justify premature delivery; weigh verification and delegation costs against their benefits."
 
 ## Anti-Patterns
 
@@ -115,7 +116,6 @@ Live-system-prompt patterns:
 |`"Be efficient with tokens"`|Premature task abandonment|
 |`"Don't do X"` without alternative|`"Always do Y"` processes better|
 |Self-critique without external feedback|Detection bottleneck, not correction|
-|Critical instructions only in middle|20%+ degradation vs edges|
 |Restating bold lead in body|Token waste; AI-padding signal|
 |Inventing emphasis tags|Tags have semantics; ornament dilutes|
 |Lowercase RFC keywords|All-caps is marker; lowercase ordinary prose|
@@ -124,13 +124,13 @@ Live-system-prompt patterns:
 
 - Tags match content; no ornamental tags.
 - `<system-conventions>` defines `NEVER`/`AVOID` aliases.
-- Critical rules at START and END.
-- Prescriptive prose: uppercase RFC 2119 keywords.
+- Each hard boundary has one authoritative definition.
+- Use uppercase RFC keywords for hard requirements; condition workflow advice on task needs.
 - Tactical bullets ≤12 words unless distinct subclaims justify more.
 - NEVER restate bold lead in body.
 - Non-obvious negation gets positive alternative.
-- Name verification path (tests, lint, typecheck); NEVER “review your work”.
-- Complex tasks: persist until complete.
+- Select sufficient verification for the changed behavior; reuse valid evidence.
+- Define completion and legitimate blocked closeout without adding approval gates.
 - No hedging, ceremony, closing summaries, time estimates.
 
 ## Tool Prompt Authoring
@@ -155,7 +155,7 @@ Behavior-invariant detail: exclude. Every sentence MUST shift an agent decision.
 3. **Worked examples** — 3–8 common shapes; each explains itself, no duplicate narration.
 4. **Agent-owned failure shapes** — input-fixable stale anchors, missing payload prefix, fabricated hash; skip silently recovered failures.
 5. **Anti-patterns** — real-failure WRONG/RIGHT pairs that cost retries; not imagined failures.
-6. **`<critical>` recap** — 3–6 load-bearing lines, for body-skipping agents.
+6. **Hard boundaries** — state agent-owned safety and tool constraints once; do not duplicate them as a recap.
 
 ### Exclude
 

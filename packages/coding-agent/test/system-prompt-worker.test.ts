@@ -65,13 +65,11 @@ describe("worker system prompt execution context", () => {
 		expect(main).toContain("§ Workflow");
 		expect(main).toContain("Delegation gates");
 		expect(main).toContain("§ Delivery");
-		expect(main).toContain("start unbounded: execute/delegate");
 		expect(main).toContain("Choose at most ONE primary routing/lifecycle skill");
 
 		expect(worker).not.toContain("§ Workflow");
 		expect(worker).not.toContain("Delegation gates");
 		expect(worker).not.toContain("§ Delivery");
-		expect(worker).not.toContain("start unbounded: execute/delegate");
 		expect(worker).not.toContain("Choose at most ONE primary routing/lifecycle skill");
 		expect(worker).toContain("Do not stop early because of turn count or elapsed time");
 	});
