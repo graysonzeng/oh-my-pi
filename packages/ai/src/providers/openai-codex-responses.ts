@@ -230,6 +230,7 @@ export function createOpenAICodexCompactionRequestContext(options: {
 }
 
 const CODEX_DEBUG = $flag("PI_CODEX_DEBUG");
+
 const CODEX_MAX_RETRIES = 5;
 const CODEX_RETRY_DELAY_MS = 500;
 
@@ -1732,14 +1733,14 @@ async function openInitialCodexEventStream(
 				);
 				const activateFallback = isFatal || websocketRetries >= websocketRetryBudget;
 				recordCodexWebSocketFailure(websocketState, activateFallback);
-				CODEX_DEBUG &&
-					logger.debug("[codex] codex websocket fallback", {
-						error: error.message,
-						retry: websocketRetries,
-						retryBudget: websocketRetryBudget,
-						activated: activateFallback,
-						fatal: isFatal,
-					});
+				logger.warn("[codex] websocket fallback", {
+					model: model.id,
+					error: error.message,
+					retry: websocketRetries,
+					retryBudget: websocketRetryBudget,
+					activated: activateFallback,
+					fatal: isFatal,
+				});
 				if (!activateFallback) {
 					websocketRetries += 1;
 					await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries), {
@@ -2252,17 +2253,16 @@ class CodexStreamProcessor {
 				let firstTokenTime = this.firstTokenTime;
 				for await (const rawEvent of this.runtime.eventStream) {
 					firstTokenTime = this.#handleStreamEvent(rawEvent, firstTokenTime);
+					this.firstTokenTime = firstTokenTime;
 					if (this.runtime.sawTerminalEvent) break;
 				}
 				if (!this.runtime.sawTerminalEvent) {
-					CODEX_DEBUG &&
-						logger.debug("[codex] codex stream ended unexpectedly", {
-							transport: this.runtime.transport,
-							terminalEventSeen: false,
-							unexpectedStreamEnd: true,
-							sentTurnStateHeader: Boolean(this.requestContext.turnState.value),
-							sentModelsEtagHeader: Boolean(this.requestContext.websocketState?.modelsEtag),
-						});
+					logger.warn("[codex] stream ended unexpectedly", {
+						model: this.model.id,
+						transport: this.runtime.transport,
+						hadFirstToken: firstTokenTime !== undefined,
+						unexpectedStreamEnd: true,
+					});
 					throw new CodexProviderStreamError("Codex stream ended before terminal completion event", true);
 				}
 				return { firstTokenTime };
@@ -2905,15 +2905,16 @@ class CodexStreamProcessor {
 			isFatal ||
 			this.runtime.websocketStreamRetries >= CODEX_WEBSOCKET_RETRY_BUDGET;
 		recordCodexWebSocketFailure(state, activateFallback);
-		CODEX_DEBUG &&
-			logger.debug("[codex] codex websocket stream fallback", {
-				error: streamError.message,
-				retry: this.runtime.websocketStreamRetries,
-				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
-				activated: activateFallback,
-				fatal: isFatal,
-				replayedBufferedOutput: replayingBufferedOutputOverSse,
-			});
+		logger.warn("[codex] websocket stream fallback", {
+			model: this.model.id,
+			error: streamError.message,
+			retry: this.runtime.websocketStreamRetries,
+			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
+			activated: activateFallback,
+			fatal: isFatal,
+			hadFirstToken: this.firstTokenTime !== undefined,
+			replayedBufferedOutput: replayingBufferedOutputOverSse,
+		});
 
 		if (!activateFallback) {
 			this.runtime.websocketStreamRetries += 1;
@@ -2961,11 +2962,12 @@ class CodexStreamProcessor {
 		if (!isConfigFailure) return false;
 
 		recordCodexWebSocketFailure(websocketState, true);
-		CODEX_DEBUG &&
-			logger.debug("[codex] codex websocket config failure, falling back to SSE", {
-				error: error.message,
-				code: error.code,
-			});
+		logger.warn("[codex] websocket config failure, falling back to SSE", {
+			model: this.model.id,
+			error: error.message,
+			code: error.code,
+			hadFirstToken: this.firstTokenTime !== undefined,
+		});
 
 		this.#closeOpenBlocksForReplay();
 		this.runtime.resetAccumulators();
@@ -3041,13 +3043,14 @@ class CodexStreamProcessor {
 			websocketState.modelsEtag = undefined;
 		}
 
-		CODEX_DEBUG &&
-			logger.debug("[codex] retrying codex provider stream error", {
-				error: error instanceof Error ? error.message : String(error),
-				retry: this.runtime.providerRetryAttempt,
-				retryBudget: CODEX_MAX_RETRIES,
-				transport: this.runtime.transport,
-			});
+		logger.warn("[codex] retrying provider stream error", {
+			model: this.model.id,
+			error: error instanceof Error ? error.message : String(error),
+			retry: this.runtime.providerRetryAttempt,
+			retryBudget: CODEX_MAX_RETRIES,
+			transport: this.runtime.transport,
+			hadFirstToken: this.firstTokenTime !== undefined,
+		});
 
 		this.runtime.resetAccumulators();
 		this.runtime.sawTerminalEvent = false;
@@ -3087,11 +3090,12 @@ class CodexStreamProcessor {
 			// Activate fallback so subsequent turns use SSE, and replay this turn over SSE
 			// instead of surfacing a raw transport error to the caller.
 			recordCodexWebSocketFailure(state, true);
-			CODEX_DEBUG &&
-				logger.debug("[codex] codex websocket reopen failed, falling back to SSE", {
-					error: error.message,
-					retry: this.runtime.websocketStreamRetries,
-				});
+			logger.warn("[codex] websocket reopen failed, falling back to SSE", {
+				model: this.model.id,
+				error: error.message,
+				retry: this.runtime.websocketStreamRetries,
+				hadFirstToken: this.firstTokenTime !== undefined,
+			});
 			await this.#reopenSseStream(state);
 		}
 	}

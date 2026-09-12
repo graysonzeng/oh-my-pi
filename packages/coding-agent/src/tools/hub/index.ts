@@ -10,9 +10,10 @@
  *   `send`/`wait` when they carry a process `name`.
  *
  * The unified `wait` blocks until the FIRST of: a matching peer message, a
- * watched job settling, the wait window elapsing, or a steering interrupt.
+ * watched job settling, an explicit wait window elapsing, or a steering interrupt.
  * Job results always deliver themselves when they finish — `wait` exists for
- * when the agent has nothing else to do.
+ * when the agent has nothing else to do. Omit `timeoutMs` (default `smart`) to
+ * stay blocked until a job or message; do not pass `timeoutMs` to poll jobs.
  */
 
 import { type } from "@oh-my-pi/omptype";
@@ -222,7 +223,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		},
 		{
 			caption: "Block until a specific peer answers",
-			call: { op: "wait", from: "AuthLoader", timeoutMs: 60000 },
+			call: { op: "wait", from: "AuthLoader" },
 		},
 		{
 			caption: "Kill a hung background job",
@@ -433,13 +434,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
 		}
 
-		// Wait window: explicit timeout wins (0 = no window); otherwise the
-		// `async.pollWaitDuration` fixed value or smart ladder. The ladder
-		// starts at the floor and climbs as the agent waits in a tight loop,
-		// then resets once it steps away (see AsyncJobManager.nextPollWaitMs).
-		const window = resolvePollWindow(this.session, manager, ownerId);
-		const windowMs = params.timeoutMs !== undefined ? normalizeIrcTimeoutMs(params.timeoutMs) : window.waitMs;
-		const usedSmartWindow = window.smart && params.timeoutMs === undefined;
+		// Wait window: `smart` (default) ignores a finite timeoutMs so the model
+		// cannot poll jobs. A fixed `async.pollWaitDuration` still honors
+		// timeoutMs, or uses the configured duration when it is omitted.
+		const window = resolvePollWindow(this.session);
+		const requestedMs = params.timeoutMs !== undefined ? normalizeIrcTimeoutMs(params.timeoutMs) : window.waitMs;
+		const windowMs = window.smart ? 0 : requestedMs;
 
 		const racePromises: Promise<unknown>[] = runningJobs.map(j => j.promise);
 
@@ -507,15 +507,10 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			}
 		} finally {
 			manager.unwatchJobs(watchedJobIds);
-			if (timeoutHandle) clearTimeout(timeoutHandle);
-			if (progressTimer) clearInterval(progressTimer);
+			clearTimeout(timeoutHandle);
+			clearInterval(progressTimer);
 			busAbort?.abort(busCancelled);
 			removeBusAbortListener?.();
-			if (usedSmartWindow) {
-				// Reset the idle-gap clock: escalate if the agent waits again soon,
-				// drop back to the floor once it goes quiet for a while.
-				manager.recordPollWaitEnd(ownerId);
-			}
 		}
 
 		// A message consumed by the bus waiter must never be dropped — it wins

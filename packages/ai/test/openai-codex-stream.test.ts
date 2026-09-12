@@ -3369,6 +3369,7 @@ describe("openai-codex streaming", () => {
 	it("carries fatal websocket fallback into isolated compaction transport", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
+		const warnSpy = vi.spyOn(piUtils.logger, "warn").mockImplementation(() => {});
 
 		const payload = Buffer.from(
 			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
@@ -3453,6 +3454,10 @@ describe("openai-codex streaming", () => {
 		expect(transportDetails.lastTransport).toBe("sse");
 		expect(transportDetails.websocketDisabled).toBe(true);
 		expect(transportDetails.fallbackCount).toBe(1);
+		expect(warnSpy).toHaveBeenCalledWith(
+			"[codex] websocket fallback",
+			expect.objectContaining({ model: "gpt-5.3-codex-spark", activated: true }),
+		);
 	});
 
 	it("isolates compaction transport and preserves main mid-turn state", async () => {

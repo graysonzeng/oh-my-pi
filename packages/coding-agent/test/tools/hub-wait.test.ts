@@ -61,12 +61,15 @@ function renderWaitJobs(details: CoordinationDetails, isPartial: boolean): strin
 	);
 }
 
-function makeSession(manager: AsyncJobManager | undefined): ToolSession {
+function makeSession(
+	manager: AsyncJobManager | undefined,
+	pollWaitDuration: "5s" | "10s" | "30s" | "1m" | "5m" | "smart" = "5m",
+): ToolSession {
 	const stub = {
 		cwd: process.cwd(),
 		settings: {
 			get(key: string): unknown {
-				if (key === "async.pollWaitDuration") return "5m";
+				if (key === "async.pollWaitDuration") return pollWaitDuration;
 				if (key === "irc.timeoutMs") return 120_000;
 				return undefined;
 			},
@@ -164,6 +167,55 @@ describe("hub unified wait", () => {
 		expect(text).toContain("Results auto-deliver; do not poll");
 		expect(result.useless).toBe(true);
 		manager.cancel(job.id);
+	});
+
+	test("smart wait without timeoutMs stays blocked until the job settles", async () => {
+		// Regression: default smart used a 5s poll timer, so a blocked parent
+		// returned Still Running and spent another LLM turn to re-wait.
+		vi.useFakeTimers();
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const job = registerHangingJob(manager, "sleep forever");
+		const tool = new HubTool(makeSession(manager, "smart"));
+		let settled = false;
+		const pending = tool.execute("call_smart", { op: "wait", ids: [job.id] }).then(result => {
+			settled = true;
+			return result;
+		});
+		await Promise.resolve();
+		vi.advanceTimersByTime(30_000);
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		job.finish("done");
+		const result = await pending;
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("## Completed (1)");
+		expect(result.useless).not.toBe(true);
+	});
+
+	test("smart wait ignores timeoutMs so a job poll cannot bounce back", async () => {
+		vi.useFakeTimers();
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const hang = Promise.withResolvers<string>();
+		manager.register("task", "MergeCore", async () => hang.promise, { id: "MergeCore", ownerId: SELF_ID });
+		const tool = new HubTool(makeSession(manager, "smart"));
+		let settled = false;
+		const pending = tool.execute("call_poll", { op: "wait", from: "MergeCore", timeoutMs: 120_000 }).then(result => {
+			settled = true;
+			return result;
+		});
+		await Promise.resolve();
+		vi.advanceTimersByTime(130_000);
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		hang.resolve("merged");
+		const result = await pending;
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("## Completed (1)");
+		expect(result.useless).not.toBe(true);
 	});
 
 	test("bare wait with no jobs and no running peers returns immediately", async () => {

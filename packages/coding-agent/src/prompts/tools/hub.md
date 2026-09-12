@@ -11,10 +11,10 @@ Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`
   Ordinary messages arrive after the current tool batch, before the next model request; they do not skip pending tools. Use `interrupt: true` for urgent stop, scope, permission, or conflict corrections; urgency is never inferred from message text. This skips pending tools and interrupts eligible waits, not arbitrary running commands.
   Ordinary: `{ "op": "send", "to": "AuthLoader", "message": "Still touching src/server/auth.ts?" }`. Urgent: `{ "op": "send", "to": "AuthLoader", "message": "Stop. Use the new auth helper instead.", "interrupt": true }`.
 - **Format**: plain prose ONLY. No JSON status objects. Share paths via `local://`/`artifact://` URLs, not pasted blobs.
-- **`wait`**: use ONLY when completely blocked with no other work. Returns on the FIRST of: an incoming message, a watched job finishing, the wait window elapsing, or a steering interrupt — NOT when all jobs finish; re-issue to keep waiting.
+- **`wait`**: use ONLY when completely blocked with no other work. Omit `timeoutMs` so the call stays blocked until a watched job finishes or a matching message arrives. Returns on the FIRST of: an incoming message, a watched job finishing, an explicit wait window elapsing, or a steering interrupt — NOT when all jobs finish.
   - Bare `wait` watches every running job AND incoming messages. NEVER pass an array of every running ID; `ids` narrows to specific jobs, `from` to one peer (or use `await: true` on send).
-  - A **user** message arriving as steering is not a wake reason to poll past: answer it in a text block BEFORE re-issuing `wait`. Parent/peer steering is answered with `send`; advisor and budget steers need no reply.
-  - Results auto-deliver; do not poll. Window expiry while jobs still run is not delivery — continue other work and re-issue wait only if you have zero remaining work. If no jobs are running, do not repeat a bare wait.
+  - A **user** message arriving as steering is not a wake reason to keep waiting: answer it in a text block. Parent/peer steering is answered with `send`; advisor and budget steers need no reply.
+  - Results auto-deliver; do not poll. NEVER pass `timeoutMs` to poll jobs. Finite `timeoutMs` is only for giving up on a peer reply (`from`). Window expiry while jobs still run is not delivery — do other work. Do not call `wait` again to keep polling the same jobs. If no jobs are running, do not repeat a bare wait.
   - While subagents run, keep doing independent parent work (`read`/`grep`/`edit`) instead of sitting in `wait`.
 - **`inbox`**: drain queued messages without blocking.
 - **`cancel`**: kill background jobs by `ids` when they have hung, stalled, or are no longer needed. Returns immediately.

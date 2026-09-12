@@ -51,7 +51,7 @@ const WAIT_DURATION_MS: Record<string, number> = {
 };
 
 const WAIT_AUTO_DELIVER_HINT =
-	"Results auto-deliver; do not poll. Continue other work; re-issue wait only if you have zero remaining work.";
+	"Results auto-deliver; do not poll. Window expiry is not delivery — do other work. Do not call wait again to keep polling the same jobs.";
 const WAIT_IDLE_HINT = "If no jobs are running, do not repeat a bare wait.";
 
 /**
@@ -67,17 +67,11 @@ export function isWaitingPollDetails(details: unknown): boolean {
 	return d.jobs.every(job => job?.status === "running");
 }
 
-/** Poll window for a job-watching wait: `async.pollWaitDuration` fixed value or smart ladder. */
-export function resolvePollWindow(
-	session: ToolSession,
-	manager: AsyncJobManager,
-	ownerId: string | undefined,
-): { waitMs: number; smart: boolean } {
+/** Poll window for a job-watching wait: fixed `async.pollWaitDuration`, or no window when `smart`. */
+export function resolvePollWindow(session: ToolSession): { waitMs: number; smart: boolean } {
 	const pollSetting = session.settings.get("async.pollWaitDuration");
 	const smart = pollSetting === "smart";
-	const waitMs = smart
-		? manager.nextPollWaitMs(ownerId)
-		: ((pollSetting ? WAIT_DURATION_MS[pollSetting] : undefined) ?? WAIT_DURATION_MS["30s"]);
+	const waitMs = smart ? 0 : ((pollSetting ? WAIT_DURATION_MS[pollSetting] : undefined) ?? WAIT_DURATION_MS["30s"]);
 	return { waitMs, smart };
 }
 
