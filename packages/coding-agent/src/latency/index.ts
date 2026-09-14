@@ -9,3 +9,4 @@ export * from "./provider-health-breaker";
 export * from "./read-view-key";
 export * from "./rollout-cohort";
 export * from "./stable-serialize";
+export * from "./tool-error-streak";

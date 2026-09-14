@@ -202,6 +202,7 @@ import {
 	metricsEventId,
 } from "../latency/assignment";
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
+import { clearToolErrorStreak, noteToolErrorStreak } from "../latency/tool-error-streak";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import {
 	buildOrdinarySessionObservationJoin,
@@ -236,6 +237,7 @@ import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/appr
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import type { PlanModeState } from "../plan-mode/state";
+import { isSkippedSyntheticResult } from "../presentation/tool-status";
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
@@ -284,6 +286,7 @@ import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { resolveConsultSelection } from "../tools/consult-model";
 import { type ConsultDetails, type ConsultUsage, resetConsultSession, resetConsultTurn } from "../tools/consult-state";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { clearReadRepeatTrackers } from "../tools/read";
 import { parseReadPathSelector } from "../tools/read-selector";
 import {
 	buildResolveReminderMessage,
@@ -4491,6 +4494,8 @@ export class AgentSession {
 			// the generic summary/truncate/TTSR optimizers must never rewrite
 			// the original data or the visible cursor envelope. The serialized
 			// final admission is the only allowed shortening point.
+			// This excluded result still breaks a streak, without changing recovery bytes.
+			clearToolErrorStreak(this);
 			return undefined;
 		}
 		if (
@@ -4505,11 +4510,35 @@ export class AgentSession {
 			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 		}
+		// Fingerprint the raw result before optimizer/TTSR composition; advisory only.
+		const errorStreakAdvisory = this.#toolErrorStreakAdvisory(ctx);
 		const optimized = await this.#optimizeOrdinaryToolResult(ctx);
 		const ttsr = this.#ttsr.afterToolCall(
 			optimized ? { ...ctx, result: { ...ctx.result, content: optimized.content ?? ctx.result.content } } : ctx,
 		);
-		return ttsr ?? optimized;
+		const base = ttsr ?? optimized;
+		if (errorStreakAdvisory === undefined) return base;
+		return {
+			...base,
+			content: [...(base?.content ?? ctx.result.content), { type: "text" as const, text: errorStreakAdvisory }],
+		};
+	}
+
+	/** One-shot advisory after N identical real tool errors; clear on success. */
+	#toolErrorStreakAdvisory(ctx: AfterToolCallContext): string | undefined {
+		if (isSkippedSyntheticResult(ctx.result)) {
+			clearToolErrorStreak(this);
+			return undefined;
+		}
+		if (!ctx.isError) {
+			clearToolErrorStreak(this);
+			return undefined;
+		}
+		const parts: string[] = [];
+		for (const block of ctx.result.content ?? []) {
+			if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
+		}
+		return noteToolErrorStreak(this, ctx.toolCall.name, parts.join("\n"));
 	}
 
 	/**
@@ -6729,6 +6758,8 @@ export class AgentSession {
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
 		resetConsultSession(this);
+		clearToolErrorStreak(this);
+		clearReadRepeatTrackers(this);
 	}
 
 	#ensureLatencyArmSnapshot(): LatencyArmSnapshotV1 {

@@ -67,6 +67,8 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 			description: "Low-reasoning agent for strictly mechanical updates or data collection only",
 			model: ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"],
 			thinkingLevel: Effort.Medium,
+			// Clamp model :max/:high suffixes — explore/mechanical work must not inherit hi/xhigh (P2 Track R).
+			maxEffort: Effort.Medium,
 		},
 		template: taskMd,
 	},

@@ -91,6 +91,11 @@ export interface AsyncJob {
 	 */
 	agentId?: string;
 	/**
+	 * Originating parent `task` tool call id. Distinguishes reused spawn
+	 * labels across sequential task calls when persisted on delivery/hub rows.
+	 */
+	taskToolCallId?: string;
+	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
 	 * batch semaphore). Queued jobs do not count toward the running-job limit
 	 * until the caller invokes `markRunning()` from the run context.
@@ -155,7 +160,10 @@ interface AsyncJobDelivery {
 	 * retrying) — without it, a recovered delivery would silently drop
 	 * `structured` even though `text` survives on the delivery itself.
 	 */
-	jobSnapshot?: Pick<AsyncJob, "type" | "status" | "startTime" | "label" | "structured" | "agentId" | "latestDetails">;
+	jobSnapshot?: Pick<
+		AsyncJob,
+		"type" | "status" | "startTime" | "label" | "structured" | "agentId" | "latestDetails" | "taskToolCallId"
+	>;
 }
 
 export interface AsyncJobDeliveryState {
@@ -177,6 +185,8 @@ export interface AsyncJobRegisterOptions {
 	ownerId?: string;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
+	/** Originating parent `task` tool call id; see {@link AsyncJob.taskToolCallId}. */
+	taskToolCallId?: string;
 	onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
@@ -304,6 +314,7 @@ export class AsyncJobManager {
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
+			taskToolCallId: options?.taskToolCallId,
 			queued: options?.queued === true,
 		};
 
@@ -935,6 +946,7 @@ export class AsyncJobManager {
 						label: job.label,
 						structured: job.structured,
 						agentId: job.agentId,
+						taskToolCallId: job.taskToolCallId,
 						latestDetails: job.latestDetails,
 					}
 				: undefined,
@@ -1065,6 +1077,7 @@ export class AsyncJobManager {
 			resultText: delivery.text,
 			structured: snapshot.structured,
 			agentId: snapshot.agentId,
+			taskToolCallId: snapshot.taskToolCallId,
 			latestDetails: snapshot.latestDetails,
 		};
 	}

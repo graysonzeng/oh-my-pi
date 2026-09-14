@@ -110,6 +110,55 @@ function taskCall(opts: {
 	});
 }
 
+function hubCall(opts: { callId: string; ts: number; ids?: string[] }): unknown {
+	return assistantMsg({
+		ts: opts.ts,
+		model: "gateway/grok-4.6",
+		ttft: 20,
+		duration: 80,
+		usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 2, cost: { total: 0.01 } },
+		content: [
+			{
+				type: "toolCall",
+				id: opts.callId,
+				name: "hub",
+				arguments: { op: "wait", ids: opts.ids ?? ["Worker"] },
+			},
+		],
+	});
+}
+
+function customAsyncResult(opts: {
+	ts: number;
+	content: string | Array<{ type: string; text?: string }>;
+	details?: unknown;
+}): unknown {
+	return {
+		type: "custom_message",
+		id: `async-${opts.ts}`,
+		parentId: null,
+		timestamp: "2026-09-09T10:00:00.000Z",
+		customType: "async-result",
+		content: opts.content,
+		details: opts.details,
+		display: true,
+	};
+}
+
+function sessionInit(opts: { agent?: string; performanceClass?: "review" | "explore" | "worker" }): unknown {
+	return {
+		type: "session_init",
+		id: "init",
+		parentId: null,
+		timestamp: "2026-09-09T10:00:00.000Z",
+		systemPrompt: "sys",
+		task: "do work",
+		tools: [],
+		agent: opts.agent,
+		performanceClass: opts.performanceClass,
+	};
+}
+
 describe("parseSessionJsonl", () => {
 	it("skips malformed lines and still parses neighbors so a torn tail cannot drop the session", () => {
 		const text = [
@@ -196,6 +245,29 @@ describe("buildSubagentBaselineReport", () => {
 		expect(json).not.toContain("please ");
 		expect(report.sessions.parentCount).toBe(1);
 		expect(report.sessions.childCount).toBe(1);
+	});
+
+	it("falls back to <task-result completionKind> in toolResult text when details.results is empty", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(userMsg(1000, "go")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "Worker" }] })),
+				line(
+					toolResult({
+						callId: "c1",
+						ts: 4000,
+						text: `<task-result id="Worker" status="budget_stop" completionKind="budget_stop" duration="1s">partial</task-result>`,
+						details: { results: [] },
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.completionKinds.budget_stop).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.spawnQueueMs).toEqual({ n: 0, p50: null, p90: null });
 	});
 
 	it("keeps missing timings and completion as null/unknown instead of 0 or passed on old records", () => {
@@ -652,5 +724,629 @@ describe("buildSubagentBaselineReport", () => {
 		expect(report.sessions.unlinkedChildCount).toBe(0);
 		expect(report.unmatchedToolResults).toBe(1);
 		expect(JSON.stringify(report)).not.toContain("stray");
+	});
+
+	it("attributes hub <task-result> completionKind to the original task spawn, not the hub call", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "AstraSolPiReview" }] })),
+				line(
+					toolResult({
+						callId: "c1",
+						ts: 2010,
+						text: "Spawned agent `AstraSolPiReview` (job `AstraSolPiReview`).",
+						details: { results: [], async: { state: "running", jobId: "AstraSolPiReview", type: "task" } },
+					}),
+				),
+				line(hubCall({ callId: "h1", ts: 3000, ids: ["AstraSolPiReview"] })),
+				line(
+					toolResult({
+						callId: "h1",
+						ts: 8000,
+						name: "hub",
+						text: `## Completed (1)\n\n### AstraSolPiReview [task] — completed\n\`\`\`\n<task-result id="AstraSolPiReview" agent="subagent-astra" status="completed" duration="5s">ok</task-result>\n\`\`\``,
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.sessions.spawnCalls).toBe(1);
+		expect(report.completionKinds.completed).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.coverage.spawnQueueMs).toEqual({ present: 0, unknown: 1 });
+		expect(report.spawnQueueMs).toEqual({ n: 0, p50: null, p90: null });
+	});
+
+	it("recovers completionKind and spawnQueueMs from async-result custom_message details", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "Worker" }] })),
+				line(toolResult({ callId: "c1", ts: 2010, details: { results: [] } })),
+				line(
+					customAsyncResult({
+						ts: 5000,
+						content: `<task-result id="Worker" status="budget_stop" duration="2s">partial</task-result>`,
+						details: {
+							jobs: [
+								{
+									jobId: "Worker",
+									agentUrlId: "Worker",
+									completionKind: "budget_stop",
+									spawnQueueMs: 42,
+								},
+							],
+						},
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.completionKinds.budget_stop).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.spawnQueueMs).toEqual({ n: 1, p50: 42, p90: 42 });
+		expect(report.coverage.spawnQueueMs).toEqual({ present: 1, unknown: 0 });
+	});
+
+	it("parses async-result content as either a string or text blocks", () => {
+		const stringParent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "Worker" }] })),
+				line(toolResult({ callId: "c1", ts: 2010, details: { results: [] } })),
+				line(
+					customAsyncResult({
+						ts: 5000,
+						content: `<task-result id="Worker" status="completed" completionKind="completed">ok</task-result>`,
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const blockParent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess2")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "Worker" }] })),
+				line(toolResult({ callId: "c1", ts: 2010, details: { results: [] } })),
+				line(
+					customAsyncResult({
+						ts: 5000,
+						content: [
+							{
+								type: "text",
+								text: `<task-result id="Worker" status="timeout" completionKind="timeout">late</task-result>`,
+							},
+						],
+					}),
+				),
+			].join("\n"),
+			"/tmp/sessions/demo/sess2.jsonl",
+		);
+		expect(buildSubagentBaselineReport([stringParent]).completionKinds.completed).toBe(1);
+		expect(buildSubagentBaselineReport([blockParent]).completionKinds.timeout).toBe(1);
+		expect(buildSubagentBaselineReport([stringParent]).coverage.spawnQueueMs).toEqual({ present: 0, unknown: 1 });
+	});
+
+	it("lets structured completionKind win over IRC and fills remaining rows per id", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(
+					taskCall({
+						callId: "batch",
+						ts: 1000,
+						tasks: [{ name: "Worker" }, { name: "Reviewer" }],
+					}),
+				),
+				line(
+					toolResult({
+						callId: "batch",
+						ts: 4000,
+						text: `<task-result id="Worker" status="timeout" completionKind="timeout">nope</task-result>\n<task-result id="Reviewer" status="budget_stop" completionKind="budget_stop">partial</task-result>`,
+						details: {
+							results: [
+								{ id: "Worker", completionKind: "completed", reviewMetrics: { spawnQueueMs: 9 } },
+								{ id: "Reviewer" },
+							],
+						},
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.completionKinds.completed).toBe(1);
+		expect(report.completionKinds.budget_stop).toBe(1);
+		expect(report.completionKinds.timeout).toBeUndefined();
+		expect(report.coverage.completionKind).toEqual({ present: 2, unknown: 0 });
+		expect(report.spawnQueueMs).toEqual({ n: 1, p50: 9, p90: 9 });
+		expect(report.coverage.spawnQueueMs).toEqual({ present: 1, unknown: 1 });
+	});
+
+	it("never assigns mismatched explicit IDs and keeps missing batch members in the denominator", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(
+					taskCall({
+						callId: "batch",
+						ts: 1000,
+						tasks: [
+							{ name: "Worker", effort: "lo" },
+							{ name: "Reviewer", effort: "hi" },
+						],
+					}),
+				),
+				line(
+					toolResult({
+						callId: "batch",
+						ts: 4000,
+						text: `<task-result id="Stranger" status="completed" completionKind="completed">other</task-result>`,
+						details: {
+							results: [{ id: "Worker", completionKind: "completed", reviewMetrics: { spawnQueueMs: 4 } }],
+						},
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.sessions.spawnCalls).toBe(1);
+		expect(report.completionKinds.completed).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 1 });
+		expect(report.coverage.spawnQueueMs).toEqual({ present: 1, unknown: 1 });
+		expect(report.spawnEfforts.lo).toBe(1);
+		expect(report.spawnEfforts.hi).toBe(1);
+	});
+
+	it("does not double-count a spawn observed on both hub wait and async-result", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "Worker" }] })),
+				line(toolResult({ callId: "c1", ts: 2010, details: { results: [] } })),
+				line(hubCall({ callId: "h1", ts: 3000 })),
+				line(
+					toolResult({
+						callId: "h1",
+						ts: 4000,
+						name: "hub",
+						text: `<task-result id="Worker" status="completed" completionKind="completed">ok</task-result>`,
+					}),
+				),
+				line(
+					customAsyncResult({
+						ts: 4100,
+						content: `<task-result id="Worker" status="completed" completionKind="completed">ok</task-result>`,
+						details: { jobs: [{ jobId: "Worker", completionKind: "completed", spawnQueueMs: 7 }] },
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.sessions.spawnCalls).toBe(1);
+		expect(report.completionKinds.completed).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.spawnQueueMs).toEqual({ n: 1, p50: 7, p90: 7 });
+	});
+
+	it("buckets childActiveWall by session_init performance class and leaves unknown when class is absent", () => {
+		const t0 = 1_700_000_000_000;
+		const parent = parseSessionJsonl([line(sessionHeader("sess1")), line(userMsg(t0, "go"))].join("\n"), PARENT);
+		const reviewChild = parseSessionJsonl(
+			[
+				line(sessionHeader("review-child")),
+				line(sessionInit({ agent: "subagent-astra", performanceClass: "review" })),
+				line(
+					assistantMsg({
+						ts: t0,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+				line(
+					assistantMsg({
+						ts: t0 + 4000,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+			].join("\n"),
+			CHILD_B,
+		);
+		const unknownChild = parseSessionJsonl(
+			[
+				line(sessionHeader("filename-worker")),
+				line(
+					assistantMsg({
+						ts: t0,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+				line(
+					assistantMsg({
+						ts: t0 + 1000,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+			].join("\n"),
+			CHILD_A,
+		);
+		const report = buildSubagentBaselineReport([parent, reviewChild, unknownChild]);
+		expect(report.childActiveWallMs.n).toBe(2);
+		expect(report.childActiveWallByClass.review.n).toBe(1);
+		expect(report.childActiveWallByClass.review.p50).toBe(4000);
+		expect(report.childActiveWallByClass.worker.n).toBe(0);
+		expect(report.childActiveWallByClass.unknown.n).toBe(1);
+		expect(report.childActiveWallByClass.unknown.p50).toBe(1000);
+		expect(report.parentFinalVerification).toEqual({ passed: 0, failed: 0, unknown: 1 });
+		expect(report.e2eMs).toBeNull();
+	});
+
+	it("classifies childActiveWall from session_init agent via the performance-class resolver", () => {
+		const t0 = 1_700_000_000_000;
+		const parent = parseSessionJsonl([line(sessionHeader("sess1"))].join("\n"), PARENT);
+		const child = parseSessionJsonl(
+			[
+				line(sessionHeader("scout-child")),
+				line(sessionInit({ agent: "scout" })),
+				line(
+					assistantMsg({
+						ts: t0,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+				line(
+					assistantMsg({
+						ts: t0 + 2500,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+			].join("\n"),
+			CHILD_A,
+		);
+		const report = buildSubagentBaselineReport([parent, child]);
+		expect(report.childActiveWallByClass.explore).toEqual({ n: 1, p50: 2500, p90: 2500 });
+		expect(report.childActiveWallByClass.unknown.n).toBe(0);
+	});
+
+	it("matches a suffixed job id to the spawn via agentUrlId without inventing a second spawn", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: 2000, name: "Foo-t1", tasks: [{ name: "Foo-t1" }] })),
+				line(toolResult({ callId: "c1", ts: 2010, details: { results: [] } })),
+				line(
+					customAsyncResult({
+						ts: 5000,
+						content: "done",
+						details: {
+							jobs: [
+								{
+									jobId: "Foo-t1-2",
+									agentUrlId: "Foo-t1",
+									completionKind: "completed",
+									spawnQueueMs: 3,
+								},
+							],
+						},
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.sessions.spawnCalls).toBe(1);
+		expect(report.completionKinds.completed).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.spawnQueueMs.p50).toBe(3);
+	});
+
+	it("does not duplicate a terminal observation across two task calls that reused the same label", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "Worker" }] })),
+				line(toolResult({ callId: "c1", ts: 2010, details: { results: [] } })),
+				line(taskCall({ callId: "c2", ts: 3000, tasks: [{ name: "Worker" }] })),
+				line(toolResult({ callId: "c2", ts: 3010, details: { results: [] } })),
+				line(
+					customAsyncResult({
+						ts: 5000,
+						content: `<task-result id="Worker" status="completed" completionKind="completed">ok</task-result>`,
+						details: { jobs: [{ jobId: "Worker", completionKind: "completed", spawnQueueMs: 5 }] },
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.sessions.spawnCalls).toBe(2);
+		expect(report.completionKinds.completed).toBeUndefined();
+		expect(report.coverage.completionKind).toEqual({ present: 0, unknown: 2 });
+		expect(report.spawnQueueMs).toEqual({ n: 0, p50: null, p90: null });
+	});
+
+	it("lets a later structured budget_stop override an earlier IRC completed across messages", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "Worker" }] })),
+				line(toolResult({ callId: "c1", ts: 2010, details: { results: [] } })),
+				line(hubCall({ callId: "h1", ts: 3000 })),
+				line(
+					toolResult({
+						callId: "h1",
+						ts: 4000,
+						name: "hub",
+						text: `<task-result id="Worker" status="completed" completionKind="completed">ok</task-result>`,
+					}),
+				),
+				line(
+					customAsyncResult({
+						ts: 5000,
+						content: `<task-result id="Worker" status="completed" completionKind="completed">ok</task-result>`,
+						details: { jobs: [{ jobId: "Worker", completionKind: "budget_stop", spawnQueueMs: 8 }] },
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.completionKinds.budget_stop).toBe(1);
+		expect(report.completionKinds.completed).toBeUndefined();
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.spawnQueueMs).toEqual({ n: 1, p50: 8, p90: 8 });
+	});
+
+	it("matches IRC completionKind to a job row via agentUrlId alias not only row.id", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: 2000, tasks: [{ name: "Foo-t1" }] })),
+				line(toolResult({ callId: "c1", ts: 2010, details: { results: [] } })),
+				line(
+					customAsyncResult({
+						ts: 5000,
+						content: `<task-result id="Foo-t1" status="budget_stop" completionKind="budget_stop">partial</task-result>`,
+						details: { jobs: [{ jobId: "Foo-t1-2", agentUrlId: "Foo-t1" }] },
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.completionKinds.budget_stop).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.coverage.spawnQueueMs).toEqual({ present: 0, unknown: 1 });
+	});
+
+	it("maps unnamed batch members through details.progress index instead of completion order", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(
+					taskCall({
+						callId: "batch",
+						ts: 1000,
+						tasks: [{ agent: "task" }, { agent: "task" }],
+					}),
+				),
+				line(
+					toolResult({
+						callId: "batch",
+						ts: 1100,
+						details: {
+							results: [],
+							progress: [
+								{ index: 0, id: "GenA" },
+								{ index: 1, id: "GenB" },
+							],
+						},
+					}),
+				),
+				line(
+					customAsyncResult({
+						ts: 4000,
+						content: "done",
+						details: {
+							jobs: [
+								{ jobId: "GenB", completionKind: "timeout", spawnQueueMs: 2 },
+								{ jobId: "GenA", completionKind: "completed", spawnQueueMs: 9 },
+							],
+						},
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.sessions.spawnCalls).toBe(1);
+		expect(report.completionKinds.completed).toBe(1);
+		expect(report.completionKinds.timeout).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 2, unknown: 0 });
+	});
+
+	it("keeps unnamed batch members unknown instead of pairing by async completion order", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(
+					taskCall({
+						callId: "batch",
+						ts: 1000,
+						tasks: [{ agent: "task" }, { agent: "task" }],
+					}),
+				),
+				line(
+					toolResult({
+						callId: "batch",
+						ts: 4000,
+						details: {
+							results: [
+								{ id: "Late", completionKind: "completed", reviewMetrics: { spawnQueueMs: 1 } },
+								{ id: "Early", completionKind: "timeout", reviewMetrics: { spawnQueueMs: 2 } },
+							],
+						},
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.sessions.spawnCalls).toBe(1);
+		expect(report.completionKinds.completed).toBeUndefined();
+		expect(report.completionKinds.timeout).toBeUndefined();
+		expect(report.coverage.completionKind).toEqual({ present: 0, unknown: 2 });
+		expect(report.coverage.spawnQueueMs).toEqual({ present: 0, unknown: 2 });
+	});
+
+	it("ignores performanceClass on custom_message and classifies from session_init or parent spawn", () => {
+		const t0 = 1_700_000_000_000;
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(
+					taskCall({
+						callId: "c1",
+						ts: t0,
+						tasks: [{ name: "Worker", agent: "scout" }],
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const forged = parseSessionJsonl(
+			[
+				line(sessionHeader("forged")),
+				line({
+					type: "custom_message",
+					id: "fake-class",
+					parentId: null,
+					timestamp: "2026-09-09T10:00:00.000Z",
+					customType: "session_init",
+					content: "not a session_init entry",
+					details: { agent: "subagent-astra", performanceClass: "review" },
+				}),
+				line(
+					assistantMsg({
+						ts: t0,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+				line(
+					assistantMsg({
+						ts: t0 + 1000,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+			].join("\n"),
+			CHILD_A,
+		);
+		const report = buildSubagentBaselineReport([parent, forged]);
+		expect(report.childActiveWallByClass.review.n).toBe(0);
+		expect(report.childActiveWallByClass.explore).toEqual({ n: 1, p50: 1000, p90: 1000 });
+		expect(report.childActiveWallByClass.unknown.n).toBe(0);
+	});
+
+	it("leaves class unknown when parent spawn labels are reused with conflicting agents", () => {
+		const t0 = 1_700_000_000_000;
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(taskCall({ callId: "c1", ts: t0, tasks: [{ name: "Worker", agent: "scout" }] })),
+				line(taskCall({ callId: "c2", ts: t0 + 10, tasks: [{ name: "Worker", agent: "subagent-astra" }] })),
+			].join("\n"),
+			PARENT,
+		);
+		const child = parseSessionJsonl(
+			[
+				line(sessionHeader("worker-child")),
+				line(
+					assistantMsg({
+						ts: t0,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+				line(
+					assistantMsg({
+						ts: t0 + 1500,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+			].join("\n"),
+			CHILD_A,
+		);
+		const report = buildSubagentBaselineReport([parent, child]);
+		expect(report.childActiveWallByClass.unknown).toEqual({ n: 1, p50: 1500, p90: 1500 });
+		expect(report.childActiveWallByClass.explore.n).toBe(0);
+		expect(report.childActiveWallByClass.review.n).toBe(0);
+	});
+
+	it("tallies an unlinked child from its own session_init class and keeps unlinked coverage", () => {
+		const t0 = 1_700_000_000_000;
+		const parent = parseSessionJsonl([line(sessionHeader("sess1"))].join("\n"), PARENT);
+		const orphan = parseSessionJsonl(
+			[
+				line(sessionHeader("orphan")),
+				line(sessionInit({ agent: "subagent-astra", performanceClass: "review" })),
+				line(
+					assistantMsg({
+						ts: t0,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+				line(
+					assistantMsg({
+						ts: t0 + 2000,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+			].join("\n"),
+			"/tmp/sessions/other/orphan/child.jsonl",
+		);
+		const report = buildSubagentBaselineReport([parent, orphan]);
+		expect(report.sessions.unlinkedChildCount).toBe(1);
+		expect(report.coverage.parentChildLink).toEqual({ present: 0, unknown: 1 });
+		expect(report.childActiveWallByClass.review).toEqual({ n: 1, p50: 2000, p90: 2000 });
+		expect(report.childActiveWallByClass.unknown.n).toBe(0);
 	});
 });

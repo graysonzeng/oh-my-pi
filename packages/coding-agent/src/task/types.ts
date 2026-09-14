@@ -445,6 +445,8 @@ export type AgentActivityPhase = "working" | "model" | "thinking" | "responding"
 export interface AgentProgress {
 	index: number;
 	id: string;
+	/** Originating parent `task` tool call id. */
+	taskToolCallId?: string;
 	agent: string;
 	agentSource: AgentSource;
 	status: "pending" | "running" | "completed" | "failed" | "aborted";
@@ -663,5 +665,7 @@ export interface TaskToolDetails {
 		state: "running" | "completed" | "failed";
 		jobId: string;
 		type: "task";
+		/** Originating parent `task` tool call id for this spawn batch. */
+		taskToolCallId?: string;
 	};
 }

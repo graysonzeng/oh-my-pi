@@ -34,12 +34,15 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
+import { emptyReviewMetrics } from "@oh-my-pi/pi-coding-agent/task/review-performance";
 import * as structuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { hubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/hub";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import { buildSubagentBaselineReport, parseSessionJsonl } from "@oh-my-pi/pi-coding-agent/latency/subagent-report";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 const taskAgent: AgentDefinition = {
@@ -92,6 +95,14 @@ function makeResult(id: string, overrides: Partial<SingleResult> = {}): SingleRe
 function getJobProgress(job: AsyncJob): AgentProgress | undefined {
 	const progress = job.latestDetails?.progress;
 	return Array.isArray(progress) ? progress[0] : undefined;
+}
+
+function firstSettledResult(job: AsyncJob): SingleResult | undefined {
+	const results = job.latestDetails?.results;
+	if (!Array.isArray(results) || results.length === 0) return undefined;
+	const first = results[0];
+	if (!first || typeof first !== "object") return undefined;
+	return first as SingleResult;
 }
 
 interface Deferred {
@@ -739,6 +750,101 @@ describe("task spawn routing", () => {
 		expect(
 			policySpy.mock.calls.some(([request]) => request.agent === "sonic" && !Object.hasOwn(request, "maxRuntimeMs")),
 		).toBe(true);
+	});
+
+	it("persists settled completionKind and spawnQueueMs through async-result into a reopenable report", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
+			makeResult("MetricsWorker", {
+				completionKind: "budget_stop",
+				reviewMetrics: { ...emptyReviewMetrics(), spawnQueueMs: 42 },
+				exitCode: 1,
+				output: "partial",
+			}),
+		);
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const spawned = await tool.execute("tc-async-details-results", {
+			agent: "task",
+			name: "MetricsWorker",
+			task: "Do the thing.",
+		} as TaskParams);
+		const job = manager.getJob(spawned.details!.async!.jobId)!;
+		await job.promise;
+		const settled = firstSettledResult(job);
+		expect(settled?.completionKind).toBe("budget_stop");
+		expect(settled?.reviewMetrics?.spawnQueueMs).toBe(42);
+
+		const message = buildAsyncResultBatchMessage([
+			{
+				jobId: job.id,
+				result: job.errorText ?? job.resultText ?? "partial",
+				job,
+				durationMs: 5,
+				epoch: 0,
+			},
+		]);
+		expect(message?.details?.jobs[0]?.completionKind).toBe("budget_stop");
+		expect(message?.details?.jobs[0]?.spawnQueueMs).toBe(42);
+
+		const jsonl = [
+			JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "sess1",
+				timestamp: "2026-09-09T10:00:00.000Z",
+				cwd: "/tmp",
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: "2026-09-09T10:00:00.000Z",
+				message: {
+					role: "assistant",
+					timestamp: 1000,
+					content: [
+						{
+							type: "toolCall",
+							id: "tc-async-details-results",
+							name: "task",
+							arguments: { agent: "task", name: "MetricsWorker", tasks: [{ name: "MetricsWorker" }] },
+						},
+					],
+				},
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "r1",
+				parentId: "a1",
+				timestamp: "2026-09-09T10:00:00.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-async-details-results",
+					toolName: "task",
+					content: [{ type: "text", text: "Spawned agent `MetricsWorker`." }],
+					timestamp: 1010,
+					details: spawned.details,
+				},
+			}),
+			JSON.stringify({
+				type: "custom_message",
+				id: "async1",
+				parentId: "r1",
+				timestamp: "2026-09-09T10:00:00.000Z",
+				customType: message?.customType,
+				content: message?.content,
+				details: message?.details,
+				display: true,
+			}),
+		].join("\n");
+		const report = buildSubagentBaselineReport([parseSessionJsonl(jsonl, "/tmp/sessions/demo/sess1.jsonl")]);
+		expect(report.completionKinds.budget_stop).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.spawnQueueMs).toEqual({ n: 1, p50: 42, p90: 42 });
 	});
 
 	it("surfaces budget_stop on the parent-facing task summary", async () => {

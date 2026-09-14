@@ -7,7 +7,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJobType } from "../../async";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
-import type { StructuredSubagentOutput } from "../../task/types";
+import type { StructuredSubagentOutput, SubagentCompletionKind } from "../../task/types";
 import type { ConfiguredThinkingLevel } from "../../thinking";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
 
@@ -89,6 +89,14 @@ export interface JobSnapshot {
 	 * on collision, else the job id itself. See {@link AsyncJob.agentId}.
 	 */
 	agentUrlId?: string;
+	/** Terminal provenance from the settled task result, when persisted. */
+	completionKind?: SubagentCompletionKind;
+	/** Harness spawn-queue wait (`acquiredAt - invokedAt`); never provider queue. */
+	spawnQueueMs?: number;
+	/** First request-phase provider queue sample, when the run recorded one. */
+	requestPhaseQueueMs?: number;
+	/** Originating parent `task` tool call id, when the job recorded one. */
+	taskToolCallId?: string;
 	/**
 	 * Compact live gist for running TUI rows: what the subagent is doing now,
 	 * or how long it has been silent. Shared verbatim by the subagent HUD and

@@ -1,0 +1,1 @@
+Locate the definition of resolveClassMaxRuntimeMs (successor of resolveTaskMaxRuntimeMs) and its callers in this workspace. Reply with one JSON object only, using keys path, signature, and caller. path is the defining file. signature is the function name with its parameter names. caller is the in-workspace call-site function name. Do not keep going after the answer is complete.

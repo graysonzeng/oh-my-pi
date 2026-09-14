@@ -33,6 +33,7 @@ import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { getExperimentalContextSession } from "./context-notes";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
+import readRereadSoftCapHint from "../prompts/latency/read-reread-soft-cap.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
 	DEFAULT_MAX_BYTES,
@@ -731,11 +732,53 @@ type ReadParams = ReadToolInput;
 const REPEAT_READ_HINT_THRESHOLD = 2;
 /** Per-session cap on tracked read keys; the map resets when exceeded. */
 const REPEAT_READ_TRACKER_CAP = 64;
+/** Repeated identical delivered views of a known source version before a one-shot hint. */
+const PATH_REREAD_SOFT_CAP = 5;
 
 const kRepeatReadTracker = Symbol("read.repeatTracker");
+const kPathRereadTracker = Symbol("read.pathRereadTracker");
+const kReadTrackerScope = Symbol("read.trackerScope");
+
+interface PathRereadRecord {
+	version: string;
+	views: Map<string, { count: number; advised: boolean }>;
+}
 
 interface SessionWithRepeatReadTracker extends ToolSession {
 	[kRepeatReadTracker]?: Map<string, { hash: bigint; count: number }>;
+	[kPathRereadTracker]?: Map<string, PathRereadRecord>;
+	[kReadTrackerScope]?: string;
+}
+
+function logicalReadScope(session: ToolSession): string {
+	try {
+		const id = session.getSessionId?.();
+		if (typeof id === "string" && id.length > 0) return id;
+	} catch {
+		// Missing/throwing session id stays object-local (fail open).
+	}
+	return "";
+}
+
+/** Drop repeat/soft-cap maps so a reused ToolSession cannot nag a new logical session. */
+export function clearReadRepeatTrackers(session: object): void {
+	const holder = session as SessionWithRepeatReadTracker;
+	delete holder[kRepeatReadTracker];
+	delete holder[kPathRereadTracker];
+	delete holder[kReadTrackerScope];
+}
+
+function prepareReadTrackers(session: ToolSession): SessionWithRepeatReadTracker {
+	const holder = session as SessionWithRepeatReadTracker;
+	const scope = logicalReadScope(session);
+	if (holder[kReadTrackerScope] !== scope) {
+		holder[kRepeatReadTracker] = new Map();
+		holder[kPathRereadTracker] = new Map();
+		holder[kReadTrackerScope] = scope;
+	}
+	holder[kRepeatReadTracker] ??= new Map();
+	holder[kPathRereadTracker] ??= new Map();
+	return holder;
 }
 
 /**
@@ -749,9 +792,8 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	const block = result.content?.find(entry => entry.type === "text");
 	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
 
-	const holder = session as SessionWithRepeatReadTracker;
-	holder[kRepeatReadTracker] ??= new Map();
-	const tracker = holder[kRepeatReadTracker];
+	const holder = prepareReadTrackers(session);
+	const tracker = holder[kRepeatReadTracker]!;
 	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
 
 	const hash = Bun.hash.xxHash64(block.text);
@@ -763,6 +805,42 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	entry.count++;
 	if (entry.count < REPEAT_READ_HINT_THRESHOLD) return;
 	block.text += `\n\n[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — use a narrower selector (path:A-B), or proceed with the edit.]`;
+}
+
+/**
+ * One-shot soft-cap for identical delivered views of a known source version.
+ * Different ranges, changed bytes and unknown identities are not proven thrash.
+ */
+function appendPathRereadSoftCapHint(session: ToolSession, result: AgentToolResult<ReadToolDetails>): void {
+	if (session.agentKind !== "sub") return;
+	const block = result.content?.find(entry => entry.type === "text");
+	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
+
+	const source = result.details?.canonicalSource?.trim() || result.details?.resolvedPath?.trim() || "";
+	const version = result.details?.providerViewIdentity?.trim() || "";
+	const view = result.details?.contentOrRevisionIdentity?.trim() || "";
+	if (!source || !version || !view) return;
+
+	const holder = prepareReadTrackers(session);
+	const tracker = holder[kPathRereadTracker]!;
+	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
+
+	let record = tracker.get(source);
+	if (!record || record.version !== version) {
+		record = { version, views: new Map() };
+		tracker.set(source, record);
+	}
+
+	const current = record.views.get(view);
+	if (!current) {
+		if (record.views.size >= REPEAT_READ_TRACKER_CAP) record.views.clear();
+		record.views.set(view, { count: 1, advised: false });
+		return;
+	}
+	current.count += 1;
+	if (current.count < PATH_REREAD_SOFT_CAP || current.advised) return;
+	current.advised = true;
+	block.text += `\n\n${prompt.render(readRereadSoftCapHint, { source, count: current.count }).trim()}`;
 }
 
 /**
@@ -1353,9 +1431,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
+		// Byte-identical hint is skipped when providerViewIdentity is set (dedupe owns that path).
+		// Subagent soft-cap uses the existing digest of the delivered view and its source version.
 		if (!result.details?.providerViewIdentity) {
 			appendRepeatReadHint(this.session, params.path, result);
 		}
+		appendPathRereadSoftCapHint(this.session, result);
 		return result;
 	}
 

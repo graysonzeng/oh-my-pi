@@ -11,7 +11,7 @@ import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
-import { renderStructuredJson } from "../../session/async-job-delivery";
+import { renderStructuredJson, settledTaskDeliveryFields } from "../../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { StructuredSubagentOutput } from "../../task/types";
 import { parseConfiguredThinkingLevel } from "../../thinking";
@@ -161,6 +161,8 @@ interface TrackedJobLike {
 	status: string;
 	label: string;
 	startTime: number;
+	agentId?: string;
+	taskToolCallId?: string;
 	latestDetails?: Record<string, unknown>;
 	resultText?: string;
 	errorText?: string;
@@ -378,6 +380,23 @@ export function formatCompactLiveActivityLine(
 	return `${base}${detailPart ?? ""}`;
 }
 
+function taskToolCallIdFromTracked(
+	current: AsyncJob | undefined,
+	latest: TrackedJobLike,
+	progressRecord: Record<string, unknown> | undefined,
+): string | undefined {
+	for (const value of [current?.taskToolCallId, latest.taskToolCallId, progressRecord?.taskToolCallId]) {
+		if (typeof value === "string" && value.trim()) return value.trim();
+	}
+	const details = current?.latestDetails ?? latest.latestDetails;
+	if (!details || typeof details !== "object" || !("async" in details)) return undefined;
+	const asyncField = details.async;
+	if (!asyncField || typeof asyncField !== "object" || !("taskToolCallId" in asyncField)) return undefined;
+	const value = asyncField.taskToolCallId;
+	if (typeof value === "string" && value.trim()) return value.trim();
+	return undefined;
+}
+
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
@@ -389,10 +408,10 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let resolvedThinkingLevel: JobSnapshot["resolvedThinkingLevel"];
 		let advisor = false;
 		let liveActivity: JobSnapshot["liveActivity"] | undefined;
+		let progressRecord: Record<string, unknown> | undefined;
 		if (latest.type === "task") {
 			const progressValue = latest.latestDetails?.progress;
 			if (Array.isArray(progressValue)) {
-				let progressRecord: Record<string, unknown> | undefined;
 				for (const item of progressValue) {
 					if (!item || typeof item !== "object") continue;
 					const candidate = item as Record<string, unknown>;
@@ -422,6 +441,16 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 				}
 			}
 		}
+		const settled =
+			latest.type === "task"
+				? settledTaskDeliveryFields({
+						id: latest.id,
+						agentId: current?.agentId ?? latest.agentId,
+						label: latest.label,
+						latestDetails: latest.latestDetails,
+					})
+				: {};
+		const taskToolCallId = taskToolCallIdFromTracked(current, latest, progressRecord);
 		return {
 			id: latest.id,
 			type: latest.type,
@@ -437,7 +466,13 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
 			...(!resultConsumed && latest.structured
 				? { structured: latest.structured, agentUrlId: current?.agentId ?? latest.id }
-				: {}),
+				: current?.agentId && current.agentId !== latest.id
+					? { agentUrlId: current.agentId }
+					: {}),
+			...(settled.completionKind ? { completionKind: settled.completionKind } : {}),
+			...(settled.spawnQueueMs !== undefined ? { spawnQueueMs: settled.spawnQueueMs } : {}),
+			...(settled.requestPhaseQueueMs !== undefined ? { requestPhaseQueueMs: settled.requestPhaseQueueMs } : {}),
+			...(taskToolCallId ? { taskToolCallId } : {}),
 		};
 	});
 }

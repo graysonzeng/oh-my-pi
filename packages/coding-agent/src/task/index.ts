@@ -1001,6 +1001,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				progress: {
 					index,
 					id: agentId,
+					taskToolCallId: toolCallId,
 					agent: agentType,
 					agentSource,
 					modelRole: policy.modelRole,
@@ -1030,6 +1031,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		let failedCount = 0;
 		let primaryJobId = asyncSpawns[0].agentId;
 		const syncResults: SingleResult[] = [];
+		const asyncResults: SingleResult[] = [];
 		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
 		let syncUsage: Usage | undefined;
 		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
@@ -1037,7 +1039,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		let syncProjectAgentsDir: string | null = null;
 		const buildAsyncDetails = (): TaskToolDetails => ({
 			projectAgentsDir: syncProjectAgentsDir,
-			results: [...syncResults],
+			results: [...syncResults, ...asyncResults],
 			totalDurationMs: Date.now() - callStartedAt,
 			usage: syncUsage,
 			outputPaths: syncOutputPaths,
@@ -1046,6 +1048,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
 				jobId: primaryJobId,
 				type: "task",
+				...(toolCallId ? { taskToolCallId: toolCallId } : {}),
 			},
 		});
 
@@ -1062,6 +1065,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
 					onUpdate,
+					recordSettledResult: result => {
+						asyncResults.push(result);
+					},
 					onSettled: failed => {
 						settledCount += 1;
 						if (failed) failedCount += 1;
@@ -1221,10 +1227,21 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
+		recordSettledResult?: (result: SingleResult) => void;
 		onSettled?: (failed: boolean) => void;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
-			options;
+		const {
+			manager,
+			toolCallId,
+			spawnParams,
+			agentId,
+			progress,
+			ircEnabled,
+			buildDetails,
+			onUpdate,
+			recordSettledResult,
+			onSettled,
+		} = options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
@@ -1383,6 +1400,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					);
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
+					if (singleResult) {
+						recordSettledResult?.(singleResult);
+					}
 					// A missing result means the sync path failed at the tool level
 					// (results: []) — treat it as a failure, not success. A runner
 					// error on a zero exit (changes captured but not landed, or a
@@ -1448,6 +1468,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			{
 				id: agentId,
 				agentId,
+				taskToolCallId: toolCallId,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				onProgress: text => {
