@@ -8,6 +8,9 @@
  *   bun packages/coding-agent/test/task/product-latency-fixture.ts --mode smoke --output <treatment.json> --compare-baseline <baseline.json>
  * Offline compare (no provider calls):
  *   bun packages/coding-agent/test/task/product-latency-fixture.ts --compare-baseline <baseline.json> --against <treatment.json> --output <compare.json>
+ * Paired experiment (two isolated repo roots with identical harness/dependencies):
+ *   --mode smoke --paired-control <root> --paired-treatment <root> --experiment advisories|sonic-effort --output <pairs.json>
+ * Add --paired-preflight to verify source/config conditions without provider calls.
  */
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -54,6 +57,13 @@ import {
 	QUALIFICATION_VARIANTS,
 	scoreAttempt,
 } from "./product-latency-qualification";
+import { runPairedQualification, type PairedQualificationReport } from "./product-latency-paired";
+import {
+	assertQualificationSourcePair,
+	captureQualificationSource,
+	PAIRED_FIXTURE_PATH,
+} from "./product-latency-source";
+import { replaceFileAtomically } from "../../src/utils/atomic-file";
 
 const FIXTURE_PATH = path.resolve(import.meta.path);
 const PI_CONFIG_DIR_NAME = ".omp-latency-fixture";
@@ -328,7 +338,14 @@ async function flushStdout(value: unknown, pretty = false): Promise<void> {
 
 async function writeReportArtifact(outputPath: string | undefined, value: unknown): Promise<void> {
 	if (!outputPath) return;
-	await Bun.write(path.resolve(outputPath), `${JSON.stringify(value, null, 2)}\n`);
+	const target = path.resolve(outputPath);
+	const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+	try {
+		await Bun.write(temporary, `${JSON.stringify(value, null, 2)}\n`);
+		await replaceFileAtomically(temporary, target);
+	} finally {
+		await rm(temporary, { force: true });
+	}
 }
 
 function parseChildPayload(value: unknown): ChildPayload | undefined {
@@ -359,6 +376,19 @@ async function runChild(argv: string[]): Promise<void> {
 	}
 	if (!authAgentDir) {
 		throw new UnverifiedError("child requires --auth-agent-dir", true);
+	}
+	const expectedSourceRoot = argValue(argv, "--expected-source-root");
+	if (expectedSourceRoot) {
+		const expectedPackage = path.join(expectedSourceRoot, "packages/coding-agent");
+		const resolved = Bun.resolveSync("@oh-my-pi/pi-coding-agent/config/model-registry", import.meta.dir);
+		const relative = path.relative(expectedPackage, resolved);
+		if (
+			FIXTURE_PATH !== path.join(expectedSourceRoot, PAIRED_FIXTURE_PATH) ||
+			relative.startsWith("..") ||
+			path.isAbsolute(relative)
+		) {
+			throw new UnverifiedError("child package resolution escaped its paired source root");
+		}
 	}
 
 	const cwd = process.cwd();
@@ -507,12 +537,13 @@ async function spawnChild(args: {
 	tempCwd: string;
 	authAgentDir: string;
 	signal: AbortSignal;
+	sourceRoot?: string;
 }): Promise<ChildPayload> {
 	const timeoutMs = VARIANT_LIMITS[args.variant].tailMs;
 	const proc = Bun.spawn(
 		[
 			process.execPath,
-			FIXTURE_PATH,
+			args.sourceRoot ? path.join(args.sourceRoot, PAIRED_FIXTURE_PATH) : FIXTURE_PATH,
 			"--child",
 			"--variant",
 			args.variant,
@@ -520,6 +551,7 @@ async function spawnChild(args: {
 			String(args.repetition),
 			"--auth-agent-dir",
 			args.authAgentDir,
+			...(args.sourceRoot ? ["--expected-source-root", args.sourceRoot] : []),
 		],
 		{
 			cwd: args.tempCwd,
@@ -727,6 +759,121 @@ async function runCompareOnly(argv: string[]): Promise<void> {
 	if (benefit.status !== "PASS") process.exitCode = 1;
 }
 
+async function runFixtureAttempt(args: {
+	variant: Variant;
+	repetition: number;
+	authAgentDir: string;
+	signal: AbortSignal;
+	sourceRoot?: string;
+	onLaunch?: () => void;
+}): Promise<AttemptRecord> {
+	const tempHome = await mkdtemp(path.join(os.tmpdir(), "omp-latency-"));
+	try {
+		const tempCwd = path.join(tempHome, "workspace");
+		for (const directory of ["workspace", "xdg-data", "xdg-state", "xdg-cache", "xdg-config"]) {
+			await mkdir(path.join(tempHome, directory), { recursive: true });
+		}
+		await seedWorkspace(tempCwd);
+		args.onLaunch?.();
+		const startedAt = Date.now();
+		const payload = await spawnChild({ ...args, tempHome, tempCwd });
+		let addTsSource: string | undefined;
+		if (args.variant === "sonic") {
+			try {
+				addTsSource = await Bun.file(path.join(tempCwd, "add.ts")).text();
+			} catch {
+				addTsSource = undefined;
+			}
+		}
+		return toAttempt({ ...args, payload, startedAt, addTsSource });
+	} finally {
+		await rm(tempHome, { recursive: true, force: true });
+	}
+}
+
+async function runPairedParent(argv: string[]): Promise<void> {
+	const mode = parseMode(argv);
+	const controlRoot = argValue(argv, "--paired-control");
+	const treatmentRoot = argValue(argv, "--paired-treatment");
+	const experiment = argValue(argv, "--experiment");
+	const outputPath = argValue(argv, "--output");
+	if (
+		!controlRoot ||
+		!treatmentRoot ||
+		!outputPath ||
+		(experiment !== "advisories" && experiment !== "sonic-effort")
+	) {
+		throw new UnverifiedError(
+			"paired mode requires --paired-control <root> --paired-treatment <root> --experiment advisories|sonic-effort --output <file>",
+			true,
+		);
+	}
+	const authAgentDir = getAgentDir();
+	const modelsPath = path.join(authAgentDir, "models.yml");
+	const sources = {
+		control: await captureQualificationSource(controlRoot),
+		treatment: await captureQualificationSource(treatmentRoot),
+	};
+	const changedSources = assertQualificationSourcePair(sources.control, sources.treatment, experiment);
+	// The coordinator's scorer must also be the exact frozen harness in both arms.
+	for (const [file, digest] of Object.entries(sources.control.files)) {
+		if (!file.startsWith("packages/coding-agent/test/task/product-latency-")) continue;
+		const current = path.join(import.meta.dir, path.basename(file));
+		if (new Bun.CryptoHasher("sha256").update(await Bun.file(current).bytes()).digest("hex") !== digest) {
+			throw new UnverifiedError(`coordinator harness differs from paired sources: ${file}`, true);
+		}
+	}
+	const modelsConfigSha256 = sha256Hex(await Bun.file(modelsPath).text());
+	const sourceEvidence = {
+		sources,
+		changedSources,
+		runtime: { bunVersion: Bun.version, platform: process.platform, arch: process.arch },
+	};
+	if (argv.includes("--paired-preflight")) {
+		const preflight = { status: "UNVERIFIED", phase: "preflight", experiment, modelsConfigSha256, ...sourceEvidence };
+		await writeReportArtifact(outputPath, preflight);
+		await flushStdout(preflight, true);
+		return;
+	}
+	const abort = new AbortController();
+	const onAbort = () => abort.abort();
+	process.once("SIGINT", onAbort);
+	process.once("SIGTERM", onAbort);
+	const checkpoint = async (report: PairedQualificationReport) => {
+		await writeReportArtifact(outputPath, { ...report, ...sourceEvidence });
+	};
+	try {
+		const report = await runPairedQualification({
+			mode,
+			experiment,
+			modelsConfigSha256,
+			signal: abort.signal,
+			checkpoint,
+			verifyConditions: async () => {
+				if (sha256Hex(await Bun.file(modelsPath).text()) !== modelsConfigSha256)
+					throw new Error("models.yml changed during paired qualification");
+				for (const source of Object.values(sources)) {
+					if ((await captureQualificationSource(source.root)).fingerprint !== source.fingerprint)
+						throw new Error("source changed during paired qualification");
+				}
+			},
+			execute: slot =>
+				runFixtureAttempt({
+					variant: slot.variant,
+					repetition: slot.repetition,
+					authAgentDir,
+					signal: abort.signal,
+					sourceRoot: sources[slot.arm].root,
+				}),
+		});
+		await flushStdout({ ...report, ...sourceEvidence }, true);
+		if (report.status !== "PASS") process.exitCode = 1;
+	} finally {
+		process.off("SIGINT", onAbort);
+		process.off("SIGTERM", onAbort);
+	}
+}
+
 async function runParent(argv: string[]): Promise<void> {
 	const mode = parseMode(argv);
 	const outputPath = argValue(argv, "--output");
@@ -737,7 +884,6 @@ async function runParent(argv: string[]): Promise<void> {
 	process.once("SIGINT", onAbort);
 	process.once("SIGTERM", onAbort);
 
-	const tempHomes: string[] = [];
 	let launches = 0;
 	const started = Date.now();
 	const attempts: AttemptRecord[] = [];
@@ -753,39 +899,14 @@ async function runParent(argv: string[]): Promise<void> {
 				if (launches >= ceiling) {
 					throw new UnverifiedError(`launch ceiling ${ceiling} exceeded`);
 				}
-				const tempHome = await mkdtemp(path.join(os.tmpdir(), "omp-latency-"));
-				tempHomes.push(tempHome);
-				const tempCwd = path.join(tempHome, "workspace");
-				await mkdir(tempCwd, { recursive: true });
-				await mkdir(path.join(tempHome, "xdg-data"), { recursive: true });
-				await mkdir(path.join(tempHome, "xdg-state"), { recursive: true });
-				await mkdir(path.join(tempHome, "xdg-cache"), { recursive: true });
-				await mkdir(path.join(tempHome, "xdg-config"), { recursive: true });
-				await seedWorkspace(tempCwd);
-				launches += 1;
-				const attemptStarted = Date.now();
-				const payload = await spawnChild({
+				const attempt = await runFixtureAttempt({
 					variant,
 					repetition,
-					tempHome,
-					tempCwd,
 					authAgentDir,
 					signal: abort.signal,
-				});
-				let addTsSource: string | undefined;
-				if (variant === "sonic") {
-					try {
-						addTsSource = await Bun.file(path.join(tempCwd, "add.ts")).text();
-					} catch {
-						addTsSource = undefined;
-					}
-				}
-				const attempt = toAttempt({
-					variant,
-					repetition,
-					payload,
-					startedAt: attemptStarted,
-					addTsSource,
+					onLaunch: () => {
+						launches += 1;
+					},
 				});
 				attempts.push(attempt);
 				if (outputPath) {
@@ -858,7 +979,6 @@ async function runParent(argv: string[]): Promise<void> {
 	} finally {
 		process.off("SIGINT", onAbort);
 		process.off("SIGTERM", onAbort);
-		await Promise.all(tempHomes.map(dir => rm(dir, { recursive: true, force: true })));
 	}
 }
 
@@ -867,6 +987,10 @@ async function main(): Promise<void> {
 	try {
 		if (argv.includes("--child")) {
 			await runChild(argv);
+			return;
+		}
+		if (argv.some(argument => argument.startsWith("--paired-"))) {
+			await runPairedParent(argv);
 			return;
 		}
 		if (argValue(argv, "--against")) {
