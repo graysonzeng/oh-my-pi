@@ -1852,6 +1852,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
 			getCodeModeDirectToolNames: () => session?.getCodeModeDirectToolNames(),
+			getNestedToolScheduler: () => session?.getNestedToolScheduler(),
+			emitNestedToolExecution: event => session?.emitNestedToolExecution(event),
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an

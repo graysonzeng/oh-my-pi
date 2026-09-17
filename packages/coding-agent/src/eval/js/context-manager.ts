@@ -41,6 +41,22 @@ import type {
 export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
 export type { JsDisplayOutput } from "./worker-protocol";
 
+function jsSnapshot(
+	cwd: string,
+	sessionId: string,
+	localRoots: Record<string, string> | undefined,
+	session?: ToolSession,
+	extra?: Pick<SessionSnapshot, "preludes">,
+): SessionSnapshot {
+	return {
+		cwd,
+		sessionId,
+		localRoots,
+		restrictedIo: session?.getCodeModeDirectToolNames?.() !== undefined,
+		...extra,
+	};
+}
+
 export interface VmRunState {
 	signal?: AbortSignal;
 	onText?: (chunk: string) => void;
@@ -188,7 +204,7 @@ export async function executeInVmContext(options: {
 	}
 	const session = await acquireSession(
 		sessionKey,
-		{ cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
+		jsSnapshot(options.cwd, options.sessionId, options.localRoots, options.session),
 		options.timeoutMs,
 		options.ownerId,
 	);
@@ -532,12 +548,9 @@ async function runOnce(
 	}
 
 	try {
-		const snapshot = {
-			cwd: options.cwd,
-			sessionId: options.sessionId,
-			localRoots: options.localRoots,
+		const snapshot = jsSnapshot(options.cwd, options.sessionId, options.localRoots, options.session, {
 			preludes: javascriptPreludeSources(options.session),
-		};
+		});
 		if (options.expectedRevision !== undefined && options.expectedDigest !== undefined) {
 			const id = `shadow-run-${Snowflake.next()}`;
 			const admission = Promise.withResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>();

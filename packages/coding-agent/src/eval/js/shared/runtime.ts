@@ -77,6 +77,12 @@ export interface RuntimeOptions {
 	 * `{ local: "/…/artifacts/local" }`). Stable for the worker's lifetime.
 	 */
 	localRoots?: Record<string, string>;
+	/**
+	 * PTC restricted I/O profile: hide the injected `fs` helper and stub `fetch`
+	 * so cells use session tools. `process` is left intact (subsetting it
+	 * segfaults workers that share puppeteer/worker_threads internals).
+	 */
+	restrictedIo?: boolean;
 }
 
 // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
@@ -92,6 +98,7 @@ const PRELUDE_GLOBAL_KEYS = [
 	"print",
 	"display",
 	"tool",
+	"catalog",
 	"completion",
 	"output",
 	"agent",
@@ -267,6 +274,10 @@ function describeDataType(data: unknown): string {
 	return typeof data;
 }
 
+function restrictedFetch(): never {
+	throw new Error("fetch is disabled in PTC eval. Use session tools such as tool.web_search instead.");
+}
+
 /**
  * Shared JS runtime for the eval worker and the browser tab worker. Owns the prelude,
  * helper bag, console bridge, and indirect-eval execution. Emits text/display/tool-call
@@ -316,6 +327,30 @@ export class JsRuntime {
 		objectToString: Object.prototype.toString,
 	};
 	#installedCallTool: unknown;
+	#hostFetch: typeof fetch | undefined;
+
+	setRestrictedIo(restricted: boolean): void {
+		this.#activateGlobals("set restricted I/O");
+		const globals = globalThis as Record<string, unknown>;
+		this.#ownGlobal("__omp_restricted_io__");
+		globals.__omp_restricted_io__ = restricted;
+		recordGlobalValue("__omp_restricted_io__", this.#globalOwner);
+		this.#ownGlobal("fs");
+		if (restricted) {
+			delete globals.fs;
+			this.#ownGlobal("fetch");
+			if (this.#hostFetch === undefined) this.#hostFetch = globalThis.fetch;
+			globalThis.fetch = restrictedFetch as unknown as typeof fetch;
+			recordGlobalValue("fetch", this.#globalOwner);
+		} else {
+			globals.fs = fs;
+			if (this.#ownedGlobalKeys.has("fetch") && this.#hostFetch) {
+				globalThis.fetch = this.#hostFetch;
+				recordGlobalValue("fetch", this.#globalOwner);
+			}
+		}
+		recordGlobalValue("fs", this.#globalOwner);
+	}
 
 	snapshotUserGlobals(): ShadowSnapshot {
 		this.#activateGlobals("snapshot user globals");
@@ -366,6 +401,7 @@ export class JsRuntime {
 		});
 		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);
+		this.setRestrictedIo(opts.restrictedIo === true);
 	}
 
 	get cwd(): string {
@@ -687,6 +723,8 @@ export class JsRuntime {
 			...Object.keys(injected),
 			...Object.keys(extraGlobals ?? {}),
 			...PRELUDE_GLOBAL_KEYS,
+			"__omp_restricted_io__",
+			"fetch",
 		]);
 
 		this.#reservedGlobalKeys = allGlobalKeys;
