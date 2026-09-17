@@ -1137,6 +1137,17 @@ describe("Settings", () => {
 
 				expect(settings.get("edit.mode")).toBe("apply_patch");
 				expect(signalCount).toBe(3);
+
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+					edit: { mode: "apply_patch" },
+					tools: { ptc: { mode: "on" } },
+				});
+				await settings.reloadFromDisk();
+
+				expect(settings.get("tools.ptc.mode")).toBe("on");
+				expect(signalCount).toBe(4);
 			} finally {
 				unsubscribe();
 			}

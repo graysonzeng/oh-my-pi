@@ -115,6 +115,7 @@ import {
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
+import { NestedToolScheduler } from "../eval/js/nested-scheduler";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { WorkPoolRegistry } from "../task/workpool";
@@ -199,7 +200,7 @@ import {
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import type { ImageAttachmentEntry } from "../tools";
+import { type ImageAttachmentEntry, type NestedToolExecutionEvent } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import {
@@ -1245,6 +1246,7 @@ export class AgentSession {
 	}
 
 	#codeModeState: { namespacesInfo?: unknown };
+	#nestedToolScheduler = new NestedToolScheduler();
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -5277,9 +5279,17 @@ export class AgentSession {
 		return this.#tools.getEvalBridgeToolNames();
 	}
 
-	/** Tools left directly model-visible by Code Mode; undefined when inactive. */
+	/** Tools left directly model-visible by Code Mode / PTC; undefined when inactive. */
 	getCodeModeDirectToolNames(): readonly string[] | undefined {
 		return this.#tools.getCodeModeDirectToolNames();
+	}
+
+	getNestedToolScheduler(): NestedToolScheduler {
+		return this.#nestedToolScheduler;
+	}
+
+	emitNestedToolExecution(event: NestedToolExecutionEvent): Promise<void> {
+		return this.#emitSessionEvent(event);
 	}
 
 	/** Whether a registry entry came from a built-in factory. */

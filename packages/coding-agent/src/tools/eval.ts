@@ -17,6 +17,7 @@ import {
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
+import { collectSessionPtcCatalogTools } from "../eval/catalog-bridge";
 import { IdleTimeout } from "../eval/idle-timeout";
 import { getEnabledEvalPreludes } from "../eval/preludes";
 import type { BackendProbeOptions } from "../eval/probe";
@@ -34,9 +35,9 @@ import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
-import { generateCodeModeDeclarations } from "./eval-format/code-mode-declarations";
 import { upsertStatusEvent } from "./eval-render";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
+import { renderPtcSkeletonCatalog } from "./ptc-catalog";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -306,28 +307,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	}
 
 	/**
-	 * Codex Code Mode advertisement, pulled from the session's applied direct
-	 * partition on every read so the declarations can never advertise a tool the
-	 * model can already call directly (a plan-mode transport `write`), nor drift
-	 * from the active model or tool registry.
+	 * PTC / Code Mode advertisement: a budgeted skeleton catalog of bridged
+	 * tools plus search/describe recovery. Direct keep-set tools are omitted
+	 * so the prompt never advertises a tool the model can already call.
 	 */
 	#codeModeDescription(baseDescription: string): string | undefined {
 		const session = this.session;
 		const directToolNames = session?.getCodeModeDirectToolNames?.();
 		if (!session || !directToolNames) return undefined;
-		const direct = new Set(directToolNames);
-		const declarations = generateCodeModeDeclarations(
-			(session.getEvalBridgeToolNames?.() ?? [...(session.toolRegistry?.keys() ?? [])]).flatMap(name => {
-				if (direct.has(name)) return [];
-				const tool = session.toolRegistry?.get(name);
-				return tool ? [{ name, parameters: (tool as { parameters?: unknown }).parameters }] : [];
-			}),
-		);
+		const catalog = renderPtcSkeletonCatalog(collectSessionPtcCatalogTools(session));
 		const preludeDeclarations = getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])
 			.map(definition => definition.codeModeDeclarations?.trim())
 			.filter((declaration): declaration is string => Boolean(declaration))
 			.join("\n\n");
-		return prompt.render(evalCodeModeDescription, { baseDescription, declarations, preludeDeclarations });
+		return prompt.render(evalCodeModeDescription, { baseDescription, catalog, preludeDeclarations });
 	}
 	/** All reuse-chain examples; the `examples` getter filters by enabled languages. */
 	private static readonly ALL_EXAMPLES: readonly ToolExample<typeof evalSchema.infer>[] = [

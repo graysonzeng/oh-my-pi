@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { NestedToolScheduler } from "@oh-my-pi/pi-coding-agent/eval/js/nested-scheduler";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { type TodoPhase, TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -824,9 +825,13 @@ describe("callSessionTool", () => {
 		expect(rawExecute).not.toHaveBeenCalled();
 	});
 
-	it("rejects checkpoint and rewind before reaching the registry", async () => {
+	it("rejects checkpoint, rewind, and new_context before reaching the registry", async () => {
 		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
-		const session = createSession([createTool("checkpoint", execute), createTool("rewind", execute)]);
+		const session = createSession([
+			createTool("checkpoint", execute),
+			createTool("rewind", execute),
+			createTool("new_context", execute),
+		]);
 
 		await expect(callSessionTool("checkpoint", { goal: "g" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
@@ -834,7 +839,53 @@ describe("callSessionTool", () => {
 		await expect(callSessionTool("rewind", { report: "r" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
 		);
+		await expect(callSessionTool("new_context", {}, { session })).rejects.toThrow(
+			"cannot run through the eval bridge",
+		);
 		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("emits nested tool_execution_start/end around a bridged call", async () => {
+		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "hello" }] });
+		const events: Array<{ type: string; toolName: string; isError?: boolean }> = [];
+		const session = {
+			...createSession([createTool("read", execute)]),
+			emitNestedToolExecution: (event: { type: string; toolName: string; isError?: boolean }) => {
+				events.push({ type: event.type, toolName: event.toolName, isError: event.isError });
+			},
+		};
+
+		await callSessionTool("read", { path: "/tmp/demo.txt" }, { session });
+
+		expect(events).toEqual([
+			{ type: "tool_execution_start", toolName: "read", isError: undefined },
+			{ type: "tool_execution_end", toolName: "read", isError: false },
+		]);
+	});
+
+	it("serializes exclusive nested tools through the session scheduler", async () => {
+		const scheduler = new NestedToolScheduler();
+		const order: string[] = [];
+		const exclusive = {
+			...createTool("edit", async () => {
+				order.push("start");
+				await Bun.sleep(20);
+				order.push("end");
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			}),
+			concurrency: "exclusive" as const,
+		};
+		const session = {
+			...createSession([exclusive]),
+			getNestedToolScheduler: () => scheduler,
+		};
+
+		await Promise.all([
+			callSessionTool("edit", { path: "a.ts" }, { session }),
+			callSessionTool("edit", { path: "b.ts" }, { session }),
+		]);
+
+		expect(order).toEqual(["start", "end", "start", "end"]);
 	});
 
 	it("rejects a registry tool excluded from the eval bridge", async () => {

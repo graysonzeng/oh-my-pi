@@ -20,6 +20,8 @@ export interface SessionSnapshot {
 	localRoots?: Record<string, string>;
 	/** Enabled host-capability snippets projected for this JavaScript cell. */
 	preludes?: EvalPreludeSource[];
+	/** PTC restricted I/O profile for this cell. */
+	restrictedIo?: boolean;
 }
 
 export interface RunErrorPayload {

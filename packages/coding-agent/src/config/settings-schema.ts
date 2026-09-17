@@ -650,7 +650,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Codex Code Mode",
 			description:
-				"Route Codex code_mode_only models (GPT-5.6) through eval. The direct tools are eval, ask, todo, yield, think, checkpoint, and rewind. Use eval cells for other session tools. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
+				"Codex fallback for programmatic tool calling when tools.ptc.mode is off. Routes code_mode_only models through eval. The keep-set is eval, ask, todo, yield, think, checkpoint, rewind, and new_context. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
 		},
 	},
 
@@ -662,7 +662,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Codex Code Mode Direct Tools",
 			description:
-				"Extra direct tools for Codex Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
+				"Extra direct tools for Codex Code Mode. The standard keep-set is eval, ask, todo, yield, think, checkpoint, rewind, and new_context.",
 		},
 	},
 
@@ -4241,6 +4241,50 @@ export const SETTINGS_SCHEMA = {
 			label: "Tool Approval Policies",
 			description:
 				"Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. Overrides are honored in every approval mode.",
+		},
+	},
+
+	// Programmatic tool calling (generic Code Mode). Codex
+	// `providers.openai-codex.codeMode` remains the fallback when this is off.
+	"tools.ptc.mode": {
+		type: "enum",
+		values: ["off", "on", "auto"] as const,
+		default: "off",
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Programmatic Tool Calling",
+			description:
+				"Collapse the direct tool surface into eval for any provider. The keep-set is eval, ask, todo, yield, think, checkpoint, rewind, and new_context; other enabled tools run from eval cells via tool.<name>(). 'auto' follows a model's code_mode_only catalog flag. Codex providers.openai-codex.codeMode remains the fallback when this switch is off.",
+			options: [
+				{
+					value: "off",
+					label: "Off",
+					description: "Leave the full direct tool surface. Codex can still enable Code Mode via its own setting.",
+				},
+				{
+					value: "on",
+					label: "On",
+					description: "Force programmatic tool calling whenever JS eval is available.",
+				},
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Enable only when the active model is flagged code_mode_only.",
+				},
+			],
+		},
+	},
+
+	"tools.ptc.directTools": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "PTC Direct Tools",
+			description:
+				"Extra tool names to keep directly callable alongside the PTC keep-set. Entries that are not enabled in the session are ignored.",
 		},
 	},
 

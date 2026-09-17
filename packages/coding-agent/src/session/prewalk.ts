@@ -46,9 +46,12 @@ const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
  * counts only when the wrapped tool resolved to a `write`/`exec` approval tier.
  * Read-only device calls — LSP navigation, `debug` inspection, `ast_edit` on
  * internal URLs, help lookups — leave the tier `read` (or absent) and must not
- * switch the model mid-investigation (issue #7312).
+ * switch the model mid-investigation (issue #7312). An `eval` cell counts when
+ * a nested session tool summarized as `edit` or `write` (via `statusEvents`)
+ * so PTC/Code Mode work still arms the hand-off.
  */
 function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
+	if (result.toolName === "eval") return evalDetailsHaveNestedMutation(result.details);
 	if (!PREWALK_ACTION_TOOLS[result.toolName]) return false;
 	const details = result.details;
 	// A direct filesystem edit/write carries no `xd://` dispatch metadata.
@@ -59,6 +62,33 @@ function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 	// reporter's "stay on the large model a couple turns longer" preference.
 	if (typeof xdev !== "object" || !("tier" in xdev)) return false;
 	return xdev.tier === "write" || xdev.tier === "exec";
+}
+
+function evalDetailsHaveNestedMutation(details: unknown): boolean {
+	for (const op of collectEvalStatusOps(details)) {
+		if (PREWALK_ACTION_TOOLS[op] === true) return true;
+	}
+	return false;
+}
+
+function collectEvalStatusOps(details: unknown): string[] {
+	if (!details || typeof details !== "object") return [];
+	const ops: string[] = [];
+	const take = (events: unknown): void => {
+		if (!Array.isArray(events)) return;
+		for (const event of events) {
+			if (event && typeof event === "object" && "op" in event && typeof event.op === "string") {
+				ops.push(event.op);
+			}
+		}
+	};
+	take("statusEvents" in details ? details.statusEvents : undefined);
+	if ("cells" in details && Array.isArray(details.cells)) {
+		for (const cell of details.cells) {
+			if (cell && typeof cell === "object" && "statusEvents" in cell) take(cell.statusEvents);
+		}
+	}
+	return ops;
 }
 
 /** Capabilities the prewalk coordinator borrows from its owning session. */
