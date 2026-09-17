@@ -36,6 +36,22 @@ import type {
 export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
 export type { JsDisplayOutput } from "./worker-protocol";
 
+function jsSnapshot(
+	cwd: string,
+	sessionId: string,
+	localRoots: Record<string, string> | undefined,
+	session?: ToolSession,
+	extra?: Pick<SessionSnapshot, "preludes">,
+): SessionSnapshot {
+	return {
+		cwd,
+		sessionId,
+		localRoots,
+		restrictedIo: session?.getCodeModeDirectToolNames?.() !== undefined,
+		...extra,
+	};
+}
+
 export interface VmRunState {
 	signal?: AbortSignal;
 	onText?: (chunk: string) => void;
@@ -180,7 +196,7 @@ export async function executeInVmContext(options: {
 	}
 	const session = await acquireSession(
 		sessionKey,
-		{ cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
+		jsSnapshot(options.cwd, options.sessionId, options.localRoots, options.session),
 		options.timeoutMs,
 		options.ownerId,
 	);
@@ -433,12 +449,9 @@ async function runOnce(
 			runId,
 			code: options.code,
 			filename: options.filename,
-			snapshot: {
-				cwd: options.cwd,
-				sessionId: options.sessionId,
-				localRoots: options.localRoots,
+			snapshot: jsSnapshot(options.cwd, options.sessionId, options.localRoots, options.session, {
 				preludes: javascriptPreludeSources(options.session),
-			},
+			}),
 		});
 		return await promise;
 	} finally {

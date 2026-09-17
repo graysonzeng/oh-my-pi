@@ -1255,6 +1255,17 @@ export async function runRpcMode(
 				});
 			}
 
+			case "set_ptc_mode": {
+				if (command.mode !== "off" && command.mode !== "on" && command.mode !== "auto") {
+					return error(id, "set_ptc_mode", "PTC mode must be off, on, or auto.");
+				}
+				session.settings.override("tools.ptc.mode", command.mode);
+				return success(id, "set_ptc_mode", {
+					mode: command.mode,
+					active: session.getCodeModeDirectToolNames() !== undefined,
+				});
+			}
+
 			case "get_available_commands": {
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
 			}

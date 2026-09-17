@@ -237,6 +237,16 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			});
 		}
 	},
+	"--ptc": (result, value, deps) => {
+		if (value === "off" || value === "on" || value === "auto") {
+			result.ptc = value;
+		} else {
+			deps.logger.warn("Invalid value passed to --ptc", {
+				value,
+				validValues: ["off", "on", "auto"],
+			});
+		}
+	},
 };
 
 /**

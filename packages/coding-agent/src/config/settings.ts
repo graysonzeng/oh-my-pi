@@ -3181,6 +3181,8 @@ const codeModeSignal = new SettingSignal("providers.openai-codex.codeMode");
  * which the namespace metadata is keyed by.
  */
 const CODE_MODE_SIGNAL_PATHS: readonly SettingPath[] = [
+	"tools.ptc.mode",
+	"tools.ptc.directTools",
 	"providers.openai-codex.codeMode",
 	"providers.openai-codex.codeModeDirectTools",
 	"eval.js",

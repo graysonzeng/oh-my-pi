@@ -2001,6 +2001,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				entries: () => session?.currentRecoveryEntries(),
 				fits: content => session?.fitsRecoveryResult(content) ?? false,
 			},
+			getNestedToolScheduler: () => session?.getNestedToolScheduler(),
+			emitNestedToolExecution: event => session?.emitNestedToolExecution(event),
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an

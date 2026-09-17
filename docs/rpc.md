@@ -125,6 +125,7 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
+- `{ id?, type: "set_ptc_mode", mode: "off" | "on" | "auto" }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
 - `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
@@ -364,6 +365,28 @@ The corresponding `get_state` result reports the same computed state:
   "fastModeActive": true
 }
 ```
+
+### `set_ptc_mode` payload
+
+`set_ptc_mode` overrides `tools.ptc.mode` for the current session. The request is:
+
+```json
+{ "id": "req_ptc_on", "type": "set_ptc_mode", "mode": "on" }
+```
+
+On success, `data` contains the requested `mode` and whether PTC/Code Mode is currently `active` (JS eval available and the resolved keep-set is in force):
+
+```json
+{
+  "id": "req_ptc_on",
+  "type": "response",
+  "command": "set_ptc_mode",
+  "success": true,
+  "data": { "mode": "on", "active": true }
+}
+```
+
+Invalid `mode` values return a failure. Codex `providers.openai-codex.codeMode` remains the fallback when the generic switch is `off`.
 
 ### `set_todos` payload
 

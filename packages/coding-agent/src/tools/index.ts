@@ -12,6 +12,7 @@ import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
+import type { NestedToolScheduler } from "../eval/js/nested-scheduler";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -137,6 +138,13 @@ export * from "./vibe";
 export * from "./write";
 export * from "./xdev";
 export * from "./yield";
+
+export { NestedToolScheduler } from "../eval/js/nested-scheduler";
+
+/** Nested eval-bridge tool lifecycle events fanned out to session subscribers. */
+export type NestedToolExecutionEvent =
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: unknown; intent?: string }
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: unknown; isError?: boolean };
 
 /** Tool type (AgentTool from pi-ai) */
 export type Tool = AgentTool<any, any, any>;
@@ -335,8 +343,12 @@ export interface ToolSession {
 	getToolContext?: () => AgentToolContext | undefined;
 	/** Names currently authorized for invocation through the eval bridge. */
 	getEvalBridgeToolNames?: () => readonly string[];
-	/** Direct partition of the active Code Mode surface; undefined when Code Mode is inactive. */
+	/** Direct partition of the active Code Mode / PTC surface; undefined when inactive. */
 	getCodeModeDirectToolNames?: () => readonly string[] | undefined;
+	/** Nested eval-bridge exclusive/shared scheduler. Independent of the outer agent-loop gate. */
+	getNestedToolScheduler?: () => NestedToolScheduler | undefined;
+	/** Fan out nested eval-bridge tool lifecycle to session subscribers (metaharness, UI). */
+	emitNestedToolExecution?: (event: NestedToolExecutionEvent) => void | Promise<void>;
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */

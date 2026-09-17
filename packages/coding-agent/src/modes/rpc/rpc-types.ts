@@ -40,6 +40,7 @@ export type RpcCommand =
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
+	| { id?: string; type: "set_ptc_mode"; mode: "off" | "on" | "auto" }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
@@ -219,6 +220,13 @@ export type RpcResponse =
 			command: "set_fast_mode";
 			success: true;
 			data: { enabled: boolean; active: boolean };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_ptc_mode";
+			success: true;
+			data: { mode: "off" | "on" | "auto"; active: boolean };
 	  }
 	| {
 			id?: string;

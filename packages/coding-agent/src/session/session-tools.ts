@@ -36,7 +36,8 @@ import {
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
-import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } from "./code-mode";
+import { buildToolNamespacesInfo, type ToolNamespacesInfo } from "./code-mode";
+import { resolvePtc, type PtcResolution } from "./ptc";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
@@ -670,22 +671,24 @@ export class SessionTools {
 		}
 	}
 
-	/** Whether a model transition crosses a Code Mode presentation boundary. */
+	#resolvePtc(model: Model | undefined, enabledToolNames: readonly string[]): PtcResolution {
+		return resolvePtc({
+			provider: model?.provider ?? "",
+			toolMode: model?.toolMode,
+			ptcMode: this.#host.settings.get("tools.ptc.mode"),
+			codexMode: this.#host.settings.get("providers.openai-codex.codeMode"),
+			extraDirectTools: this.#host.settings.get("tools.ptc.directTools"),
+			codexExtraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
+			enabledToolNames,
+			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
+		});
+	}
+
+	/** Whether a model transition crosses a Code Mode / PTC presentation boundary. */
 	codeModeChangesBetween(previousModel: Model | undefined, nextModel: Model): boolean {
 		const enabledToolNames = this.getEnabledToolNames();
-		const setting = this.#host.settings.get("providers.openai-codex.codeMode");
-		const extraDirectTools = this.#host.settings.get("providers.openai-codex.codeModeDirectTools");
-		const resolve = (model: Model | undefined) =>
-			resolveCodeMode({
-				provider: model?.provider ?? "",
-				toolMode: model?.toolMode,
-				setting,
-				extraDirectTools,
-				enabledToolNames,
-				evalTransportAvailable: this.#hasCodeModeEvalTransport(),
-			});
-		const previous = resolve(previousModel);
-		const next = resolve(nextModel);
+		const previous = this.#resolvePtc(previousModel, enabledToolNames);
+		const next = this.#resolvePtc(nextModel, enabledToolNames);
 		if (previous.active !== next.active) return true;
 		if (!next.active) return false;
 		if (previous.directToolNames.size !== next.directToolNames.size) return true;
@@ -855,14 +858,7 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
-		const codeMode = resolveCodeMode({
-			provider: this.#host.model()?.provider ?? "",
-			toolMode: this.#host.model()?.toolMode,
-			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
-			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
-			enabledToolNames: toolNames,
-			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
-		});
+		const codeMode = this.#resolvePtc(this.#host.model(), toolNames);
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
 		const fullWriteSelected =
 			toolNames.includes("write") &&
@@ -952,24 +948,26 @@ export class SessionTools {
 			if (transportNeeded && validToolNames.includes("write")) codeMode.directToolNames.add("write");
 			appliedTools = tools.filter(tool => codeMode.directToolNames.has(tool.name));
 			appliedNames = validToolNames.filter(name => codeMode.directToolNames.has(name));
-			nextCodeModeNamespacesInfo = buildToolNamespacesInfo({
-				tools: validToolNames.flatMap(name => {
-					const tool = this.#toolRegistry.get(name);
-					if (!tool) return [];
-					return [
-						{
-							name,
-							customWireName: tool.customWireName,
-							loadMode: "loadMode" in tool && typeof tool.loadMode === "string" ? tool.loadMode : undefined,
-							mcpServerName:
-								"mcpServerName" in tool && typeof tool.mcpServerName === "string"
-									? tool.mcpServerName
-									: undefined,
-						},
-					];
-				}),
-				directToolNames: codeMode.directToolNames,
-			});
+			if (codeMode.codexNamespaces) {
+				nextCodeModeNamespacesInfo = buildToolNamespacesInfo({
+					tools: validToolNames.flatMap(name => {
+						const tool = this.#toolRegistry.get(name);
+						if (!tool) return [];
+						return [
+							{
+								name,
+								customWireName: tool.customWireName,
+								loadMode: "loadMode" in tool && typeof tool.loadMode === "string" ? tool.loadMode : undefined,
+								mcpServerName:
+									"mcpServerName" in tool && typeof tool.mcpServerName === "string"
+										? tool.mcpServerName
+										: undefined,
+							},
+						];
+					}),
+					directToolNames: codeMode.directToolNames,
+				});
+			}
 		}
 		const restrictDeviceOnlyWrite =
 			validToolNames.includes("write") &&
