@@ -57,12 +57,12 @@ describe("renderPtcSkeletonCatalog", () => {
 				summary: "Create a Jira issue",
 			}),
 		];
-		const rendered = renderPtcSkeletonCatalog(tools, { budgetBytes: 280 });
+		const rendered = renderPtcSkeletonCatalog(tools, { budgetBytes: 360 });
 		expect(rendered).toContain("read(args:");
 		expect(rendered).toContain("mcp__github_list_prs(args:");
 		expect(rendered).toMatch(/jira \(\d+ tools\)/);
 		expect(rendered).toContain("searchTools");
-		expect(Buffer.byteLength(rendered, "utf-8")).toBeLessThanOrEqual(280);
+		expect(Buffer.byteLength(rendered, "utf-8")).toBeLessThanOrEqual(360);
 	});
 
 	test("does not slice a declaration in the middle of a tool line", () => {

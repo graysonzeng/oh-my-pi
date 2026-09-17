@@ -5,6 +5,7 @@
  */
 
 import { jsonSchemaToTypeScript } from "@oh-my-pi/pi-ai";
+import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema/wire";
 import { generateCodeModeDeclarations } from "./eval-format/code-mode-declarations";
 
 /** Experimental UTF-8 byte budget for the eval-description catalog (~20 KiB). */
@@ -167,7 +168,7 @@ function toHit(tool: PtcCatalogTool): PtcCatalogSearchHit {
 function toDescriptor(tool: PtcCatalogTool): PtcCatalogDescriptor {
 	let schema: string;
 	try {
-		schema = jsonSchemaToTypeScript(tool.parameters);
+		schema = jsonSchemaToTypeScript(toJsonSchema(tool.parameters));
 	} catch {
 		schema = "unknown";
 	}
@@ -206,6 +207,10 @@ function tokenize(value: string): string[] {
 
 function sanitizeSummary(summary: string): string {
 	return summary.replace(SUMMARY_CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
+}
+
+function toJsonSchema(parameters: unknown): unknown {
+	return isArkSchema(parameters) ? arkToWireSchema(parameters) : parameters;
 }
 
 function byteLength(text: string): number {
