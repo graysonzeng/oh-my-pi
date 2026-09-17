@@ -328,15 +328,28 @@ export class JsRuntime {
 	};
 	#installedCallTool: unknown;
 	#hostFetch: typeof fetch | undefined;
+	#restrictedIo = false;
 
 	setRestrictedIo(restricted: boolean): void {
-		this.#activateGlobals("set restricted I/O");
+		if (this.#disposed) throw new Error("Cannot set restricted I/O on a disposed JS runtime");
+		this.#restrictedIo = restricted;
+		// Same as setCwd: WorkerCore/browser call this from init and pre-run
+		// paths that may race another same-realm runtime. Throwing here used to
+		// replace the exclusive-run error ("Cannot run code while another
+		// same-realm JS runtime is running") with a setup error.
+		if (activeGlobalRunOwner === null || activeGlobalRunOwner === this.#globalOwner) {
+			this.#activateGlobals("set restricted I/O");
+			this.#writeRestrictedIoGlobals();
+		}
+	}
+
+	#writeRestrictedIoGlobals(): void {
 		const globals = globalThis as Record<string, unknown>;
 		this.#ownGlobal("__omp_restricted_io__");
-		globals.__omp_restricted_io__ = restricted;
+		globals.__omp_restricted_io__ = this.#restrictedIo;
 		recordGlobalValue("__omp_restricted_io__", this.#globalOwner);
 		this.#ownGlobal("fs");
-		if (restricted) {
+		if (this.#restrictedIo) {
 			delete globals.fs;
 			this.#ownGlobal("fetch");
 			if (this.#hostFetch === undefined) this.#hostFetch = globalThis.fetch;
@@ -525,6 +538,7 @@ export class JsRuntime {
 		options: { runId?: string; cwd?: string } = {},
 	): Promise<unknown> {
 		this.#activateGlobals("run code");
+		this.#writeRestrictedIoGlobals();
 		this.#namespaceRevision++;
 		const leaveRun = enterGlobalRun(this.#globalOwner, "run code");
 		const context: RunContext = {

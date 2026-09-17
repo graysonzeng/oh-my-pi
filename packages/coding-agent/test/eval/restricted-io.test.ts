@@ -79,4 +79,50 @@ describe("JsRuntime restricted I/O", () => {
 			runtime.dispose();
 		}
 	});
+
+	it("defers cross-runtime setRestrictedIo until this runtime can own the realm", async () => {
+		const first = new JsRuntime({
+			initialCwd: process.cwd(),
+			sessionId: "restricted-io-first",
+		});
+		const second = new JsRuntime({
+			initialCwd: process.cwd(),
+			sessionId: "restricted-io-second",
+		});
+		const hooks: RuntimeHooks = {
+			onText: () => {},
+			onDisplay: () => {},
+			callTool: async () => undefined,
+		};
+		const gate = Promise.withResolvers<void>();
+		let hold: Promise<unknown> | undefined;
+		try {
+			second.setRunScope({ gate: gate.promise });
+			hold = second.run("await gate;", undefined, hooks);
+			// Pre-run restricted I/O must not steal the exclusive-run error or
+			// clobber the live runtime's globals — WorkerCore calls this while
+			// another same-realm cell is mid-run.
+			expect(() => first.setRestrictedIo(true)).not.toThrow();
+			expect((globalThis as Record<string, unknown>).__omp_helpers__).toBe(second.helpers);
+			await first.run("1", undefined, hooks).then(
+				() => {
+					throw new Error("expected active runtime rejection");
+				},
+				error =>
+					expect(error).toHaveProperty(
+						"message",
+						"Cannot run code while another same-realm JS runtime is running",
+					),
+			);
+			gate.resolve();
+			await hold;
+			const result = (await first.run(`typeof fs`, undefined, hooks)) as string;
+			expect(result).toBe("undefined");
+		} finally {
+			gate.resolve();
+			if (hold) await hold.catch(() => undefined);
+			first.dispose();
+			second.dispose();
+		}
+	});
 });
