@@ -217,6 +217,18 @@ describe("product-latency qualification scoring", () => {
 		expect(scoreReviewerOutput(REVIEWER_OK).accepted).toBe(true);
 		expect(scoreSonicWorkspace(SONIC_OK).accepted).toBe(true);
 	});
+
+	it("rejects wrong path, reversed parameters, and wrong caller even when they include the tokens", () => {
+		expect(
+			scoreScoutOutput(
+				JSON.stringify({
+					path: "vendor/src/task/review-performance.ts.bak",
+					signature: "resolveClassMaxRuntimeMs(configuredMaxRuntimeMs, performanceClass)",
+					caller: "notResolveTaskSpawnRuntime",
+				}),
+			).accepted,
+		).toBe(false);
+	});
 });
 
 describe("product-latency qualification gates", () => {
@@ -491,6 +503,13 @@ describe("product-latency baseline comparison", () => {
 		expect(report.providerRequests).not.toBe(report.launchCeiling);
 	});
 
+	it("reports cost total separately from the measured-attempt cost median", () => {
+		const report = reportFrom(suite());
+		expect(report.aggregates.scout.costTotal).toBeCloseTo(0.06);
+		expect(report.aggregates.scout.costMedian).toBe(0.01);
+		expect(report.aggregates.scout.costTotal).not.toBe(report.aggregates.scout.costMedian);
+	});
+
 	it("rejects a malformed baseline object instead of inventing a report", () => {
 		const parsed = parseQualificationReport({ status: "PASS" });
 		expect("error" in parsed).toBe(true);
@@ -517,5 +536,32 @@ describe("product-latency baseline comparison", () => {
 		if ("error" in parsed) return;
 		expect(parsed.qualityAcceptance.status).toBe("FAIL");
 		expect(parsed.status).toBe("FAIL");
+	});
+
+	it("does not promote config-drift or in_progress checkpoints to PASS on parse", () => {
+		const base = reportFrom(suite());
+		const drifted = parseQualificationReport({
+			...base,
+			runtimeSmoke: { status: "UNVERIFIED", reason: "config-drift: models.yml hash changed" },
+		});
+		expect("error" in drifted).toBe(false);
+		if ("error" in drifted) return;
+		expect(drifted.status).toBe("UNVERIFIED");
+		expect(drifted.runtimeSmoke.status).toBe("UNVERIFIED");
+
+		const checkpoint = parseQualificationReport({ ...base, checkpoint: "in_progress" });
+		expect("error" in checkpoint).toBe(false);
+		if ("error" in checkpoint) return;
+		expect(checkpoint.status).toBe("UNVERIFIED");
+	});
+
+	it("fails runtime smoke when one measured attempt lacks effort", () => {
+		const report = reportFrom(
+			suite((variant, repetition) =>
+				variant === "scout" && repetition === 1 ? { effectiveEffort: undefined } : {},
+			),
+		);
+		expect(report.runtimeSmoke.status).toBe("FAIL");
+		expect(report.runtimeSmoke.reason).toContain("missing runtime effort");
 	});
 });

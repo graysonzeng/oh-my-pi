@@ -866,6 +866,36 @@ describe("buildSubagentBaselineReport", () => {
 		expect(report.coverage.spawnQueueMs).toEqual({ present: 1, unknown: 1 });
 	});
 
+	it("keeps IRC terminal B when structured only reported A, and rejects a stranger id", async () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(
+					taskCall({
+						callId: "batch",
+						ts: 1000,
+						tasks: [{ name: "Worker" }, { name: "Reviewer" }],
+					}),
+				),
+				line(
+					toolResult({
+						callId: "batch",
+						ts: 4000,
+						text: `<task-result id="Worker" status="completed" completionKind="completed">ok</task-result>\n<task-result id="Reviewer" status="budget_stop" completionKind="budget_stop">partial</task-result>`,
+						details: {
+							results: [{ id: "Worker", completionKind: "completed", reviewMetrics: { spawnQueueMs: 9 } }],
+						},
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildSubagentBaselineReport([parent]);
+		expect(report.completionKinds.completed).toBe(1);
+		expect(report.completionKinds.budget_stop).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 2, unknown: 0 });
+	});
+
 	it("never assigns mismatched explicit IDs and keeps missing batch members in the denominator", () => {
 		const parent = parseSessionJsonl(
 			[

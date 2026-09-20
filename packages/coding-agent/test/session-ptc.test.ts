@@ -113,7 +113,7 @@ describe("resolvePtc", () => {
 		expect(r.degradedReason).toBe("eval-unavailable");
 	});
 
-	test("generic extra direct tools union with the Codex extras", () => {
+	test("generic extra direct tools do not receive Codex extras on a non-Codex provider", () => {
 		const r = resolvePtc({
 			provider: "anthropic",
 			ptcMode: "on",
@@ -124,8 +124,23 @@ describe("resolvePtc", () => {
 			evalTransportAvailable: true,
 		});
 		expect(r.directToolNames.has("read")).toBe(true);
+		expect(r.directToolNames.has("bash")).toBe(false);
+		expect(r.codexNamespaces).toBe(false);
+	});
+
+	test("Codex extras apply only for openai-codex", () => {
+		const r = resolvePtc({
+			provider: "openai-codex",
+			ptcMode: "on",
+			codexMode: "off",
+			extraDirectTools: ["read"],
+			codexExtraDirectTools: ["bash"],
+			enabledToolNames: ENABLED,
+			evalTransportAvailable: true,
+		});
+		expect(r.directToolNames.has("read")).toBe(true);
 		expect(r.directToolNames.has("bash")).toBe(true);
-		expect(r.directToolNames.has("missing")).toBe(false);
+		expect(r.codexNamespaces).toBe(true);
 	});
 
 	test("reserved eval bridge names stay direct", () => {

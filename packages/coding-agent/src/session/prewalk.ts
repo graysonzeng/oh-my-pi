@@ -47,38 +47,37 @@ const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
  * Read-only device calls — LSP navigation, `debug` inspection, `ast_edit` on
  * internal URLs, help lookups — leave the tier `read` (or absent) and must not
  * switch the model mid-investigation (issue #7312). An `eval` cell counts when
- * a nested session tool summarized as `edit` or `write` (via `statusEvents`)
- * so PTC/Code Mode work still arms the hand-off.
+ * a nested session tool is a genuine mutation (same xdev.tier rule), so
+ * PTC/Code Mode work still arms the hand-off.
  */
 function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 	if (result.toolName === "eval") return evalDetailsHaveNestedMutation(result.details);
-	if (!PREWALK_ACTION_TOOLS[result.toolName]) return false;
-	const details = result.details;
-	// A direct filesystem edit/write carries no `xd://` dispatch metadata.
+	return isMutatingAction(result.toolName, result.details);
+}
+
+function isMutatingAction(toolName: string, details: unknown): boolean {
+	if (!PREWALK_ACTION_TOOLS[toolName]) return false;
 	if (!details || typeof details !== "object" || !("xdev" in details) || !details.xdev) return true;
 	const xdev = details.xdev;
-	// Device dispatch: switch only on a genuine mutation tier. An absent tier
-	// (help lookup, unresolved approval) declines the switch, matching the
-	// reporter's "stay on the large model a couple turns longer" preference.
 	if (typeof xdev !== "object" || !("tier" in xdev)) return false;
 	return xdev.tier === "write" || xdev.tier === "exec";
 }
 
 function evalDetailsHaveNestedMutation(details: unknown): boolean {
-	for (const op of collectEvalStatusOps(details)) {
-		if (PREWALK_ACTION_TOOLS[op] === true) return true;
+	for (const event of collectEvalStatusEvents(details)) {
+		if (isMutatingAction(event.op, event)) return true;
 	}
 	return false;
 }
 
-function collectEvalStatusOps(details: unknown): string[] {
+function collectEvalStatusEvents(details: unknown): Array<{ op: string } & Record<string, unknown>> {
 	if (!details || typeof details !== "object") return [];
-	const ops: string[] = [];
-	const take = (events: unknown): void => {
-		if (!Array.isArray(events)) return;
-		for (const event of events) {
+	const events: Array<{ op: string } & Record<string, unknown>> = [];
+	const take = (value: unknown): void => {
+		if (!Array.isArray(value)) return;
+		for (const event of value) {
 			if (event && typeof event === "object" && "op" in event && typeof event.op === "string") {
-				ops.push(event.op);
+				events.push(event as { op: string } & Record<string, unknown>);
 			}
 		}
 	};
@@ -88,7 +87,7 @@ function collectEvalStatusOps(details: unknown): string[] {
 			if (cell && typeof cell === "object" && "statusEvents" in cell) take(cell.statusEvents);
 		}
 	}
-	return ops;
+	return events;
 }
 
 /** Capabilities the prewalk coordinator borrows from its owning session. */

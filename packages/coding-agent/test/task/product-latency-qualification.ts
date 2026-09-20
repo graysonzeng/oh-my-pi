@@ -154,6 +154,8 @@ export interface VariantAggregate {
 	efforts: string[];
 	tokenUsage?: TokenUsage;
 	costTotal?: number;
+	/** Median of measured per-attempt costs; missing samples are omitted, not zero. */
+	costMedian?: number;
 }
 
 export interface QualificationFingerprints {
@@ -203,6 +205,8 @@ export interface QualificationReport {
 	elapsedMs: number;
 	attempts: AttemptRecord[];
 	aggregates: Record<Variant, VariantAggregate>;
+	checkpoint?: "final" | "in_progress";
+	configDrift?: string;
 }
 
 export function qualificationFingerprints(modelsConfigSha256 = "unobserved"): QualificationFingerprints {
@@ -289,12 +293,11 @@ export function scoreScoutOutput(text: unknown): QualityScore {
 	const signature = typeof json.signature === "string" ? json.signature : "";
 	const caller = typeof json.caller === "string" ? json.caller : "";
 	const missing: string[] = [];
-	if (!path.includes("src/task/review-performance.ts")) missing.push("path src/task/review-performance.ts");
-	if (!signature.includes("resolveClassMaxRuntimeMs")) missing.push("signature resolveClassMaxRuntimeMs");
-	if (!signature.includes("performanceClass") || !signature.includes("configuredMaxRuntimeMs")) {
-		missing.push("signature parameters");
+	if (path !== "src/task/review-performance.ts") missing.push("path src/task/review-performance.ts");
+	if (signature !== "resolveClassMaxRuntimeMs(performanceClass, configuredMaxRuntimeMs)") {
+		missing.push("signature resolveClassMaxRuntimeMs");
 	}
-	if (!caller.includes("resolveTaskSpawnRuntime")) missing.push("caller resolveTaskSpawnRuntime");
+	if (caller !== "resolveTaskSpawnRuntime") missing.push("caller resolveTaskSpawnRuntime");
 	if (missing.length > 0) {
 		return { accepted: false, reason: `scout missing ${missing.join(", ")}` };
 	}
@@ -398,6 +401,7 @@ export function aggregateVariant(mode: Mode, variant: Variant, attempts: readonl
 			costTotal += attempt.costTotal;
 		}
 	}
+	const measuredCosts = sortedNumbers(measured.map(attempt => attempt.costTotal));
 	return {
 		variant,
 		launched: launched.length,
@@ -417,6 +421,7 @@ export function aggregateVariant(mode: Mode, variant: Variant, attempts: readonl
 		efforts: uniqueStrings(measured.map(attempt => attempt.effectiveEffort)),
 		...(hasUsage ? { tokenUsage } : {}),
 		...(hasCost ? { costTotal } : {}),
+		...(measuredCosts.length > 0 ? { costMedian: percentile(measuredCosts, 50) } : {}),
 	};
 }
 
@@ -443,6 +448,11 @@ export function evaluateRuntimeSmoke(mode: Mode, attempts: readonly AttemptRecor
 		return { status: "FAIL", reason: `${executionError.variant} child execution failure` };
 	}
 	for (const variant of QUALIFICATION_VARIANTS) {
+		const launched = attempts.filter(attempt => attempt.variant === variant);
+		const warmups = launched.filter(attempt => attempt.warmup);
+		if (warmups.length !== 1 || warmups[0]?.repetition !== 0) {
+			return { status: "FAIL", reason: `${variant} warmup count/repetition invalid` };
+		}
 		const measured = measuredAttempts(attempts, variant);
 		if (measured.length !== measuredCount(mode)) {
 			return {
@@ -450,8 +460,17 @@ export function evaluateRuntimeSmoke(mode: Mode, attempts: readonly AttemptRecor
 				reason: `${variant} measured ${measured.length}, expected ${measuredCount(mode)}`,
 			};
 		}
+		const repetitions = measured.map(attempt => attempt.repetition).sort((left, right) => left - right);
+		for (let index = 0; index < repetitions.length; index++) {
+			if (repetitions[index] !== index + 1) {
+				return { status: "FAIL", reason: `${variant} measured repetitions are not unique 1..n` };
+			}
+		}
 		if (measured.some(attempt => !attempt.runtimeProvenance || attempt.effectiveAgentSource !== "bundled")) {
 			return { status: "FAIL", reason: `${variant} identity/provenance missing or mixed` };
+		}
+		if (measured.some(attempt => !attempt.effectiveEffort)) {
+			return { status: "FAIL", reason: `${variant} missing runtime effort` };
 		}
 		if (uniqueStrings(measured.map(provenanceKey)).length !== 1) {
 			return { status: "FAIL", reason: `${variant} runtime model mixed across samples` };
@@ -532,7 +551,18 @@ export function buildQualificationReport(args: {
 	benefit?: BenefitVerdict;
 	modelsConfigSha256?: string;
 }): QualificationReport {
-	const runtimeSmoke = evaluateRuntimeSmoke(args.mode, args.attempts);
+	let runtimeSmoke = evaluateRuntimeSmoke(args.mode, args.attempts);
+	if (runtimeSmoke.status === "PASS" && args.launches !== args.attempts.length) {
+		runtimeSmoke = {
+			status: "FAIL",
+			reason: `launches ${args.launches} != attempts ${args.attempts.length}`,
+		};
+	} else if (runtimeSmoke.status === "PASS" && args.launches > launchCeiling(args.mode)) {
+		runtimeSmoke = {
+			status: "FAIL",
+			reason: `launches ${args.launches} exceeds ceiling ${launchCeiling(args.mode)}`,
+		};
+	}
 	const qualityAcceptance = evaluateQualityAcceptance(args.mode, args.attempts);
 	const e2eDelegateToAccepted = evaluateE2eDelegateToAccepted(args.mode, args.attempts);
 	const aggregates = {
@@ -1024,5 +1054,24 @@ export function parseQualificationReport(value: unknown): QualificationReport | 
 		elapsedMs: value.elapsedMs,
 	});
 	report.identity = identity;
+	if (value.checkpoint === "in_progress") {
+		report.checkpoint = "in_progress";
+		report.status = "UNVERIFIED";
+		report.runtimeSmoke = { status: "UNVERIFIED", reason: "in_progress checkpoint" };
+	}
+	const storedSmoke = isRecord(value.runtimeSmoke) ? value.runtimeSmoke : undefined;
+	const driftReason =
+		typeof value.configDrift === "string" && value.configDrift
+			? value.configDrift
+			: typeof storedSmoke?.reason === "string" &&
+				  storedSmoke.status === "UNVERIFIED" &&
+				  storedSmoke.reason.includes("config-drift")
+				? storedSmoke.reason
+				: undefined;
+	if (driftReason) {
+		report.configDrift = driftReason;
+		report.runtimeSmoke = { status: "UNVERIFIED", reason: driftReason };
+		report.status = "UNVERIFIED";
+	}
 	return report;
 }

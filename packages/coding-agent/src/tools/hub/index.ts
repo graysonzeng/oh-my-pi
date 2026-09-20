@@ -434,13 +434,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
 		}
 
-		// Wait window: `smart` (default) ignores a finite timeoutMs so the model
-		// cannot poll jobs. A fixed `async.pollWaitDuration` still honors
-		// timeoutMs, or uses the configured duration when it is omitted.
+		// Wait window: `smart` ignores a finite timeoutMs so the model cannot
+		// poll jobs — unless `from` + timeoutMs names a real message deadline.
 		const window = resolvePollWindow(this.session);
 		const requestedMs = params.timeoutMs !== undefined ? normalizeIrcTimeoutMs(params.timeoutMs) : window.waitMs;
-		const windowMs = window.smart ? 0 : requestedMs;
-
+		const honorMessageDeadline = Boolean(from && params.timeoutMs !== undefined);
+		const windowMs = window.smart && !honorMessageDeadline ? 0 : requestedMs;
 		const racePromises: Promise<unknown>[] = runningJobs.map(j => j.promise);
 
 		// Message leg: park a bus waiter with no timeout of its own — the race

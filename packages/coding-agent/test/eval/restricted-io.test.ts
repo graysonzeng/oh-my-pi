@@ -99,9 +99,6 @@ describe("JsRuntime restricted I/O", () => {
 		try {
 			second.setRunScope({ gate: gate.promise });
 			hold = second.run("await gate;", undefined, hooks);
-			// Pre-run restricted I/O must not steal the exclusive-run error or
-			// clobber the live runtime's globals — WorkerCore calls this while
-			// another same-realm cell is mid-run.
 			expect(() => first.setRestrictedIo(true)).not.toThrow();
 			expect((globalThis as Record<string, unknown>).__omp_helpers__).toBe(second.helpers);
 			await first.run("1", undefined, hooks).then(
@@ -123,6 +120,76 @@ describe("JsRuntime restricted I/O", () => {
 			if (hold) await hold.catch(() => undefined);
 			first.dispose();
 			second.dispose();
+		}
+	});
+
+	it("does not leave a later unrestricted runtime on the previous restricted fetch", async () => {
+		const restricted = new JsRuntime({
+			initialCwd: process.cwd(),
+			sessionId: "restricted-first",
+			restrictedIo: true,
+		});
+		const hooks: RuntimeHooks = {
+			onText: () => {},
+			onDisplay: () => {},
+			callTool: async () => undefined,
+		};
+		try {
+			await restricted.run(`typeof fs`, undefined, hooks);
+			restricted.dispose();
+			const open = new JsRuntime({
+				initialCwd: process.cwd(),
+				sessionId: "unrestricted-second",
+				restrictedIo: false,
+			});
+			try {
+				const result = (await open.run(
+					`(async () => {
+						let fetchType = typeof fetch;
+						let fetchOk = false;
+						try { await fetch("http://127.0.0.1"); fetchOk = true; } catch (error) {
+							fetchOk = !(error instanceof Error && error.message.includes("fetch is disabled"));
+						}
+						return { fs: typeof fs, fetchType, fetchOk };
+					})()`,
+					undefined,
+					hooks,
+				)) as { fs: string; fetchType: string; fetchOk: boolean };
+				expect(result.fs).toBe("object");
+				expect(result.fetchType).toBe("function");
+				expect(result.fetchOk).toBe(true);
+			} finally {
+				open.dispose();
+			}
+		} finally {
+			restricted.dispose();
+		}
+	});
+
+	it("keeps overlapping cells on the I/O policy snapshotted at run start", async () => {
+		const runtime = new JsRuntime({
+			initialCwd: process.cwd(),
+			sessionId: "overlap-io",
+			restrictedIo: true,
+		});
+		const hooks: RuntimeHooks = {
+			onText: () => {},
+			onDisplay: () => {},
+			callTool: async () => undefined,
+		};
+		const gate = Promise.withResolvers<void>();
+		try {
+			runtime.setRunScope({ gate: gate.promise });
+			const first = runtime.run(`(async () => { await gate; return { fs: typeof fs }; })()`, undefined, hooks);
+			runtime.setRestrictedIo(false);
+			const second = (await runtime.run(`({ fs: typeof fs })`, undefined, hooks)) as { fs: string };
+			expect(second.fs).toBe("object");
+			gate.resolve();
+			const firstResult = (await first) as { fs: string };
+			expect(firstResult.fs).toBe("undefined");
+		} finally {
+			gate.resolve();
+			runtime.dispose();
 		}
 	});
 });

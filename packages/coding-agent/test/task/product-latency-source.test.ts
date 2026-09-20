@@ -80,4 +80,26 @@ describe("paired source isolation", () => {
 		await fs.symlink(path.join(temp.path(), "package.json"), readPath);
 		await expect(captureQualificationSource(temp.path())).rejects.toThrow("source symlink");
 	});
+
+	it("rejects a first-party workspace package that resolves through a shared node_modules to another checkout", async () => {
+		using temp = TempDir.createSync("paired-source-");
+		const controlRoot = path.join(temp.path(), "control");
+		const thirdRoot = path.join(temp.path(), "third");
+		await seed(controlRoot);
+		await fs.mkdir(thirdRoot, { recursive: true });
+		await Bun.write(path.join(thirdRoot, "index.ts"), "leaked");
+		const realControl = await fs.realpath(controlRoot);
+		const realThird = await fs.realpath(thirdRoot);
+		await Bun.write(
+			path.join(realControl, "package.json"),
+			JSON.stringify({ name: "oh-my-pi", private: true, workspaces: ["packages/*"] }),
+		);
+		await Bun.write(
+			path.join(realControl, "packages/utils/package.json"),
+			JSON.stringify({ name: "@oh-my-pi/pi-utils" }),
+		);
+		await fs.mkdir(path.join(realControl, "node_modules/@oh-my-pi"), { recursive: true });
+		await fs.symlink(realThird, path.join(realControl, "node_modules/@oh-my-pi/pi-utils"));
+		await expect(captureQualificationSource(realControl)).rejects.toThrow("outside checkout");
+	});
 });

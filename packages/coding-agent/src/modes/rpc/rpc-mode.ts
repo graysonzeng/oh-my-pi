@@ -1260,6 +1260,11 @@ export async function runRpcMode(
 					return error(id, "set_ptc_mode", "PTC mode must be off, on, or auto.");
 				}
 				session.settings.override("tools.ptc.mode", command.mode);
+				try {
+					await session.reconcileCodeMode();
+				} catch (err) {
+					return error(id, "set_ptc_mode", err instanceof Error ? err.message : String(err));
+				}
 				return success(id, "set_ptc_mode", {
 					mode: command.mode,
 					active: session.getCodeModeDirectToolNames() !== undefined,

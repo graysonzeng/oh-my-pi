@@ -19,6 +19,7 @@ import {
 import { shouldDetachKernel } from "../py/spawn-options";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
+import type { NestedToolToken } from "./nested-scheduler";
 import { WorkerCore } from "./worker-core";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
@@ -95,6 +96,8 @@ interface PendingRun {
 	 */
 	heldResult?: Extract<WorkerOutbound, { type: "result" }>;
 	settled: boolean;
+	/** Scheduler tokens of exclusive/shared parents that created this run. */
+	ancestorTokens: ReadonlySet<NestedToolToken>;
 }
 
 interface JsSession {
@@ -245,6 +248,7 @@ export async function invokeJsTool(
 		deferDepth: 0,
 		aborted: false,
 		settled: false,
+		ancestorTokens: new Set(options.session.getNestedToolScheduler?.()?.runningTokens() ?? []),
 	};
 	session.pending.set(runId, pending);
 
@@ -413,6 +417,7 @@ async function runOnce(
 		deferDepth: 0,
 		aborted: false,
 		settled: false,
+		ancestorTokens: new Set(options.session.getNestedToolScheduler?.()?.runningTokens() ?? []),
 	};
 	session.pending.set(runId, pending);
 
@@ -661,6 +666,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		const value = await callSessionTool(msg.name, msg.args, {
 			session: pending.toolSession,
 			signal: ctrl.signal,
+			ancestors: pending.ancestorTokens,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });

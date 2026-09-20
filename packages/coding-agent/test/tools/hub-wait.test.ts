@@ -194,7 +194,7 @@ describe("hub unified wait", () => {
 		expect(result.useless).not.toBe(true);
 	});
 
-	test("smart wait ignores timeoutMs so a job poll cannot bounce back", async () => {
+	test("smart wait without from still ignores timeoutMs so a job poll cannot bounce back", async () => {
 		vi.useFakeTimers();
 		const registry = AgentRegistry.global();
 		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
@@ -203,7 +203,7 @@ describe("hub unified wait", () => {
 		manager.register("task", "MergeCore", async () => hang.promise, { id: "MergeCore", ownerId: SELF_ID });
 		const tool = new HubTool(makeSession(manager, "smart"));
 		let settled = false;
-		const pending = tool.execute("call_poll", { op: "wait", from: "MergeCore", timeoutMs: 120_000 }).then(result => {
+		const pending = tool.execute("call_poll", { op: "wait", ids: ["MergeCore"], timeoutMs: 120_000 }).then(result => {
 			settled = true;
 			return result;
 		});
@@ -216,6 +216,24 @@ describe("hub unified wait", () => {
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("## Completed (1)");
 		expect(result.useless).not.toBe(true);
+	});
+
+	test("smart wait honors from plus timeoutMs as a message deadline while jobs run", async () => {
+		vi.useFakeTimers();
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const hang = Promise.withResolvers<string>();
+		manager.register("task", "MergeCore", async () => hang.promise, { id: "MergeCore", ownerId: SELF_ID });
+		const tool = new HubTool(makeSession(manager, "smart"));
+		const pending = tool.execute("call_deadline", { op: "wait", from: "MergeCore", timeoutMs: 40 });
+		await Promise.resolve();
+		vi.advanceTimersByTime(50);
+		await Promise.resolve();
+		const result = await pending;
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("## Still Running");
+		hang.resolve("merged");
 	});
 
 	test("bare wait with no jobs and no running peers returns immediately", async () => {

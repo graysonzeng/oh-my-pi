@@ -551,11 +551,19 @@ function resolveSpawnRows(details: unknown, contentText: string): SpawnResultRow
 		return mergeRow(row, fromIrc[index]!);
 	});
 
+	for (let index = 0; index < fromIrc.length; index++) {
+		if (usedIrc.has(index)) continue;
+		const row = fromIrc[index];
+		if (!row?.id) continue;
+		if (filled.some(existing => rowsShareIdentity(existing, row))) continue;
+		usedIrc.add(index);
+		filled.push(row);
+	}
+
 	const unusedAnonymous = fromIrc
 		.map((row, index) => ({ row, index }))
 		.filter(entry => !usedIrc.has(entry.index) && !entry.row.id);
-	const unmatchedExplicitIrc = fromIrc.some((row, index) => !usedIrc.has(index) && Boolean(row.id));
-	if (unmatchedExplicitIrc) return filled;
+	if (fromIrc.some((row, index) => !usedIrc.has(index) && Boolean(row.id))) return filled;
 
 	let anonCursor = 0;
 	return filled.map(row => {

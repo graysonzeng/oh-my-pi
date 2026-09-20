@@ -690,6 +690,7 @@ export class SessionTools {
 		const previous = this.#resolvePtc(previousModel, enabledToolNames);
 		const next = this.#resolvePtc(nextModel, enabledToolNames);
 		if (previous.active !== next.active) return true;
+		if (previous.codexNamespaces !== next.codexNamespaces) return true;
 		if (!next.active) return false;
 		if (previous.directToolNames.size !== next.directToolNames.size) return true;
 		for (const name of previous.directToolNames) {

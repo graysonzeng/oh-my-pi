@@ -89,6 +89,19 @@ describe("renderPtcSkeletonCatalog", () => {
 		const rendered = renderPtcSkeletonCatalog(tools);
 		expect(Buffer.byteLength(rendered, "utf-8")).toBeLessThanOrEqual(DEFAULT_PTC_CATALOG_BUDGET_BYTES);
 	});
+
+	test("keeps the remainder index inside the total byte budget", () => {
+		const tools = Array.from({ length: 40 }, (_, index) =>
+			tool({
+				name: `mcp__overflow_${index}`,
+				mcpServerName: `server_${index}`,
+				summary: "余项索引".repeat(30),
+			}),
+		);
+		const rendered = renderPtcSkeletonCatalog(tools, { budgetBytes: 400 });
+		expect(Buffer.byteLength(rendered, "utf-8")).toBeLessThanOrEqual(400);
+		expect(rendered).toContain("searchTools");
+	});
 });
 
 describe("searchPtcTools / describePtcTools", () => {
@@ -121,6 +134,22 @@ describe("searchPtcTools / describePtcTools", () => {
 		expect(described.read?.name).toBe("read");
 		expect(described.read?.schema).toContain("q");
 		expect(described.missing).toBeNull();
+	});
+
+	test("describeTools keeps a large schema fully recoverable instead of byte-slicing characters", () => {
+		const huge = "中".repeat(6_000);
+		const described = describePtcTools(
+			[
+				tool({
+					name: "huge",
+					builtIn: true,
+					parameters: { type: "object", properties: { note: { type: "string", description: huge } } },
+				}),
+			],
+			["huge"],
+		);
+		expect(described.huge?.schema).toContain(huge);
+		expect(described.huge?.schema).not.toContain("schema truncated");
 	});
 
 	test("describeTools rejects more than 10 names", () => {

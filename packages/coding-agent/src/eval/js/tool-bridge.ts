@@ -26,7 +26,7 @@ import {
 } from "../handle-bridge";
 import { invokeEvalPrelude } from "../preludes";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
-import type { NestedToolConcurrency } from "./nested-scheduler";
+import type { NestedToolConcurrency, NestedToolToken } from "./nested-scheduler";
 import type { JsStatusEvent } from "./shared/types";
 
 export type { JsStatusEvent } from "./shared/types";
@@ -36,6 +36,8 @@ interface ToolBridgeOptions {
 	signal?: AbortSignal;
 	emitStatus?: (event: JsStatusEvent) => void;
 	defaultIntent?: string;
+	/** Ancestor scheduler tokens captured when the child eval run started. */
+	ancestors?: ReadonlySet<NestedToolToken>;
 }
 
 type ToolValue =
@@ -106,6 +108,7 @@ function summarizeToolResult(
 				op: "write",
 				path: record.path,
 				chars: typeof record.content === "string" ? record.content.length : 0,
+				...(isRecord(details.xdev) ? { xdev: details.xdev } : {}),
 			});
 		case "grep":
 			return withError({
@@ -129,7 +132,11 @@ function summarizeToolResult(
 				output: text.slice(0, 500),
 			});
 		default:
-			return withError({ op: name, chars: text.length });
+			return withError({
+				op: name,
+				chars: text.length,
+				...(isRecord(details.xdev) ? { xdev: details.xdev } : {}),
+			});
 	}
 }
 
@@ -299,7 +306,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		}
 	};
 	const scheduler = options.session.getNestedToolScheduler?.();
-	return scheduler ? scheduler.run(resolveNestedConcurrency(tool, normalizedArgs), execute) : execute();
+	return scheduler
+		? scheduler.run(resolveNestedConcurrency(tool, normalizedArgs), execute, {
+				signal: options.signal,
+				ancestors: options.ancestors,
+			})
+		: execute();
 }
 
 function resolveNestedConcurrency(tool: AgentTool, args: unknown): NestedToolConcurrency {

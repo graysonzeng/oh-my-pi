@@ -53,6 +53,7 @@ export interface RunContext {
 	runId: string;
 	hooks: RuntimeHooks;
 	cwd: string;
+	restrictedIo: boolean;
 	finalExpressionSet: boolean;
 	finalExpressionValue: unknown;
 }
@@ -214,42 +215,20 @@ export class JsRuntime {
 	#als = new AsyncLocalStorage<RunContext>();
 	#moduleLoader: LocalModuleLoader;
 	#localRoots: Record<string, string>;
-	#hostFetch: typeof fetch | undefined;
 	#restrictedIo = false;
+	#restrictedResolver = (): boolean | undefined => this.#als.getStore()?.restrictedIo;
 
 	setRestrictedIo(restricted: boolean): void {
 		if (this.#disposed) throw new Error("Cannot set restricted I/O on a disposed JS runtime");
 		this.#restrictedIo = restricted;
-		// Same as setCwd: WorkerCore/browser call this from init and pre-run
-		// paths that may race another same-realm runtime. Throwing here used to
-		// replace the exclusive-run error ("Cannot run code while another
-		// same-realm JS runtime is running") with a setup error.
-		if (activeGlobalRunOwner === null || activeGlobalRunOwner === this.#globalOwner) {
-			this.#activateGlobals("set restricted I/O");
-			this.#writeRestrictedIoGlobals();
-		}
+		// Do not rewrite realm globals here. Overlapping cells and a later
+		// unrestricted runtime share one Bun realm; I/O policy is snapshotted
+		// onto RunContext at run() and resolved through ALS.
 	}
 
 	#writeRestrictedIoGlobals(): void {
-		const globals = globalThis as Record<string, unknown>;
-		this.#ownGlobal("__omp_restricted_io__");
-		globals.__omp_restricted_io__ = this.#restrictedIo;
-		recordGlobalValue("__omp_restricted_io__", this.#globalOwner);
-		this.#ownGlobal("fs");
-		if (this.#restrictedIo) {
-			delete globals.fs;
-			this.#ownGlobal("fetch");
-			if (this.#hostFetch === undefined) this.#hostFetch = globalThis.fetch;
-			globalThis.fetch = restrictedFetch as unknown as typeof fetch;
-			recordGlobalValue("fetch", this.#globalOwner);
-		} else {
-			globals.fs = fs;
-			if (this.#ownedGlobalKeys.has("fetch") && this.#hostFetch) {
-				globalThis.fetch = this.#hostFetch;
-				recordGlobalValue("fetch", this.#globalOwner);
-			}
-		}
-		recordGlobalValue("fs", this.#globalOwner);
+		patchRestrictedIoOnce();
+		RUN_RESTRICTED_RESOLVERS.add(this.#restrictedResolver);
 	}
 
 	constructor(opts: RuntimeOptions) {
@@ -372,6 +351,7 @@ export class JsRuntime {
 			runId,
 			hooks,
 			cwd: this.#cwd,
+			restrictedIo: this.#restrictedIo,
 			finalExpressionSet: false,
 			finalExpressionValue: undefined,
 		};
@@ -395,6 +375,7 @@ export class JsRuntime {
 			runId: options.runId ?? crypto.randomUUID(),
 			hooks,
 			cwd: options.cwd ?? this.#cwd,
+			restrictedIo: this.#restrictedIo,
 			finalExpressionSet: false,
 			finalExpressionValue: undefined,
 		};
@@ -571,33 +552,40 @@ export class JsRuntime {
 			createRequire,
 			fs,
 		};
-
 		const allGlobalKeys = new Set<string>([
 			...Object.keys(injected),
 			...Object.keys(extraGlobals ?? {}),
 			...PRELUDE_GLOBAL_KEYS,
-			"__omp_restricted_io__",
-			"fetch",
 		]);
+		allGlobalKeys.delete("fs");
+		allGlobalKeys.delete("fetch");
+		allGlobalKeys.delete("__omp_restricted_io__");
 
 		this.#reservedGlobalKeys = allGlobalKeys;
 		for (const key of allGlobalKeys) {
 			this.#ownGlobal(key);
 		}
 
-		Object.assign(globalThis, injected, extraGlobals ?? {});
+		const assignable: Record<string, unknown> = { ...injected, ...extraGlobals };
+		delete assignable.fs;
+		delete assignable.fetch;
+		delete assignable.__omp_restricted_io__;
+		Object.assign(globalThis, assignable);
 		// Prelude assigns console bridge + short aliases (`read`, `write`, `tool`, `display`, ...)
 		// onto globalThis. Must run after helpers are in place.
 		indirectEval(JAVASCRIPT_PRELUDE_SOURCE);
 		for (const key of allGlobalKeys) recordGlobalValue(key, this.#globalOwner);
 		RUN_HOOK_RESOLVERS.add(this.#runHookResolver);
+		RUN_RESTRICTED_RESOLVERS.add(this.#restrictedResolver);
 		patchStdioOnce();
+		patchRestrictedIoOnce();
 	}
 
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		RUN_HOOK_RESOLVERS.delete(this.#runHookResolver);
+		RUN_RESTRICTED_RESOLVERS.delete(this.#restrictedResolver);
 		for (const key of this.#ownedGlobalKeys) releaseGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.clear();
 		this.#reservedGlobalKeys.clear();
@@ -686,6 +674,7 @@ function assertCanUseGlobalOwner(owner: symbol, action: string): void {
 function activateGlobalOwner(owner: symbol, keys: Iterable<string>, action: string): void {
 	assertCanUseGlobalOwner(owner, action);
 	for (const key of keys) {
+		if (key === "fetch" || key === "fs" || key === "__omp_restricted_io__") continue;
 		const stack = GLOBAL_STACKS.get(key);
 		const index = stack?.entries.findIndex(entry => entry.owner === owner) ?? -1;
 		if (!stack || index === -1) throw new Error(`Cannot ${action} on a disposed JS runtime`);
@@ -694,6 +683,7 @@ function activateGlobalOwner(owner: symbol, keys: Iterable<string>, action: stri
 		stack.entries.push(entry);
 		(globalThis as Record<string, unknown>)[key] = entry.value;
 	}
+	if (restrictedIoPatched) patchRestrictedIoOnce();
 }
 
 function enterGlobalRun(owner: symbol, action: string): () => void {
@@ -712,8 +702,41 @@ function enterGlobalRun(owner: symbol, action: string): () => void {
 /** Resolvers for each live runtime's active-run hooks (one per JsRuntime instance). */
 const RUN_HOOK_RESOLVERS = new Set<() => RuntimeHooks | undefined>();
 
+/** Per-runtime ALS restricted-I/O flags; the active async continuation wins. */
+const RUN_RESTRICTED_RESOLVERS = new Set<() => boolean | undefined>();
+
 /** Streams whose `write` the runtime has already wrapped (patch-once guard). */
 const PATCHED_STDIO_STREAMS = new WeakSet<NodeJS.WriteStream>();
+
+let restrictedIoPatched = false;
+const PROCESS_FETCH = globalThis.fetch;
+
+function activeRestrictedIo(): boolean {
+	for (const resolve of RUN_RESTRICTED_RESOLVERS) {
+		const restricted = resolve();
+		if (restricted !== undefined) return restricted;
+	}
+	return false;
+}
+
+function patchRestrictedIoOnce(): void {
+	if (restrictedIoPatched) return;
+	restrictedIoPatched = true;
+	Object.defineProperty(globalThis, "__omp_restricted_io__", {
+		configurable: true,
+		enumerable: true,
+		get: activeRestrictedIo,
+	});
+	globalThis.fetch = ((...args: Parameters<typeof fetch>) => {
+		if (activeRestrictedIo()) restrictedFetch();
+		return PROCESS_FETCH(...args);
+	}) as typeof fetch;
+	Object.defineProperty(globalThis, "fs", {
+		configurable: true,
+		enumerable: true,
+		get: () => (activeRestrictedIo() ? undefined : fs),
+	});
+}
 
 /** Hooks for whichever registered runtime currently has an active run, if any. */
 function activeRunHooks(): RuntimeHooks | undefined {

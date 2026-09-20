@@ -111,8 +111,10 @@ export function resolvePtc(args: {
 	for (const name of args.extraDirectTools ?? []) {
 		if (args.enabledToolNames.includes(name)) direct.add(name);
 	}
-	for (const name of args.codexExtraDirectTools ?? []) {
-		if (args.enabledToolNames.includes(name)) direct.add(name);
+	if (args.provider === "openai-codex") {
+		for (const name of args.codexExtraDirectTools ?? []) {
+			if (args.enabledToolNames.includes(name)) direct.add(name);
+		}
 	}
 	return {
 		active: true,

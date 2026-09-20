@@ -6324,6 +6324,11 @@ export class AgentSession {
 		return this.#tools.reconcileCodeMode();
 	}
 
+	/** Reapplies the PTC/Code Mode partition after a setting or model change. */
+	reconcileCodeMode(): Promise<void> {
+		return this.#tools.reconcileCodeMode();
+	}
+
 	/** Current Code Mode `tool_namespaces_info` snapshot, or `undefined` when inactive. */
 	get codeModeNamespacesInfo(): unknown {
 		return this.#codeModeState.namespacesInfo;

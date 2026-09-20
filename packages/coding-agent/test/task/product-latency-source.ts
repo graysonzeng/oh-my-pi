@@ -67,6 +67,7 @@ export async function captureQualificationSource(root: string): Promise<Qualific
 	for (const required of [PAIRED_FIXTURE_PATH, ...Object.values(SOURCE_DELTAS).flat()]) {
 		if (!entries.some(([file]) => file === required)) throw new Error(`missing required source: ${required}`);
 	}
+	await assertFirstPartyResolutionsStayInside(root);
 	entries.sort(([left], [right]) => left.localeCompare(right));
 	return { root, fingerprint: sha256Hex(JSON.stringify(entries)), files: Object.fromEntries(entries) };
 }
@@ -88,4 +89,70 @@ export function assertQualificationSourcePair(
 	}
 	if (differences.length === 0) throw new Error("paired sources contain no experiment difference");
 	return differences.sort();
+}
+
+async function readPackageJson(file: string): Promise<Record<string, unknown> | undefined> {
+	try {
+		const value = JSON.parse(await Bun.file(file).text()) as unknown;
+		if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+		return value as Record<string, unknown>;
+	} catch {
+		return undefined;
+	}
+}
+
+async function resolveLinkChain(file: string): Promise<string> {
+	let current = file;
+	for (let hop = 0; hop < 8; hop++) {
+		const stat = await fs.lstat(current).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!stat?.isSymbolicLink()) return path.resolve(current);
+		current = path.resolve(path.dirname(current), await fs.readlink(current));
+	}
+	return path.resolve(current);
+}
+
+async function assertFirstPartyResolutionsStayInside(root: string): Promise<void> {
+	if (!(await readPackageJson(path.join(root, "package.json")))) return;
+	const firstParty: string[] = [];
+	try {
+		for (const entry of await fs.readdir(path.join(root, "packages"), { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			const pkg = await readPackageJson(path.join(root, "packages", entry.name, "package.json"));
+			if (typeof pkg?.name === "string" && pkg.name.startsWith("@oh-my-pi/")) firstParty.push(pkg.name);
+		}
+	} catch (error) {
+		if (isEnoent(error)) return;
+		throw error;
+	}
+	const searchRoots = [path.join(root, "node_modules"), path.join(root, "packages/coding-agent/node_modules")];
+	for (const nodeModules of searchRoots) {
+		const nodeStat = await fs.lstat(nodeModules).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!nodeStat) continue;
+		if (nodeStat.isSymbolicLink()) {
+			const real = await resolveLinkChain(nodeModules);
+			const relative = path.relative(root, real);
+			if (relative.startsWith("..") || path.isAbsolute(relative)) {
+				throw new Error(`shared node_modules escapes checkout: ${real}`);
+			}
+		}
+		for (const name of firstParty) {
+			const target = path.join(nodeModules, name);
+			const stat = await fs.lstat(target).catch(error => {
+				if (isEnoent(error)) return undefined;
+				throw error;
+			});
+			if (!stat) continue;
+			const real = stat.isSymbolicLink() ? await resolveLinkChain(target) : path.resolve(target);
+			const relative = path.relative(root, real);
+			if (relative.startsWith("..") || path.isAbsolute(relative)) {
+				throw new Error(`first-party ${name} resolved outside checkout via ${target} -> ${real}`);
+			}
+		}
+	}
 }

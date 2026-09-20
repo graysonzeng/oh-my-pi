@@ -10,7 +10,6 @@ import { generateCodeModeDeclarations } from "./eval-format/code-mode-declaratio
 
 /** Experimental UTF-8 byte budget for the eval-description catalog (~20 KiB). */
 export const DEFAULT_PTC_CATALOG_BUDGET_BYTES = 20_000;
-const DESCRIBE_SCHEMA_CAP_BYTES = 8_000;
 const SEARCH_LIMIT = 20;
 const DESCRIBE_NAME_LIMIT = 10;
 const SUMMARY_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
@@ -51,14 +50,29 @@ export function renderPtcSkeletonCatalog(
 ): string {
 	const budget = options.budgetBytes ?? DEFAULT_PTC_CATALOG_BUDGET_BYTES;
 	const sorted = sortCatalogTools(tools);
-	const admitted: PtcCatalogTool[] = [];
-	for (const tool of sorted) {
-		admitted.push(tool);
-		if (byteLength(formatCatalog(admitted, remainderOf(sorted, admitted))) <= budget) continue;
-		admitted.pop();
-		break;
+	const signatures = new Map<string, string>();
+	let admittedCount = 0;
+	for (let count = 0; count <= sorted.length; count++) {
+		const admitted = sorted.slice(0, count);
+		const remainder = sorted.slice(count);
+		const text = formatCatalog(admitted, remainder, signatures, false);
+		if (byteLength(text) > budget) break;
+		admittedCount = count;
 	}
-	return formatCatalog(admitted, remainderOf(sorted, admitted));
+	const admitted = sorted.slice(0, admittedCount);
+	const remainder = sorted.slice(admittedCount);
+	const fitted = formatCatalog(admitted, remainder, signatures, false);
+	if (byteLength(fitted) <= budget) return fitted;
+	const compact = formatCatalog(admitted, remainder, signatures, true);
+	if (byteLength(compact) <= budget) return compact;
+	let groups = groupByServer(remainder);
+	while (groups.length > 0) {
+		groups = groups.slice(0, -1);
+		const trimmed = groups.flatMap(([, group]) => group);
+		const text = formatCatalog(admitted, trimmed, signatures, true);
+		if (byteLength(text) <= budget) return text;
+	}
+	return formatCatalog(admitted, [], signatures, true);
 }
 
 export function searchPtcTools(
@@ -95,11 +109,6 @@ export function describePtcTools(
 	return out;
 }
 
-function remainderOf(all: readonly PtcCatalogTool[], admitted: readonly PtcCatalogTool[]): PtcCatalogTool[] {
-	const kept = new Set(admitted.map(tool => tool.name));
-	return all.filter(tool => !kept.has(tool.name));
-}
-
 function sortCatalogTools(tools: readonly PtcCatalogTool[]): PtcCatalogTool[] {
 	return [...tools].sort((left, right) => {
 		if (Boolean(left.builtIn) !== Boolean(right.builtIn)) return left.builtIn ? -1 : 1;
@@ -109,25 +118,34 @@ function sortCatalogTools(tools: readonly PtcCatalogTool[]): PtcCatalogTool[] {
 	});
 }
 
-function formatCatalog(admitted: readonly PtcCatalogTool[], remainder: readonly PtcCatalogTool[]): string {
+function formatCatalog(
+	admitted: readonly PtcCatalogTool[],
+	remainder: readonly PtcCatalogTool[],
+	signatures: Map<string, string>,
+	compactRemainder: boolean,
+): string {
 	const lines: string[] = [];
 	const builtins = admitted.filter(tool => tool.builtIn);
 	if (builtins.length > 0) {
 		lines.push("builtin:");
-		for (const tool of builtins) lines.push(`  ${formatSkeletonLine(tool)}`);
+		for (const tool of builtins) lines.push(`  ${formatSkeletonLine(tool, signatures)}`);
 	}
 	const servers = groupByServer(admitted.filter(tool => !tool.builtIn));
 	for (const [server, group] of servers) {
 		lines.push(`${formatServerHeader(server, group[0])}:`);
-		for (const tool of group) lines.push(`  ${formatSkeletonLine(tool)}`);
+		for (const tool of group) lines.push(`  ${formatSkeletonLine(tool, signatures)}`);
 	}
 	if (remainder.length > 0) {
 		const grouped = groupByServer(remainder);
 		lines.push("");
 		lines.push(`[${remainder.length} tools not listed. Use catalog.searchTools(query, { server }) to discover them:`);
 		for (const [server, group] of grouped) {
-			const summary = sanitizeSummary(group[0]?.summary ?? server);
 			const label = server === "" ? group.map(tool => tool.name).join(", ") : server;
+			if (compactRemainder) {
+				lines.push(`  ${label} (${group.length})`);
+				continue;
+			}
+			const summary = sanitizeSummary(group[0]?.summary ?? server);
 			lines.push(`  ${label} (${group.length} tools) — ${summary}`);
 		}
 		lines.push("]");
@@ -151,8 +169,12 @@ function formatServerHeader(server: string, sample: PtcCatalogTool | undefined):
 	return sample?.name ?? "tools";
 }
 
-function formatSkeletonLine(tool: PtcCatalogTool): string {
-	const signature = generateCodeModeDeclarations([{ name: tool.name, parameters: tool.parameters }]).trim();
+function formatSkeletonLine(tool: PtcCatalogTool, signatures: Map<string, string>): string {
+	let signature = signatures.get(tool.name);
+	if (!signature) {
+		signature = generateCodeModeDeclarations([{ name: tool.name, parameters: tool.parameters }]).trim();
+		signatures.set(tool.name, signature);
+	}
 	return `${signature} — ${sanitizeSummary(tool.summary || tool.description || tool.label || tool.name)}`;
 }
 
@@ -171,9 +193,6 @@ function toDescriptor(tool: PtcCatalogTool): PtcCatalogDescriptor {
 		schema = jsonSchemaToTypeScript(toJsonSchema(tool.parameters));
 	} catch {
 		schema = "unknown";
-	}
-	if (byteLength(schema) > DESCRIBE_SCHEMA_CAP_BYTES) {
-		schema = `${schema.slice(0, DESCRIBE_SCHEMA_CAP_BYTES)}\n/* …schema truncated… */`;
 	}
 	return {
 		name: tool.name,

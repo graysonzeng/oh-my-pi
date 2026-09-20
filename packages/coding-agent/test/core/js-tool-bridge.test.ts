@@ -850,6 +850,66 @@ describe("callSessionTool", () => {
 		expect(order).toEqual(["start", "end", "start", "end"]);
 	});
 
+	it("does not run a queued TodoTool after cancel while an exclusive blocker holds the gate", async () => {
+		const scheduler = new NestedToolScheduler();
+		let phases: TodoPhase[] = [{ name: "Regression", tasks: [{ content: "queued todo", status: "in_progress" }] }];
+		const blocker = {
+			...createTool("edit", async () => {
+				await Bun.sleep(50);
+				return { content: [{ type: "text" as const, text: "blocked" }] };
+			}),
+			concurrency: "exclusive" as const,
+		};
+		const session: ToolSession = {
+			...createSession([blocker]),
+			getNestedToolScheduler: () => scheduler,
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			getToolByName: name => {
+				if (name === "todo") return todoTool as unknown as AgentTool;
+				if (name === "edit") return blocker;
+				return undefined;
+			},
+		};
+		const todoTool = new TodoTool(session);
+		const ctrl = new AbortController();
+		const blocking = callSessionTool("edit", { path: "a.ts" }, { session });
+		const queued = callSessionTool(
+			"todo",
+			{ op: "done", phase: "Regression", list: null, task: null, items: null, reason: null },
+			{ session, signal: ctrl.signal },
+		);
+		ctrl.abort();
+		await expect(queued).rejects.toMatchObject({ name: "AbortError" });
+		await blocking;
+		expect(phases[0]?.tasks[0]?.status).toBe("in_progress");
+	});
+
+	it("lets a nested shared read run inside an exclusive eval without waiting for that eval", async () => {
+		const scheduler = new NestedToolScheduler();
+		const read = createTool("read", async () => ({ content: [{ type: "text" as const, text: "from-read" }] }));
+		const evalTool = {
+			...createTool("eval", async () => {
+				const nested = await callSessionTool(
+					"read",
+					{ path: "a.ts" },
+					{ session, ancestors: scheduler.runningTokens() },
+				);
+				return { content: [{ type: "text" as const, text: JSON.stringify(nested) }] };
+			}),
+			concurrency: "exclusive" as const,
+		};
+		const session = {
+			...createSession([evalTool, read]),
+			getNestedToolScheduler: () => scheduler,
+		};
+
+		const result = await callSessionTool("eval", { code: "1" }, { session });
+		expect(JSON.stringify(result)).toContain("from-read");
+	});
+
 	it("rejects a registry tool excluded from the eval bridge", async () => {
 		const rawExecute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "raw" }] });
 		const session = {
