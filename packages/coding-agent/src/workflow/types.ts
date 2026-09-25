@@ -71,6 +71,16 @@ export interface WorkPackageExecutionV1 extends WorkPackageV1 {
 	errorSummary?: string;
 }
 
+/** P1-4 explainable merge/recovery outcome; isolation is never a transaction. */
+export interface WorkPackageMergeRecoveryV1 {
+	kind: "merge_conflict" | "merge_applied" | "recovered_applied" | "needs_reconciliation";
+	explainable: true;
+	detail: string;
+	verifyRerunGuaranteed: false;
+	isolationIsTransaction: false;
+	unitIds?: string[];
+}
+
 export interface WorkPackageMergeV1 {
 	status: "pending" | "prepared" | "applied" | "failed";
 	order: string[];
@@ -79,6 +89,8 @@ export interface WorkPackageMergeV1 {
 	/** SHA-256 of the durable aggregate patch written before merge starts. */
 	patchSha256?: string;
 	summary?: string;
+	/** Explainable merge/recovery outcome (P1-4); does not rewrite `summary`. */
+	recovery?: WorkPackageMergeRecoveryV1;
 }
 
 export interface WorkPackageStateArtifactV1 extends ArtifactHeader {

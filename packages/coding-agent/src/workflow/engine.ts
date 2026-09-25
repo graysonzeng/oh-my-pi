@@ -3081,11 +3081,22 @@ export class WorkflowEngine {
 			const observed = await this.#inspectPersistedWritePatch(state, cwd);
 			changesApplied = observed === "applied";
 		}
-		const reconciled = withWorkPackageMerge(state, attemptId, {
-			patchPath: state.merge.patchPath,
-			changesApplied,
-			summary: reported.summary,
-		});
+		// P1-4: reconcile outcomes stay explainable; isolation is not a transaction.
+		const recoveryKind = !changesApplied
+			? "merge_conflict"
+			: trustMerger
+				? "merge_applied"
+				: "recovered_applied";
+		const reconciled = withWorkPackageMerge(
+			state,
+			attemptId,
+			{
+				patchPath: state.merge.patchPath,
+				changesApplied,
+				summary: reported.summary,
+			},
+			{ recoveryKind },
+		);
 		await this.#persistWorkPackageState(workflowId, attemptId, reconciled);
 		return reconciled;
 	}

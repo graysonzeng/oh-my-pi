@@ -372,6 +372,16 @@ describe("work-package aggregation", () => {
 			changesApplied: true,
 			summary: "combined changes applied",
 		});
+		// P1-4: merge outcome is explainable without rewriting summary or claiming a transaction.
+		expect(mergedState.merge.recovery).toMatchObject({
+			kind: "merge_applied",
+			explainable: true,
+			verifyRerunGuaranteed: false,
+			isolationIsTransaction: false,
+			unitIds: ["second", "first"],
+		});
+		expect(mergedState.merge.recovery?.detail).toContain("isolation is not a transaction");
+		expect(mergedState.merge.summary).toBe("combined changes applied");
 
 		const aggregate = aggregateWorkPackageImplementations({
 			workflowId: WORKFLOW_ID,

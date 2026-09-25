@@ -5,7 +5,7 @@ import {
 	shouldAutoParallel,
 	type WorkflowConcurrencyDeclarationV1,
 } from "../latency/concurrency-declaration";
-import { explainCancelOutcome } from "../latency/parallel-recovery-safety";
+import { explainCancelOutcome, explainMergeRecoveryOutcome } from "../latency/parallel-recovery-safety";
 import workPackageAssignmentTemplate from "../prompts/workflow/work-package-assignment.hbs.md" with { type: "text" };
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "../task/parallel";
 import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
@@ -379,7 +379,18 @@ export function withWorkPackageMerge(
 	state: WorkPackageStateArtifactV1,
 	attemptId: string,
 	merge: CapturedChangesMergeResult,
+	options?: {
+		/** Override when resume/reconcile proves a prior apply (not a fresh merge). */
+		recoveryKind?: "merge_conflict" | "merge_applied" | "recovered_applied" | "needs_reconciliation";
+	},
 ): WorkPackageStateArtifactV1 {
+	const recoveryKind =
+		options?.recoveryKind ?? (merge.changesApplied ? "merge_applied" : "merge_conflict");
+	const recovery = explainMergeRecoveryOutcome({
+		kind: recoveryKind,
+		detail: merge.summary,
+		unitIds: state.merge.order,
+	});
 	return {
 		...structuredClone(state),
 		attemptId,
@@ -390,7 +401,9 @@ export function withWorkPackageMerge(
 			status: merge.changesApplied ? "applied" : "failed",
 			patchPath: merge.patchPath,
 			changesApplied: merge.changesApplied,
+			// Keep caller summary intact — recovery explains isolation/verify contracts separately.
 			summary: merge.summary,
+			recovery,
 		},
 	};
 }
