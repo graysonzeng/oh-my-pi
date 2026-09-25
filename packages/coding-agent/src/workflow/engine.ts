@@ -31,6 +31,10 @@ import {
 	LatencyRolloutCohortStore,
 	type LatencyRolloutObservationV1,
 } from "../latency/rollout-cohort";
+import {
+	buildParentFinalVerificationDetails,
+	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+} from "../latency/parent-final-verification";
 import gateReviewAdapterPrompt from "../prompts/workflow/gate-review-adapter.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import {
@@ -2299,6 +2303,16 @@ export class WorkflowEngine {
 				});
 				this.#finalVerification = verification;
 				await this.#persistArtifact(workflowId, attemptId, "verification", verification);
+				// Explicit parent-acceptance receipt for offline e2e association.
+				// Normal stage transitions alone must not imply verification.
+				try {
+					session.sessionManager?.appendCustomEntry(
+						PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+						buildParentFinalVerificationDetails(verification.passed ? "passed" : "failed", "workflow"),
+					);
+				} catch {
+					// Receipt bookkeeping must not fail final_verify.
+				}
 				const decision = verification.passed ? "passed" : "failed";
 				const next = getNextStage("final_verify", decision);
 				await this.#completeTo(

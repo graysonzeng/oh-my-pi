@@ -1,12 +1,19 @@
 /**
  * Offline subagent baseline from existing session JSONL.
- * Consumes historical fields only. Does not infer passed, e2e, or verification.
+ * Consumes historical fields only. Does not infer passed, e2e, or verification
+ * from tool success or normal exit — only from explicit parent-final receipts.
  */
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import { resolveSubagentPerformanceClass, type SubagentPerformanceClass } from "../task/review-performance";
 import { computeActiveWallMs } from "./active-wall";
+import {
+	criticalPathMsFromIntervals,
+	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+	parseParentFinalVerificationDetails,
+	type ParentFinalVerificationObservation,
+} from "./parent-final-verification";
 import { sha256Hex } from "./stable-serialize";
 
 export interface CoverageCount {
@@ -21,9 +28,12 @@ export interface PercentileSummary {
 }
 
 export interface SubagentBaselineReport {
-	e2eMs: null;
-	criticalPathMs: null;
-	taskCompletionMs: null;
+	/** Parent start→final-verification wall; null when no explicit acceptance receipts. */
+	e2eMs: PercentileSummary | null;
+	/** Causal critical path (parallel children via union, not sum); null without receipts. */
+	criticalPathMs: PercentileSummary | null;
+	/** Parent assistant active wall through verification when known; null otherwise. */
+	taskCompletionMs: PercentileSummary | null;
 	uncomputableFromHistory: string[];
 	sessions: {
 		parentCount: number;
@@ -69,7 +79,7 @@ export interface SubagentBaselineReport {
 	spawnEfforts: Record<string, number>;
 	thinkingLevels: Record<string, number>;
 	completionKinds: Record<string, number>;
-	parentFinalVerification: { passed: 0; failed: 0; unknown: number };
+	parentFinalVerification: { passed: number; failed: number; unknown: number };
 	overlappingChildIntervals: number;
 	unmatchedToolResults: number;
 	repeatedReads: { key: string; count: number }[];
@@ -96,6 +106,7 @@ export interface ParsedSession {
 	toolResults: ParsedToolResult[];
 	thinkingLevels: string[];
 	spawnObservations: SpawnResultRow[];
+	parentFinalVerifications: ParentFinalVerificationObservation[];
 }
 
 interface UsageRequest {
@@ -157,13 +168,8 @@ const KNOWN_COMPLETION_KINDS: Record<string, true> = {
 	timeout: true,
 	hard_abort: true,
 };
-const UNCOMPUTABLE_FROM_HISTORY = [
-	"parentFinalVerification",
-	"e2eCriticalPathMs",
-	"taskCompletionMs",
-	"providerQueueMs",
-];
-
+/** Always listed: provider queue is never produced into session history today. */
+const ALWAYS_UNCOMPUTABLE_FROM_HISTORY = ["providerQueueMs"] as const;
 function asNonNegativeNumber(value: unknown): number | null {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
@@ -612,12 +618,30 @@ function parseUsageRequest(msg: Record<string, unknown>): UsageRequest {
 	};
 }
 
+function collectParentFinalVerification(
+	session: ParsedSession,
+	customType: unknown,
+	details: unknown,
+	ts: number | null,
+): void {
+	if (customType !== PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) return;
+	const parsed = parseParentFinalVerificationDetails(details);
+	if (!parsed) return;
+	session.parentFinalVerifications.push({
+		status: parsed.status,
+		source: parsed.source,
+		ts: parsed.verifiedAtMs ?? ts,
+	});
+}
+
 function collectTerminalObservations(
 	session: ParsedSession,
 	customType: unknown,
 	content: unknown,
 	details: unknown,
+	ts: number | null = null,
 ): void {
+	collectParentFinalVerification(session, customType, details, ts);
 	const type = typeof customType === "string" ? customType : "";
 	const text = textFromContent(content);
 	const hasJobs = isRecord(details) && Array.isArray(details.jobs);
@@ -652,6 +676,7 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 		toolResults: [],
 		thinkingLevels: [],
 		spawnObservations: [],
+		parentFinalVerifications: [],
 	};
 	for (const raw of records) {
 		if (!isRecord(raw)) continue;
@@ -678,15 +703,25 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 			session.thinkingLevels.push(raw.thinkingLevel);
 			continue;
 		}
+		if (type === "custom") {
+			const ts = entryTimestamp(raw, undefined);
+			touchTs(session, ts);
+			collectParentFinalVerification(session, raw.customType, raw.data, ts);
+			continue;
+		}
 		if (type === "custom_message") {
-			collectTerminalObservations(session, raw.customType, raw.content, raw.details);
+			const ts = entryTimestamp(raw, undefined);
+			touchTs(session, ts);
+			collectTerminalObservations(session, raw.customType, raw.content, raw.details, ts);
 			continue;
 		}
 		if (type !== "message") continue;
 		const msg = isRecord(raw.message) ? raw.message : undefined;
 		if (!msg) continue;
 		if (msg.role === "custom") {
-			collectTerminalObservations(session, msg.customType, msg.content, msg.details);
+			const ts = entryTimestamp(raw, msg);
+			touchTs(session, ts);
+			collectTerminalObservations(session, msg.customType, msg.content, msg.details, ts);
 			continue;
 		}
 		const ts = entryTimestamp(raw, msg);
@@ -1064,12 +1099,18 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 		}
 	}
 
+	const e2eSamples: number[] = [];
+	const criticalPathSamples: number[] = [];
+	const taskCompletionSamples: number[] = [];
+	let parentFinalPassed = 0;
+	let parentFinalFailed = 0;
+	let parentFinalUnknown = 0;
+
 	for (const parent of parents) {
 		const fileWall = fileWallMs(parent);
 		if (fileWall !== null) parentFileWallSamples.push(fileWall);
 		const activeWall = computeActiveWallMs(parent.assistantTimestamps);
 		if (activeWall !== undefined) parentActiveWallSamples.push(activeWall);
-		cover(coverage.parentFinalVerification, false);
 
 		const kids = childrenByParent.get(parent.path) ?? [];
 		const intervals: Array<{ start: number; end: number }> = [];
@@ -1094,6 +1135,36 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 				}
 			}
 		}
+
+		const verification = parent.parentFinalVerifications[parent.parentFinalVerifications.length - 1];
+		if (!verification) {
+			parentFinalUnknown++;
+			cover(coverage.parentFinalVerification, false);
+			continue;
+		}
+		cover(coverage.parentFinalVerification, true);
+		if (verification.status === "passed") parentFinalPassed++;
+		else parentFinalFailed++;
+
+		const startTs = parent.firstTs;
+		const verifyTs = verification.ts;
+		if (startTs !== null && verifyTs !== null && verifyTs >= startTs) {
+			e2eSamples.push(verifyTs - startTs);
+			const pathMs = criticalPathMsFromIntervals({
+				startTs,
+				verifyTs,
+				childIntervals: intervals,
+			});
+			if (pathMs !== null) criticalPathSamples.push(pathMs);
+		}
+		// Active wall up to verification is task work when assistants were active;
+		// missing active timestamps stay unknown rather than zero-filled.
+		const assistantsThroughVerify =
+			verifyTs === null
+				? parent.assistantTimestamps
+				: parent.assistantTimestamps.filter(ts => ts <= verifyTs);
+		const completionActive = computeActiveWallMs(assistantsThroughVerify);
+		if (completionActive !== undefined) taskCompletionSamples.push(completionActive);
 	}
 	for (const child of children) {
 		if (parentOf(child, byPath, byId)) continue;
@@ -1152,11 +1223,21 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 		.map(([tool, errors]) => ({ tool, calls: toolCallCounts.get(tool) ?? 0, errors }))
 		.sort((a, b) => a.tool.localeCompare(b.tool));
 
+	const e2eMs = e2eSamples.length > 0 ? summarizeMs(e2eSamples) : null;
+	const criticalPathMs = criticalPathSamples.length > 0 ? summarizeMs(criticalPathSamples) : null;
+	const taskCompletionMs = taskCompletionSamples.length > 0 ? summarizeMs(taskCompletionSamples) : null;
+	const uncomputableFromHistory: string[] = [];
+	if (parents.length === 0 || parentFinalUnknown === parents.length) {
+		uncomputableFromHistory.push("parentFinalVerification");
+	}
+	if (e2eMs === null || criticalPathMs === null) uncomputableFromHistory.push("e2eCriticalPathMs");
+	if (taskCompletionMs === null) uncomputableFromHistory.push("taskCompletionMs");
+	uncomputableFromHistory.push(...ALWAYS_UNCOMPUTABLE_FROM_HISTORY);
 	return {
-		e2eMs: null,
-		criticalPathMs: null,
-		taskCompletionMs: null,
-		uncomputableFromHistory: [...UNCOMPUTABLE_FROM_HISTORY],
+		e2eMs,
+		criticalPathMs,
+		taskCompletionMs,
+		uncomputableFromHistory,
 		sessions: {
 			parentCount: parents.length,
 			childCount: children.length,
@@ -1190,7 +1271,11 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 		spawnEfforts,
 		thinkingLevels,
 		completionKinds,
-		parentFinalVerification: { passed: 0, failed: 0, unknown: parents.length },
+		parentFinalVerification: {
+			passed: parentFinalPassed,
+			failed: parentFinalFailed,
+			unknown: parentFinalUnknown,
+		},
 		overlappingChildIntervals,
 		unmatchedToolResults,
 		repeatedReads,
@@ -1238,9 +1323,9 @@ export function formatSubagentBaselineReport(report: SubagentBaselineReport): st
 		`  ttftMs                   ${fmtPct(report.ttftMs)}`,
 		`  generationMs             ${fmtPct(report.generationMs)}`,
 		`  spawnQueueMs             ${fmtPct(report.spawnQueueMs)}`,
-		`  e2eMs                    ${report.e2eMs}`,
-		`  criticalPathMs           ${report.criticalPathMs}`,
-		`  taskCompletionMs         ${report.taskCompletionMs}`,
+		`  e2eMs                    ${report.e2eMs ? fmtPct(report.e2eMs) : "null"}`,
+		`  criticalPathMs           ${report.criticalPathMs ? fmtPct(report.criticalPathMs) : "null"}`,
+		`  taskCompletionMs         ${report.taskCompletionMs ? fmtPct(report.taskCompletionMs) : "null"}`,
 		`completionKind: ${JSON.stringify(report.completionKinds)}`,
 		`parentFinalVerification: ${JSON.stringify(report.parentFinalVerification)}`,
 		`models: ${JSON.stringify(report.models)}`,

@@ -33,7 +33,11 @@ message-span wall time, provider TTFT/generation, and task call-to-result latenc
 The latter may be just a spawn acknowledgement, not time waiting for completion.
 Missing completion, queue, and final-verification evidence remains unknown;
 normal exit and successful tools never imply task acceptance. Concurrent child
-durations are not summed into end-to-end latency.
+durations are not summed into end-to-end latency. When an explicit
+`parent_final_verification` custom entry/message is present (workflow
+`final_verify`, `AgentSession.recordParentFinalVerification`, or fixture),
+the report fills `parentFinalVerification` and parent start→verify `e2eMs` /
+`criticalPathMs`; failures and timeouts stay in `completionKinds`.
 
 Repeated reads are grouped by selector-stripped resource within one parent
 session and emitted as SHA-256 keys, not raw paths/URLs. Different ranges or

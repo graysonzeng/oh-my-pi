@@ -8,7 +8,12 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
 import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
 
-import { renderStructuredJson, structuredStatusLabel } from "../session/async-job-delivery";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import {
+	renderStructuredJson,
+	settledTaskDeliveryFields,
+	structuredStatusLabel,
+} from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -25,6 +30,26 @@ import type {
 
 import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+
+/** Originating parent task tool call id from the job row or nested progress details. */
+function taskToolCallIdFromTrackedJob(job: TrackedJobLike): string | undefined {
+	if (typeof job.taskToolCallId === "string" && job.taskToolCallId.trim()) return job.taskToolCallId.trim();
+	const details = job.latestDetails;
+	if (!isRecord(details)) return undefined;
+	if (
+		isRecord(details.async) &&
+		typeof details.async.taskToolCallId === "string" &&
+		details.async.taskToolCallId.trim()
+	) {
+		return details.async.taskToolCallId.trim();
+	}
+	if (!Array.isArray(details.progress)) return undefined;
+	for (const item of details.progress) {
+		if (!isRecord(item) || typeof item.taskToolCallId !== "string" || !item.taskToolCallId.trim()) continue;
+		return item.taskToolCallId.trim();
+	}
+	return undefined;
+}
 
 /**
  * Resolve a list of job ids to job records visible to the calling agent.
@@ -149,6 +174,10 @@ interface TrackedJobLike {
 	resultText?: string;
 	errorText?: string;
 	structured?: StructuredSubagentOutput;
+	/** Registry agent id when the manager disambiguated a colliding job id. */
+	agentId?: string;
+	/** Originating parent `task` tool call id when the spawn recorded one. */
+	taskToolCallId?: string;
 }
 
 export function snapshotJobs(
@@ -196,6 +225,16 @@ export function snapshotJobs(
 				advisor = progressRecord?.advisor === true;
 			}
 		}
+		const settled =
+			latest.type === "task"
+				? settledTaskDeliveryFields({
+						id: latest.id,
+						agentId: current?.agentId ?? latest.agentId,
+						label: latest.label,
+						latestDetails: latest.latestDetails,
+					})
+				: {};
+		const taskToolCallId = latest.type === "task" ? taskToolCallIdFromTrackedJob(latest) : undefined;
 		return {
 			id: latest.id,
 			type: latest.type,
@@ -219,7 +258,10 @@ export function snapshotJobs(
 			...(!resultConsumed && options.includeResults !== false && latest.structured
 				? { structured: latest.structured }
 				: {}),
-			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.id } : {}),
+			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.agentId ?? latest.id } : {}),
+			...(settled.completionKind ? { completionKind: settled.completionKind } : {}),
+			...(settled.spawnQueueMs !== undefined ? { spawnQueueMs: settled.spawnQueueMs } : {}),
+			...(taskToolCallId ? { taskToolCallId } : {}),
 		};
 	});
 }

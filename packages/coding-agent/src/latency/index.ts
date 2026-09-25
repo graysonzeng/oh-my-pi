@@ -5,6 +5,7 @@ export * from "./bash-attempt-ledger";
 export * from "./concurrency-declaration";
 export * from "./eval-parity";
 export * from "./mechanical-class";
+export * from "./parent-final-verification";
 export * from "./provider-health-breaker";
 export * from "./read-view-key";
 export * from "./rollout-cohort";

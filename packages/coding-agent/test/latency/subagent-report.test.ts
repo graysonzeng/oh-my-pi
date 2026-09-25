@@ -1379,4 +1379,90 @@ describe("buildSubagentBaselineReport", () => {
 		expect(report.childActiveWallByClass.review).toEqual({ n: 1, p50: 2000, p90: 2000 });
 		expect(report.childActiveWallByClass.unknown.n).toBe(0);
 	});
+
+	it("associates explicit parent-final verification with e2e and does not sum parallel children", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess1")),
+				line(userMsg(0, "delegate")),
+				line(
+					taskCall({
+						callId: "batch",
+						ts: 1000,
+						tasks: [
+							{ name: "Worker", agent: "task" },
+							{ name: "Reviewer", agent: "reviewer" },
+						],
+					}),
+				),
+				line(
+					toolResult({
+						callId: "batch",
+						ts: 1100,
+						details: {
+							results: [
+								{ id: "Worker", completionKind: "completed" },
+								{ id: "Reviewer", completionKind: "timeout" },
+							],
+						},
+					}),
+				),
+				line({
+					type: "custom",
+					id: "pfv1",
+					parentId: null,
+					timestamp: "2026-09-09T10:00:00.000Z",
+					customType: "parent_final_verification",
+					data: { status: "failed", source: "workflow", verifiedAtMs: 5000 },
+				}),
+			].join("\n"),
+			PARENT,
+		);
+		const childA = parseSessionJsonl(
+			[
+				line(sessionHeader("a")),
+				line(userMsg(1000, "a")),
+				line(
+					assistantMsg({
+						ts: 2000,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+			].join("\n"),
+			CHILD_A,
+		);
+		const childB = parseSessionJsonl(
+			[
+				line(sessionHeader("b")),
+				line(userMsg(1000, "b")),
+				line(
+					assistantMsg({
+						ts: 4000,
+						model: "m",
+						ttft: 1,
+						duration: 2,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					}),
+				),
+			].join("\n"),
+			CHILD_B,
+		);
+		const report = buildSubagentBaselineReport([parent, childA, childB]);
+		expect(report.parentFinalVerification).toEqual({ passed: 0, failed: 1, unknown: 0 });
+		expect(report.coverage.parentFinalVerification).toEqual({ present: 1, unknown: 0 });
+		expect(report.e2eMs).toEqual({ n: 1, p50: 5000, p90: 5000 });
+		expect(report.criticalPathMs).toEqual({ n: 1, p50: 5000, p90: 5000 });
+		// Child file walls are 1000 + 3000; critical path is parent wall, not that sum.
+		expect(report.childFileWallMs.n).toBe(2);
+		expect(report.overlappingChildIntervals).toBe(1);
+		expect(report.criticalPathMs?.p50).not.toBe(1000 + 3000);
+		expect(report.completionKinds.completed).toBe(1);
+		expect(report.completionKinds.timeout).toBe(1);
+		expect(report.uncomputableFromHistory).toContain("providerQueueMs");
+		expect(report.uncomputableFromHistory).not.toContain("parentFinalVerification");
+		expect(report.uncomputableFromHistory).not.toContain("e2eCriticalPathMs");
+	});
 });
