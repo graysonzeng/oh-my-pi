@@ -400,12 +400,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
-	it("fails fast on a usage-limit error with no provider reset hint when retry.waitForUsageReset is set", async () => {
-		// Contract: the opt-in only honors *parsed provider* reset timing. A
-		// usage-limit error with no hint (e.g. 402 balance) falls back to the
-		// 30-minute QUOTA_EXHAUSTED heuristic, which must NOT bypass the cap —
-		// otherwise a permanent error holds the session through repeated
-		// heuristic sleeps instead of surfacing.
+	it("surfaces a hintless permanent billing error immediately when retry.waitForUsageReset is set", async () => {
+		// Contract: a permanent billing error cannot recover by sleeping the
+		// 30-minute QUOTA_EXHAUSTED heuristic, even when usage-reset waiting is
+		// enabled. Surface the provider error instead of reporting a delay cap.
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -460,8 +458,8 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryStartEvents).toHaveLength(0);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false });
-		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
-		expect(retryEndEvents[0].finalError).toContain("Provider requested 1800000ms wait");
+		expect(retryEndEvents[0].finalError).toBe(balanceError);
+		expect(retryEndEvents[0].finalError).not.toContain("exceeds retry.maxDelayMs");
 		for (const call of waitSpy.mock.calls) {
 			expect(call[0]).toBeLessThanOrEqual(100);
 		}

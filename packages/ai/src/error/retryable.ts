@@ -1,13 +1,17 @@
 import { isRetryableError, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
 import {
+	classify,
 	CODEX_HTTP_BODY_READ_ERROR_PATTERN,
 	BAD_RESPONSE_STATUS_CODE_PATTERN,
+	Flag,
+	is,
 	isRetryableStreamEnvelopeError,
 	isTransientStreamParseError,
 	isUsageLimit,
 	status,
 	TRANSIENT_TRANSPORT_PATTERN,
 } from "./flags";
+import { isPermanentBillingFailureText } from "./rate-limit";
 
 /**
  * Whether a numeric HTTP status is in the canonical transient/retryable set:
@@ -44,6 +48,8 @@ function isTransientTransportMessage(message: string): boolean {
 export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (isUsageLimit(error)) return false;
+	if (is(classify(error), Flag.AuthFailed)) return false;
+	if (isPermanentBillingFailureText(error.message)) return false;
 	const httpStatus = status(error);
 	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 429) {
 		return false;

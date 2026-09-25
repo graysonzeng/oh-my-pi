@@ -145,6 +145,39 @@ describe("AIError.classify — structural provider errors", () => {
 		const err = new AIError.ProviderResponseError("upstream error", { provider: "google", kind: "output" });
 		expect(AIError.retriable(AIError.classify(err))).toBe(false);
 	});
+
+	it("keeps 401 Insufficient balance rotatable and does not retry bare auth_unavailable", () => {
+		const balance = AIError.classify(new Error("401 Insufficient balance"));
+		expect(AIError.is(balance, AIError.Flag.AuthFailed)).toBe(true);
+		expect(AIError.is(balance, AIError.Flag.UsageLimit)).toBe(true);
+		expect(AIError.retriable(balance)).toBe(true);
+
+		const authUnavailable = AIError.classify(new Error("503 auth_unavailable: no auth available"));
+		expect(AIError.is(authUnavailable, AIError.Flag.AuthFailed)).toBe(true);
+		expect(AIError.is(authUnavailable, AIError.Flag.UsageLimit)).toBe(false);
+		expect(AIError.retriable(authUnavailable)).toBe(false);
+
+		expect(AIError.retriable(AIError.classify(new Error("503 service unavailable")))).toBe(true);
+		expect(AIError.retriable(AIError.classify(new Error("429 Too Many Requests")))).toBe(true);
+	});
+
+	it("treats xAI out-of-credits auth_unavailable as permanent billing without catching resettable quotas", () => {
+		const grokCredits =
+			"503 auth_unavailable: no auth available (providers=xai, model=grok-4.6; last upstream error: You have run out of credits or need a Grok subscription. Add credits at https://accounts.x.ai)";
+		const id = AIError.classify(new Error(grokCredits));
+		expect(AIError.isPermanentBillingFailureText(grokCredits)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.AuthFailed)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.UsageLimit)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.isProviderRetryableError(new Error(grokCredits))).toBe(false);
+
+		const resettable = "429 usage_limit_reached. Try again in 47 minutes.";
+		expect(AIError.isPermanentBillingFailureText(resettable)).toBe(false);
+		expect(AIError.is(AIError.classify(new Error(resettable)), AIError.Flag.UsageLimit)).toBe(true);
+		expect(AIError.isPermanentBillingFailureText("429 Too Many Requests")).toBe(false);
+		expect(AIError.isProviderRetryableError(new Error("429 Too Many Requests"))).toBe(true);
+		expect(AIError.isPermanentBillingFailureText("balance exhausted")).toBe(true);
+	});
 });
 
 describe("AIError.finalize", () => {

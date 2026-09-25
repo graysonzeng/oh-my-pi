@@ -419,4 +419,36 @@ describe("retryTransientCompletion", () => {
 		expect(calls).toBe(2);
 		expect(observedDelay).toBe(90);
 	});
+
+	it("does not same-credential retry permanent auth or payment failures", async () => {
+		for (const errorMessage of [
+			"503 auth_unavailable: no auth available",
+			"503 Payment Required",
+			"401 Insufficient balance",
+			"503 auth_unavailable: no auth available (providers=xai, model=grok-4.6; last upstream error: You have run out of credits or need a Grok subscription. Add credits at https://accounts.x.ai)",
+		]) {
+			let calls = 0;
+			const final = await retryTransientCompletion(
+				() => {
+					calls += 1;
+					return Promise.resolve(message({ stopReason: "error", errorMessage }));
+				},
+				{ ...fast, maxAttempts: 4 },
+			);
+			expect(calls).toBe(1);
+			expect(final.errorMessage).toBe(errorMessage);
+		}
+	});
+
+	it("still re-issues an ordinary 503 and 429", async () => {
+		for (const errorMessage of ["503 service unavailable", "429 Too Many Requests"]) {
+			let calls = 0;
+			const final = await retryTransientCompletion(() => {
+				calls += 1;
+				return Promise.resolve(calls === 1 ? message({ stopReason: "error", errorMessage }) : message());
+			}, fast);
+			expect(calls).toBe(2);
+			expect(final.stopReason).toBe("stop");
+		}
+	});
 });

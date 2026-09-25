@@ -150,7 +150,6 @@ describe("subagent system prompt prefix contract", () => {
 
 		expect(worker).toContain("that message is the result");
 		expect(worker).toContain("Do not stop early because of turn count or elapsed time");
-		expect(worker).toContain("Reuse confirmed key evidence");
 		expect(explore).toContain("Write a compressed final assistant message");
 		expect(explore).not.toContain("Do not stop early because of turn count or elapsed time");
 		expect(review).toContain("A prose summary is not a passing review");

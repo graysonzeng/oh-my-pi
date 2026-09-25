@@ -12,6 +12,7 @@ import {
 	isAccountScopedCapText,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
+	isPermanentBillingFailureText,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseRateLimitReason,
@@ -332,6 +333,10 @@ export function is(id: number | undefined, flag: Flag): boolean {
 export function retriable(id: number | undefined, opts?: { replayUnsafe?: boolean }): boolean {
 	if (is(id, Flag.ContentBlocked)) return false;
 	if (is(id, Flag.PayloadRejected)) return false;
+	// A 503 auth_unavailable sets Transient from the status token. That auth
+	// failure is not a same-model backoff. UsageLimit still rotates: "401
+	// Insufficient balance" is both AuthFailed and UsageLimit.
+	if (is(id, Flag.AuthFailed) && !is(id, Flag.UsageLimit)) return false;
 	if (opts?.replayUnsafe) return false;
 	if (is(id, Flag.MalformedFunctionCall)) return true;
 	return ((id ?? 0) & RETRIABLE_KINDS) !== 0;
@@ -503,8 +508,9 @@ function classifyText(
 		) {
 			kinds |= Flag.UsageLimit;
 		}
-		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
-		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+		const permanentBillingFailure = isPermanentBillingFailureText(errorMessage);
+		if (!permanentBillingFailure && isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
+		else if (!permanentBillingFailure && isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
 		// A stream truncation or forwarded Codex HTTP body-read failure may not
 		// match TRANSIENT_TRANSPORT_PATTERN. Flag it explicitly so AIError.retriable and
 		// the turn-recovery layer treat it as retryable, matching the provider
@@ -621,7 +627,7 @@ export function classify(error: unknown, api?: Api): number {
 				if ((linkKinds & Flag.UsageLimit) === 0) {
 					linkKinds |= Flag.Transient;
 				}
-			} else if (codeStatus >= 500) {
+			} else if (codeStatus >= 500 && !isPermanentBillingFailureText(link.message)) {
 				linkKinds |= Flag.Transient;
 			}
 			kinds |= linkKinds;
@@ -648,6 +654,7 @@ export function classify(error: unknown, api?: Api): number {
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
+	if ((kinds & Flag.AuthFailed) !== 0) kinds &= ~(Flag.Transient | Flag.Timeout);
 	return kinds !== 0 ? create(kinds) : (status(error) ?? 0);
 }
 
@@ -799,6 +806,12 @@ export function classifyMessage(message: {
 		// because the same prompt reproduces the same malformed output, so the agent-level
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
+	}
+	if (
+		classificationMessage &&
+		(isAuthFailureText(classificationMessage) || isPermanentBillingFailureText(classificationMessage))
+	) {
+		kinds &= ~(Flag.Transient | Flag.Timeout);
 	}
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 
