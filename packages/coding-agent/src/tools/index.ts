@@ -1061,7 +1061,25 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 
 	// Catalog / presentation transform on real AgentTool descriptors (schema drop, filter).
 	// Must run after all tools are assembled so createTools-exposed objects match transformTools.
-	return applyWorkflowTransformTools(tools, session);
+	// The SDK registers tools as a side effect of building them and discards this
+	// return value, so the live registry has to drop tools the transform removed.
+	const transformed = applyWorkflowTransformTools(tools, session);
+	if (transformed !== tools) {
+		const kept = new Set(transformed.map(tool => tool.name));
+		const dropped: string[] = [];
+		for (const name of builtInNames) {
+			if (!kept.has(name)) dropped.push(name);
+		}
+		for (const name of dropped) {
+			toolRegistry.delete(name);
+			builtInNames.delete(name);
+		}
+		for (const tool of transformed) toolRegistry.set(tool.name, tool);
+		const active = new Set(transformed.map(tool => tool.name));
+		if (session.setActiveToolNames) session.setActiveToolNames(active);
+		else session.isToolActive = name => active.has(name);
+	}
+	return transformed;
 }
 
 export type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";

@@ -224,7 +224,9 @@ describe("ReviewCommand", () => {
 			const promptText = result!;
 			expect(promptText).toContain("src/workspace.ts");
 			expect(promptText).toContain("+1/-1");
-			expect(promptText).toContain("MAY read assigned files and direct producer/consumer call sites");
+			expect(promptText).toContain(
+				"Focus ONLY on assigned files, plus direct producer/consumer or dispatch call sites required to prove a finding",
+			);
 			expect(promptText).toContain(
 				`Snapshot ID: \`sha256:${new Bun.CryptoHasher("sha256").update(SAMPLE_JJ_DIFF).digest("hex")}\``,
 			);

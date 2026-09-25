@@ -134,7 +134,9 @@ import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToT
 import { combine, lookup, type SettingsScope } from "../config/registry";
 import type { Settings } from "../config/settings";
 import {
+	cfgConsultAllowSameModel,
 	cfgConsultEnabled,
+	cfgConsultModel,
 	cfgGoalHostGateEnabled,
 	cfgGoalHostGateFalseCompletion,
 	cfgModelOptimizationOutputTruncationEnabled,
@@ -2597,11 +2599,14 @@ export class AgentSession implements SettingsScope {
 				logger.warn("consult reconcile after model role change failed", { error: String(error) });
 			});
 		});
-		cfgConsultEnabled.listen(this, () => {
+		const reconcileConsult = () => {
 			void this.#tools.reconcileConsultTool().catch(error => {
 				logger.warn("consult reconcile after setting change failed", { error: String(error) });
 			});
-		});
+		};
+		cfgConsultEnabled.listen(this, reconcileConsult);
+		cfgConsultAllowSameModel.listen(this, reconcileConsult);
+		cfgConsultModel.listen(this, reconcileConsult);
 		// Re-derive the active model's effective context window when the
 		// extended-context setting flips at runtime: the registry re-clamps (or
 		// restores) premium long-context windows, and the live model object must

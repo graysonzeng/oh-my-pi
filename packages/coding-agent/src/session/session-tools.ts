@@ -659,7 +659,10 @@ export class SessionTools {
 		if (this.#toolRegistryMutationScope.getStore()) return untilAborted(signal, mutation);
 		const serialized = this.#toolRegistryMutationTail.then(() => {
 			signal?.throwIfAborted();
-			return this.#toolRegistryMutationScope.run(true, mutation);
+			return this.#toolRegistryMutationScope.run(true, async () => {
+				await this.#reconcileConsultTool();
+				return mutation();
+			});
 		});
 		const operation = untilAborted(signal, serialized);
 		this.#toolRegistryMutationTail = serialized.then(

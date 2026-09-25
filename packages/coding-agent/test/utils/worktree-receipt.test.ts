@@ -54,10 +54,12 @@ describe("worktreeReceiptSync", () => {
 		expect(worktreeReceiptSync(repo)?.digest).not.toBe(committed);
 	});
 
-	test("returns null rather than hashing a diff truncated by the native output cap", async () => {
+	test("hashes a large fully captured diff instead of treating it as truncated", async () => {
 		const repo = await createRepo();
 		await Bun.write(path.join(repo, "tracked.txt"), "x".repeat(9 * 1024 * 1024));
-		expect(worktreeReceiptSync(repo)).toBeNull();
+		const digest = worktreeReceiptSync(repo)?.digest;
+		expect(digest).toMatch(/^[0-9a-f]{64}$/);
+		expect(worktreeReceiptSync(repo)?.digest).toBe(digest);
 	});
 
 	test("hashes untracked file bytes and ignores exclude-standard paths", async () => {

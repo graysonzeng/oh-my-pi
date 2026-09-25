@@ -211,6 +211,29 @@ export function applyWorkflowTransformTools<T extends object>(tools: T[], sessio
 						if (prop === "loadMode") return "discoverable";
 						return getToolProp(target, prop);
 					},
+					has(target, prop) {
+						if (prop === "schemaLocator" || prop === "loadMode" || prop === "summary") return true;
+						return prop in target;
+					},
+					ownKeys(target) {
+						const keys = Reflect.ownKeys(target);
+						for (const extra of ["schemaLocator", "loadMode", "summary"] as const) {
+							if (!keys.includes(extra)) keys.push(extra);
+						}
+						return keys;
+					},
+					getOwnPropertyDescriptor(target, prop) {
+						if (prop === "schemaLocator") {
+							return { configurable: true, enumerable: true, value: locator };
+						}
+						if (prop === "loadMode") {
+							return { configurable: true, enumerable: true, value: "discoverable" };
+						}
+						if (prop === "summary") {
+							return { configurable: true, enumerable: true, value: summary };
+						}
+						return Reflect.getOwnPropertyDescriptor(target, prop);
+					},
 				}) as T,
 			);
 			continue;
