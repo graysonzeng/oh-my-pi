@@ -393,6 +393,42 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("synthesizes an evidence handoff fence from the task contract when context is freeform", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const assignment = [
+			"# Target",
+			"- packages/coding-agent/src/task/evidence-handoff.ts",
+			"# Change",
+			"- Wire ensureEvidenceHandoffContext into spawn",
+			"# Acceptance",
+			"- Dispatched context includes an evidence-handoff fence",
+		].join("\n");
+		const settled = await runStructuredSubagent(
+			request({
+				assignment,
+				context: "Freeform parent notes without a fence.",
+				retainArtifacts: true,
+			}),
+		);
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted).not.toBeNull();
+		expect(extracted!.preamble).toContain("Freeform parent notes");
+		expect(extracted!.handoff.goals).toEqual([
+			"- packages/coding-agent/src/task/evidence-handoff.ts",
+			"- Wire ensureEvidenceHandoffContext into spawn",
+		]);
+		expect(extracted!.handoff.acceptance).toEqual([
+			"- Dispatched context includes an evidence-handoff fence",
+		]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);
