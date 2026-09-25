@@ -245,7 +245,7 @@ and a rollout receipt exist.
 
 ---
 
-## Scaffolding policy for this PR
+## Scaffolding policy for this tip
 
 | Candidate | Action |
 |---|---|
