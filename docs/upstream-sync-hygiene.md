@@ -103,18 +103,31 @@ Practice these resolutions **before** a large catch-up:
   scripts.
 - Rule: `unknown` stays unknown (no zero-fill); parallel intervals do not
   sum into parent e2e; failures remain in the corpus.
-- Drill: `bun run stats:subagents --help` / focused
+- Drill: `bun run stats:subagents -- --since 3d --format json` (or the
+  script help text in `scripts/session-stats/subagent-report.ts`) / focused
   `parent-final-verification` + `subagent-report` tests if those files
   moved.
 
-### 4) Natives / code-intel exports
+### 4) Gateway / attestation identity
+
+- Symptom: conflict in provider adapters, identity receipts, or gateway
+  models.yml / live-e2e notes.
+- Rule: keep three coordinates distinct — configured selection, local
+  resolution, provider/gateway attestation; local resolution never proves
+  execution; conflicting attestations fail closed (`docs/workflow.md`).
+- Drill: no fully automated gateway drill in-repo without credentials.
+  After resolve, run focused identity/availability tests when those files
+  moved; record live dual-protocol probe as **optional / not run** when
+  credentials are absent (do not treat missing creds as sync failure).
+
+### 5) Natives / code-intel exports
 
 - Symptom: merge “fixes” drop `code_intel` Rust exports or TS bindings.
 - Rule: restore exports; never leave a half-linked native symbol.
 - Drill: `omp --smoke-test` (worker graph) + focused
   `code-intel-envelope` / index tests when natives changed.
 
-### 5) Experiment defaults
+### 6) Experiment defaults
 
 - Symptom: upstream or local edit flips an experiment flag on.
 - Rule: `compaction.experiment.enabled` default **false**; policy levers
@@ -129,7 +142,8 @@ Run after every non-trivial sync (docs-only sync of this file may skip, but
 any code merge must not):
 
 ```sh
-# Worker host + tiny-model smoke (also used by ci:test:smoke)
+# Full CLI smoke (stats sync worker, tiny-model subprocess, and other
+# worker-host probes wired into ci:test:smoke)
 bun packages/coding-agent/src/cli.ts --smoke-test
 # or, once omp is on PATH from this tree:
 omp --smoke-test

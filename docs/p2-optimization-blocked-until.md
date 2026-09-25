@@ -1,26 +1,35 @@
-# P2 optimization status — blocked until live evidence
+# P2 / continuous optimization status — blocked until live evidence
 
-Status board for the revised optimization plan’s **P2** bucket:
-model calibration, concurrency tuning, code-intel productization, and
-output optimization.
+Delivery status board for the **evidence-gated** follow-ons after P0–P1-4:
+model/effort calibration, concurrency tuning, code-intel productization, and
+output optimization — plus the continuous upstream-sync hygiene item.
 
-**This delivery documents gates and experiment entry points only.** It does
+**This tip commit documents gates and experiment entry points only.** It does
 **not** change production model defaults, concurrency caps, Track E prompts,
 or force code-intel productization. No latency wins are claimed.
 
-Upstream program inputs:
+This board is a **delivery bucket**, not a rewrite of the 2026-09-09 research
+§2 historical “P2” label. Map each row to its original owner:
 
-- Revised plan (approved next-batch was P0; P2 remains evidence-gated)
-- `docs/research/2026-09-09-subagent-harness-next-optimizations.md` §2 P2 + §3
+| Board item | Historical owner in research / design |
+|---|---|
+| Model / effort | `docs/research/2026-09-09-subagent-harness-next-optimizations.md` §2 P2 |
+| Concurrency | same research §2 P1 “并发调参” paragraph |
+| Output / caps | same research §3 “暂时不值得做” (still evidence-gated here) |
+| Code-intel productization | `docs/tools/code_intel.md` + 2026-09-02 native code-intel design |
+| Upstream sync hygiene | Continuous maintenance (not an optimization lever) |
+
+Other program inputs:
+
+- Split P4 / measurement stack: PRs #2–#6 on `workflow`
 - `docs/superpowers/specs/2026-08-03-latency-optimization-plan-design.md`
   (ordinary `modelOptimization` seam; concurrency owners)
-- `docs/tools/code_intel.md` + native code-intel design
-- Continuous sync hygiene: `docs/upstream-sync-hygiene.md`
+- Continuous sync: `docs/upstream-sync-hygiene.md`
 
 Stack prerequisites (measurement + safety before tuning): P0 #2, P1-1 #3,
 P1-2 #4, P1-3 #5, P1-4 #6 on `workflow`.
 
-## Shared experiment bar (all P2 items)
+## Shared experiment bar (all optimization items below)
 
 Unblocks require **all** of:
 
@@ -37,15 +46,20 @@ context cap for all models; rebuild the workflow state machine.
 
 ---
 
-## Matrix
+## Continuous (not a P2 lever)
 
-| Item | Shipped in this PR | Production default change | Blocked until | Experiment entry |
+| Item | Shipped in this tip | Production default change | Blocked until | Entry |
 |---|---|---|---|---|
 | Upstream sync hygiene | Checklist + drills + smoke gates | N/A (process) | N/A | `docs/upstream-sync-hygiene.md` |
-| P2 model / effort calibration | Status + entry points only | **No** | Fresh failure/slow traces + paired role×effort evidence | [§ Model](#1-model--effort-calibration) |
-| P2 concurrency caps | Status + entry points only | **No** | Live 1/2/4 concurrency corpus with 429/retry/parent-wait | [§ Concurrency](#2-concurrency-tuning) |
-| P2 code-intel productization | Status + entry points only | **No** | Corpus proving scout/read thrash with code_intel as the fix | [§ Code-intel](#3-code-intel-productization) |
-| P2 output optimization | Status + entry points only | **No** | Paired proof that output trunc/dedupe cuts e2e without quality drop | [§ Output](#4-output-optimization) |
+
+## P2 / evidence-gated optimization matrix
+
+| Item | Shipped in this tip | Production default change | Blocked until | Experiment entry |
+|---|---|---|---|---|
+| Model / effort calibration | Status + entry points only | **No** | Fresh failure/slow traces + paired role×effort evidence | [§ Model](#1-model--effort-calibration) |
+| Concurrency caps | Status + entry points only | **No** | Live 1/2/4 concurrency corpus with 429/retry/parent-wait | [§ Concurrency](#2-concurrency-tuning) |
+| Code-intel productization | Status + entry points only | **No** | Corpus proving scout/read thrash with code_intel as the fix | [§ Code-intel](#3-code-intel-productization) |
+| Output optimization | Status + entry points only | **No** | Paired proof that output trunc/dedupe cuts e2e without quality drop | [§ Output](#4-output-optimization) |
 
 ---
 
@@ -72,7 +86,8 @@ context cap for all models; rebuild the workflow state machine.
 ### Experiment entry points
 
 ```sh
-# Sonic effort ceiling only (not advisories)
+# Sonic effort ceiling ONLY (bundled sonic maxEffort) — does not cover
+# scout/reviewer/implementer model swaps. See program-design doc.
 bun run test:latency:paired:sonic-effort -- \
   --paired-control /path/to/control \
   --paired-treatment /path/to/sonic-effort-treatment \
@@ -82,6 +97,12 @@ bun run test:latency:paired:sonic-effort -- \
 bun run stats:subagents -- --since 3d --format json
 # or: bun scripts/session-stats/subagent-report.ts --sessions ~/.omp/agent/sessions --since 1w
 ```
+
+For **non-sonic** role×model or role×effort pairs: use a settings-only paired
+harness (fixed tasks; only `workflow.qualityRoutes` / profile
+`modelPattern`+effort differ) or live quality-route fixtures described in
+`docs/workflow.md`. Do not stretch `test:latency:paired:sonic-effort` beyond
+sonic effort.
 
 Production path: keep bundled / configured role models unchanged until B-M1–B-M4
 pass and a dedicated rollout PR flips defaults with receipts.
@@ -100,7 +121,7 @@ pass and a dedicated rollout PR flips defaults with receipts.
 
 - `task.maxConcurrency` semaphore (`packages/coding-agent/src/task/`)
 - Provider concurrency wrapper — currently settings-backed for
-  `ollama-cloud` only (`provider-concurrency.ts`)
+  `ollama-cloud` only (`packages/coding-agent/src/task/provider-concurrency.ts`)
 - Workflow work-package plan + declaration-backed caps
 - Policy lever `tool_concurrency_ceiling` (production apply still requires
   verified rollout authority; raw active gates fail closed)
@@ -117,20 +138,21 @@ pass and a dedicated rollout PR flips defaults with receipts.
 
 ### Experiment entry points
 
-```ts
-// Policy lever evaluation stays shadow without rollout authority:
-import { evaluatePolicyLever } from "../../src/workflow/policy-experiment";
-// lever: "tool_concurrency_ceiling" — see policy-experiment.test.ts
-```
+- Source: `packages/coding-agent/src/workflow/policy-experiment.ts`
+  (`tool_concurrency_ceiling` lever; production apply stays shadow without
+  verified rollout authority)
+- Contracts: `packages/coding-agent/test/workflow/policy-experiment.test.ts`
+- Local mechanism only (mock provider) — does **not** unblock production caps:
 
 ```sh
-# Local mechanism only (mock provider) — does NOT unblock production caps
 bun test packages/coding-agent/test/task/parallel-spawn-local-bench.test.ts
 ```
 
 Settings knobs to vary in a **paired** live harness (do not land as repo
 defaults here): `task.maxConcurrency`, and when evidence names a provider,
-that provider’s existing maxConcurrency setting (today: ollama-cloud).
+that provider’s existing maxConcurrency setting
+(`packages/coding-agent/src/task/provider-concurrency.ts` — today:
+`ollama-cloud` only).
 
 ### Explicitly not doing now
 
