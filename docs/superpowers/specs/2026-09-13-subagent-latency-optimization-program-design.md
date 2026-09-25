@@ -44,11 +44,22 @@ bun packages/coding-agent/test/task/product-latency-fixture.ts \
 
 Optional: `--paired-preflight` to validate source pairs without launching.
 
-Package aliases (same argv):
+Package aliases fail closed without paired roots (usage error, not unpaired full pack):
 
 ```sh
-bun run test:latency:paired:advisories -- --paired-control ... --paired-treatment ... --output ...
-bun run test:latency:paired:sonic-effort -- --paired-control ... --paired-treatment ... --output ...
+# These exit with the paired-mode usage error until you append the required flags:
+bun run test:latency:paired:advisories
+bun run test:latency:paired:sonic-effort
+
+# Live attributable run:
+bun run test:latency:paired:advisories -- \
+  --paired-control /path/to/control \
+  --paired-treatment /path/to/advisories-treatment \
+  --output /tmp/p4-advisories-pairs.json
+bun run test:latency:paired:sonic-effort -- \
+  --paired-control /path/to/control \
+  --paired-treatment /path/to/sonic-effort-treatment \
+  --output /tmp/p4-sonic-effort-pairs.json
 ```
 
 ## Judge separately

@@ -20,6 +20,14 @@ export type PairedArm = "control" | "treatment";
 
 export { EXPERIMENT_VARIANTS };
 
+/** True when argv selects a paired experiment surface (not unpaired qualification). */
+export function requestsPairedQualification(argv: readonly string[]): boolean {
+	if (argv.some(argument => argument.startsWith("--paired-"))) return true;
+	const index = argv.indexOf("--experiment");
+	const experiment = index >= 0 ? argv[index + 1] : undefined;
+	return experiment === "advisories" || experiment === "sonic-effort";
+}
+
 export interface PairedSlot {
 	pairId: string;
 	arm: PairedArm;

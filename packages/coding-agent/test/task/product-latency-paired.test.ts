@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	createPairedSchedule,
 	EXPERIMENT_VARIANTS,
+	requestsPairedQualification,
 	runPairedQualification,
 	type PairedExperiment,
 	type PairedQualificationReport,
@@ -129,6 +130,13 @@ describe("product-latency paired schedule", () => {
 	it("scopes advisories and sonic-effort to disjoint role sets", () => {
 		expect(EXPERIMENT_VARIANTS.advisories).toEqual(["scout", "reviewer"]);
 		expect(EXPERIMENT_VARIANTS["sonic-effort"]).toEqual(["sonic"]);
+	});
+
+	it("fail-closes bare experiment argv into paired mode (never unpaired full pack)", () => {
+		expect(requestsPairedQualification(["--mode", "smoke", "--experiment", "advisories"])).toBe(true);
+		expect(requestsPairedQualification(["--mode", "smoke", "--experiment", "sonic-effort"])).toBe(true);
+		expect(requestsPairedQualification(["--paired-control", "/tmp/c"])).toBe(true);
+		expect(requestsPairedQualification(["--mode", "smoke", "--output", "/tmp/out.json"])).toBe(false);
 	});
 
 	it("keeps arms adjacent and alternates the first arm by pair index", () => {

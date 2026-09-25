@@ -261,6 +261,7 @@ export function snapshotJobs(
 			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.agentId ?? latest.id } : {}),
 			...(settled.completionKind ? { completionKind: settled.completionKind } : {}),
 			...(settled.spawnQueueMs !== undefined ? { spawnQueueMs: settled.spawnQueueMs } : {}),
+			...(settled.requestPhaseQueueMs !== undefined ? { requestPhaseQueueMs: settled.requestPhaseQueueMs } : {}),
 			...(taskToolCallId ? { taskToolCallId } : {}),
 		};
 	});

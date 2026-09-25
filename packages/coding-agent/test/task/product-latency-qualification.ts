@@ -811,22 +811,6 @@ export function compareQualificationReports(
 		treatmentView.e2eDelegateToAccepted,
 	]);
 	const experimentStamp = stampSonic ? { declaredExperiment: DECLARED_EXPERIMENT_ID as typeof DECLARED_EXPERIMENT_ID } : {};
-	if (baselineAbs === "UNVERIFIED" || treatmentAbs === "UNVERIFIED") {
-		return {
-			status: "INCOMPARABLE",
-			reason: "absolute runtime/quality/e2e gates unverified",
-			...experimentStamp,
-			...(sonicEffort ? { sonicEffort } : {}),
-		};
-	}
-	if (baselineAbs !== "PASS" || treatmentAbs !== "PASS") {
-		return {
-			status: "FAIL",
-			reason: `absolute runtime/quality/e2e gates not PASS (baseline ${baselineAbs}, treatment ${treatmentAbs})`,
-			...experimentStamp,
-			...(sonicEffort ? { sonicEffort } : {}),
-		};
-	}
 
 	const acceptanceRates: BenefitVerdict["acceptanceRates"] = {};
 	const p50AcceptanceMs: BenefitVerdict["p50AcceptanceMs"] = {};
@@ -972,6 +956,24 @@ export function compareQualificationReports(
 		p50AcceptanceMs,
 		roleVerdicts,
 	};
+
+	// Absolute gates still decide overall status, but roleVerdicts always ship so
+	// a single-role regression cannot be masked by total wall-clock or an early FAIL.
+	if (baselineAbs === "UNVERIFIED" || treatmentAbs === "UNVERIFIED") {
+		return {
+			status: "INCOMPARABLE",
+			reason: "absolute runtime/quality/e2e gates unverified",
+			...shared,
+		};
+	}
+	if (baselineAbs !== "PASS" || treatmentAbs !== "PASS") {
+		return {
+			status: "FAIL",
+			reason: `absolute runtime/quality/e2e gates not PASS (baseline ${baselineAbs}, treatment ${treatmentAbs})`,
+			...shared,
+		};
+	}
+
 	if (roleVerdicts.some(role => role.status === "INCOMPARABLE")) {
 		const first = roleVerdicts.find(role => role.status === "INCOMPARABLE")!;
 		return { status: "INCOMPARABLE", reason: first.reason, ...shared };

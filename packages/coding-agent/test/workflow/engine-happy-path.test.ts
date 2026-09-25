@@ -53,6 +53,24 @@ describe("WorkflowEngine happy path", () => {
 		expect(result.routingAudit.length).toBeGreaterThan(0);
 	});
 
+	it("writes parent_final_verification receipt on final_verify for offline e2e association", async () => {
+		const customEntries: Array<{ customType: string; data: unknown }> = [];
+		const session = fakeSession({
+			sessionManager: {
+				appendCustomEntry: (customType: string, data?: unknown) => {
+					customEntries.push({ customType, data });
+					return "pfv-test";
+				},
+			},
+		});
+		const workflowId = await engine.startWorkflow({ request: "ship with receipt" });
+		const result = await engine.run(workflowId, session);
+		expect(result.state.status).toBe("completed");
+		const receipt = customEntries.find(entry => entry.customType === "parent_final_verification");
+		expect(receipt).toBeDefined();
+		expect(receipt?.data).toMatchObject({ status: "passed", source: "workflow" });
+	});
+
 	it("reports available budget", async () => {
 		expect(await engine.budgetCheckPreStage()).toBe(true);
 	});

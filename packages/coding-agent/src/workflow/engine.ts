@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { logger } from "@oh-my-pi/pi-utils";
 import {
 	buildLatencyRolloutDecision,
 	freezeLatencyArmSnapshot,
@@ -2310,8 +2311,14 @@ export class WorkflowEngine {
 						PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
 						buildParentFinalVerificationDetails(verification.passed ? "passed" : "failed", "workflow"),
 					);
-				} catch {
-					// Receipt bookkeeping must not fail final_verify.
+				} catch (error) {
+					// Receipt bookkeeping must not fail final_verify, but missing
+					// receipts leave offline e2e as unknown — surface the write error.
+					logger.warn("parent_final_verification receipt write failed", {
+						workflowId,
+						attemptId,
+						error: error instanceof Error ? error.message : String(error),
+					});
 				}
 				const decision = verification.passed ? "passed" : "failed";
 				const next = getNextStage("final_verify", decision);
