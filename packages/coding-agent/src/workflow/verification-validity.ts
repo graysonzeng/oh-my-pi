@@ -1,5 +1,6 @@
 /**
- * Verification ownership and result validity (P1-2).
+ * Verification ownership and result validity (P1-2), plus P1-4 full-repo
+ * verification spawn ownership assessment.
  *
  * Makes worker / parent / workflow_verifier responsibilities explicit on the
  * existing VerificationArtifactV1 path. Records command+scope, code state,
@@ -11,6 +12,10 @@
 
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import * as path from "node:path";
+import {
+	assessVerificationSpawn,
+	type VerificationSpawnAssessment,
+} from "../latency/parallel-recovery-safety";
 import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
 import { sha256Hex } from "./optimization-receipt";
 import type {
@@ -23,6 +28,20 @@ import type {
 	VerificationScope,
 	VerificationValidityV1,
 } from "./types";
+
+export type { VerificationSpawnAssessment };
+
+/**
+ * P1-4: forbid unowned duplicate full-repo verify; keep explicitly assigned local/scoped verify.
+ */
+export function assessVerificationOwnership(input: {
+	scope: "repo" | "paths" | "commands" | "local";
+	owner?: string | null;
+	explicitlyAssigned: boolean;
+	duplicateOfActive?: boolean;
+}): VerificationSpawnAssessment {
+	return assessVerificationSpawn(input);
+}
 
 export type VerificationReuseReason =
 	| "reusable"

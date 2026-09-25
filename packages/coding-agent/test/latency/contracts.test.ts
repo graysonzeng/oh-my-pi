@@ -698,7 +698,7 @@ describe("WorkflowConcurrencyDeclarationV1", () => {
 		expect(resolveEffectiveConcurrency({ declarationMax: 0, sessionMax: 0 })).toBe(0);
 	});
 
-	it("rejects tampered fingerprints and same isolationScope with disjoint paths", () => {
+	it("rejects tampered fingerprints and same isolated worktree with disjoint paths", () => {
 		const valid = buildConcurrencyDeclaration({
 			declarationId: "d-iso",
 			ownerKind: "workflow",
@@ -719,7 +719,7 @@ describe("WorkflowConcurrencyDeclarationV1", () => {
 					mode: "write",
 					required: true,
 					idempotencyKey: "w1",
-					isolationScope: "workspace",
+					isolationScope: "wt-shared",
 				},
 				{
 					id: "w2",
@@ -729,7 +729,7 @@ describe("WorkflowConcurrencyDeclarationV1", () => {
 					mode: "write",
 					required: true,
 					idempotencyKey: "w2",
-					isolationScope: "workspace",
+					isolationScope: "wt-shared",
 				},
 			],
 		});

@@ -5,6 +5,7 @@ import {
 	shouldAutoParallel,
 	type WorkflowConcurrencyDeclarationV1,
 } from "../latency/concurrency-declaration";
+import { explainCancelOutcome } from "../latency/parallel-recovery-safety";
 import workPackageAssignmentTemplate from "../prompts/workflow/work-package-assignment.hbs.md" with { type: "text" };
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "../task/parallel";
 import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
@@ -253,7 +254,10 @@ export async function executeWorkPackagePlan(input: ExecuteWorkPackagePlanInput)
 	const semaphore = new Semaphore(input.plan.maxConcurrency);
 	const packageIndex = new Map(input.plan.packages.map((workPackage, index) => [workPackage.id, index]));
 	for (const wave of input.plan.waves) {
-		if (input.signal?.aborted) throw new WorkflowCancelledError("cancelled before work-package wave");
+		if (input.signal?.aborted) {
+			const outcome = explainCancelOutcome({ phase: "before_start", reason: "cancelled before work-package wave" });
+			throw new WorkflowCancelledError(outcome.detail, { recovery: outcome });
+		}
 		const pending = wave.filter(workPackage => packageState(state, workPackage.id).status !== "succeeded");
 		if (pending.length === 0) continue;
 		const { results, aborted } = await mapWithConcurrencyLimitAllSettled(
@@ -265,7 +269,14 @@ export async function executeWorkPackagePlan(input: ExecuteWorkPackagePlanInput)
 				try {
 					await semaphore.acquire(workerSignal);
 					acquired = true;
-					if (workerSignal.aborted) throw new WorkflowCancelledError("cancelled before work-package launch");
+					if (workerSignal.aborted) {
+						const outcome = explainCancelOutcome({
+							phase: "before_start",
+							unitIds: [workPackage.id],
+							reason: "cancelled before work-package launch",
+						});
+						throw new WorkflowCancelledError(outcome.detail, { recovery: outcome });
+					}
 					requestLaunched = true;
 					const stableIndex = packageIndex.get(workPackage.id) ?? 0;
 					const invocationAttemptId = `${input.attemptId}_wp_${stableIndex + 1}_r${state.revision + 1}`;
@@ -313,15 +324,27 @@ export async function executeWorkPackagePlan(input: ExecuteWorkPackagePlanInput)
 					requestLaunched: reason.requestLaunched === true,
 				});
 			} else if (!settled) {
+				const outcome = explainCancelOutcome({
+					phase: "before_start",
+					unitIds: [pending[index]!.id],
+					reason: "work-package was not launched before cancellation",
+				});
 				failures.push({
 					packageId: pending[index]!.id,
-					error: new WorkflowCancelledError("work-package was not launched before cancellation"),
+					error: new WorkflowCancelledError(outcome.detail, { recovery: outcome }),
 					requestLaunched: false,
 				});
 			}
 		}
 		if (failures.length > 0) throw new WorkPackageExecutionError(failures);
-		if (aborted) throw new WorkflowCancelledError("cancelled after work-package wave");
+		if (aborted) {
+			const outcome = explainCancelOutcome({
+				phase: "after_partial",
+				unitIds: pending.map(workPackage => workPackage.id),
+				reason: "cancelled after work-package wave",
+			});
+			throw new WorkflowCancelledError(outcome.detail, { recovery: outcome });
+		}
 	}
 	return structuredClone(state);
 }

@@ -18,6 +18,7 @@ import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides 
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+import { completeTaskContract } from "../latency/parallel-recovery-safety";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
@@ -524,14 +525,20 @@ function buildExecutorOptions(
 	// Forward prepareWorkflowInvocation session fields so createTools on the child
 	// sees toolAliases / argumentAliases / processResult (and write/command policies).
 	const workflowFields = pickWorkflowToolSessionFields(session);
+	// P1-4: missing `# Acceptance` completes the contract — never refuses spawn alone.
+	const contract = completeTaskContract(request.assignment);
+	if (contract.refused) {
+		throw new Error(contract.detail);
+	}
+	const assignment = contract.assignment.trim();
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
-		task: renderSubagentPrompt(request.assignment),
-		assignment: request.assignment.trim(),
+		task: renderSubagentPrompt(assignment),
+		assignment,
 		// Project evidence handoffs by class so reviewers share raw evidence
 		// without inheriting author conclusions; freeform context passes through.
 		context: prepareSubagentContext(request.context, policy.performanceClass),
