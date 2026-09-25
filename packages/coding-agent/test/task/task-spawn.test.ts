@@ -11,21 +11,39 @@
  * Param validation (missing agent / missing task) is covered by
  * test/task/task-schema.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import {
+	__classifyAcquireAbortReasonForTests,
+	__exerciseTimeoutMetricSettleRaceForTests,
+	__getTaskTimeoutMetricsForTests,
+	__getTaskTimeoutOnceKeyCountForTests,
+	__makeQueuedTimeoutReasonForTests,
+	__resetTaskTimeoutMetricsForTests,
+	TaskTool,
+} from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
+import { emptyReviewMetrics } from "@oh-my-pi/pi-coding-agent/task/review-performance";
+import * as structuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import { buildSubagentBaselineReport, parseSessionJsonl } from "@oh-my-pi/pi-coding-agent/latency/subagent-report";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 
@@ -36,7 +54,11 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
-function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
+function createSession(options: {
+	manager?: AsyncJobManager;
+	settings?: Record<string, unknown>;
+	eventBus?: EventBus;
+}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -44,6 +66,7 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
+		eventBus: options.eventBus,
 	} as unknown as ToolSession;
 }
 
@@ -76,6 +99,14 @@ function getJobProgress(job: AsyncJob): AgentProgress | undefined {
 	return Array.isArray(progress) ? progress[0] : undefined;
 }
 
+function firstSettledResult(job: AsyncJob): SingleResult | undefined {
+	const results = job.latestDetails?.results;
+	if (!Array.isArray(results) || results.length === 0) return undefined;
+	const first = results[0];
+	if (!first || typeof first !== "object") return undefined;
+	return first as SingleResult;
+}
+
 interface Deferred {
 	promise: Promise<void>;
 	resolve: () => void;
@@ -102,6 +133,10 @@ describe("task spawn routing", () => {
 		managers.push(manager);
 		return manager;
 	}
+
+	beforeAll(async () => {
+		await initTheme();
+	});
 
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
@@ -615,6 +650,337 @@ describe("task spawn routing", () => {
 		placeholderGate.resolve();
 		if (capturedArtifactsDir) await fs.rm(capturedArtifactsDir, { recursive: true, force: true });
 	});
+	it("caps review/Gate agents at 30 minutes regardless of task.maxRuntimeMs", async () => {
+		const reviewer: AgentDefinition = {
+			name: "reviewer",
+			description: "Reviewer",
+			systemPrompt: "Review.",
+			source: "bundled",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [reviewer],
+			projectAgentsDir: null,
+		});
+		const policySpy = vi.spyOn(structuredSubagent, "resolveEffectiveSubagentPolicy");
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxRuntimeMs": 3_600_000 } }));
+		const result = await tool.execute("tc-review-cap", {
+			agent: "reviewer",
+			name: "Reviewer",
+			task: "Review the change.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBeTruthy();
+		await manager.getJob(jobId!)!.promise;
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(1_800_000);
+		expect(
+			policySpy.mock.calls.some(
+				([request]) => request.agent === "reviewer" && !Object.hasOwn(request, "maxRuntimeMs"),
+			),
+		).toBe(true);
+	});
+
+	it("keeps a stricter reviewer maxRuntimeMs below the 30-minute ceiling", async () => {
+		const reviewer: AgentDefinition = {
+			name: "reviewer",
+			description: "Reviewer",
+			systemPrompt: "Review.",
+			source: "bundled",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [reviewer],
+			projectAgentsDir: null,
+		});
+		const policySpy = vi.spyOn(structuredSubagent, "resolveEffectiveSubagentPolicy");
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxRuntimeMs": 300_000 } }));
+		const result = await tool.execute("tc-review-stricter", {
+			agent: "reviewer",
+			name: "Reviewer",
+			task: "Review the change.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBeTruthy();
+		await manager.getJob(jobId!)!.promise;
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(300_000);
+		expect(
+			policySpy.mock.calls.some(
+				([request]) => request.agent === "reviewer" && !Object.hasOwn(request, "maxRuntimeMs"),
+			),
+		).toBe(true);
+	});
+
+	it("leaves reviewer runtime unlimited when task.maxRuntimeMs is 0", async () => {
+		const reviewer: AgentDefinition = {
+			name: "reviewer",
+			description: "Reviewer",
+			systemPrompt: "Review.",
+			source: "bundled",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [reviewer],
+			projectAgentsDir: null,
+		});
+		const policySpy = vi.spyOn(structuredSubagent, "resolveEffectiveSubagentPolicy");
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Reviewer", { agent: "reviewer" }));
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxRuntimeMs": 0 } }));
+		const result = await tool.execute("tc-review-unlimited", {
+			agent: "reviewer",
+			name: "Reviewer",
+			task: "Review the change.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBeTruthy();
+		await manager.getJob(jobId!)!.promise;
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(0);
+		expect(
+			policySpy.mock.calls.some(
+				([request]) => request.agent === "reviewer" && !Object.hasOwn(request, "maxRuntimeMs"),
+			),
+		).toBe(true);
+	});
+
+	it("applies the explore ceiling to a TaskTool sonic spawn without a request cap", async () => {
+		const sonic: AgentDefinition = {
+			name: "sonic",
+			description: "Fast bounded worker",
+			systemPrompt: "Inspect quickly.",
+			source: "bundled",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [sonic], projectAgentsDir: null });
+		const policySpy = vi.spyOn(structuredSubagent, "resolveEffectiveSubagentPolicy");
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Sonic", { agent: "sonic" }));
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxRuntimeMs": 3_600_000 } }));
+		const result = await tool.execute("tc-sonic-cap", {
+			agent: "sonic",
+			name: "Sonic",
+			task: "Inspect the bounded target.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		if (!jobId) throw new Error("Expected sonic async job");
+		await manager.getJob(jobId)!.promise;
+		expect(runSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(600_000);
+		expect(runSpy.mock.calls[0]?.[0].performanceClass).toBe("explore");
+		expect(
+			policySpy.mock.calls.some(([request]) => request.agent === "sonic" && !Object.hasOwn(request, "maxRuntimeMs")),
+		).toBe(true);
+	});
+
+	it("persists settled completionKind and spawnQueueMs through async-result into a reopenable report", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
+			makeResult("MetricsWorker", {
+				completionKind: "budget_stop",
+				reviewMetrics: { ...emptyReviewMetrics(), spawnQueueMs: 42 },
+				exitCode: 1,
+				output: "partial",
+			}),
+		);
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const spawned = await tool.execute("tc-async-details-results", {
+			agent: "task",
+			name: "MetricsWorker",
+			task: "Do the thing.",
+		} as TaskParams);
+		const job = manager.getJob(spawned.details!.async!.jobId)!;
+		await job.promise;
+		const settled = firstSettledResult(job);
+		expect(settled?.completionKind).toBe("budget_stop");
+		expect(settled?.reviewMetrics?.spawnQueueMs).toBe(42);
+
+		const message = buildAsyncResultBatchMessage([
+			{
+				jobId: job.id,
+				result: job.errorText ?? job.resultText ?? "partial",
+				job,
+				durationMs: 5,
+				epoch: 0,
+			},
+		]);
+		expect(message?.details?.jobs[0]?.completionKind).toBe("budget_stop");
+		expect(message?.details?.jobs[0]?.spawnQueueMs).toBe(42);
+
+		const jsonl = [
+			JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "sess1",
+				timestamp: "2026-09-09T10:00:00.000Z",
+				cwd: "/tmp",
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: "2026-09-09T10:00:00.000Z",
+				message: {
+					role: "assistant",
+					timestamp: 1000,
+					content: [
+						{
+							type: "toolCall",
+							id: "tc-async-details-results",
+							name: "task",
+							arguments: { agent: "task", name: "MetricsWorker", tasks: [{ name: "MetricsWorker" }] },
+						},
+					],
+				},
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "r1",
+				parentId: "a1",
+				timestamp: "2026-09-09T10:00:00.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-async-details-results",
+					toolName: "task",
+					content: [{ type: "text", text: "Spawned agent `MetricsWorker`." }],
+					timestamp: 1010,
+					details: spawned.details,
+				},
+			}),
+			JSON.stringify({
+				type: "custom_message",
+				id: "async1",
+				parentId: "r1",
+				timestamp: "2026-09-09T10:00:00.000Z",
+				customType: message?.customType,
+				content: message?.content,
+				details: message?.details,
+				display: true,
+			}),
+		].join("\n");
+		const report = buildSubagentBaselineReport([parseSessionJsonl(jsonl, "/tmp/sessions/demo/sess1.jsonl")]);
+		expect(report.completionKinds.budget_stop).toBe(1);
+		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
+		expect(report.spawnQueueMs).toEqual({ n: 1, p50: 42, p90: 42 });
+	});
+
+	it("surfaces budget_stop on the parent-facing task summary", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
+			makeResult("YieldedScout", {
+				completionKind: "budget_stop",
+				aborted: false,
+				exitCode: 1,
+				output: "partial review report",
+				stderr: "soft request budget exceeded",
+			}),
+		);
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false } }));
+		const result = await tool.execute("tc-budget-stop-summary", {
+			agent: "task",
+			name: "YieldedScout",
+			task: "Do the thing.",
+		} as TaskParams);
+		const text = getFirstText(result);
+		expect(text).toContain('completionKind="budget_stop"');
+		expect(text).toContain('status="budget_stop"');
+		expect(text).toContain("partial review report");
+		expect(text).toContain("soft request budget exceeded");
+		expect(text).not.toMatch(/status="completed"/);
+	});
+
+	for (const kind of ["completed", "timeout"] as const) {
+		it(`delivers ${kind === "timeout" ? "timed-out" : "incomplete"} review reports to the parent async job`, async () => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+			const reason = kind === "timeout" ? "runtime limit exceeded" : "required terminal verdict missing";
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+				makeResult(options.id ?? "ReviewReport", {
+					completionKind: kind,
+					exitCode: 1,
+					aborted: kind === "timeout",
+					abortReason: kind === "timeout" ? reason : undefined,
+					stderr: reason,
+					output: "Checked authentication; authorization remains unreviewed.",
+				}),
+			);
+			const manager = createManager();
+			const tool = await TaskTool.create(createSession({ manager }));
+			const spawned = await tool.execute("tc-review-report", {
+				agent: "task",
+				name: "ReviewReport",
+				task: "Review authentication.",
+			} as TaskParams);
+			const job = manager.getJob(spawned.details!.async!.jobId)!;
+			await job.promise;
+			const delivered = job.resultText ?? job.errorText ?? "";
+			expect(delivered).toContain(reason);
+			expect(delivered).toContain("authorization remains unreviewed");
+			expect(delivered).not.toContain('status="completed"');
+		});
+	}
+
+	for (const lifecycleFirst of [true, false]) {
+		it(`delivers failed review content when lifecycle arrives ${lifecycleFirst ? "before" : "after"} consumption`, async () => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+			const bus = new EventBus();
+			const observers = new SessionObserverRegistry();
+			observers.subscribeToEventBus(bus, bus);
+			const delivered = Promise.withResolvers<string>();
+			let deliveries = 0;
+			const manager = new AsyncJobManager({
+				onJobComplete: (_id, text) => {
+					deliveries++;
+					delivered.resolve(text);
+				},
+			});
+			managers.push(manager);
+			const emitTerminal = () =>
+				bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+					id: "ReviewRace",
+					agent: "task",
+					status: "failed",
+					completionKind: "completed",
+					index: 0,
+				});
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				if (lifecycleFirst) emitTerminal();
+				return makeResult(options.id ?? "ReviewRace", {
+					exitCode: 1,
+					stderr: "required terminal verdict missing",
+					output: "SALVAGE: authorization not reviewed",
+				});
+			});
+			try {
+				const tool = await TaskTool.create(createSession({ manager, eventBus: bus }));
+				const spawned = await tool.execute("tc-review-race", {
+					agent: "task",
+					name: "ReviewRace",
+					task: "Review authorization.",
+				} as TaskParams);
+				const text = await delivered.promise;
+				await manager.getJob(spawned.details!.async!.jobId)!.promise;
+				if (!lifecycleFirst) emitTerminal();
+				expect(text).toContain("SALVAGE: authorization not reviewed");
+				expect(text).toContain("required terminal verdict missing");
+				expect(text).not.toContain('status="completed"');
+				expect(deliveries).toBe(1);
+			} finally {
+				observers.dispose();
+			}
+		});
+	}
 
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
@@ -641,7 +1007,7 @@ describe("task spawn routing", () => {
 		const secondJob = manager.getJob(second.details!.async!.jobId)!;
 
 		// First job body reaches the executor; second stays parked at the
-		// semaphore — still flagged queued because markRunning never ran.
+		// semaphore — still flagged queued becausekRunning never ran.
 		await pollUntil(() => started.length >= 1);
 		expect(started).toEqual(["First"]);
 		expect(secondJob.queued).toBe(true);
@@ -766,6 +1132,244 @@ describe("task spawn routing", () => {
 		expect(firstJob.status).toBe("completed");
 		expect(thirdJob.status).toBe("completed");
 		expect(fourthJob.status).toBe("completed");
+	});
+
+	it("fails a spawn that waits too long for a semaphore permit (queued startup timeout)", async () => {
+		__resetTaskTimeoutMetricsForTests();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const started: string[] = [];
+		const gates = new Map<string, Deferred>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			const gate = deferred();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const session = createSession({
+			manager,
+			settings: {
+				"task.maxConcurrency": 1,
+				"task.queuedStartupTimeoutMs": 40,
+				// Keep runtime unlimited so only the queue guard can fire.
+				"task.maxRuntimeMs": 0,
+			},
+		});
+		const tool = await TaskTool.create(session);
+
+		const first = await tool.execute("tc-hold", {
+			agent: "task",
+			name: "Holder",
+			task: "Hold the only permit.",
+		} as TaskParams);
+		const firstJob = manager.getJob(first.details!.async!.jobId)!;
+		await pollUntil(() => started.length === 1);
+		expect(started).toEqual(["Holder"]);
+
+		const second = await tool.execute("tc-queued", {
+			agent: "task",
+			name: "Queued",
+			task: "Wait behind holder.",
+		} as TaskParams);
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+		expect(secondJob.queued).toBe(true);
+
+		await secondJob.promise;
+		expect(secondJob.status).toBe("failed");
+		expect(secondJob.errorText ?? "").toContain("queued startup timeout");
+		expect(secondJob.errorText ?? "").toContain("task.queuedStartupTimeoutMs=40");
+		expect(started).toEqual(["Holder"]);
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(1);
+
+		// A later job with the same agent name must get a fresh per-job metric key.
+		session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
+		const repeated = await tool.execute("tc-queued-repeat", {
+			agent: "task",
+			name: "Queued",
+			task: "Wait behind holder again.",
+		} as TaskParams);
+		const repeatedJob = manager.getJob(repeated.details!.async!.jobId)!;
+		await repeatedJob.promise;
+		expect(repeatedJob.status).toBe("failed");
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(2);
+
+		// Permit must not leak: after holder finishes, a third spawn can acquire.
+		const third = await tool.execute("tc-after", {
+			agent: "task",
+			name: "After",
+			task: "Should start after holder releases.",
+		} as TaskParams);
+		const thirdJob = manager.getJob(third.details!.async!.jobId)!;
+		// Still held by Holder until we release it.
+		await Bun.sleep(20);
+		expect(started).toEqual(["Holder"]);
+		expect(thirdJob.queued).toBe(true);
+
+		gates.get("Holder")!.resolve();
+		await firstJob.promise;
+		await pollUntil(() => started.includes("After"));
+		expect(started).toEqual(["Holder", "After"]);
+		gates.get("After")!.resolve();
+		await thirdJob.promise;
+		expect(thirdJob.status).toBe("completed");
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(2);
+	});
+
+	it("keeps cancel as first cause when timeout timer fires after cancel (same-tick race)", async () => {
+		__resetTaskTimeoutMetricsForTests();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const started: string[] = [];
+		const gates = new Map<string, Deferred>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			const gate = deferred();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: {
+					"task.maxConcurrency": 1,
+					// Long enough that cancel can win; short enough to still fire in-test.
+					"task.queuedStartupTimeoutMs": 80,
+					"task.maxRuntimeMs": 0,
+				},
+			}),
+		);
+
+		const first = await tool.execute("tc-hold-cancel", {
+			agent: "task",
+			name: "Holder",
+			task: "Hold the only permit.",
+		} as TaskParams);
+		const firstJob = manager.getJob(first.details!.async!.jobId)!;
+		await pollUntil(() => started.length === 1);
+
+		const second = await tool.execute("tc-queued-cancel", {
+			agent: "task",
+			name: "Queued",
+			task: "Wait behind holder, then cancel.",
+		} as TaskParams);
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+		expect(secondJob.queued).toBe(true);
+
+		// Cancel wins first-cause before the queued-startup timer.
+		expect(manager.cancel(secondJob.id)).toBe(true);
+		await secondJob.promise;
+		// Allow any late timer tick; clearTimeout + first-cause must still keep cancel attribution.
+		await Bun.sleep(120);
+
+		expect(secondJob.status).toBe("cancelled");
+		expect(secondJob.errorText ?? "").not.toContain("queued startup timeout");
+		expect(started).toEqual(["Holder"]);
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(0);
+		// F8: cancel-then-late-timer must not leave orphan once-keys.
+		expect(__getTaskTimeoutOnceKeyCountForTests()).toBe(0);
+
+		gates.get("Holder")!.resolve();
+		await firstJob.promise;
+	});
+
+	it("F8: settleOnce always clears once-keys even after a late record", () => {
+		__resetTaskTimeoutMetricsForTests();
+		const result = __exerciseTimeoutMetricSettleRaceForTests("race-job");
+		expect(result.keysAfterLateRecord).toBe(1);
+		expect(result.keysAfterReentryClear).toBe(0);
+		expect(__getTaskTimeoutOnceKeyCountForTests()).toBe(0);
+	});
+
+	it("classifies cancel-then-timeout by combinedSignal.reason only (no secondary OR)", () => {
+		const cancel = new AbortController();
+		const queued = new AbortController();
+		const combined = AbortSignal.any([cancel.signal, queued.signal]);
+		cancel.abort(new Error("user-cancel"));
+		queued.abort(__makeQueuedTimeoutReasonForTests(80));
+
+		// Production must trust AbortSignal.any first-cause only.
+		expect(__classifyAcquireAbortReasonForTests(combined.reason)).toBe("aborted");
+		// Secondary timeout reason is present but must not rewrite first-cause.
+		expect(__classifyAcquireAbortReasonForTests(queued.signal.reason)).toBe("queued_timeout");
+	});
+
+	it("classifies timeout-then-cancel by combinedSignal.reason only", () => {
+		const cancel = new AbortController();
+		const queued = new AbortController();
+		const combined = AbortSignal.any([cancel.signal, queued.signal]);
+		queued.abort(__makeQueuedTimeoutReasonForTests(40));
+		cancel.abort(new Error("user-cancel"));
+
+		expect(__classifyAcquireAbortReasonForTests(combined.reason)).toBe("queued_timeout");
+	});
+
+	it("keeps queued timeout as first cause when timeout beats a later cancel", async () => {
+		__resetTaskTimeoutMetricsForTests();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const started: string[] = [];
+		const gates = new Map<string, Deferred>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			const gate = deferred();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: {
+					"task.maxConcurrency": 1,
+					"task.queuedStartupTimeoutMs": 40,
+					"task.maxRuntimeMs": 0,
+				},
+			}),
+		);
+
+		const first = await tool.execute("tc-hold-timeout-first", {
+			agent: "task",
+			name: "Holder",
+			task: "Hold the only permit.",
+		} as TaskParams);
+		const firstJob = manager.getJob(first.details!.async!.jobId)!;
+		await pollUntil(() => started.length === 1);
+
+		const second = await tool.execute("tc-queued-timeout-first", {
+			agent: "task",
+			name: "Queued",
+			task: "Wait behind holder until timeout.",
+		} as TaskParams);
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+		expect(secondJob.queued).toBe(true);
+
+		await secondJob.promise;
+		// Timeout already settled the job; a late cancel must not rewrite attribution.
+		expect(manager.cancel(secondJob.id)).toBe(false);
+		expect(secondJob.status).toBe("failed");
+		expect(secondJob.errorText ?? "").toContain("queued startup timeout");
+		expect(started).toEqual(["Holder"]);
+		expect(__getTaskTimeoutMetricsForTests().queued_timeout_triggered).toBe(1);
+
+		gates.get("Holder")!.resolve();
+		await firstJob.promise;
 	});
 
 	for (const maxConcurrency of [0, 0.5]) {
@@ -909,5 +1513,134 @@ describe("task spawn routing", () => {
 
 		gates.get("Fifth")!.resolve();
 		await Promise.all(jobs.map(job => job.promise));
+	});
+
+	it("copies executor current-tool args and start timestamp onto the job snapshot", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const started = Promise.withResolvers<void>();
+		const switchTools = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			expect(options.detached).toBe(true);
+			const emit = (progress: AgentProgress) => {
+				options.onProgress?.(progress);
+				options.eventBus?.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+					index: options.index ?? 0,
+					agent: options.agent.name,
+					agentSource: options.agent.source,
+					task: options.task,
+					parentToolCallId: options.parentToolCallId,
+					detached: options.detached,
+					assignment: options.assignment,
+					progress,
+					sessionFile: options.sessionFile,
+				});
+			};
+			emit({
+				index: 0,
+				id: options.id,
+				agent: "task",
+				agentSource: "bundled",
+				status: "running",
+				task: options.task,
+				lastIntent: "Inspect login",
+				currentTool: "read",
+				currentToolArgs: "src/auth.ts",
+				currentToolStartMs: now - 6_000,
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 1,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 6_000,
+			});
+			started.resolve();
+			await switchTools.promise;
+			emit({
+				index: 0,
+				id: options.id,
+				agent: "task",
+				agentSource: "bundled",
+				status: "running",
+				task: options.task,
+				currentTool: undefined,
+				currentToolArgs: undefined,
+				currentToolStartMs: undefined,
+				recentTools: [{ tool: "grep", args: "password", endMs: now }],
+				recentOutput: [],
+				toolCount: 1,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 6_000,
+			});
+			await finish.promise;
+			return makeResult(options.id);
+		});
+		const manager = createManager();
+		const eventBus = new EventBus();
+		const observers = new SessionObserverRegistry();
+		observers.subscribeToEventBus(eventBus, eventBus);
+		const session = createSession({ manager, eventBus });
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-live-copy", {
+			agent: "task",
+			name: "AuthLoader",
+			task: "Refactor the auth flow.",
+		} as TaskParams);
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBe("AuthLoader");
+		await started.promise;
+		await pollUntil(() => {
+			const job = jobId ? manager.getJob(jobId) : undefined;
+			return job !== undefined && getJobProgress(job)?.currentTool === "read";
+		});
+		const runningJob = manager.getJob(jobId!);
+		expect(runningJob).toBeDefined();
+		expect(getJobProgress(runningJob!)?.currentTool).toBe("read");
+		expect(getJobProgress(runningJob!)?.currentToolArgs).toBe("src/auth.ts");
+		expect(getJobProgress(runningJob!)?.lastIntent).toBe("Inspect login");
+		const runningHud = Bun.stripANSI(renderSubagentHudLines(observers.getSessions(), 120).join("\n"));
+		expect(runningHud).toContain("AuthLoader");
+		expect(runningHud).toMatch(/read: Inspect login/);
+		expect(runningHud).not.toContain("src/auth.ts");
+		expect(runningHud).toContain("6.0s");
+		const runningHudNarrow = Bun.stripANSI(renderSubagentHudLines(observers.getSessions(), 40).join("\n"));
+		expect(runningHudNarrow).toContain("AuthLoader");
+		expect(runningHudNarrow).toMatch(/read: Inspect login/);
+		expect(runningHudNarrow).not.toContain("src/auth.ts");
+		expect(runningHudNarrow).toContain("6.0s");
+		for (const line of runningHudNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+		switchTools.resolve();
+		await pollUntil(() => {
+			const job = manager.getJob(jobId!);
+			const progress = job ? getJobProgress(job) : undefined;
+			return progress?.currentTool === undefined && progress?.recentTools[0]?.tool === "grep";
+		});
+		const recentJob = manager.getJob(jobId!);
+		expect(recentJob).toBeDefined();
+		expect(getJobProgress(recentJob!)?.currentTool).toBeUndefined();
+		expect(getJobProgress(recentJob!)?.recentTools[0]).toEqual({ tool: "grep", args: "password", endMs: now });
+		const recentHud = Bun.stripANSI(renderSubagentHudLines(observers.getSessions(), 120).join("\n"));
+		expect(recentHud).toMatch(/grep: password/);
+		expect(recentHud).not.toContain("src/auth.ts");
+		expect(recentHud).not.toContain("6.0s");
+		const recentHudNarrow = Bun.stripANSI(renderSubagentHudLines(observers.getSessions(), 40).join("\n"));
+		expect(recentHudNarrow).toMatch(/grep: password/);
+		expect(recentHudNarrow).not.toContain("src/auth.ts");
+		expect(recentHudNarrow).not.toContain("6.0s");
+		for (const line of recentHudNarrow.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+		}
+		finish.resolve();
+		await manager.getJob(jobId!)?.promise;
 	});
 });

@@ -56,13 +56,18 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	const read = async (path, opts, ...rest) => {
 		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
-		if (shouldDelegateRead(path)) {
+		if (globalThis.__omp_restricted_io__ || shouldDelegateRead(path)) {
 			const toolPath = withReadLineSelector(path, options);
 			return toolPath === null ? "" : readToolText(toolPath);
 		}
 		return callHelper("read", path, options);
 	};
-	const write = async (path, data) => callHelper("writeFile", path, data);
+	const write = async (path, data) => {
+		if (globalThis.__omp_restricted_io__) {
+			return globalThis.__omp_call_tool__("write", { path, content: data });
+		}
+		return callHelper("writeFile", path, data);
+	};
 	const env = (key, value) => callHelper("env", key, value);
 
 	const __tools = new Map();
@@ -94,6 +99,17 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			return async args => globalThis.__omp_call_tool__(prop, args ?? {});
 		},
 	});
+	const catalog = {
+		searchTools: (query, opts) =>
+			globalThis.__omp_call_tool__("__catalog_search__", {
+				query,
+				...(opts && typeof opts === "object" ? opts : {}),
+			}),
+		describeTools: names =>
+			globalThis.__omp_call_tool__("__catalog_describe__", {
+				names: Array.isArray(names) ? names : [names],
+			}),
+	};
 
 	const output = async (...args) => {
 		let opts = {};
@@ -611,6 +627,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.print = consoleBridge.log;
 	globalThis.display = display;
 	globalThis.tool = tool;
+	globalThis.catalog = catalog;
 	globalThis.completion = completion;
 	globalThis.output = output;
 	globalThis.agent = agent;

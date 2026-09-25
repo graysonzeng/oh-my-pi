@@ -20,6 +20,7 @@ import {
 	cfgTierOpenai,
 	cfgTierSubagent,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgTierXai } from "@oh-my-pi/pi-coding-agent/config/workflow-settings";
 
 function requiredBundledModel(provider: "openai-codex" | "anthropic" | "google", id: string) {
 	const model = getBundledModel(provider, id);
@@ -69,6 +70,7 @@ describe("serviceTier → tier.* settings migration", () => {
 		expect(cfgTierOpenai.get(settings)).toBe("priority");
 		expect(cfgTierAnthropic.get(settings)).toBe("priority");
 		expect(cfgTierGoogle.get(settings)).toBe("priority");
+		expect(cfgTierXai.get(settings)).toBe("none");
 	});
 
 	it("scopes openai-only/claude-only to a single family", async () => {
@@ -100,6 +102,7 @@ describe("serviceTier → tier.* settings migration", () => {
 	it("leaves a fresh config on the per-family defaults", async () => {
 		const settings = await loadWith({});
 		expect(cfgTierOpenai.get(settings)).toBe("none");
+		expect(cfgTierXai.get(settings)).toBe("none");
 		expect(cfgTierSubagent.get(settings)).toBe("inherit");
 		expect(cfgTierAdvisor.get(settings)).toBe("none");
 	});

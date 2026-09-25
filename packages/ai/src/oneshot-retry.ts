@@ -117,6 +117,9 @@ function isRetryableOneshotFailure(errorId: number, errorStatus: number | undefi
 	// of reaching the fallback that can actually shrink the input.
 	if (AIError.is(errorId, AIError.Flag.ContextOverflow)) return false;
 	if (AIError.is(errorId, AIError.Flag.PayloadRejected)) return false;
+	// 503 auth_unavailable and Payment Required replay identically.
+	if (AIError.is(errorId, AIError.Flag.AuthFailed)) return false;
+	if (AIError.isPermanentBillingFailureText(errorMessage)) return false;
 	return (
 		AIError.isTransientStatus(errorStatus) ||
 		AIError.is(errorId, AIError.Flag.Transient) ||

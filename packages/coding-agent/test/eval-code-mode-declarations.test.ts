@@ -196,8 +196,9 @@ test("EvalTool advertises bridged tool declarations only while Code Mode is acti
 		getCodeModeDirectToolNames: () => ["eval"],
 	} as unknown as ToolSession);
 	const active = activeTool.description;
-	expect(active).toContain("declare const tool: {");
+	expect(active).toContain("catalog.searchTools");
 	expect(active).toContain("read(args:");
+	expect(active).not.toContain("declare const tool: {");
 	expect(active).toContain("declare const fixturePreludeDeclaration: true;");
 
 	preludeEnabled = false;
@@ -207,6 +208,7 @@ test("EvalTool advertises bridged tool declarations only while Code Mode is acti
 		...baseSession,
 		getCodeModeDirectToolNames: () => undefined,
 	} as unknown as ToolSession).description;
+	expect(inactive).not.toContain("catalog.searchTools");
 	expect(inactive).not.toContain("declare const tool");
 	expect(inactive).not.toContain("read(args:");
 	expect(inactive).not.toContain("fixturePreludeDeclaration");

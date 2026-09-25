@@ -23,6 +23,7 @@ import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
+import { type ConsultSelectionHost, isConsultActivationAllowed } from "../tools/consult-model";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -39,9 +40,10 @@ import {
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
-import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } from "./code-mode";
+import { buildToolNamespacesInfo, type ToolNamespacesInfo } from "./code-mode";
+import { resolvePtc, type PtcResolution } from "./ptc";
 import { toolReadsSkillUris } from "../system-prompt";
-
+import { cfgConsultEnabled, cfgToolsPtcDirectTools, cfgToolsPtcMode } from "../config/workflow-settings";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
@@ -79,6 +81,8 @@ export interface SessionToolsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
+	getConsultModelOverride(): string | undefined;
+	setConsultModelOverride(pattern: string | undefined): void;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
 }
@@ -99,6 +103,10 @@ interface SessionToolsOptions {
 	createVibeTools?: () => AgentTool[];
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
+	/** Creates session_search for session-scoped kill/re-enable after arm invalidation. */
+	createSessionSearchTool?: () => Promise<AgentTool | null>;
+	/** Creates the built-in `consult` tool for session-scoped runtime enablement. */
+	createConsultTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
@@ -120,6 +128,7 @@ interface SessionToolsOptions {
 		options?: { directToolNames?: readonly string[] },
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	wrapMcpInstructionActivation?: (tool: AgentTool) => AgentTool;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
@@ -251,6 +260,8 @@ export class SessionTools {
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
+	#createSessionSearchTool: SessionToolsOptions["createSessionSearchTool"];
+	#createConsultTool: SessionToolsOptions["createConsultTool"];
 	#installedVibeToolNames = new Set<string>();
 	#builtInToolNames: Set<string>;
 	#rpcHostToolNames = new Set<string>();
@@ -334,6 +345,7 @@ export class SessionTools {
 		settings: this.#host.settings,
 		localProtocolOptions: this.#host.localProtocolOptions(),
 	});
+	#wrapMcpInstructionActivation: SessionToolsOptions["wrapMcpInstructionActivation"];
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
 	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
@@ -369,6 +381,8 @@ export class SessionTools {
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createVibeTools = options.createVibeTools;
 		this.#createThinkTool = options.createThinkTool;
+		this.#createSessionSearchTool = options.createSessionSearchTool;
+		this.#createConsultTool = options.createConsultTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
 		if (options.mcpManagerToolNames === undefined) {
@@ -391,6 +405,7 @@ export class SessionTools {
 		this.#reconcileSettingsGatedTools = options.reconcileSettingsGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
+		this.#wrapMcpInstructionActivation = options.wrapMcpInstructionActivation;
 		this.#xdev = options.xdev;
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
@@ -776,23 +791,26 @@ export class SessionTools {
 		}
 	}
 
-	/** Whether a model transition crosses a Code Mode presentation boundary. */
+	#resolvePtc(model: Model | undefined, enabledToolNames: readonly string[]): PtcResolution {
+		return resolvePtc({
+			provider: model?.provider ?? "",
+			toolMode: model?.toolMode,
+			ptcMode: cfgToolsPtcMode.get(this.#host.settings),
+			codexMode: cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings),
+			extraDirectTools: cfgToolsPtcDirectTools.get(this.#host.settings),
+			codexExtraDirectTools: cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings),
+			enabledToolNames,
+			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
+		});
+	}
+
+	/** Whether a model transition crosses a Code Mode / PTC presentation boundary. */
 	codeModeChangesBetween(previousModel: Model | undefined, nextModel: Model): boolean {
 		const enabledToolNames = this.getEnabledToolNames();
-		const setting = cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings);
-		const extraDirectTools = cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings);
-		const resolve = (model: Model | undefined) =>
-			resolveCodeMode({
-				provider: model?.provider ?? "",
-				toolMode: model?.toolMode,
-				setting,
-				extraDirectTools,
-				enabledToolNames,
-				evalTransportAvailable: this.#hasCodeModeEvalTransport(),
-			});
-		const previous = resolve(previousModel);
-		const next = resolve(nextModel);
+		const previous = this.#resolvePtc(previousModel, enabledToolNames);
+		const next = this.#resolvePtc(nextModel, enabledToolNames);
 		if (previous.active !== next.active) return true;
+		if (previous.codexNamespaces !== next.codexNamespaces) return true;
 		if (!next.active) return false;
 		if (previous.directToolNames.size !== next.directToolNames.size) return true;
 		for (const name of previous.directToolNames) {
@@ -964,14 +982,7 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
-		const codeMode = resolveCodeMode({
-			provider: this.#host.model()?.provider ?? "",
-			toolMode: this.#host.model()?.toolMode,
-			setting: cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings),
-			extraDirectTools: cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings),
-			enabledToolNames: toolNames,
-			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
-		});
+		const codeMode = this.#resolvePtc(this.#host.model(), toolNames);
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
 		const fullWriteSelected =
 			toolNames.includes("write") &&
@@ -1061,24 +1072,26 @@ export class SessionTools {
 			if (transportNeeded && validToolNames.includes("write")) codeMode.directToolNames.add("write");
 			appliedTools = tools.filter(tool => codeMode.directToolNames.has(tool.name));
 			appliedNames = validToolNames.filter(name => codeMode.directToolNames.has(name));
-			nextCodeModeNamespacesInfo = buildToolNamespacesInfo({
-				tools: validToolNames.flatMap(name => {
-					const tool = this.#toolRegistry.get(name);
-					if (!tool) return [];
-					return [
-						{
-							name,
-							customWireName: tool.customWireName,
-							loadMode: "loadMode" in tool && typeof tool.loadMode === "string" ? tool.loadMode : undefined,
-							mcpServerName:
-								"mcpServerName" in tool && typeof tool.mcpServerName === "string"
-									? tool.mcpServerName
-									: undefined,
-						},
-					];
-				}),
-				directToolNames: codeMode.directToolNames,
-			});
+			if (codeMode.codexNamespaces) {
+				nextCodeModeNamespacesInfo = buildToolNamespacesInfo({
+					tools: validToolNames.flatMap(name => {
+						const tool = this.#toolRegistry.get(name);
+						if (!tool) return [];
+						return [
+							{
+								name,
+								customWireName: tool.customWireName,
+								loadMode: "loadMode" in tool && typeof tool.loadMode === "string" ? tool.loadMode : undefined,
+								mcpServerName:
+									"mcpServerName" in tool && typeof tool.mcpServerName === "string"
+										? tool.mcpServerName
+										: undefined,
+							},
+						];
+					}),
+					directToolNames: codeMode.directToolNames,
+				});
+			}
 		}
 		const restrictDeviceOnlyWrite =
 			validToolNames.includes("write") &&
@@ -1696,6 +1709,17 @@ export class SessionTools {
 	}
 
 	/**
+	 * Session-scoped enable/disable for the private `think` scratchpad tool.
+	 *
+	 * Enabling constructs the tool once and refreshes the model's tool contract;
+	 * disabling removes it from the active set while preserving its registry entry.
+	 *
+	 * @returns false when enabling was requested but this session cannot build the tool.
+	 */
+	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#setThinkToolActive(enabled && supportsExternalThinking(this.#host.model()));
+	}
+	/**
 	 * Reconciles the private `think` scratchpad with the `externalThinking`
 	 * setting and the active model. Enabling constructs the tool once;
 	 * disabling removes it from the active set but keeps its registry entry.
@@ -1728,6 +1752,123 @@ export class SessionTools {
 				await this.#applyActiveToolsByName([...active, "think"]);
 			}
 			return true;
+		});
+	}
+	async setSessionSearchToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const active = this.getEnabledToolNames();
+			if (!enabled) {
+				if (active.includes("session_search")) {
+					await this.#applyActiveToolsByName(active.filter(name => name !== "session_search"));
+				}
+				return true;
+			}
+			if (!this.#toolRegistry.has("session_search")) {
+				const tool = await this.#createSessionSearchTool?.();
+				if (tool?.name !== "session_search") return false;
+				const wrapped = this.#wrapRuntimeTool(tool);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+				this.#builtInToolNames.add(wrapped.name);
+			}
+			if (!active.includes("session_search")) {
+				await this.#applyActiveToolsByName([...active, "session_search"]);
+			}
+			return true;
+		});
+	}
+
+	/** Explicit session toggle; automatic same-model pauses preserve this intent. */
+	setConsultToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.runToolRegistryMutation(() => this.#setConsultToolEnabled(enabled));
+	}
+
+	async #setConsultToolEnabled(enabled: boolean): Promise<boolean> {
+		if (enabled && this.#host.agentKind() !== "main") return false;
+		cfgConsultEnabled.override(this.#host.settings, enabled);
+		if (!enabled) {
+			const active = this.getEnabledToolNames();
+			if (active.includes("consult")) {
+				await this.#applyActiveToolsByName(active.filter(name => name !== "consult"));
+			}
+			return true;
+		}
+		return this.#reconcileConsultTool();
+	}
+
+	/** Re-evaluate availability without changing the user's enabled setting. */
+	reconcileConsultTool(): Promise<boolean> {
+		return this.runToolRegistryMutation(() => this.#reconcileConsultTool());
+	}
+
+	#consultSelectionHost(): ConsultSelectionHost {
+		return {
+			settings: this.#host.settings,
+			modelRegistry: this.#host.modelRegistry,
+			getConsultModelOverride: () => this.#host.getConsultModelOverride(),
+			getActiveModel: () => this.#host.model(),
+		};
+	}
+
+	async #reconcileConsultTool(): Promise<boolean> {
+		if (this.#consultShouldBeActive()) {
+			return this.#setConsultToolActive();
+		}
+		const active = this.getEnabledToolNames();
+		if (active.includes("consult")) {
+			await this.#applyActiveToolsByName(active.filter(name => name !== "consult"));
+		}
+		// A same-model/disabled pause is a successful no-op; a session that can
+		// never host consult (subagent) reports unavailability.
+		return this.#host.agentKind() === "main";
+	}
+
+	#consultShouldBeActive(): boolean {
+		if (cfgConsultEnabled.get(this.#host.settings) !== true) return false;
+		if (this.#host.agentKind() !== "main") return false;
+		return isConsultActivationAllowed(this.#consultSelectionHost());
+	}
+
+	async #setConsultToolActive(): Promise<boolean> {
+		const active = this.getEnabledToolNames();
+		if (!this.#toolRegistry.has("consult")) {
+			const tool = await this.#createConsultTool?.();
+			if (tool?.name !== "consult") {
+				logger.warn("consult tool could not be created", {
+					model: this.#host.model()?.id,
+				});
+				return false;
+			}
+			// The primary model can switch while the async factory awaits. Re-check
+			// the same-model pause before touching the registry so a tool built
+			// under a permissive model never re-enters the surface under a
+			// same-model primary.
+			if (!this.#consultShouldBeActive()) return true;
+			const wrapped = this.#wrapRuntimeTool(tool);
+			this.#toolRegistry.set(wrapped.name, wrapped);
+			this.#builtInToolNames.add(wrapped.name);
+		}
+		if (!active.includes("consult")) {
+			await this.#applyActiveToolsByName([...active, "consult"]);
+		}
+		return true;
+	}
+
+	/**
+	 * Session-scoped `/consult <model>` override. Setting one activates consult
+	 * for this session (overriding `consult.enabled`), then defers to the same
+	 * reconcile gate: an override targeting the active primary pauses the tool
+	 * instead of exposing a call that can only fail `same_model`.
+	 */
+	setConsultModelOverride(pattern: string | undefined): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			if (pattern !== undefined && this.#host.agentKind() !== "main") {
+				return false;
+			}
+			this.#host.setConsultModelOverride(pattern);
+			if (pattern !== undefined) {
+				cfgConsultEnabled.override(this.#host.settings, true);
+			}
+			return this.#reconcileConsultTool();
 		});
 	}
 
@@ -2033,7 +2174,10 @@ export class SessionTools {
 			const wrapped = wrapToolWithMetaNotice(
 				CustomToolAdapter.wrap(customTool, this.#getCustomToolContext) as AgentTool,
 			);
-			return (extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped) as AgentTool;
+			const activationWrapped = this.#wrapMcpInstructionActivation?.(wrapped) ?? wrapped;
+			return (
+				extensionRunner ? new ExtensionToolWrapper(activationWrapped, extensionRunner) : activationWrapped
+			) as AgentTool;
 		});
 		const managerToolSet = new Set(managerTools);
 		const reconciledTools = deduplicateMCPToolsByName([...this.#extensionMcpTools.values(), ...managerTools]);

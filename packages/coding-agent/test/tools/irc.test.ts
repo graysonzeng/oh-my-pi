@@ -605,7 +605,7 @@ describe("IRC", () => {
 			expect(promptSpy).toHaveBeenCalled();
 		});
 
-		it("queues peer IRC as an interrupt while a turn is streaming", async () => {
+		it("queues ordinary peer IRC as an aside while a turn is streaming", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
@@ -620,10 +620,32 @@ describe("IRC", () => {
 			});
 			expect(outcome).toBe("injected");
 			expect(promptSpy).not.toHaveBeenCalled();
-			expect(await session.agent.hasIrcInterrupts?.()).toBe(true);
+			expect(await session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(session.drainPendingIrcInboxMessages("0-Me").map(msg => msg.body)).toEqual(["mid-turn note"]);
 		});
 
-		it("queues parent IRC as steering while a subagent turn is streaming", async () => {
+		it("queues interrupt:true peer IRC as an interrupt while a turn is streaming", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-2-int",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "urgent peer note",
+				ts: Date.now(),
+				interrupt: true,
+			});
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(await session.agent.hasIrcInterrupts?.()).toBe(true);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+		});
+
+		it("queues ordinary parent IRC as an aside while a subagent turn is streaming", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
@@ -636,6 +658,28 @@ describe("IRC", () => {
 				to: "0-Child",
 				body: "change approach",
 				ts: Date.now(),
+			});
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(session.drainPendingIrcInboxMessages("0-Child").map(msg => msg.body)).toEqual(["change approach"]);
+		});
+
+		it("queues interrupt:true parent IRC as steering while a subagent turn is streaming", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-parent-int",
+				from: "Main",
+				to: "0-Child",
+				body: "change approach",
+				ts: Date.now(),
+				interrupt: true,
 			});
 			const queued = session.agent.peekSteeringQueue();
 			expect(outcome).toBe("injected");

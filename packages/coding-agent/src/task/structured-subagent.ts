@@ -7,6 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
 import {
@@ -23,10 +24,11 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel, TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
+import { pickWorkflowToolSessionFields } from "../tools/workflow-session-fields";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
@@ -42,6 +44,11 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import {
+	resolveClassMaxRuntimeMs,
+	resolveSubagentPerformanceClass,
+	type SubagentPerformanceClass,
+} from "./review-performance";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
 import type {
@@ -65,6 +72,7 @@ import {
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
+	cfgTaskMaxRuntimeMs,
 } from "./settings";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
@@ -109,6 +117,8 @@ export interface StructuredSubagentRequest {
 	schemaMode?: StructuredSubagentSchemaMode;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
+	/** Request a code-review shadow cohort (`code`) or force it off. */
+	shadowReview?: "code" | "off";
 	identity?: StructuredSubagentIdentity;
 	index?: number;
 	parentToolCallId?: string;
@@ -142,8 +152,16 @@ export interface StructuredSubagentRequest {
 	customTools?: CustomTool[];
 	/** Workpool items accepted by the child yield tool during this turn. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
+	thinkingLevel?: ConfiguredThinkingLevel;
 	signal?: AbortSignal;
+	onResponse?: SimpleStreamOptions["onResponse"];
+	strictModelIdentity?: boolean;
 	onProgress?: (progress: AgentProgress) => void;
+	/**
+	 * When set, subagent tools are restricted to this allowlist (workflow scoped write/read policies).
+	 * Implies restrictToolNames for the executor session.
+	 */
+	allowedTools?: readonly string[];
 }
 
 /** A normalized preflight result, reusable by tests and adapters. */
@@ -169,6 +187,8 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	performanceClass: SubagentPerformanceClass;
+	effectiveMaxRuntimeMs: number;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -309,7 +329,16 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	let effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	// Workflow (and other adapters) may supply an explicit tool allowlist.
+	if (!planMode && request.allowedTools && request.allowedTools.length > 0) {
+		effectiveAgent = {
+			...effectiveAgent,
+			tools: [...request.allowedTools],
+			// Prevent recursive unrestricted fan-out under scoped write policies.
+			spawns: undefined,
+		};
+	}
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -353,6 +382,22 @@ export async function resolveEffectiveSubagentPolicy(
 			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
 		);
 	}
+	const performanceClass = resolveSubagentPerformanceClass({
+		agentName,
+		agentShadowReview: effectiveAgent.shadowReview,
+		spawnShadowReview: request.shadowReview,
+	});
+	const freshConfiguredMaxRuntimeMs = cfgTaskMaxRuntimeMs.get(request.session.settings);
+	let effectiveMaxRuntimeMs: number;
+	if (request.maxRuntimeMs !== undefined) {
+		effectiveMaxRuntimeMs = request.maxRuntimeMs;
+	} else if (request.invocationKind === "eval") {
+		effectiveMaxRuntimeMs = freshConfiguredMaxRuntimeMs;
+	} else if (freshConfiguredMaxRuntimeMs === 0) {
+		effectiveMaxRuntimeMs = 0;
+	} else {
+		effectiveMaxRuntimeMs = Math.min(freshConfiguredMaxRuntimeMs, resolveClassMaxRuntimeMs(performanceClass));
+	}
 	return {
 		discovery,
 		agentName,
@@ -378,6 +423,8 @@ export async function resolveEffectiveSubagentPolicy(
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+		performanceClass,
+		effectiveMaxRuntimeMs,
 	};
 }
 
@@ -470,8 +517,12 @@ function buildExecutorOptions(
 	const { session } = request;
 	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
+	const restrictToolNames =
+		policy.planMode || session.restrictToolNames === true || Boolean(request.allowedTools?.length);
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	// Forward prepareWorkflowInvocation session fields so createTools on the child
+	// sees toolAliases / argumentAliases / processResult (and write/command policies).
+	const workflowFields = pickWorkflowToolSessionFields(session);
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -498,8 +549,9 @@ function buildExecutorOptions(
 		serviceTierOverride: policy.serviceTierOverride,
 		compactionThresholdOverride: policy.compactionThresholdOverride,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
-		thinkingLevel: policy.effectiveAgent.thinkingLevel,
+		thinkingLevel: request.thinkingLevel ?? policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		shadowReview: request.shadowReview,
 		...(policy.schema.source === "none"
 			? {}
 			: {
@@ -513,13 +565,16 @@ function buildExecutorOptions(
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
-		maxRuntimeMs: request.maxRuntimeMs,
+		performanceClass: policy.performanceClass,
+		maxRuntimeMs: policy.effectiveMaxRuntimeMs,
 		restrictToolNames,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
 		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
+		onResponse: request.onResponse,
+		strictModelIdentity: request.strictModelIdentity,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
@@ -548,6 +603,7 @@ function buildExecutorOptions(
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+		...workflowFields,
 	};
 }
 
@@ -588,6 +644,7 @@ function buildFailureResult(
 			modelOverride: policy.modelOverride,
 			modelRole: policy.modelRole,
 			error: message,
+			completionKind: "hard_abort",
 		};
 	};
 }
@@ -733,19 +790,17 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		}
 		attachStructuredOutputMetadata(result, policy.schema);
 		hasValidStructuredOutput = result.structuredOutput?.status === "valid";
-		requiresRecoveryArtifacts =
-			policy.isIsolated &&
-			(result.exitCode !== 0 || result.error !== undefined || result.aborted === true) &&
-			(result.patchPath !== undefined || result.branchName !== undefined || (result.nestedPatches?.length ?? 0) > 0);
-
-		if (
-			policy.isIsolated &&
-			isolationContext &&
-			policy.applyChanges &&
+		const completedRun =
 			result.exitCode === 0 &&
 			!result.error &&
-			!result.aborted
-		) {
+			!result.aborted &&
+			(result.completionKind === undefined || result.completionKind === "completed");
+		requiresRecoveryArtifacts =
+			policy.isIsolated &&
+			!completedRun &&
+			(result.patchPath !== undefined || result.branchName !== undefined || (result.nestedPatches?.length ?? 0) > 0);
+
+		if (policy.isIsolated && isolationContext && policy.applyChanges && completedRun) {
 			const outcome = await mergeIsolatedChanges({
 				result,
 				repoRoot: isolationContext.repoRoot,
@@ -777,11 +832,11 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				rootPatchPath: result.hasRootChanges === false ? undefined : result.patchPath,
 				nestedPatchPaths: result.nestedPatchPaths ?? [],
 			});
-		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
+		} else if (policy.isIsolated && isolationContext && (!policy.applyChanges || !completedRun)) {
 			mergeSummary = describeCapturedChanges(result);
 		}
 
-		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;
+		completedSuccessfully = completedRun;
 		return {
 			result,
 			policy,

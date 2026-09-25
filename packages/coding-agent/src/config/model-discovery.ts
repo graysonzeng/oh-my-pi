@@ -11,6 +11,7 @@ import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,
+	getBundledProviderModelReferenceIndex,
 	inheritReferenceThinking,
 	resolveModelReference,
 	stripBracketedModelIdAffixes,
@@ -183,6 +184,7 @@ export interface DiscoveryProviderConfig {
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
+	referenceProvider?: string;
 	discovery: ProviderDiscovery;
 	optional?: boolean;
 }
@@ -1105,6 +1107,7 @@ export async function discoverProxyModels(
 	const payload = apiKey
 		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 		: await attempt(baseHeaders);
+	const preferredReferences = getBundledProviderModelReferenceIndex(providerConfig.referenceProvider);
 	const items = payload.data ?? [];
 	const discovered: Model<Api>[] = [];
 	for (const item of items) {
@@ -1118,7 +1121,9 @@ export async function discoverProxyModels(
 				: providerConfig.api;
 		if (!api) continue;
 		const isAnthropic = api === "anthropic-messages";
-		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+		const reference =
+			(preferredReferences ? resolveModelReference(id, preferredReferences) : undefined) ??
+			resolveModelReference(id, getBundledModelReferenceIndex());
 		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
 		const displayName =
 			(discoveryName && discoveryName !== id ? discoveryName : undefined) ??

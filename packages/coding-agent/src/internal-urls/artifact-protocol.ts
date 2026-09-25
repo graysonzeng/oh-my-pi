@@ -23,7 +23,7 @@ import type {
 	UrlCompletion,
 } from "./types";
 
-const MAX_INLINE_ARTIFACT_BYTES = 8 * 1024 * 1024;
+export const MAX_INLINE_ARTIFACT_BYTES = 8 * 1024 * 1024;
 
 /** Filesystem location for a session artifact, resolved without materializing its content. */
 interface ResolvedArtifactFile {
@@ -47,7 +47,7 @@ function parseArtifactId(url: InternalUrl): string {
 class MissingArtifactError extends Error {}
 
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
-async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
+export async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
 
 	// Artifact ids are per-session counters; in multi-session hosts the same

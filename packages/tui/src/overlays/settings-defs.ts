@@ -51,7 +51,7 @@ export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Consult", "Prewalk", "Vision", "Model"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -68,7 +68,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
-	files: ["Editing", "Reading", "Read Summaries", "LSP"],
+	files: ["Editing", "Reading", "Read Summaries", "LSP", "Code Intel"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
 		"Available Tools",

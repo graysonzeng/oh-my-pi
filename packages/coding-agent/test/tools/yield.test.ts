@@ -13,6 +13,7 @@ import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
 import { arrayValuedLabels } from "../../src/task/yield-assembly";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { wrapAgentToolWithWorkflowAliases } from "../../src/tools/workflow-alias-wrap";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -159,6 +160,15 @@ describe("YieldTool", () => {
 		);
 		expect(yieldEnd?.isError).toBe(false);
 		expect(yieldEnd?.result.details).toEqual({ data: { report: "finished" }, status: "success", error: undefined });
+	});
+
+	it("toolAliases-only Proxy preserves the real YieldTool execute receiver", async () => {
+		const wrapped = wrapAgentToolWithWorkflowAliases(new YieldTool(createSession()), {
+			workflowToolOptimization: { toolAliases: { yield: "submit_result" } },
+		});
+
+		const result = await wrapped.execute("call-aliased", { data: { ok: true } } as never);
+		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
 	});
 
 	it("accepts aborted payload with error only", async () => {

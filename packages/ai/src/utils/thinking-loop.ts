@@ -1,12 +1,13 @@
 /**
- * Thinking-loop guard.
+ * Thinking-loop guard (Gemini, DeepSeek, Grok).
  *
  * Gemini models (notably `gemini-3.5-flash` via OpenRouter) occasionally fall
  * into a degenerate reasoning loop: they re-emit the same paragraph intent over
  * and over with cosmetic wording drift ("Confirming Safety", "Verifying
  * Completion", …), burning the entire output budget without ever calling a tool
  * or answering. The runaway is *not* byte-identical, so a cheap verbatim
- * tail-repeat check alone misses it.
+ * tail-repeat check alone misses it. Grok 4.6 additionally collapses onto a
+ * long planning sentence (including CJK) and repeats it verbatim.
  *
  * This guard watches streamed deltas and, on a match, terminates the stream with
  * a synthetic `error` {@link AssistantMessage} whose terminal content is empty.
@@ -45,6 +46,7 @@
  * three guarded attempts and then fail closed. Disable detection with
  * `PI_NO_THINKING_LOOP_GUARD=1`.
  */
+
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Api, AssistantMessage, Model, StreamOptions } from "../types";
@@ -61,8 +63,9 @@ const EXACT_TAIL_WINDOW = 4096;
 const EXACT_MAX_UNIT = 1024;
 /** New characters between scans. Large deltas are scanned immediately. */
 const EXACT_CHECK_STRIDE = 128;
-/** Short cycles need four repeats covering at least this many characters. */
-const EXACT_SHORT_MAX_UNIT = 60;
+/** Short cycles (≤96, covering the observed 74-character CJK planning sentence)
+ *  need four repeats covering at least this many characters. */
+const EXACT_SHORT_MAX_UNIT = 96;
 const EXACT_SHORT_MIN_REPEATED_CHARS = 180;
 /** Long cycles need at least three repeats covering at least this many chars. */
 const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
@@ -512,8 +515,8 @@ function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMes
 /**
  * Detect an exact cycle at the text suffix. A Z-array over the reversed tail
  * finds every possible suffix period in linear time without substring churn.
- * Short cycles retain the original 180-character/four-repeat sensitivity; long
- * cycles require at least three repeats and 1024 repeated characters.
+ * Short cycles (≤96) retain the original 180-character/four-repeat sensitivity;
+ * long cycles require at least three repeats and 1024 repeated characters.
  */
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	if (text.length < EXACT_SHORT_MIN_REPEATED_CHARS) return null;
@@ -542,11 +545,21 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 	return null;
 }
 
-/** Lowercase and tokenize prose plus code/path payloads, dropping pure numbers. */
+/** Lowercase and tokenize prose plus code/path payloads, dropping pure numbers.
+ *  Latin-only segments keep the original `[a-z0-9]` peel so English stall
+ *  calibration is unchanged. Segments that contain Han additionally keep each
+ *  Han character as its own token so CJK planning loops still have a fingerprint. */
 function normalizeSegment(segment: string): string {
-	return segment
-		.toLowerCase()
-		.replace(/`([^`]*)`/g, " $1 ")
+	const lowered = segment.toLowerCase().replace(/`([^`]*)`/g, " $1 ");
+	if (/\p{Script=Han}/u.test(lowered)) {
+		const tokens: string[] = [];
+		for (const match of lowered.matchAll(/[a-z0-9]+|\p{Script=Han}/gu)) {
+			const token = match[0];
+			if (/[a-z]/i.test(token) || /\p{Script=Han}/u.test(token)) tokens.push(token);
+		}
+		return tokens.join(" ").trim();
+	}
+	return lowered
 		.replace(/[^a-z0-9]+/g, " ")
 		.split(/\s+/)
 		.filter(token => /[a-z]/.test(token))

@@ -14,6 +14,7 @@ import {
 import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
 import type { ToolSession } from "../tools";
+import { formatJobLiveActivity } from "../tools/wait";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -110,7 +111,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 						job.endTime === undefined
 							? `up ${formatDuration(now - job.startTime)}`
 							: `in ${formatDuration(job.endTime - job.startTime)}`;
-					return `${job.id} [${job.type}] ${job.status} ${duration} — ${job.label.replace(/\s+/g, " ")}`;
+					const activity =
+						job.type === "task" ? formatJobLiveActivity(job.latestDetails?.progress, job.id, now) : undefined;
+					const label = job.label.replace(/\s+/g, " ");
+					return `${job.id} [${job.type}] ${job.status} ${duration} — ${label}${activity ? ` — ${activity}` : ""}`;
 				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent => `${agent.id} [task] running up ${formatDuration(agent.ageMs)} — ${agent.activity ?? "agent"}`,

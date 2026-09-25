@@ -5,7 +5,11 @@ import {
 	type AgentToolUpdateCallback,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { Ellipsis, replaceTabs, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { formatDuration, previewLine, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import * as os from "node:os";
 import { IrcBus } from "../irc/bus";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -213,4 +217,221 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			manager?.unwatchJobs(watchedIds);
 		}
 	}
+}
+
+/** Observed execution phase from real streaming events. "model" never claims the request was sent. */
+export type LiveActivityPhase = "working" | "model" | "thinking" | "responding" | "tool";
+
+/** Compact gist shared by the subagent HUD and proc:// job rows. */
+export interface LiveActivity {
+	tool?: string;
+	last?: boolean;
+	detail?: string;
+	elapsedMs?: number;
+	phase?: LiveActivityPhase;
+	idleMs?: number;
+	retryState?: { attempt: number; maxAttempts: number; delayMs?: number };
+	retryFailure?: { attempt?: number; errorMessage?: string };
+}
+
+const CURRENT_TOOL_ELAPSED_MS = 5000;
+const IDLE_HINT_THRESHOLD_MS = 10_000;
+
+const PHASE_LABELS: Record<Exclude<LiveActivityPhase, "tool">, string> = {
+	working: "working",
+	model: "waiting on model",
+	thinking: "thinking",
+	responding: "responding",
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	// Progress snapshots are plain objects; individual fields stay unknown until checked.
+	return value as Record<string, unknown>;
+}
+
+function asPhase(value: unknown): LiveActivityPhase | undefined {
+	if (value === "working" || value === "model" || value === "thinking" || value === "responding" || value === "tool") {
+		return value;
+	}
+	return undefined;
+}
+
+function numberField(record: Record<string, unknown>, key: string): number | undefined {
+	const value = record[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function asTrimmedString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function shortenHomePathsInText(text: string): string {
+	const home = os.homedir();
+	if (!home || text.length === 0 || !text.includes(home)) return text;
+	return text.replaceAll(home, () => shortenPath(home, home));
+}
+
+/**
+ * Compact live gist from an agent progress snapshot. Timestamps are never invented:
+ * `idleMs` stays absent until a real `lastActivityAtMs` was observed. Terminal snapshots
+ * are not running activity. `currentTool` is in-flight; `recentTools` only surface as `last`.
+ */
+export function liveActivityFromProgress(record: unknown, now: number): LiveActivity | undefined {
+	const progressRecord = asRecord(record);
+	if (!progressRecord) return undefined;
+	const status = progressRecord.status;
+	if (status === "completed" || status === "failed" || status === "aborted") return undefined;
+
+	const phase = asPhase(progressRecord.activityPhase);
+	const currentTool = asTrimmedString(progressRecord.currentTool);
+	const recentTools = Array.isArray(progressRecord.recentTools) ? progressRecord.recentTools : [];
+	const recentRecord = asRecord(recentTools[0]);
+	const recentTool = asTrimmedString(recentRecord?.tool);
+	const tool = currentTool ?? recentTool;
+	const isHistory = currentTool === undefined && recentTool !== undefined;
+
+	let retryState: LiveActivity["retryState"];
+	const retry = asRecord(progressRecord.retryState);
+	if (retry) {
+		const attempt = numberField(retry, "attempt");
+		const maxAttempts = numberField(retry, "maxAttempts");
+		const delayMs = numberField(retry, "delayMs");
+		if (attempt !== undefined && maxAttempts !== undefined) {
+			retryState = { attempt, maxAttempts, ...(delayMs !== undefined && delayMs > 0 ? { delayMs } : {}) };
+		}
+	}
+	let retryFailure: LiveActivity["retryFailure"];
+	const failure = asRecord(progressRecord.retryFailure);
+	if (failure) {
+		const attempt = numberField(failure, "attempt");
+		const errorMessage = asTrimmedString(failure.errorMessage);
+		if (attempt !== undefined || errorMessage !== undefined) {
+			retryFailure = { ...(attempt !== undefined ? { attempt } : {}), ...(errorMessage ? { errorMessage } : {}) };
+		}
+	}
+
+	const lastActivityAtMs = numberField(progressRecord, "lastActivityAtMs");
+	if (!phase && !tool && !retryState && !retryFailure && lastActivityAtMs === undefined) return undefined;
+
+	const lastIntent = asTrimmedString(progressRecord.lastIntent);
+	const args = currentTool ? asTrimmedString(progressRecord.currentToolArgs) : asTrimmedString(recentRecord?.args);
+	const detail = phase && phase !== "tool" && !currentTool ? lastIntent : (lastIntent ?? args);
+
+	let elapsedMs: number | undefined;
+	if (currentTool) {
+		const startMs = numberField(progressRecord, "currentToolStartMs");
+		if (startMs !== undefined) {
+			const elapsed = now - startMs;
+			if (elapsed > CURRENT_TOOL_ELAPSED_MS) elapsedMs = elapsed;
+		}
+	}
+	let idleMs: number | undefined;
+	if (lastActivityAtMs !== undefined && elapsedMs === undefined) {
+		const idle = now - lastActivityAtMs;
+		if (idle > 0) idleMs = idle;
+	}
+
+	return {
+		...(phase ? { phase } : {}),
+		...(tool ? { tool, ...(isHistory ? { last: true } : {}) } : {}),
+		...(detail ? { detail } : {}),
+		...(elapsedMs !== undefined ? { elapsedMs } : {}),
+		...(idleMs !== undefined ? { idleMs } : {}),
+		...(retryState ? { retryState } : {}),
+		...(retryFailure ? { retryFailure } : {}),
+	};
+}
+
+function activityGist(activity: LiveActivity): string {
+	if (activity.phase && activity.phase !== "tool") return PHASE_LABELS[activity.phase];
+	if (activity.tool) return activity.last ? `last ${activity.tool}` : activity.tool;
+	if (activity.phase === "tool") return "running a tool";
+	return PHASE_LABELS.working;
+}
+
+function activityTiming(activity: LiveActivity): string | undefined {
+	if (activity.idleMs !== undefined && activity.idleMs >= IDLE_HINT_THRESHOLD_MS) {
+		return `${formatDuration(activity.idleMs)} no new events`;
+	}
+	if (activity.elapsedMs !== undefined) return formatDuration(activity.elapsedMs);
+	return undefined;
+}
+
+/** Theme-free roster line for proc:// and other plain-text surfaces. */
+export function formatPlainLiveActivity(activity: LiveActivity): string {
+	if (activity.retryState) {
+		const delay = activity.retryState.delayMs;
+		const base = `retry ${activity.retryState.attempt}/${activity.retryState.maxAttempts}`;
+		return delay !== undefined ? `${base} · retrying in ${formatDuration(delay)}` : base;
+	}
+	if (activity.retryFailure) {
+		return activity.retryFailure.errorMessage ? `blocked: ${activity.retryFailure.errorMessage}` : "blocked";
+	}
+	const timing = activityTiming(activity);
+	const detail = activity.detail ? shortenHomePathsInText(activity.detail) : undefined;
+	return [activityGist(activity), detail, timing].filter(part => part !== undefined && part.length > 0).join(" · ");
+}
+
+/** HUD line. Silence is preferred over stale tool args when the row is narrow. */
+export function formatCompactLiveActivityLine(activity: LiveActivity, budget: number, uiTheme: Theme): string {
+	const hook = `${uiTheme.tree.hook} `;
+	if (activity.retryState) {
+		let line = `${hook}${uiTheme.fg("warning", `retry ${activity.retryState.attempt}/${activity.retryState.maxAttempts}`)}`;
+		const delay = activity.retryState.delayMs;
+		if (delay !== undefined) {
+			const part = `${uiTheme.sep.dot}${uiTheme.fg("warning", `retrying in ${formatDuration(delay)}`)}`;
+			if (visibleWidth(Bun.stripANSI(line)) + visibleWidth(Bun.stripANSI(part)) <= budget) line += part;
+		}
+		return truncateToWidth(line, budget, Ellipsis.Unicode);
+	}
+	if (activity.retryFailure) {
+		const hint = activity.retryFailure.errorMessage ? `blocked: ${activity.retryFailure.errorMessage}` : "blocked";
+		return truncateToWidth(
+			`${hook}${uiTheme.fg("warning", shortenHomePathsInText(replaceTabs(sanitizeText(hint)).trim()))}`,
+			budget,
+			Ellipsis.Unicode,
+		);
+	}
+	const base = `${hook}${uiTheme.fg("muted", sanitizeText(activityGist(activity)))}`;
+	const baseWidth = visibleWidth(Bun.stripANSI(base));
+	if (baseWidth >= budget) return truncateToWidth(base, budget, Ellipsis.Unicode);
+	const timingText = activityTiming(activity);
+	const timingPart = timingText ? `${uiTheme.sep.dot}${uiTheme.fg("warning", timingText)}` : undefined;
+	const detailRaw = activity.detail
+		? shortenHomePathsInText(replaceTabs(sanitizeText(activity.detail)).trim())
+		: undefined;
+	const detailPart =
+		detailRaw !== undefined
+			? `: ${uiTheme.fg("dim", previewLine(detailRaw, Math.max(1, budget - baseWidth - 2), Ellipsis.Unicode))}`
+			: undefined;
+	const width = (value: string): number => visibleWidth(Bun.stripANSI(value));
+	const full = `${base}${detailPart ?? ""}${timingPart ?? ""}`;
+	if (width(full) <= budget) return full;
+	const noDetail = `${base}${timingPart ?? ""}`;
+	if (width(noDetail) <= budget) return noDetail;
+	return `${base}${detailPart ?? ""}`;
+}
+
+/** Plain activity line for one task progress payload (record or progress array). */
+export function formatJobLiveActivity(progress: unknown, jobId: string, now: number): string | undefined {
+	let record: unknown = progress;
+	if (Array.isArray(progress)) {
+		let fallback: unknown;
+		for (const item of progress) {
+			const itemRecord = asRecord(item);
+			if (!itemRecord) continue;
+			if (!fallback) fallback = item;
+			if (itemRecord.id === jobId) {
+				record = item;
+				fallback = undefined;
+				break;
+			}
+		}
+		if (fallback) record = fallback;
+	}
+	const activity = liveActivityFromProgress(record, now);
+	return activity ? formatPlainLiveActivity(activity) : undefined;
 }

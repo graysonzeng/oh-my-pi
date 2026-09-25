@@ -20,6 +20,7 @@ import {
 	createMCPProxyTools,
 	createSubagentSettings,
 } from "./executor";
+import { resolveRequireYieldTool, resolveSubagentPerformanceClass } from "./review-performance";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -85,6 +86,10 @@ export function createPersistedSubagentReviverFactory(
 		} catch {
 			return undefined;
 		}
+		const init = peek.init;
+		const performanceClass =
+			init.performanceClass ?? resolveSubagentPerformanceClass({ agentName: init.agent ?? ref.displayName });
+		const requireYieldTool = resolveRequireYieldTool(performanceClass);
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
 		// assuming a fixed level.
@@ -123,6 +128,7 @@ export function createPersistedSubagentReviverFactory(
 			// createSubagentSettings default).
 			const subagentSettings = createSubagentSettings(ctx.settings, {
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+				...(init.outputTruncation === false ? { "modelOptimization.outputTruncation.enabled": false } : undefined),
 				...(init.advisor
 					? {
 							"advisor.enabled": true,
@@ -190,7 +196,8 @@ export function createPersistedSubagentReviverFactory(
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
-				requireYieldTool: true,
+				requireYieldTool,
+				workerClass: performanceClass === "worker",
 				systemPrompt: () => [init.systemPrompt],
 				// Inherit current owner policy, never extension authority from a transcript.
 				extensionRoots: () => ctx.session.effectiveExtensionRoots,
@@ -252,6 +259,8 @@ export function createPersistedSubagentReviverFactory(
 				// Anchor artifacts to the revived ref's own dir (its parent's children
 				// dir), not the live root session's, matching the spawn callers (#11563).
 				artifactsDir: path.dirname(sessionFile),
+				performanceClass,
+				settings: ctx.settings,
 			});
 			return session;
 		};

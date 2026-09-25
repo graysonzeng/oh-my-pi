@@ -66,3 +66,19 @@ function isGuardedCompletionsTransport(model: Model<Api>): model is Model<"opena
 	if (model.api === "openai-completions") return true;
 	return model.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES === "0";
 }
+
+export type AnthropicImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+
+export function normalizeAnthropicImageMediaType(mimeType: string): AnthropicImageMediaType | undefined {
+	const normalized = mimeType.trim().toLowerCase();
+	if (normalized === "image/jpg") return "image/jpeg";
+	if (
+		normalized === "image/jpeg" ||
+		normalized === "image/png" ||
+		normalized === "image/gif" ||
+		normalized === "image/webp"
+	) {
+		return normalized;
+	}
+	return undefined;
+}

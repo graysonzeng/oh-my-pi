@@ -2,8 +2,8 @@
  * Contract: a vibe worker's spawn options carry the pre-expansion model role.
  *
  * `#resolveWorker` expands the bundled worker's role alias (`good` -> `task` ->
- * `@task`, `fast` -> `sonic` -> `@smol`) into concrete patterns, so the role
- * survives only as a separate field forwarded across `ResolvedVibeWorker` ->
+ * `@task`) into concrete patterns, so the role survives only as a separate field
+ * forwarded across `ResolvedVibeWorker` ->
  * `VibeRecord` -> `#buildSpawnOptions` -> `runSubprocess`. The executor keys the
  * child's inherited `retry.fallbackChains` entry off it; drop any link in that
  * chain and vibe children silently retry on the `default` role's chain.
@@ -76,9 +76,10 @@ describe("vibe worker spawn model role", () => {
 
 		expect(options.modelOverride).toEqual(["anthropic/sonnet"]);
 		expect(options.modelRole).toBe("task");
+		expect(options.performanceClass).toBe("worker");
 	});
 
-	it("forwards the `smol` role behind the `fast` worker's expanded patterns", async () => {
+	it("uses the bundled flash then grok-4.6 high chain for the `fast` worker", async () => {
 		const options = await spawnAndCaptureOptions(
 			"fast",
 			Settings.isolated({
@@ -86,8 +87,9 @@ describe("vibe worker spawn model role", () => {
 			}),
 		);
 
-		expect(options.modelOverride).toEqual(["fast/hy3"]);
-		expect(options.modelRole).toBe("smol");
+		expect(options.modelOverride).toEqual(["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"]);
+		expect(options.modelRole).toBeUndefined();
+		expect(options.performanceClass).toBe("explore");
 	});
 
 	it("keeps the role identity when a per-agent model override replaces the alias", async () => {

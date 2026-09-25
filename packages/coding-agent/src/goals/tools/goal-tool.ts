@@ -6,9 +6,8 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import goalDescription from "../../prompts/tools/goal.md" with { type: "text" };
 
 import type { ToolSession } from "../../tools";
-
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-
+import { executeGoalComplete } from "../complete";
 import { completionBudgetReport, remainingTokens } from "../runtime";
 import type { Goal, GoalToolDetails } from "@oh-my-pi/pi-tui/tools/goal";
 
@@ -67,15 +66,23 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: GoalToolInput,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<GoalToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GoalToolDetails>> {
 		const runtime = this.#session.getGoalRuntime?.();
 		if (!runtime) {
 			throw new ToolError("Goal mode is not active.");
+		}
+
+		if (params.op === "complete") {
+			const completed = await executeGoalComplete(this.#session, runtime, signal, toolCallId);
+			return {
+				content: [{ type: "text", text: completed.text }],
+				details: completed.details,
+			};
 		}
 
 		let response: GoalToolResponse;
@@ -88,12 +95,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		} else if (params.op === "resume") {
 			const resumed = await runtime.resumeGoal();
 			response = buildGoalToolResponse(resumed.goal);
-		} else if (params.op === "drop") {
+		} else {
 			const dropped = await runtime.dropGoal();
 			response = buildGoalToolResponse(dropped ?? null);
-		} else {
-			const completed = await runtime.completeGoalFromTool();
-			response = buildGoalToolResponse(completed, { includeCompletionReport: true });
 		}
 		let text: string;
 		if (response.goal) {

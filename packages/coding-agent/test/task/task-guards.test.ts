@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -24,6 +26,11 @@ import { createSessionDefaults } from "../helpers/session-defaults";
  * 3. A cancelled/aborted child that produced no completed output salvages its
  *    last assistant text into a `[cancelled after N req, …]` summary instead
  *    of the parent seeing "(no output)" and redoing the work.
+ *
+ * Events are delivered from `prompt()` with a microtask gap between requests
+ * so deferred wrap-up notices can land the way the live scheduler does. The
+ * first prompt may hang until `abort()`; follow-up forced-yield prompts must
+ * settle or the suite never finishes.
  */
 
 interface SteerCall {
@@ -72,9 +79,15 @@ function yieldToolEnd(): AgentSessionEvent {
 
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 	let abortCount = 0;
+	let promptIndex = 0;
 	const steerCalls: SteerCall[] = [];
+	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const { promise: hang, resolve: releaseHang } = Promise.withResolvers<void>();
 	if (!config.hang) releaseHang();
+
+	const emit = (event: AgentSessionEvent) => {
+		for (const listener of [...listeners]) listener(event);
+	};
 
 	const session: Partial<AgentSession> = {
 		...createSessionDefaults(),
@@ -85,29 +98,39 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
-			if (config.events?.length) {
-				const events = config.events;
-				queueMicrotask(() => {
-					for (const event of events) listener(event);
-				});
-			}
-			return () => {};
+			listeners.push(listener);
+			return () => {
+				const index = listeners.indexOf(listener);
+				if (index >= 0) listeners.splice(index, 1);
+			};
 		},
 		prompt: async () => {
-			await hang;
+			promptIndex += 1;
+			if (promptIndex === 1 && config.events?.length) {
+				for (const event of config.events) {
+					emit(event);
+					// One-turn gap: wrap-up notices are deferred off processEvent.
+					await Promise.resolve();
+				}
+			}
+			if (config.hang && promptIndex === 1) await hang;
 			return true;
 		},
 		waitForIdle: async () => {
-			await hang;
+			if (config.hang && promptIndex === 1) await hang;
 		},
 		sendUserMessage: async (content, options) => {
 			steerCalls.push({ content: String(content), options });
 		},
 		getLastAssistantMessage: () => (config.lastAssistantMessage ?? undefined) as never,
+		hasPendingAsyncWork: () => false,
+		getAsyncJobSnapshot: () => null,
+		settleAsyncWork: async () => {},
 		abort: async () => {
 			abortCount += 1;
 			releaseHang();
 		},
+		dispose: async () => {},
 	};
 	return {
 		session: session as AgentSession,
@@ -140,11 +163,15 @@ const baseOptions = {
 	id: "subagent-guards",
 	modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
 	enableLsp: false,
+	keepAlive: false,
 };
 
 describe("runSubprocess request guards", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.useRealTimers();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
 	});
 
 	it("counts assistant requests into SingleResult.requests", async () => {

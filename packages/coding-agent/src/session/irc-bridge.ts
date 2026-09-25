@@ -187,7 +187,7 @@ export class IrcBridge {
 				from: msg.from,
 				message: msg.body,
 				replyTo: msg.replyTo ?? "",
-				interrupting: streaming,
+				interrupting: msg.interrupt === true,
 				relayOnStop,
 			}),
 			display: true,
@@ -203,17 +203,21 @@ export class IrcBridge {
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
-			if (recipientParentId === msg.from) {
-				this.#host.agent.steer({
-					role: "user",
-					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: msg.body }),
-					attribution: "agent",
-					timestamp: msg.ts,
-					steering: true,
-				});
+			if (msg.interrupt === true) {
+				const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
+				if (recipientParentId === msg.from) {
+					this.#host.agent.steer({
+						role: "user",
+						content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: msg.body }),
+						attribution: "agent",
+						timestamp: msg.ts,
+						steering: true,
+					});
+				} else {
+					this.#interrupts.push(record);
+				}
 			} else {
-				this.#interrupts.push(record);
+				this.#asides.push(record);
 			}
 			return "injected";
 		}

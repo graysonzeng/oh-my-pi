@@ -11,8 +11,10 @@ import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { getActiveRules } from "../capability/rule";
 import { resolveContainedPath } from "../discovery/contained-path";
 import { getActiveSkills, type Skill } from "../extensibility/skills";
+import { getBundledAgent } from "../task/agents";
 import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
 import {
 	buildDirectoryResource,
@@ -31,6 +33,22 @@ import type {
 	SchemeSpec,
 	UrlCompletion,
 } from "./types";
+
+const UNKNOWN_SKILL_NO_SCAN = "Do not glob, guess filesystem paths, or read **/SKILL.md to recover unknown skills.";
+
+/** Fail-closed unknown-skill message. Suggests `rule://` or a task agent only on an exact name match. */
+export function formatUnknownSkillError(skillName: string, available: readonly string[]): string {
+	const availableStr = available.length > 0 ? available.join(", ") : "none";
+	const lines = [`Unknown skill: ${skillName}`, `Available: ${availableStr}`];
+	if (getActiveRules().some(rule => rule.name === skillName)) {
+		lines.push(`Did you mean rule://${skillName}?`);
+	}
+	if (getBundledAgent(skillName)) {
+		lines.push(`Did you mean task agent ${skillName}?`);
+	}
+	lines.push(UNKNOWN_SKILL_NO_SCAN);
+	return lines.join("\n");
+}
 
 /**
  * Path a skill:// URL addresses, after traversal and plugin-root containment
@@ -51,9 +69,12 @@ async function skillTargetPath(
 
 	const skill = skills.find(s => s.name === skillName);
 	if (!skill) {
-		const available = skills.map(s => s.name);
-		const availableStr = available.length > 0 ? available.join(", ") : "none";
-		throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
+		throw new Error(
+			formatUnknownSkillError(
+				skillName,
+				skills.map(s => s.name),
+			),
+		);
 	}
 
 	const urlPath = url.pathname;

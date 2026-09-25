@@ -15,6 +15,33 @@ scripts/session-stats/
   audit-prompt.md  # system prompt for the audit classifier
 ```
 
+## Subagent baseline (`subagent-report.ts`)
+
+```sh
+bun run stats:subagents --since 3d --folder oh-my-pi
+bun run stats:subagents --session /path/to/parent.jsonl --format json
+bun run stats:subagents --since 1w --json /tmp/subagent-baseline.json
+```
+
+Offline JSONL analysis: no model calls, database sync, or uploads. `--since`
+selects whole parent/child groups by their latest file modification time; it
+is not an event-time filter. `--session` includes nested child transcripts
+without applying that window. Freeze/copy the input if comparing runs.
+
+The report separates assistant active wall time (gaps over ten minutes excluded),
+message-span wall time, provider TTFT/generation, and task call-to-result latency.
+The latter may be just a spawn acknowledgement, not time waiting for completion.
+Missing completion, queue, and final-verification evidence remains unknown;
+normal exit and successful tools never imply task acceptance. Concurrent child
+durations are not summed into end-to-end latency.
+
+Repeated reads are grouped by selector-stripped resource within one parent
+session and emitted as SHA-256 keys, not raw paths/URLs. Different ranges or
+changed file contents can be legitimate reads: these counts are investigation
+signals, not proven redundant work. Timing/model usage summaries currently
+pool parent and child requests, so they are not per-model controlled experiments.
+No conversation bodies or raw tool arguments appear in report output.
+
 ## One-time prep
 
 ```sh

@@ -38,9 +38,14 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { LatencyArmSnapshotV1 } from "../latency/arms";
+import type { DshAssignmentV1, DshExperimentId } from "../latency/assignment";
+import type { LatencyRolloutCohortStore } from "../latency/rollout-cohort";
+import type { ResolvedModelOptimization } from "../model-optimization";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
+import type { ConsultUsage } from "../tools/consult-state";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SettingsGatedToolDelta } from "./session-tools";
@@ -209,6 +214,14 @@ export interface AgentSessionConfig {
 	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
+	/** Creates session_search for session-scoped kill/re-enable after arm invalidation. */
+	createSessionSearchTool?: () => Promise<AgentTool | null>;
+	/** Creates the built-in `consult` tool for session-scoped runtime enablement. */
+	createConsultTool?: () => Promise<AgentTool | null>;
+	/** Shared consult quota counters owned by ToolSession. */
+	consultUsage?: ConsultUsage;
+	/** When true, start with inline tool descriptors instead of provider schemas. */
+	pruneToolDescriptions?: boolean;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
@@ -262,6 +275,14 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/** Re-resolve ordinary-session model optimization for the active model. */
+	reconcileModelOptimization?: (model: Model) => Promise<ResolvedModelOptimization>;
+	/** Apply or clear SDK-owned runtime adapters after resolution. */
+	applyModelOptimization?: (resolved: ResolvedModelOptimization) => void;
+	/** Recompute live inline tool descriptor placement for the active model. */
+	resolveInlineToolDescriptors?: (modelId: string | undefined) => boolean;
+	/** Local calendar date provider used by prompt-cache invalidation. */
+	getLocalCalendarDate?: () => string;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
@@ -270,6 +291,8 @@ export interface AgentSessionConfig {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** Wraps refreshed MCP tools with session-local instruction activation. */
+	wrapMcpInstructionActivation?: (tool: AgentTool) => AgentTool;
 	/** Time-traveling stream-rule manager. */
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
@@ -337,6 +360,12 @@ export interface AgentSessionConfig {
 	advisorConfigWarnings?: string[];
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/** Snapshot frozen before createTools; AgentSession must adopt it. */
+	latencyArmSnapshot?: LatencyArmSnapshotV1;
+	dshAssignment?: DshAssignmentV1;
+	dshExecutionIds?: Map<DshExperimentId, string>;
+	latencyRolloutStore?: LatencyRolloutCohortStore;
+	allowHeadlessGoalContinuation?: boolean;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 }

@@ -2,7 +2,7 @@ You MUST summarize the conversation above into a structured handoff summary for 
 
 IMPORTANT: If the conversation ends with an unanswered question or a request awaiting user response (e.g., "Please run command and paste output"), you MUST preserve that exact question/request.
 
-You MUST use this format (sections can be omitted if not applicable):
+You MUST use exactly this format. Every section is required, even when no content applies; write `None` instead of omitting a section. Do not add or remove sections.
 
 ## Goal
 [User goals; list multiple if session covers different tasks.]
@@ -11,18 +11,21 @@ You MUST use this format (sections can be omitted if not applicable):
 - [Constraints or requirements mentioned]
 
 ## Progress
-
 ### Done
 - [x] [Completed tasks/changes]
-
 ### In Progress
 - [ ] [Current work]
-
 ### Blocked
 - [Issues preventing progress]
 
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
+
+## Verification
+- [Checks, tests, validation, and their results]
+
+## Artifact & Source Pointers
+- [Important file paths, URLs, identifiers, or source references]
 
 ## Next Steps
 1. [Ordered list of next actions]

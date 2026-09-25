@@ -34,6 +34,7 @@ export const LSP_READONLY_ACTIONS: ReadonlySet<string> = new Set([
 	"symbols",
 	"status",
 	"capabilities",
+	"call_hierarchy",
 ]);
 
 export interface LspStartupServerInfo {

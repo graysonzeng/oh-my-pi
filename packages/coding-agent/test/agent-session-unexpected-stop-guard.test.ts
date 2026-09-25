@@ -59,7 +59,7 @@ function unexpectedStop(text: string): MockResponse {
 
 function thinkingOnlyStop(thinking: string): MockResponse {
 	return {
-		content: [{ type: "thinking", thinking, thinkingSignature: "reasoning_content" }],
+		content: [{ type: "thinking", thinking, thinkingSignature: "sig_anthropic" }],
 		stopReason: "stop",
 	};
 }

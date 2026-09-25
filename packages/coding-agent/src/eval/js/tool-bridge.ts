@@ -4,12 +4,19 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
+import type { PtcCatalogDescriptor, PtcCatalogSearchHit } from "../../tools/ptc-catalog";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { withBridgeTimeoutPause } from "../bridge-timeout";
+import {
+	EVAL_CATALOG_DESCRIBE_BRIDGE_NAME,
+	EVAL_CATALOG_SEARCH_BRIDGE_NAME,
+	runEvalCatalogDescribe,
+	runEvalCatalogSearch,
+} from "../catalog-bridge";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
 import {
 	EVAL_JUDGMENT_BATCH_BRIDGE_NAME,
@@ -30,6 +37,7 @@ import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { RuntimeCallIdentity } from "./shared/runtime";
+import type { NestedToolConcurrency, NestedToolToken } from "./nested-scheduler";
 import type { JsStatusEvent } from "./shared/types";
 
 export type { JsStatusEvent } from "./shared/types";
@@ -41,6 +49,8 @@ export interface ToolBridgeOptions {
 	defaultIntent?: string;
 	identity?: RuntimeCallIdentity;
 	shadowCell?: EvalShadowCellSession;
+	/** Ancestor scheduler tokens captured when the child eval run started. */
+	ancestors?: ReadonlySet<NestedToolToken>;
 }
 
 type ToolValue =
@@ -52,6 +62,8 @@ type ToolValue =
 	| EvalJudgmentBatchResult
 	| EvalHandleSnapshot
 	| EvalWorkpoolResult
+	| PtcCatalogSearchHit[]
+	| Record<string, PtcCatalogDescriptor | null>
 	| { items: EvalHandleSnapshot[] }
 	| { cancelled: boolean }
 	| {
@@ -114,6 +126,7 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
 				op: "write",
 				path: record.path,
 				chars: typeof record.content === "string" ? record.content.length : 0,
+				...(isRecord(details.xdev) ? { xdev: details.xdev } : {}),
 			});
 		case "grep":
 			return withError({
@@ -139,7 +152,11 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
 		case "todo":
 			return withError({ op: "todo", chars: text.length, committed: committedTodoPhases(result) !== undefined });
 		default:
-			return withError({ op: name, chars: text.length });
+			return withError({
+				op: name,
+				chars: text.length,
+				...(isRecord(details.xdev) ? { xdev: details.xdev } : {}),
+			});
 	}
 };
 
@@ -267,9 +284,15 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_WORKPOOL_BRIDGE_NAME) {
 		return await runEvalWorkpool(args, options);
 	}
-	if (name === "checkpoint" || name === "rewind") {
-		// The session recognizes checkpoint/rewind only as direct toolResult
-		// messages; a bridged call would report success without taking effect.
+	if (name === EVAL_CATALOG_SEARCH_BRIDGE_NAME) {
+		return runEvalCatalogSearch(args, options.session);
+	}
+	if (name === EVAL_CATALOG_DESCRIBE_BRIDGE_NAME) {
+		return runEvalCatalogDescribe(args, options.session);
+	}
+	if (name === "checkpoint" || name === "rewind" || name === "new_context") {
+		// Session machinery keys these on the direct toolResult's toolName;
+		// a bridged call would report success without taking effect.
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
 	const tool = getTool(options.session, name);
@@ -321,27 +344,66 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		options.signal?.throwIfAborted();
 		if (claimed) return bridgeValueFromToolResult(name, normalizedArgs, claimed, options.emitStatus);
 	}
-	try {
-		const result = await tool.execute(
+	const execute = async (): Promise<ToolValue> => {
+		await options.session.emitNestedToolExecution?.({
+			type: "tool_execution_start",
 			toolCallId,
-			normalizedArgs,
-			options.signal,
-			undefined,
-			options.session.getToolContext?.(),
-		);
-		if (name === "todo") {
-			// A bridged call emits no `todo` toolResult entry, the only thing branch
-			// rehydration reads; without this the in-memory update is lost on the
-			// next resume/rewind/fork and stale todos trigger a false reminder.
-			const phases = committedTodoPhases(result);
-			if (phases) options.session.persistTodoPhases?.(phases);
-		}
-		return bridgeValueFromToolResult(name, normalizedArgs, result, options.emitStatus);
-	} catch (error) {
-		options.emitStatus?.({
-			op: name,
-			error: error instanceof Error ? error.message : String(error),
+			toolName: name,
+			args: normalizedArgs,
 		});
-		throw error;
+		try {
+			const result = await tool.execute(
+				toolCallId,
+				normalizedArgs,
+				options.signal,
+				undefined,
+				options.session.getToolContext?.(),
+			);
+			if (name === "todo") {
+				const phases = committedTodoPhases(result);
+				if (phases) options.session.persistTodoPhases?.(phases);
+			}
+			const value = bridgeValueFromToolResult(name, normalizedArgs, result, options.emitStatus);
+			await options.session.emitNestedToolExecution?.({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: name,
+				result,
+				isError: toolResultHasError(result),
+			});
+			return value;
+		} catch (error) {
+			options.emitStatus?.({
+				op: name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			await options.session.emitNestedToolExecution?.({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: name,
+				result: { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] },
+				isError: true,
+			});
+			throw error;
+		}
+	};
+	const scheduler = options.session.getNestedToolScheduler?.();
+	return scheduler
+		? scheduler.run(resolveNestedConcurrency(tool, normalizedArgs), execute, {
+				signal: options.signal,
+				ancestors: options.ancestors,
+			})
+		: execute();
+}
+
+function resolveNestedConcurrency(tool: AgentTool, args: unknown): NestedToolConcurrency {
+	const mode = tool.concurrency;
+	if (typeof mode === "function") {
+		try {
+			return mode(args as never) === "exclusive" ? "exclusive" : "shared";
+		} catch {
+			return "exclusive";
+		}
 	}
+	return mode === "exclusive" ? "exclusive" : "shared";
 }

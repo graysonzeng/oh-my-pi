@@ -327,6 +327,19 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
 }
 const STATUS_402_QUOTA_PATTERN =
 	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?(?:balance|account.?funds))\b/i;
+// Prepaid top-up, not a window that resets. "run out of credits" is the xAI/Grok
+// phrasing; do not fold in usage_limit_reached or "try again in" 429s.
+const PERMANENT_TOP_UP_PATTERN = /\bout of credits\b|\bbalance[-_\s]?exhausted\b/i;
+
+/**
+ * Explicit account-billing failure that replays until credits are added.
+ * Covers 402 payment/deactivation wording and out-of-credits / balance-exhausted
+ * text, including a 503 auth_unavailable wrapper around "run out of credits".
+ * Resettable quota (`usage_limit_reached`, retry-after 429s) stays out.
+ */
+export function isPermanentBillingFailureText(message: string | undefined): boolean {
+	return message !== undefined && (STATUS_402_QUOTA_PATTERN.test(message) || PERMANENT_TOP_UP_PATTERN.test(message));
+}
 
 export function is402BillingCapBody(message: string | undefined): boolean {
 	if (message === undefined || isOpaqueStatusBody(message)) return true;

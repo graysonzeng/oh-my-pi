@@ -6,12 +6,16 @@ Mode: custom instructions.
 
 Use `task`: `agent: "reviewer"`, `tasks` array. Create exactly **1 reviewer task**; assignment MUST include custom instructions.
 
-## Reviewer Instructions
+Use the `task` tool with `agent: "reviewer"`, shared `context`, and a `tasks` array.
+Create exactly **1 reviewer task**. Put the custom instructions and referenced evidence in `context`; keep the assignment scoped.
+Use `effort: "med"` by default. Only when the custom instructions explicitly target a critical contract boundary—cross-module/public API, persisted schema, authentication/authorization, protocol, compatibility migration, or externally consumed configuration—use `effort: "hi"`; the reviewer agent caps this at `xhigh`.
+
+### Reviewer Instructions
 
 Reviewer MUST:
-1. Follow custom instructions.
-2. Read referenced files/workspace context needed to evaluate them.
-3. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool.
+1. Follow the custom instructions below.
+2. Read only referenced files and direct producer/consumer call sites needed to prove a finding; NEVER scan unrelated modules.
+3. When the verdict is ready, stop. Write one tool-free final assistant message whose JSON matches the output schema; you MAY still `yield` the same object in `data`. Do not keep searching for completeness.
 
 ## Custom Instructions
 

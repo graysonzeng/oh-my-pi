@@ -63,6 +63,25 @@ function extractJsonPath(data: unknown, segments: string[]): unknown {
 }
 
 /**
+ * Artifacts dirs for the session-scoped lineage roots: each ancestor session
+ * file strips its `.jsonl` suffix to its artifacts dir (matching
+ * `artifactsDirectoryFor`). Ordered nearest-first; duplicates collapse.
+ */
+function artifactsDirsFromLineage(context: ResolveContext | undefined): string[] {
+	const dirs: string[] = [];
+	const addDir = (dir: string | null | undefined) => {
+		if (!dir) return;
+		if (!dirs.includes(dir)) dirs.push(dir);
+	};
+	const lineage = context?.lineage;
+	if (lineage?.currentSessionFile) addDir(lineage.currentSessionFile.slice(0, -6));
+	for (const root of lineage?.lineageRoots ?? []) {
+		addDir(root.canonicalPath.slice(0, -6));
+	}
+	return dirs;
+}
+
+/**
  * Handler for agent:// URLs.
  *
  * Resolves output IDs like "reviewer_0" to their artifact files,
@@ -139,7 +158,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 
 		const extraction = hasPathExtraction(url);
 
-		const dirs = await this.#outputDirs(context);
+		const dirs = [...artifactsDirsFromLineage(context), ...(await this.#outputDirs(context))];
 		if (dirs.length === 0) {
 			throw new Error("No session - agent outputs unavailable");
 		}

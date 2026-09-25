@@ -2,6 +2,18 @@
 import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { buildOutputValidator } from "../tools/output-schema-validator";
+import type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+
+/**
+ * True for an incremental (array-typed) yield `type`: a section contribution
+ * that never decides termination by itself. Assembly itself lives in
+ * `@oh-my-pi/pi-tui/tools/task-yield-assembly`; this predicate stays here so the
+ * runtime can single-source explicit-terminal detection without importing that
+ * render graph's private helper.
+ */
+export function isIncrementalYieldType(type: YieldItem["type"]): type is string[] {
+	return Array.isArray(type) && type.length > 0;
+}
 
 /** True when `value` is a JSON-schema node whose instances are arrays. */
 function isArrayTypedSchema(value: unknown): boolean {

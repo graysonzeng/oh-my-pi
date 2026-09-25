@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { NestedToolScheduler } from "@oh-my-pi/pi-coding-agent/eval/js/nested-scheduler";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -881,9 +882,13 @@ describe("callSessionTool", () => {
 		expect(rawExecute).not.toHaveBeenCalled();
 	});
 
-	it("rejects checkpoint and rewind before reaching the registry", async () => {
+	it("rejects checkpoint, rewind, and new_context before reaching the registry", async () => {
 		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
-		const session = createSession([createTool("checkpoint", execute), createTool("rewind", execute)]);
+		const session = createSession([
+			createTool("checkpoint", execute),
+			createTool("rewind", execute),
+			createTool("new_context", execute),
+		]);
 
 		await expect(callSessionTool("checkpoint", { goal: "g" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
@@ -891,7 +896,113 @@ describe("callSessionTool", () => {
 		await expect(callSessionTool("rewind", { report: "r" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
 		);
+		await expect(callSessionTool("new_context", {}, { session })).rejects.toThrow(
+			"cannot run through the eval bridge",
+		);
 		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("emits nested tool_execution_start/end around a bridged call", async () => {
+		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "hello" }] });
+		const events: Array<{ type: string; toolName: string; isError?: boolean }> = [];
+		const session = {
+			...createSession([createTool("read", execute)]),
+			emitNestedToolExecution: (event: { type: string; toolName: string; isError?: boolean }) => {
+				events.push({ type: event.type, toolName: event.toolName, isError: event.isError });
+			},
+		};
+
+		await callSessionTool("read", { path: "/tmp/demo.txt" }, { session });
+
+		expect(events).toEqual([
+			{ type: "tool_execution_start", toolName: "read", isError: undefined },
+			{ type: "tool_execution_end", toolName: "read", isError: false },
+		]);
+	});
+
+	it("serializes exclusive nested tools through the session scheduler", async () => {
+		const scheduler = new NestedToolScheduler();
+		const order: string[] = [];
+		const exclusive = {
+			...createTool("edit", async () => {
+				order.push("start");
+				await Bun.sleep(20);
+				order.push("end");
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			}),
+			concurrency: "exclusive" as const,
+		};
+		const session = {
+			...createSession([exclusive]),
+			getNestedToolScheduler: () => scheduler,
+		};
+
+		await Promise.all([
+			callSessionTool("edit", { path: "a.ts" }, { session }),
+			callSessionTool("edit", { path: "b.ts" }, { session }),
+		]);
+
+		expect(order).toEqual(["start", "end", "start", "end"]);
+	});
+
+	it("does not run a queued TodoTool after cancel while an exclusive blocker holds the gate", async () => {
+		const scheduler = new NestedToolScheduler();
+		let phases: TodoPhase[] = [{ name: "Regression", tasks: [{ content: "queued todo", status: "in_progress" }] }];
+		const blocker = {
+			...createTool("edit", async () => {
+				await Bun.sleep(50);
+				return { content: [{ type: "text" as const, text: "blocked" }] };
+			}),
+			concurrency: "exclusive" as const,
+		};
+		const session: ToolSession = {
+			...createSession([blocker]),
+			getNestedToolScheduler: () => scheduler,
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			getToolByName: name => {
+				if (name === "todo") return todoTool as unknown as AgentTool;
+				if (name === "edit") return blocker;
+				return undefined;
+			},
+		};
+		const todoTool = new TodoTool(session);
+		const ctrl = new AbortController();
+		const blocking = callSessionTool("edit", { path: "a.ts" }, { session });
+		const queued = callSessionTool(
+			"todo",
+			{ op: "done", phase: "Regression", list: null, task: null, items: null, reason: null },
+			{ session, signal: ctrl.signal },
+		);
+		ctrl.abort();
+		await expect(queued).rejects.toMatchObject({ name: "AbortError" });
+		await blocking;
+		expect(phases[0]?.tasks[0]?.status).toBe("in_progress");
+	});
+
+	it("lets a nested shared read run inside an exclusive eval without waiting for that eval", async () => {
+		const scheduler = new NestedToolScheduler();
+		const read = createTool("read", async () => ({ content: [{ type: "text" as const, text: "from-read" }] }));
+		const evalTool = {
+			...createTool("eval", async () => {
+				const nested = await callSessionTool(
+					"read",
+					{ path: "a.ts" },
+					{ session, ancestors: scheduler.runningTokens() },
+				);
+				return { content: [{ type: "text" as const, text: JSON.stringify(nested) }] };
+			}),
+			concurrency: "exclusive" as const,
+		};
+		const session = {
+			...createSession([evalTool, read]),
+			getNestedToolScheduler: () => scheduler,
+		};
+
+		const result = await callSessionTool("eval", { code: "1" }, { session });
+		expect(JSON.stringify(result)).toContain("from-read");
 	});
 
 	it("rejects a registry tool excluded from the eval bridge", async () => {

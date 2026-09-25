@@ -1,4 +1,6 @@
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+export type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+export type { SubagentRequestPhase, SubagentToolPhase } from "./review-performance";
 export {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -8,10 +10,47 @@ export type {
 	SubagentLifecyclePayload,
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { type BaseType, type } from "@oh-my-pi/omptype";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { $env } from "@oh-my-pi/pi-utils";
 
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { SubagentCompletionKind } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { SubagentReviewMetrics } from "./review-performance";
+
+export type { SubagentCompletionKind };
+
+/** Live activity of a subagent, evidenced by real execution events observed by the run monitor. */
+export type AgentActivityPhase = "working" | "model" | "thinking" | "responding" | "tool";
+
+declare module "@oh-my-pi/pi-tui/tools/task" {
+	interface TaskItem {
+		/** Request a code-review shadow cohort (`code`) or force it off. */
+		shadowReview?: "code" | "off";
+	}
+	interface TaskParams {
+		/** Request a code-review shadow cohort (`code`) or force it off. */
+		shadowReview?: "code" | "off";
+	}
+	interface AgentProgress {
+		/** Originating parent `task` tool call id. */
+		taskToolCallId?: string;
+		activityPhase?: AgentActivityPhase;
+		lastActivityAtMs?: number;
+		reviewMetrics?: SubagentReviewMetrics;
+	}
+	interface SingleResult {
+		/** Number of tool calls executed across the run when counted; omit when unknown. */
+		toolCalls?: number;
+		/**
+		 * Terminal provenance. Successful 1.5× forced-yield is `budget_stop` even when
+		 * `status`/`exitCode` still look completed. Timeout and grace budget abort
+		 * outrank a still-true `budgetStopRequested`.
+		 */
+		completionKind?: SubagentCompletionKind;
+		reviewMetrics?: SubagentReviewMetrics;
+	}
+}
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
@@ -52,6 +91,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -62,6 +102,7 @@ const taskItemSchemaIsolated = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"isolated?": "boolean",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 
@@ -73,6 +114,7 @@ export const taskSchema = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"isolated?": "boolean",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskSchemaNoIsolation = type({
@@ -82,6 +124,7 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
 const taskSchemaBatch = type({
@@ -133,6 +176,7 @@ function createTaskSchema(options: {
 				"schemaMode?": '"permissive" | "strict"',
 				...toolsField,
 				"isolated?": "boolean",
+				"shadowReview?": '"code" | "off"',
 				"+": "delete",
 			});
 			return type.raw({
@@ -149,6 +193,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			"shadowReview?": '"code" | "off"',
 			"+": "delete",
 		});
 		return type.raw({
@@ -167,6 +212,7 @@ function createTaskSchema(options: {
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
 			"isolated?": "boolean",
+			"shadowReview?": '"code" | "off"',
 			"+": "delete",
 		});
 	}
@@ -178,6 +224,7 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
+		"shadowReview?": '"code" | "off"',
 		"+": "delete",
 	});
 }
@@ -224,13 +271,19 @@ export interface AgentDefinition {
 	spawns?: string[] | "*";
 	model?: string[];
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Maximum provider reasoning effort this agent may use, including caller overrides and fallback models. */
+	maxEffort?: Effort;
 	output?: unknown;
 	blocking?: boolean;
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
 	readSummarize?: boolean;
+	/** When `false`, the spawned session does not apply model-family tool-output truncation. */
+	outputTruncation?: boolean;
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;
+	/** Opt-in code-review shadow cohort. Only `"code"` is recognized. */
+	shadowReview?: "code";
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
 	advisor?: boolean | string;
 	source: AgentSource;

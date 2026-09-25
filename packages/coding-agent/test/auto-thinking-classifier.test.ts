@@ -4,7 +4,7 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { classifyDifficulty } from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
+import { classifyDifficulty, countRecentToolResultErrors } from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -465,5 +465,41 @@ describe("auto thinking classifier helpers", () => {
 			expect(parseThinkingLevel(selector)).toBeUndefined();
 			expect(parseConfiguredThinkingLevel(selector)).toBeUndefined();
 		}
+	});
+
+	it("counts only the latest eight tool-result errors and ignores other roles", () => {
+		const results = Array.from({ length: 9 }, () => ({ role: "toolResult", isError: true }));
+		expect(countRecentToolResultErrors([...results, { role: "user" }, { role: "toolResult", isError: true }])).toBe(
+			8,
+		);
+		expect(countRecentToolResultErrors([{ role: "toolResult" }, { role: "toolResult", isError: true }])).toBe(1);
+	});
+
+	it("wraps the judge request with normalized adaptive signals and omits the envelope otherwise", async () => {
+		const fixture = createLocalClassifierFixture("qwen2.5-1.5b");
+		let classifierPrompt = "";
+		vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_modelKey, promptText) => {
+			classifierPrompt = promptText;
+			return "trivial";
+		});
+
+		await classifyDifficulty("rename the helper", {
+			...fixture,
+			adaptiveContext: {
+				agentRole: "sub",
+				recentToolFailures: 2.9,
+				contextUsagePercent: 41.7,
+				deadlineRemainingMs: Number.NaN,
+			},
+		});
+		expect(classifierPrompt).toContain("agent_role: sub");
+		expect(classifierPrompt).toContain("recent_tool_failures: 2");
+		expect(classifierPrompt).toContain("context_usage_percent: 41");
+		expect(classifierPrompt).not.toContain("deadline_remaining_ms");
+		expect(classifierPrompt).toContain("rename the helper");
+
+		classifierPrompt = "";
+		await classifyDifficulty("rename the helper", fixture);
+		expect(classifierPrompt).not.toContain("agent_role:");
 	});
 });

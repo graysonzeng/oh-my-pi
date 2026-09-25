@@ -22,6 +22,7 @@ import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/us
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { isSkippedSyntheticResult } from "../../presentation/tool-status";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
 import {
@@ -304,6 +305,9 @@ export class EventController {
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
+			todo_updated: async e => {
+				this.ctx.setTodos(e.phases);
+			},
 			irc_message: e => this.#handleIrcMessage(e),
 			notice: e => this.#handleNotice(e),
 			model_changed: async () => {
@@ -1348,6 +1352,10 @@ export class EventController {
 						// Creating either component now would lock the read into the wrong shape.
 						continue;
 					}
+					// Track args for EVERY read (grouped and full) so an end-before-start
+					// completion can reapply the grouping decision instead of dropping
+					// the result into the wrong card.
+					this.#trackReadToolCall(content.id, content.arguments);
 					if (readArgsCollapseIntoGroup(content.arguments)) {
 						const existing = this.ctx.pendingTools.get(content.id);
 						if (existing) {
@@ -1363,6 +1371,9 @@ export class EventController {
 							this.#toolTimelineComponents.set(content.id, group);
 							this.#settleHeldCompletionIfPresent(content.id, group);
 						}
+						// A held completion for this read (its end event outran the
+						// streamed block) settles now that the group exists.
+						this.#settleHeldReadCompletionIfAny(content.id);
 						continue;
 					}
 					// Other internal-URL reads fall through to ToolExecutionComponent below.
@@ -1690,6 +1701,8 @@ export class EventController {
 					this.#toolTimelineComponents.set(event.toolCallId, group);
 					this.#settleHeldCompletionIfPresent(event.toolCallId, group);
 				}
+				// A held completion (end outran start) settles now that the group exists.
+				this.#settleHeldReadCompletionIfAny(event.toolCallId);
 				this.#startToolApprovalPreview(event.toolCallId);
 				this.ctx.ui.requestRender();
 				return;
@@ -1856,6 +1869,21 @@ export class EventController {
 		}
 	}
 
+	/**
+	 * Settle a held read completion against the component that was just created
+	 * for its call id (grouped or full) — see {@link #orphanedToolCompletions}.
+	 * Resolves the component from `pendingTools` because the creation site owns
+	 * the card; unknown ids stay observable instead of silently dropped.
+	 */
+	#settleHeldReadCompletionIfAny(toolCallId: string): void {
+		const event = this.#orphanedToolCompletions.get(toolCallId);
+		if (event?.toolName !== "read") return;
+		this.#orphanedToolCompletions.delete(toolCallId);
+		const component = this.ctx.pendingTools.get(toolCallId);
+		if (!component) return;
+		this.#settleHeldCompletion(component, event);
+	}
+
 	async #handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): Promise<void> {
 		// `createAbortedToolResult` emits start/end after an error/aborted
 		// assistant message. The matching card was deliberately retracted at
@@ -1916,7 +1944,43 @@ export class EventController {
 						this.#clearReadToolCall(event.toolCallId);
 						return;
 					}
-					this.#orphanedToolCompletions.set(event.toolCallId, event);
+					const args = this.#readToolCallArgs.get(event.toolCallId);
+					if (args && readArgsCollapseIntoGroup(args)) {
+						const group = this.#getReadGroup();
+						group.updateArgs(args, event.toolCallId);
+						this.ctx.pendingTools.set(event.toolCallId, group);
+						this.#toolTimelineComponents.set(event.toolCallId, group);
+						group.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
+						this.ctx.pendingTools.delete(event.toolCallId);
+						this.#clearReadToolCall(event.toolCallId);
+						this.ctx.ui.requestRender();
+					} else if (args) {
+						const tool = this.ctx.viewSession.getToolByName("read");
+						const full = new ToolExecutionComponent(
+							"read",
+							args,
+							{
+								useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool("read"),
+								showImages: cfgTerminalShowImages.get(settings),
+							},
+							tool,
+							this.ctx.ui,
+							this.ctx.sessionManager.getCwd(),
+							event.toolCallId,
+						);
+						full.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(full);
+						this.ctx.pendingTools.set(event.toolCallId, full);
+						this.#toolTimelineComponents.set(event.toolCallId, full);
+						full.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
+						this.ctx.pendingTools.delete(event.toolCallId);
+						this.#clearReadToolCall(event.toolCallId);
+						this.ctx.ui.requestRender();
+					} else {
+						this.#orphanedToolCompletions.set(event.toolCallId, event);
+						this.ctx.ui.requestRender();
+						return;
+					}
 				} else {
 					component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
 					this.ctx.pendingTools.delete(event.toolCallId);
@@ -1965,7 +2029,7 @@ export class EventController {
 		if (event.toolName === "eval" && hasNestedTodo(event.result.details)) {
 			this.ctx.setTodos(this.ctx.viewSession.getTodoPhases());
 		}
-		if (event.toolName === "todo" && event.isError) {
+		if (event.toolName === "todo" && event.isError && !isSkippedSyntheticResult(event.result)) {
 			const textContent = event.result.content.find(
 				(content: { type: string; text?: string }) => content.type === "text",
 			)?.text;
@@ -2167,15 +2231,17 @@ export class EventController {
 						? "Idle "
 						: "";
 		const actionLabel =
-			event.action === "remote"
-				? "Auto server compaction"
-				: event.action === "handoff"
-					? "Auto-handoff"
-					: event.action === "shake"
-						? "Auto-shake"
-						: event.action === "snapcompact"
-							? "Auto-snapcompact"
-							: "Auto context-full maintenance";
+			event.action === "structured"
+				? "Auto-structured compaction"
+				: event.action === "remote"
+					? "Auto server compaction"
+					: event.action === "handoff"
+						? "Auto-handoff"
+						: event.action === "shake"
+							? "Auto-shake"
+							: event.action === "snapcompact"
+								? "Auto-snapcompact"
+								: "Auto context-full maintenance";
 		this.ctx.autoCompactionLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
@@ -2200,20 +2266,23 @@ export class EventController {
 		const isRemoteAction = event.action === "remote";
 		const isShakeAction = event.action === "shake";
 		const isSnapcompactAction = event.action === "snapcompact";
+		const isStructuredAction = event.action === "structured";
 		if (event.aborted) {
 			this.ctx.showStatus(
-				isHandoffAction
-					? "Auto-handoff cancelled"
-					: isRemoteAction
-						? "Auto server compaction cancelled"
-						: isShakeAction
-							? "Auto-shake cancelled"
-							: isSnapcompactAction
-								? "Auto-snapcompact cancelled"
-								: "Auto context-full maintenance cancelled",
+				isStructuredAction
+					? "Auto-structured compaction cancelled"
+					: isHandoffAction
+						? "Auto-handoff cancelled"
+						: isRemoteAction
+							? "Auto server compaction cancelled"
+							: isShakeAction
+								? "Auto-shake cancelled"
+								: isSnapcompactAction
+									? "Auto-snapcompact cancelled"
+									: "Auto context-full maintenance cancelled",
 			);
-		} else if (isShakeAction) {
-			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
+		} else if (isShakeAction || isStructuredAction) {
+			// In-place methods produce no checkpoint CompactionResult; rebuild on success.
 			// The fallback path (`errorMessage` set, `skipped` false) means shake reclaimed
 			// some tokens before deciding the threshold still wasn't cleared — rebuild so
 			// the chat reflects the dropped regions even though a context-full pass follows.
@@ -2229,7 +2298,7 @@ export class EventController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
-				this.ctx.showStatus("Auto-shake completed");
+				this.ctx.showStatus(isStructuredAction ? "Auto-structured compaction completed" : "Auto-shake completed");
 			}
 		} else if (event.result) {
 			this.ctx.lastAssistantUsage = undefined;

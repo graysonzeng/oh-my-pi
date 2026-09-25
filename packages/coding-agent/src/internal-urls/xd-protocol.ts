@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import { formatUnknownSkillError } from "./skill-protocol";
 import type { ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { REPORT_ISSUE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
@@ -20,6 +22,21 @@ import type {
 } from "./types";
 
 const NOT_MOUNTED = "xd:// is not mounted in this session.";
+
+/** Parsed xd:// target — classic device or presentation namespace bridge. */
+export interface XdTarget {
+	/**
+	 * Device / skill name, or null for the root listing (`xd://`).
+	 * For presentation locators `xd://tools/{name}` / `xd://skills/{name}`,
+	 * this is the bare `{name}` so existing registry lookup still works.
+	 */
+	name: string | null;
+	/**
+	 * Presentation namespace when the URL used `tools/` or `skills/` path form.
+	 * Classic `xd://{device}` leaves this null.
+	 */
+	namespace: "tools" | "skills" | null;
+}
 
 /**
  * Approval tier for `write xd://<device>`: the mounted tool's own
@@ -64,6 +81,8 @@ export class XdProtocolHandler implements ProtocolHandler {
 	};
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		const skillBody = await this.#skillPresentation(url, context);
+		if (skillBody) return skillBody;
 		const session = context?.session;
 		if (!session) throw new ToolError(NOT_MOUNTED);
 		const topic = parseXdTopicUrl(url.href);
@@ -76,10 +95,14 @@ export class XdProtocolHandler implements ProtocolHandler {
 	}
 
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
+		const skillsWrite = /^xd:\/\/skills\/([^/?#]*)$/i.exec(url.href.trim());
+		if (skillsWrite) {
+			throw new ToolError(`xd://skills/${skillsWrite[1] ?? ""} is read-only; use skill:// for skill content.`);
+		}
 		const target = parseXdUrl(url.href);
-		if (!target) throw new ToolError(`Invalid xd:// URL: ${url.href}. Use xd://<tool>.`);
 		const session = context?.session;
 		if (!session) throw new ToolError(NOT_MOUNTED);
+		if (!target) throw new ToolError(`Invalid xd:// URL: ${url.href}. Use xd://<tool> to write a device.`);
 		const { name } = target;
 		if (name === REPORT_ISSUE_DEVICE_NAME) {
 			const { result, xdev } = await dispatchReportIssueDevice(session, content);
@@ -132,5 +155,32 @@ export class XdProtocolHandler implements ProtocolHandler {
 			throw new ToolError(`Unknown topic '${topic}' for ${name}. Available: ${Object.keys(topics).join(", ")}.`);
 		}
 		return doc;
+	}
+
+	/** `xd://skills/<name>`: one-hop skill body, same load as `skill://`. */
+	async #skillPresentation(url: InternalUrl, context?: ResolveContext): Promise<InternalResource | undefined> {
+		const match = /^xd:\/\/skills\/([^/?#]+)$/i.exec(url.href.trim());
+		const name = match?.[1];
+		if (!name) return undefined;
+		const skills = context?.skills;
+		if (!skills || skills.length === 0) {
+			throw new ToolError(`xd://skills/${name}: no skills loaded in this session.`);
+		}
+		const skill = skills.find(item => item.name === name);
+		if (!skill)
+			throw new ToolError(
+				formatUnknownSkillError(
+					name,
+					skills.map(item => item.name),
+				),
+			);
+		const content = await fs.readFile(skill.filePath, "utf-8");
+		return {
+			url: url.href,
+			content,
+			contentType: "text/markdown",
+			size: Buffer.byteLength(content),
+			sourcePath: skill.filePath,
+		};
 	}
 }

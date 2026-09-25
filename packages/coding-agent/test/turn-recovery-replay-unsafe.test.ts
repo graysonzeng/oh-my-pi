@@ -102,7 +102,7 @@ function createHost(
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
 		shakeForRequestBodyReadTimeout: async () => false,
-		withBashBranchTransition: <T>(operation: () => T): T => operation(),
+		withBashBranchTransition: async <T>(operation: () => T | Promise<T>): Promise<T> => operation(),
 	};
 }
 

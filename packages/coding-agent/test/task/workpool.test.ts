@@ -35,6 +35,8 @@ const POLICY = {
 	applyChanges: true,
 	enableLsp: false,
 	enableIrc: true,
+	performanceClass: "explore",
+	effectiveMaxRuntimeMs: 0,
 } satisfies EffectiveSubagentPolicy;
 
 const managers = new Set<AsyncJobManager>();

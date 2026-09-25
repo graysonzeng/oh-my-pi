@@ -42,13 +42,17 @@ export function formatTaskResultSummary(
 	result: SingleResult,
 	options: { totalDurationMs: number; mergeSummary?: string },
 ): string {
-	const status = result.aborted
-		? "cancelled"
-		: result.exitCode === 0 && result.error
-			? "merge failed"
-			: result.exitCode === 0
-				? "completed"
-				: `failed (exit ${result.exitCode})`;
+	const completionKind = result.completionKind;
+	const status =
+		completionKind && completionKind !== "completed"
+			? completionKind
+			: result.aborted
+				? "cancelled"
+				: result.exitCode === 0 && result.error
+					? "merge failed"
+					: result.exitCode === 0
+						? "completed"
+						: `failed (exit ${result.exitCode})`;
 	const output = formatResultOutputFallback(result);
 	// The preview prefers `output` over `stderr`, so a run that failed after
 	// streaming prose (provider stream error, missing yield) would otherwise
@@ -69,6 +73,7 @@ export function formatTaskResultSummary(
 		id: result.id,
 		status,
 		duration: formatDuration(options.totalDurationMs),
+		completionKind: completionKind !== "completed" ? completionKind : undefined,
 		abortReason: result.aborted ? result.abortReason : undefined,
 		error,
 		resumable,

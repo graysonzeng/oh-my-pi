@@ -24,6 +24,7 @@ import { taskCardAgentIds } from "../tools/task";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../tools/todo";
 import { isWaitingPollDetails } from "../tools/wait";
 import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../render/render-utils";
+import { classifyToolPresentation } from "../render/tool-presentation";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { convertImageToPng } from "./image-loading";
@@ -935,8 +936,15 @@ export class ToolExecutionComponent extends Container {
 		// (steering/peer interrupt aborted a still-pending call) never ran, so it
 		// gets the neutral pending tint rather than the error tint (#7199).
 		const benignSkip = this.#isBenignSkip();
+		const presentation = this.#result ? classifyToolPresentation(this.#result) : undefined;
 		const stateBgKey =
-			this.#isPartial || benignSkip ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
+			this.#isPartial || benignSkip
+				? "toolPendingBg"
+				: presentation === "aborted"
+					? "toolErrorBg"
+					: this.#result?.isError
+						? "toolErrorBg"
+						: "toolSuccessBg";
 		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
 
 		// A benign skip is a synthetic placeholder for a call that never executed,
@@ -1347,7 +1355,12 @@ export class ToolExecutionComponent extends Container {
 				label: this.#toolLabel,
 				args: this.#args,
 				result: this.#result
-					? { output: this.#getTextOutput(), isError: this.#result.isError, skipped: this.#isBenignSkip() }
+					? {
+							output: this.#getTextOutput(),
+							isError: this.#result.isError,
+							skipped: this.#isBenignSkip(),
+							details: this.#result.details,
+						}
 					: undefined,
 				options: this.#renderState,
 			},

@@ -163,6 +163,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},
+	"--consult-model": (result, value) => {
+		result.consultModel = value;
+		result.consult = true;
+	},
 	"--system-prompt": (result, value) => {
 		result.systemPrompt = value;
 	},
@@ -236,6 +240,16 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			});
 		}
 	},
+	"--ptc": (result, value, deps) => {
+		if (value === "off" || value === "on" || value === "auto") {
+			result.ptc = value;
+		} else {
+			deps.logger.warn("Invalid value passed to --ptc", {
+				value,
+				validValues: ["off", "on", "auto"],
+			});
+		}
+	},
 };
 
 /**
@@ -306,6 +320,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-pty",
 	"--hide-thinking",
 	"--advisor",
+	"--consult",
 	"--external-thinking",
 	"--prewalk",
 	"--no-prewalk",

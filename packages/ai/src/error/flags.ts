@@ -12,6 +12,7 @@ import {
 	isAccountScopedCapText,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
+	isPermanentBillingFailureText,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseRateLimitReason,
@@ -185,6 +186,7 @@ export function isResponsesRequestBodyReadTimeout(message: {
 	);
 }
 
+export const BAD_RESPONSE_STATUS_CODE_PATTERN = /bad[_ -]?response[_ -]?status[_ -]?code/i;
 export const TRANSIENT_TRANSPORT_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
 const AUTH_FAILURE_PATTERN =
@@ -374,6 +376,10 @@ export function is(id: number | undefined, flag: Flag): boolean {
 export function retriable(id: number | undefined, opts?: { replayUnsafe?: boolean }): boolean {
 	if (is(id, Flag.ContentBlocked)) return false;
 	if (is(id, Flag.PayloadRejected)) return false;
+	// A 503 auth_unavailable sets Transient from the status token. That auth
+	// failure is not a same-model backoff. UsageLimit still rotates: "401
+	// Insufficient balance" is both AuthFailed and UsageLimit.
+	if (is(id, Flag.AuthFailed) && !is(id, Flag.UsageLimit)) return false;
 	if (opts?.replayUnsafe) return false;
 	if (is(id, Flag.MalformedFunctionCall)) return true;
 	return ((id ?? 0) & RETRIABLE_KINDS) !== 0;
@@ -451,6 +457,7 @@ function isTransientErrorText(text: string): boolean {
 		isStreamReadErrorText(text) ||
 		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
 		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text) ||
+		BAD_RESPONSE_STATUS_CODE_PATTERN.test(text) ||
 		(TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_TRUNCATION_PATTERN.test(text)) ||
 		TRANSIENT_TRANSPORT_PATTERN.test(text)
 	);
@@ -550,8 +557,9 @@ function classifyText(
 		) {
 			kinds |= Flag.UsageLimit;
 		}
-		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
-		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+		const permanentBillingFailure = isPermanentBillingFailureText(errorMessage);
+		if (!permanentBillingFailure && isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
+		else if (!permanentBillingFailure && isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
 		// A stream truncation, transport-level stream drop, or forwarded Codex HTTP
 		// body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag it
 		// explicitly so AIError.retriable and the turn-recovery layer treat it as
@@ -683,7 +691,7 @@ export function classify(error: unknown, api?: Api): number {
 				if ((linkKinds & Flag.UsageLimit) === 0) {
 					linkKinds |= Flag.Transient;
 				}
-			} else if (codeStatus >= 500) {
+			} else if (codeStatus >= 500 && !isPermanentBillingFailureText(link.message)) {
 				linkKinds |= Flag.Transient;
 			}
 			kinds |= linkKinds;
@@ -710,6 +718,7 @@ export function classify(error: unknown, api?: Api): number {
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
+	if ((kinds & Flag.AuthFailed) !== 0) kinds &= ~(Flag.Transient | Flag.Timeout);
 	return kinds !== 0 ? create(kinds) : (status(error) ?? 0);
 }
 
@@ -861,6 +870,12 @@ export function classifyMessage(message: {
 		// because the same prompt reproduces the same malformed output, so the agent-level
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
+	}
+	if (
+		classificationMessage &&
+		(isAuthFailureText(classificationMessage) || isPermanentBillingFailureText(classificationMessage))
+	) {
+		kinds &= ~(Flag.Transient | Flag.Timeout);
 	}
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 

@@ -278,19 +278,19 @@ export const cfgTaskMaxRecursionDepth = register({
 export const cfgTaskMaxRuntimeMs = register({
 	id: "task.maxRuntimeMs",
 	type: "number",
-	default: 0,
+	default: 3_600_000,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
 		label: "Max Subagent Runtime",
 		description:
-			"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason.",
+			"Hard wall-clock limit per subagent (ms). 0 disables it. Review-class agents (reviewer names, frontmatter shadowReview code, or a spawn shadowReview code, excluding scout/sonic) cap at 30 minutes and explore-class agents (scout/sonic) cap at 10 minutes when the caller omits an explicit runtime. An explicit request cap, including 0, is authoritative. Default 1 hour is a proposed acceptance target. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a runtime-limit reason.",
 		options: [
-			{ value: "0", label: "Unlimited", description: "Default" },
+			{ value: "0", label: "Unlimited" },
 			{ value: "300000", label: "5 minutes" },
 			{ value: "900000", label: "15 minutes" },
 			{ value: "1800000", label: "30 minutes" },
-			{ value: "3600000", label: "1 hour" },
+			{ value: "3600000", label: "1 hour", description: "Default" },
 		],
 	},
 });

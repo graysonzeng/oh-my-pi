@@ -77,6 +77,12 @@ describe("discoverAdvisorConfigs", () => {
 		expect(defaultTools?.tools).toBeUndefined();
 		expect(invalidOnly?.tools).toBeUndefined();
 	});
+	it("drops consult from advisor-granted tools", async () => {
+		const yaml = ["advisors:", "  - name: Shadow", "    tools: [read, consult, grep]"].join("\n");
+		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
+		const { advisors } = await discoverAdvisorConfigs(tmp, agentDir);
+		expect(advisors[0]?.tools).toEqual(["read", "grep"]);
+	});
 
 	it("ignores a malformed YAML file without throwing", async () => {
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), "advisors: [unclosed bracket");

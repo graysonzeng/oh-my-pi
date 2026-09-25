@@ -22,6 +22,7 @@ import { InternalUrlRouter } from "./internal-urls/router";
 import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
+import consultInstructionsPrompt from "./prompts/system/consult-instructions.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -537,6 +538,12 @@ export interface BuildSystemPromptOptions {
 	eagerTasksAlways?: boolean;
 	/** Whether `task.batch` is enabled; selects the centralized delegation guidance's call shape. */
 	taskBatch?: boolean;
+	/** Whether to render proactive guidance for batching independent runnable slices. */
+	taskProactiveAutoParallel?: boolean;
+	/** Whether to render proactive guidance for escalating gated delivery to workflow. */
+	taskProactivePipelineGuidance?: boolean;
+	/** Whether to render proactive guidance for routing slices through existing agents. */
+	taskProactiveStageRouting?: boolean;
 	/** Effective task concurrency limit displayed in centralized delegation guidance. Zero means unlimited. */
 	taskMaxConcurrency?: number;
 	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
@@ -545,6 +552,8 @@ export interface BuildSystemPromptOptions {
 	scoutAvailable?: boolean;
 	/** Active model's delegation appetite (catalog `delegation-bias` axis); selects the Delegation section's wording. Default: `eager`. */
 	delegationBias?: DelegationBias;
+	/** Whether the mechanical `sonic` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
+	sonicAvailable?: boolean;
 
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
@@ -584,6 +593,12 @@ export interface BuildSystemPromptOptions {
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
+	/**
+	 * When true, the default template uses the worker execution context instead of
+	 * main-agent delegation, global workflow, and global completion management.
+	 * Custom / append / RULES text is not filtered or rewritten. Default: false.
+	 */
+	workerClass?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -655,12 +670,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks = false,
 		eagerTasksAlways = false,
 		taskBatch = true,
+		taskProactiveAutoParallel = false,
+		taskProactivePipelineGuidance = false,
+		taskProactiveStageRouting = false,
 		taskMaxConcurrency = 0,
 		taskIrcEnabled = false,
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
 		delegationBias = "eager",
+		sonicAvailable = true,
 		memoryBackend,
 		securityEnabled = false,
 		settingsApproval = false,
@@ -677,6 +696,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoQaEnabled = false,
 		writeTransportOnly = false,
 		activeRepoContext: providedActiveRepoContext,
+		workerClass = false,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -982,6 +1002,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
 		delegationBias,
+		workerClass,
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
@@ -990,8 +1011,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		// Restrained bias yields to an explicit eager-tasks mode.
 		inlineFirstDelegation: delegationBias === "restrained" && !eagerTasks,
 		taskBatch,
+		taskProactiveAutoParallel,
+		taskProactivePipelineGuidance,
+		taskProactiveStageRouting,
 		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
+		sonicAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
 		browserEnabled,
@@ -1025,6 +1050,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const systemPrompt = [rendered];
 	if (computerEnabled) {
 		systemPrompt.push(computerSafetyPrompt.trim());
+	}
+	if (toolNames.includes("consult")) {
+		systemPrompt.push(consultInstructionsPrompt.trim());
 	}
 	// Literal overrides render context files and append text in their wrapper.
 	// Both the bundled template and user templates receive them in the footer.

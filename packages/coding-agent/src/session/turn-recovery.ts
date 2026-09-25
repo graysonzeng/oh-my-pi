@@ -25,7 +25,7 @@ import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-cred
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -91,6 +91,7 @@ const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
+const CODEX_WEBSOCKET_ABNORMAL_CLOSE_RE = /^Codex websocket transport error: websocket closed \(1006\)$/i;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
 const HTTP2_STREAM_RESET_ERROR_RE =
@@ -176,6 +177,41 @@ function toolReplayStart(messages: readonly AgentMessage[]): number | undefined 
 	return start;
 }
 
+/**
+ * Codex 1006 recovery is safe only when the persisted tail is exactly one
+ * unexecuted assistant-stop result for each uniquely identified tool call.
+ * The exact tail shape rejects real, unknown, missing, or duplicate results.
+ */
+function hasExactAssistantStopErrorResults(
+	messages: readonly AgentMessage[],
+	assistantIndex: number,
+	toolCallIds: readonly string[],
+): boolean {
+	if (toolCallIds.length === 0 || messages.length - assistantIndex - 1 !== toolCallIds.length) return false;
+
+	const expectedIds = new Set<string>();
+	for (const toolCallId of toolCallIds) {
+		if (expectedIds.has(toolCallId)) return false;
+		expectedIds.add(toolCallId);
+	}
+
+	const seenIds = new Set<string>();
+	for (let index = assistantIndex + 1; index < messages.length; index++) {
+		const result = messages[index];
+		if (
+			!isSyntheticToolResultMessage(result) ||
+			result.details?.source !== "assistant_stop_error" ||
+			result.details?.executed !== false
+		) {
+			return false;
+		}
+		if (!expectedIds.has(result.toolCallId) || seenIds.has(result.toolCallId)) return false;
+		seenIds.add(result.toolCallId);
+	}
+
+	return seenIds.size === expectedIds.size;
+}
+
 /** Result shape shared with automatic maintenance recovery. */
 export interface RecoveryCompactionResult {
 	deferredHandoff: boolean;
@@ -258,7 +294,7 @@ export interface TurnRecoveryHost {
 		},
 	): Promise<RecoveryCompactionResult>;
 	shakeForRequestBodyReadTimeout(generation: number): Promise<boolean>;
-	withBashBranchTransition<T>(operation: () => T): T;
+	withBashBranchTransition<T>(operation: () => T | Promise<T>): Promise<T>;
 }
 
 /** Construction-time retry state restored from model selection. */
@@ -870,7 +906,7 @@ export class TurnRecovery {
 
 		if (this.#acceptTerminalEmptyStopForPrompt && assistantMessage.stopReason === "stop") {
 			this.#acceptTerminalEmptyStopForPrompt = false;
-			this.#discardAcceptedTerminalEmptyStop(assistantMessage);
+			await this.#discardAcceptedTerminalEmptyStop(assistantMessage);
 			this.#emptyStopRetryCount = 0;
 			return undefined;
 		}
@@ -883,10 +919,11 @@ export class TurnRecovery {
 				0,
 				outputTokens - (assistantMessage.usage.reasoningTokens ?? 0),
 			);
+			const billedDroppedContent = outputTokensExcludingKnownReasoning > 0 && assistantMessage.content.length === 0;
 			let finalError: string;
 			if (providerEmptyOutput) {
 				finalError = "Assistant returned no final output after retry cap; try switching models";
-			} else if (outputTokensExcludingKnownReasoning > 0 && assistantMessage.content.length === 0) {
+			} else if (billedDroppedContent) {
 				// Billed non-reasoning output on a truly zero-block stop means content was
 				// generated and then dropped downstream (a filter/refusal flattened to
 				// `finish_reason: "stop"` by a proxy, or a lossy API translation) — the
@@ -906,6 +943,27 @@ export class TurnRecovery {
 				provider: assistantMessage.provider,
 				outputTokens,
 			});
+			const retrySettings = this.#host.settings.getGroup("retry");
+			const currentModel = this.#host.model();
+			const currentSelector = currentModel
+				? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
+				: undefined;
+			let switchedModel = false;
+			if (retrySettings.enabled && retrySettings.modelFallback && currentSelector) {
+				this.noteRetryFallbackCooldown(currentSelector, undefined, finalError);
+				switchedModel = await this.#tryRetryModelFallback(currentSelector, assistantMessage);
+			}
+			if (switchedModel) {
+				this.#clearPendingRetryErrors();
+				this.#retryAttempt = 0;
+				this.#emptyStopRetryCount = 0;
+				await this.#dropAssistantTurnDurably(assistantMessage);
+				this.#host.scheduleAgentContinue({
+					source: "empty-stop-fallback",
+					generation: this.#host.promptGeneration(),
+				});
+				return "continue";
+			}
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
@@ -1065,7 +1123,7 @@ export class TurnRecovery {
 	 */
 	async #dropPersistedAssistantTurn(assistantMessage: AssistantMessage): Promise<string | undefined> {
 		await this.#host.waitForSessionMessagePersistence(assistantMessage);
-		return this.discardAssistantTurn(assistantMessage);
+		return await this.discardAssistantTurn(assistantMessage);
 	}
 
 	/**
@@ -1102,6 +1160,14 @@ export class TurnRecovery {
 	): Promise<RecoveryCompactionResult> {
 		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		await this.dropPersistedAssistantTurn(assistantMessage);
+		// A runAutoCompaction rejection (abort, veto, or persistence failure —
+		// including SessionPersistenceIndeterminateError, whose latch must not
+		// be disturbed by appending the old turn) propagates untouched: nothing
+		// here may infer "not committed" from checkpoint presence, because a
+		// structured rewrite commits without creating any compaction entry.
+		// The `historyRewritten: true` fact after a post-commit abort/failure
+		// is carried by the returned result (maintenance contract) — a throw
+		// never masks a real commit.
 		const result = await this.#host.runAutoCompaction(reason, true, false, allowDefer, {
 			autoContinue: options.autoContinue,
 			triggerContextTokens: options.triggerContextTokens,
@@ -1127,7 +1193,7 @@ export class TurnRecovery {
 		this.#host.agent.appendMessage(assistantMessage);
 	}
 
-	#discardAcceptedTerminalEmptyStop(assistantMessage: AssistantMessage): void {
+	async #discardAcceptedTerminalEmptyStop(assistantMessage: AssistantMessage): Promise<void> {
 		const branch = this.#host.sessionManager.getBranch();
 		const branchEntry = branch
 			.slice()
@@ -1151,11 +1217,11 @@ export class TurnRecovery {
 
 		if (!branchEntry) return;
 		const targetParentId = prunePrompt ? parentEntry.parentId : branchEntry.parentId;
-		this.#host.withBashBranchTransition(() => {
+		await this.#host.withBashBranchTransition(async () => {
 			if (targetParentId === null) {
-				this.#host.sessionManager.resetLeaf();
+				await this.#host.sessionManager.resetLeaf();
 			} else {
-				this.#host.sessionManager.branch(targetParentId);
+				await this.#host.sessionManager.branch(targetParentId);
 			}
 		});
 		this.#host.sessionManager.appendCustomEntry("accepted-terminal-empty-stop");
@@ -1168,7 +1234,7 @@ export class TurnRecovery {
 	 * the Gemini header-runaway interrupt, which must not replay a partial,
 	 * loop-fueling thinking block.
 	 */
-	discardAssistantTurn(assistantMessage: AssistantMessage): string | undefined {
+	async discardAssistantTurn(assistantMessage: AssistantMessage): Promise<string | undefined> {
 		this.removeAssistantMessageFromActiveContext(assistantMessage);
 
 		const branch = this.#host.sessionManager.getBranch();
@@ -1192,11 +1258,11 @@ export class TurnRecovery {
 		if (!branchEntry) {
 			return undefined;
 		}
-		this.#host.withBashBranchTransition(() => {
+		await this.#host.withBashBranchTransition(async () => {
 			if (branchEntry.parentId === null) {
-				this.#host.sessionManager.resetLeaf();
+				await this.#host.sessionManager.resetLeaf();
 			} else {
-				this.#host.sessionManager.branch(branchEntry.parentId);
+				await this.#host.sessionManager.branch(branchEntry.parentId);
 			}
 		});
 		return branchEntry.id;
@@ -1357,6 +1423,7 @@ export class TurnRecovery {
 	}
 
 	/**
+/**
 	 * True when every emitted tool call provably never executed and no other
 	 * replay-unsafe output exists. The caller restricts this exception to
 	 * classifier refusals, malformed-function responses, and retriable
@@ -1384,9 +1451,6 @@ export class TurnRecovery {
 		}
 		if (emittedToolCallIds.size === 0) return false;
 
-		// The errored assistant message is NOT the tail of state: the agent loop
-		// appends the synthetic results after it before the turn ends, so locate it
-		// by walking backwards exactly as `classifyResolvedInterruptedToolTurn` does.
 		const messages = this.#host.agent.state.messages;
 		let assistantIndex = -1;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -1402,8 +1466,6 @@ export class TurnRecovery {
 		for (let i = assistantIndex + 1; i < messages.length; i++) {
 			const candidate = messages[i];
 			if (candidate.role !== "toolResult" || !emittedToolCallIds.has(candidate.toolCallId)) continue;
-			// Every result for an emitted call is inspected, not just the first: a
-			// real result anywhere in the tail means the tool ran.
 			if (!isSyntheticToolResultMessage(candidate) || candidate.details?.executed !== false) return false;
 			unexecutedToolCallIds.add(candidate.toolCallId);
 		}
@@ -1411,13 +1473,20 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Classify a reasonless abort, idle stream stall, HTTP/2 stream reset, or
-	 * premature stream close whose emitted tool calls all have results. The failed
+	 * Classify an interrupted tool turn whose emitted calls all have resolved results.
+	 * Reasonless aborts and stream stalls preserve their existing reconciliation;
+	 * Codex 1006 recovery additionally requires an exact tail of synthetic,
+	 * unexecuted provider-error results before continuation is allowed.
+	 *
+	 * Classify a reasonless abort, idle stream stall, HTTP/2 stream reset,
+	 * unexpected socket close, or premature stream close whose emitted tool calls all have results. The failed
 	 * assistant/tool-result pair stays in context so continuation cannot replay
 	 * completed side effects; synthetic results tell the next turn that an
 	 * unexecuted call must be reissued.
 	 */
-	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
+	classifyResolvedInterruptedToolTurn(
+		message: AssistantMessage,
+	): "reasonless-abort" | "stream-stall" | "codex-websocket-1006" | undefined {
 		const id = this.#classifyRetryMessage(message);
 		const genericAbort =
 			message.errorMessage === "Request was aborted" || message.errorMessage === "Request was aborted.";
@@ -1434,15 +1503,16 @@ export class TurnRecovery {
 			message.stopReason === "error" &&
 			(HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
 				AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(errorMessage) ||
-				AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage)) &&
+				AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage) ||
+				isUnexpectedSocketCloseMessage(errorMessage)) &&
 			AIError.retriable(id) &&
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&
 			!this.#host.streamingEditAbortTriggered();
-		// A premature gateway close (no finish_reason/terminal event) is the same
-		// transport-failure class as the stall/reset cases: mid-generation death.
-		// Preserved-turn continuation lets the retry resume after the partial
-		// output instead of surfacing the error or replaying rendered content.
+		const codexWebsocketAbnormalClose =
+			message.stopReason === "error" &&
+			CODEX_WEBSOCKET_ABNORMAL_CLOSE_RE.test(errorMessage) &&
+			AIError.retriable(id);
 		const prematureClose =
 			message.stopReason === "error" &&
 			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage) &&
@@ -1450,7 +1520,8 @@ export class TurnRecovery {
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&
 			!this.#host.streamingEditAbortTriggered();
-		if (!reasonlessAbort && !streamStall && !transportReset && !prematureClose) return undefined;
+		if (!reasonlessAbort && !streamStall && !transportReset && !prematureClose && !codexWebsocketAbnormalClose)
+			return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
 		// Idle stall and HTTP/2 RST both close the Cursor Connect stream:
@@ -1476,6 +1547,11 @@ export class TurnRecovery {
 			}
 		}
 		if (assistantIndex < 0) return undefined;
+		if (codexWebsocketAbnormalClose) {
+			return hasExactAssistantStopErrorResults(messages, assistantIndex, resolvedToolCallIds)
+				? "codex-websocket-1006"
+				: undefined;
+		}
 
 		const unresolvedToolCallIds = new Set(resolvedToolCallIds);
 		for (let i = assistantIndex + 1; i < messages.length; i++) {
@@ -1518,6 +1594,9 @@ export class TurnRecovery {
 		return (
 			(message.provider === "openrouter" &&
 				/server_error:\s*stream closed with reason:\s*error/i.test(errorMessage)) ||
+			(message.model === "grok-4.6" &&
+				message.api === "openai-completions" &&
+				/OpenAI completions stream closed before a finish_reason was received/i.test(errorMessage)) ||
 			(message.provider === "github-copilot" &&
 				message.model === "grok-4.6" &&
 				message.api === "openai-responses" &&
@@ -2290,13 +2369,15 @@ export class TurnRecovery {
 		// (every rotation sets switchedCredential and skips it), so without
 		// this last resort a provider-wide usage cap never fails over to the
 		// configured chain.
-		const maxRetries = this.#isBoundedThinkingStreamClose(message)
-			? Math.min(retrySettings.maxRetries, 1)
-			: retrySettings.maxRetries;
+		const id = this.#classifyRetryMessage(message);
+		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
+		const maxRetries =
+			this.#isBoundedThinkingStreamClose(message) || (message.model === "grok-4.6" && thinkingLoop)
+				? Math.min(retrySettings.maxRetries, 1)
+				: retrySettings.maxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
-		const id = this.#classifyRetryMessage(message);
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
@@ -2306,9 +2387,10 @@ export class TurnRecovery {
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
-		let delayMs = staleOpenAIResponsesReplayError
-			? 0
-			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+		let delayMs =
+			staleOpenAIResponsesReplayError || AIError.isPermanentBillingFailureText(errorMessage)
+				? 0
+				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
@@ -2434,7 +2516,6 @@ export class TurnRecovery {
 		// would swap a healthy planning turn to another family based on chain
 		// contents, not model health (issue #8760). Keep it on the same model; the
 		// retry budget still bounds a genuinely stuck stream.
-		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
 		const effectiveUsageLimitWaitMs =
 			usageLimitWaitMs ??
 			(siblingAvailabilityWaitMs === undefined
@@ -2513,7 +2594,13 @@ export class TurnRecovery {
 			// same-route budget: every distinct account must be tried first.
 			if (switchedModel) this.#retryAttempt = 1;
 		}
-		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
+		// Permanent billing failures may rotate credentials or use a configured
+		// fallback above, but cannot recover by sleeping and replaying the same route.
+		if (
+			(classifierRefusal || accountPolicyDenial || AIError.isPermanentBillingFailureText(errorMessage)) &&
+			!switchedCredential &&
+			!switchedModel
+		) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this
@@ -2521,12 +2608,12 @@ export class TurnRecovery {
 			// `auto_retry_end` so subscribers tracking retry-outstanding state
 			// (e.g. suppressing a duplicate error toast) don't stay latched on
 			// an announcement that never resolves.
-			if (this.#retryAttempt > 1) {
+			if (this.#retryAttempt > 1 || AIError.isPermanentBillingFailureText(errorMessage)) {
 				await this.persistTerminalEmptyErrorTurn(message);
 				await this.#host.emitSessionEvent({
 					type: "auto_retry_end",
 					success: false,
-					attempt: this.#retryAttempt - 1,
+					attempt: Math.max(1, this.#retryAttempt - 1),
 					finalError: errorMessage,
 				});
 				this.#clearPendingRetryErrors();
@@ -2922,7 +3009,7 @@ export class TurnRecovery {
 						this.#isSameAssistantMessage(entry.message as AssistantMessage, anchor),
 				);
 		if (anchorEntry) {
-			this.#host.withBashBranchTransition(() => {
+			await this.#host.withBashBranchTransition(() => {
 				this.#host.sessionManager.branch(anchorEntry.id);
 			});
 		}

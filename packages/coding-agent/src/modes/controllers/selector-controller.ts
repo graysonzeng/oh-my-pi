@@ -580,11 +580,18 @@ export class SelectorController {
 	/**
 	 * Apply the side effects of a setting change the user made in this process
 	 * (settings selector, approved `cfg://` writes); the value is already stored.
-	 * Only `defaultThinkingLevel` needs this: it also switches the live session,
-	 * which config reloads and parent-session writes must not do. Every other
-	 * setting applies through handle listeners owned by the session and InteractiveMode.
+	 * Only `defaultThinkingLevel` and `consult.enabled` need this: thinking level
+	 * also switches the live session, which config reloads must not do, and consult
+	 * must reconcile the live tool. Every other setting applies through handle
+	 * listeners owned by the session and InteractiveMode.
 	 */
 	handleSettingChange(id: string, value: unknown): void {
+		if (id === "consult.enabled") {
+			void this.ctx.session.applyConsultEnabledChange().catch(err => {
+				this.ctx.showError(`Failed to apply consult: ${err}`);
+			});
+			return;
+		}
 		if (id !== cfgDefaultThinkingLevel.id || typeof value !== "string") return;
 		const level = parseConfiguredThinkingLevel(value);
 		if (level === undefined || level === this.ctx.session.configuredThinkingLevel()) return;
@@ -1497,6 +1504,7 @@ export class SelectorController {
 			hasUI: true,
 			settings: this.ctx.settings,
 			getSessionFile: () => this.ctx.sessionManager.getSessionFile() ?? null,
+			getLineageContext: () => this.ctx.sessionManager.getLineageContext(),
 			getSessionSpawns: () => null,
 			getPlanModeState: () => this.ctx.session.getPlanModeState(),
 		};

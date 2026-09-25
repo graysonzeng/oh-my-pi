@@ -486,6 +486,17 @@ export interface OpenAICompat {
 	 * next request boundary.
 	 */
 	supportsSteering?: boolean;
+	/**
+	 * Which Responses path `openai-codex-responses` appends for both WebSocket
+	 * and HTTP/SSE transport.
+	 *
+	 * - `"codex"` (default): `/codex/responses` — official ChatGPT Codex backend.
+	 * - `"standard"`: `/responses` — generic OpenAI Responses gateways that 404
+	 *   on `/codex/responses`.
+	 *
+	 * Never inferred from hostnames; set explicitly on custom models.
+	 */
+	codexResponsesEndpoint?: "codex" | "standard";
 	/** Whether streamed reasoning deltas for the same field may repeat the full cumulative text snapshot. Default: false. */
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
@@ -886,6 +897,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "stripImageInput"
 			| "thinkingLoopGuard"
 			| "whenThinking"
+			| "codexResponsesEndpoint"
 		>
 	> & {
 		vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
@@ -893,6 +905,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		cacheControlFormat?: OpenAICompat["cacheControlFormat"];
 		thinkingKeep?: OpenAICompat["thinkingKeep"];
 		streamIdleTimeoutMs?: number;
+		codexResponsesEndpoint?: OpenAICompat["codexResponsesEndpoint"];
 		toolStrictMode: ResolvedToolStrictMode;
 		/** The model sits behind Vercel AI Gateway. */
 		isVercelGatewayHost: boolean;
@@ -909,6 +922,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	strictResponsesPairing: boolean;
 	supportsImageDetailOriginal: boolean;
 	supportsObfuscationOptOut: boolean;
+	/** See {@link OpenAICompat.codexResponsesEndpoint}. Undefined uses the Codex endpoint. */
+	codexResponsesEndpoint?: "codex" | "standard";
 	/**
 	 * Whether `reasoning.context: "all_turns"` (full cross-turn reasoning
 	 * replay) is accepted. Rule-owned: gpt-5.4+ wire generation on the Codex

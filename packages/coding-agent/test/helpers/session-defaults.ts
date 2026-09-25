@@ -14,5 +14,9 @@ export function createSessionDefaults() {
 		setIrcWakeTurnObserver: () => {},
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
+		getAsyncJobSnapshot: () => null,
+		hasPendingAsyncWork: () => false,
+		settleAsyncWork: async () => {},
+		trackIrcReply: () => {},
 	} satisfies Partial<AgentSession>;
 }

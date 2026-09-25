@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
-import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
@@ -34,7 +35,10 @@ function cloneState(state: GoalModeState | undefined): GoalModeState | undefined
 }
 
 function createToolSession(overrides: Partial<ToolSession>): ToolSession {
-	return overrides as ToolSession;
+	return {
+		settings: Settings.isolated({ "goal.hostGate.enabled": true }),
+		...overrides,
+	} as ToolSession;
 }
 
 function createRuntimeHarness(initialState?: GoalModeState) {
@@ -78,12 +82,25 @@ describe("GoalTool", () => {
 		const runtime = {
 			createGoal: vi.fn(async () => createGoalState),
 			completeGoalFromTool: vi.fn(async () => completedGoal),
+			nominateComplete: vi.fn(async () => ({
+				accepted: true,
+				shared: false,
+				goal: getGoalState.goal,
+			})),
+			currentTurnId: vi.fn(() => "turn-1"),
+			currentGeneration: vi.fn(() => 1),
+			applyNominationResult: vi.fn(async () => "applied"),
+			trackInFlightNomination: vi.fn(),
+			recoverPendingVerification: vi.fn(async () => false),
+			pauseGoal: vi.fn(async () => getGoalState),
 		};
 		const getGoalModeState = vi.fn(() => getGoalState);
 		const tool = new GoalTool(
 			createToolSession({
 				getGoalRuntime: () => runtime as unknown as GoalRuntime,
 				getGoalModeState,
+				snapshotConsultContext: () => ({ systemPrompt: [], messages: [] }),
+				getTodoPhases: () => [],
 			}),
 		);
 
@@ -110,22 +127,22 @@ describe("GoalTool", () => {
 		});
 		expect(runtime.completeGoalFromTool).not.toHaveBeenCalled();
 
-		const completed = await tool.execute("call-complete", {
+		const nominated = await tool.execute("call-complete", {
 			op: "complete",
 			objective: undefined,
 			token_budget: undefined,
 		});
-		expect(runtime.completeGoalFromTool).toHaveBeenCalledTimes(1);
-		expect(completed.details).toMatchObject({
+		expect(runtime.completeGoalFromTool).not.toHaveBeenCalled();
+		expect(runtime.nominateComplete).toHaveBeenCalledTimes(1);
+		expect(nominated.details).toMatchObject({
 			op: "complete",
-			goal: completedGoal,
-			remainingTokens: 3,
-			completionBudgetReport: completionBudgetReport(completedGoal),
+			goal: getGoalState.goal,
+			gate: "continue",
 		});
-		expect(completed.content[0]).toEqual({
-			type: "text",
-			text: "Goal: Complete route\nStatus: complete\nTokens: 7 used / 10 budget\nRemaining tokens: 3\n\nGoal achieved. Report final budget usage to the user: tokens used: 7 of 10; time used: 3 seconds.",
-		});
+		expect(nominated.details?.goal?.status).toBe("active");
+		expect(String(nominated.content[0] && "text" in nominated.content[0] ? nominated.content[0].text : "")).toContain(
+			"Host gate: continue",
+		);
 	});
 
 	it("rejects create when a goal already exists", async () => {
@@ -193,13 +210,15 @@ describe("GoalTool", () => {
 		expect(harness.getState()).toBeUndefined();
 	});
 
-	it("flips state to exiting and clears enabled when op=complete succeeds (fix #1)", async () => {
+	it("keeps the goal active when op=complete fails the host gate", async () => {
 		const harness = createRuntimeHarness();
 		await harness.runtime.createGoal({ objective: "Ship the release", tokenBudget: 100 });
 		const tool = new GoalTool(
 			createToolSession({
 				getGoalRuntime: () => harness.runtime,
 				getGoalModeState: () => harness.getState(),
+				snapshotConsultContext: () => ({ systemPrompt: [], messages: [] }),
+				getTodoPhases: () => [],
 			}),
 		);
 
@@ -209,15 +228,16 @@ describe("GoalTool", () => {
 			token_budget: undefined,
 		});
 
-		expect(result.details).toMatchObject({ op: "complete" });
+		expect(result.details).toMatchObject({ op: "complete", gate: "continue" });
 		const after = harness.getState();
-		expect(after?.enabled).toBe(false);
-		expect(after?.mode).toBe("exiting");
-		expect(after?.reason).toBe("completed");
-		expect(after?.goal.status).toBe("complete");
+		expect(after?.enabled).toBe(true);
+		expect(after?.mode).toBe("active");
+		expect(after?.goal.status).toBe("active");
+		expect(after?.goal.hostGate?.pendingVerification).toBe(false);
+		expect(after?.goal.hostGate?.lastDecision).toBe("continue");
 	});
 
-	it("completes a paused goal (enabled=false) — was broken before fix", async () => {
+	it("nominates a paused goal without completing it", async () => {
 		const harness = createRuntimeHarness({
 			enabled: false,
 			mode: "active",
@@ -227,6 +247,8 @@ describe("GoalTool", () => {
 			createToolSession({
 				getGoalRuntime: () => harness.runtime,
 				getGoalModeState: () => harness.getState(),
+				snapshotConsultContext: () => ({ systemPrompt: [], messages: [] }),
+				getTodoPhases: () => [],
 			}),
 		);
 
@@ -235,8 +257,9 @@ describe("GoalTool", () => {
 			objective: undefined,
 			token_budget: undefined,
 		});
-		expect(result.details?.goal?.status).toBe("complete");
-		expect(harness.getState()?.goal.status).toBe("complete");
+		expect(result.details?.gate).toBe("continue");
+		expect(result.details?.goal?.status).toBe("paused");
+		expect(harness.getState()?.goal.status).toBe("paused");
 	});
 
 	it("allows create after previous goal is complete", async () => {

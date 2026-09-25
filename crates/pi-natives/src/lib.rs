@@ -28,9 +28,11 @@ pub mod ast;
 pub mod audio;
 pub mod block;
 pub mod clipboard;
+pub mod code_intel;
 pub mod crash_handler;
 pub mod desktop;
 pub mod devicecheck;
+
 pub mod diff;
 pub mod edit;
 pub mod fd;

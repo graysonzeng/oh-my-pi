@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { MAX_SKILL_DESCRIPTION_CHARS } from "../capability/skill";
 
 /** Provider id stamped on discovered managed skills (distinguishes them from authored). */
 export const MANAGED_SKILLS_PROVIDER_ID = "omp-managed";
@@ -158,6 +159,11 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 	// so the tool would report success for a skill that never appears.
 	if (!description) {
 		throw new Error(`Managed skill "${name}" needs a non-empty description.`);
+	}
+	if (description.length > MAX_SKILL_DESCRIPTION_CHARS) {
+		throw new Error(
+			`Managed skill "${name}" description is ${description.length} characters; keep it to ${MAX_SKILL_DESCRIPTION_CHARS}.`,
+		);
 	}
 	if (!body) {
 		throw new Error(`Managed skill "${name}" needs a non-empty body.`);

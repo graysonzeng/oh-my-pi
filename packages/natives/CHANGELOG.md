@@ -72,6 +72,9 @@
 - Added a vendored Astro grammar so `.astro` files highlight the `---` TypeScript frontmatter and `{…}` template expressions instead of falling back to plain HTML ([#11164](https://github.com/can1357/oh-my-pi/pull/11164) by [@byigitt](https://github.com/byigitt)).
 - Fixed the TUI sometimes stopping repainting while the agent continued running.
 - Fixed native Darwin OAuth helper compilation under sandboxed and custom build environments by respecting `$CC` ([#11869](https://github.com/can1357/oh-my-pi/pull/11869) by [@Malix-Labs](https://github.com/Malix-Labs)).
+### Added
+
+- Added native code-intelligence indexing for evidence-backed repository queries.
 
 ## [18.1.17] - 2026-09-10
 

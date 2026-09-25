@@ -7,6 +7,7 @@
 import * as fs from "node:fs/promises";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { getActiveRules, type Rule } from "../capability/rule";
+import { getActiveSkills } from "../extensibility/skills";
 import ruleDoc from "../prompts/internal-urls/rule.md" with { type: "text" };
 import type {
 	InternalResource,
@@ -32,11 +33,24 @@ function findRule(url: InternalUrl, context?: ResolveContext): Rule {
 	const { rule, rules } = lookupRule(url, context);
 	if (!rule) {
 		const ruleName = url.rawHost || url.hostname;
-		const available = rules.map(r => r.name);
-		const availableStr = available.length > 0 ? available.join(", ") : "none";
-		throw new Error(`Unknown rule: ${ruleName}\nAvailable: ${availableStr}`);
+		throw new Error(
+			formatUnknownRuleError(
+				ruleName,
+				rules.map(r => r.name),
+			),
+		);
 	}
 	return rule;
+}
+
+/** Fail-closed unknown-rule message. Suggests `skill://` only on an exact skill name match. */
+export function formatUnknownRuleError(ruleName: string, available: readonly string[]): string {
+	const availableStr = available.length > 0 ? available.join(", ") : "none";
+	const lines = [`Unknown rule: ${ruleName}`, `Available: ${availableStr}`];
+	if (getActiveSkills().some(skill => skill.name === ruleName)) {
+		lines.push(`Did you mean skill://${ruleName}?`);
+	}
+	return lines.join("\n");
 }
 
 export class RuleProtocolHandler implements ProtocolHandler {

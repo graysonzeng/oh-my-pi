@@ -1,0 +1,161 @@
+import { describe, expect, it } from "bun:test";
+import { getDefault } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type BuildSystemPromptOptions, buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
+
+const EMPTY_TREE = {
+	rootPath: "",
+	rendered: "",
+	truncated: false,
+	totalLines: 0,
+	agentsMdFiles: [],
+};
+
+type ProactiveDelegationFlags = Pick<
+	BuildSystemPromptOptions,
+	| "taskProactiveAutoParallel"
+	| "taskProactivePipelineGuidance"
+	| "taskProactiveStageRouting"
+	| "taskIrcEnabled"
+	| "delegationBias"
+>;
+
+async function renderDelegationPrompt(
+	options: ProactiveDelegationFlags & { eagerTasks?: boolean; model?: string } = {},
+): Promise<string> {
+	const { systemPrompt } = await buildSystemPrompt({
+		cwd: process.cwd(),
+		contextFiles: [],
+		skills: [],
+		rules: [],
+		toolNames: ["task", "workflow"],
+		workspaceTree: { ...EMPTY_TREE, rootPath: process.cwd() },
+		eagerTasks: true,
+		...options,
+	});
+	return systemPrompt.join("\n\n");
+}
+
+describe("proactive delegation guidance", () => {
+	it("defaults all proactive delegation flags to false", () => {
+		expect(getDefault("task.proactive.autoParallel")).toBe(false);
+		expect(getDefault("task.proactive.pipelineGuidance")).toBe(false);
+		expect(getDefault("task.proactive.stageRouting")).toBe(false);
+	});
+
+	it("toggles auto-parallel guidance independently", async () => {
+		const rendered = await renderDelegationPrompt({ taskProactiveAutoParallel: true });
+
+		expect(rendered).toContain("Benefit before parallelism.");
+		expect(rendered).toContain("Independent slices are candidates, not a delegation mandate.");
+		expect(rendered).not.toContain("Escalate complete gated delivery to workflow.");
+		expect(rendered).not.toContain("Route after deciding to delegate.");
+	});
+
+	it("toggles pipeline guidance independently", async () => {
+		const rendered = await renderDelegationPrompt({ taskProactivePipelineGuidance: true });
+
+		expect(rendered).not.toContain("Benefit before parallelism.");
+		expect(rendered).toContain("Escalate complete gated delivery to workflow.");
+		expect(rendered).not.toContain("Route after deciding to delegate.");
+	});
+
+	it("toggles stage routing guidance independently", async () => {
+		const rendered = await renderDelegationPrompt({ taskProactiveStageRouting: true });
+
+		expect(rendered).not.toContain("Benefit before parallelism.");
+		expect(rendered).not.toContain("Escalate complete gated delivery to workflow.");
+		expect(rendered).toContain("Route after deciding to delegate.");
+		expect(rendered).toContain("Delegated mechanical work");
+		expect(rendered).toContain("`sonic`");
+	});
+
+	it("renders shared proactive blocks for default eager catalog bias", async () => {
+		const rendered = await renderDelegationPrompt({
+			taskProactiveAutoParallel: true,
+			taskProactivePipelineGuidance: true,
+			taskProactiveStageRouting: true,
+		});
+
+		expect(rendered).toContain("Direct execution default");
+		expect(rendered).toContain("Benefit before parallelism.");
+		expect(rendered).toContain("Escalate complete gated delivery to workflow.");
+		expect(rendered).toContain("Route after deciding to delegate.");
+		expect(rendered).not.toContain("Proactive multi-agent delegation active;");
+	});
+
+	it("selects gated, eager, and restrained copy from catalog delegationBias", async () => {
+		const eager = await renderDelegationPrompt({ delegationBias: "eager" });
+		const restrained = await renderDelegationPrompt({
+			eagerTasks: false,
+			delegationBias: "restrained",
+		});
+		const gatedOpen = await renderDelegationPrompt({
+			delegationBias: "gated",
+			taskProactiveAutoParallel: true,
+			taskProactivePipelineGuidance: true,
+			taskProactiveStageRouting: true,
+		});
+		const gatedClosed = await renderDelegationPrompt({
+			eagerTasks: false,
+			delegationBias: "gated",
+			taskProactiveAutoParallel: true,
+			taskProactivePipelineGuidance: true,
+			taskProactiveStageRouting: true,
+		});
+		const fromModelString = await renderDelegationPrompt({
+			model: "openai/gpt-5.6-codex",
+			taskProactiveAutoParallel: true,
+		});
+
+		expect(eager).toContain("Direct execution default");
+		expect(eager).not.toContain("Inline first.");
+		expect(restrained).toContain("Inline first.");
+		expect(restrained).toContain("NEVER open with a scout");
+		expect(gatedOpen).toContain("Proactive multi-agent delegation active;");
+		expect(gatedOpen).toContain("Benefit before parallelism.");
+		expect(gatedOpen).not.toContain("Direct execution default");
+		expect(gatedClosed).toContain("No subagents unless user or applicable AGENTS.md/skill explicitly requests");
+		expect(gatedClosed).not.toContain("Benefit before parallelism.");
+		expect(fromModelString).toContain("Direct execution default");
+		expect(fromModelString).not.toContain("Proactive multi-agent delegation active;");
+	});
+
+	it("gates every proactive block behind eagerTasks", async () => {
+		const rendered = await renderDelegationPrompt({
+			eagerTasks: false,
+			taskProactiveAutoParallel: true,
+			taskProactivePipelineGuidance: true,
+			taskProactiveStageRouting: true,
+		});
+
+		expect(rendered).not.toContain("Benefit before parallelism.");
+		expect(rendered).not.toContain("Escalate complete gated delivery to workflow.");
+		expect(rendered).not.toContain("Route after deciding to delegate.");
+	});
+
+	it("preflights and reuses an exact late reviewer when IRC is available", async () => {
+		const rendered = await renderDelegationPrompt({ taskIrcEnabled: true });
+
+		expect(rendered).toContain("a mandatory end-stage gate after substantial independent work");
+		expect(rendered).toContain("fallback or identity mismatch as failed readiness");
+		expect(rendered).toContain("launch that exact reviewer early");
+		expect(rendered).toContain("NEVER a greeting or synthetic ping");
+		expect(rendered).toContain("wake that same idle/parked agent");
+		expect(rendered).toContain("cancel or ignore any late loser");
+		expect(rendered).not.toContain("No continuation channel");
+	});
+
+	it("does not claim reviewer reuse without IRC", async () => {
+		const rendered = await renderDelegationPrompt();
+
+		expect(rendered).toContain("never claim that a successful probe reserves or reuses a reviewer");
+		expect(rendered).not.toContain("Reuse the checked reviewer");
+		expect(rendered).not.toContain("wake that same idle/parked agent");
+	});
+
+	it("does not render the old unconditional default-to-parallel guidance", async () => {
+		const rendered = await renderDelegationPrompt();
+
+		expect(rendered).not.toContain("Default to parallel for complex changes.");
+	});
+});

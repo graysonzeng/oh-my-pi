@@ -45,6 +45,8 @@ providers:
     baseUrl: https://api.example.com/v1
     apiKey: MY_PROVIDER_API_KEY
     api: openai-completions
+    # Prefer same-id metadata from this bundled provider before generic proxy inference.
+    referenceProvider: openai-codex
     headers:
       X-Team: platform
     authHeader: true
@@ -59,6 +61,7 @@ providers:
     models:
       - id: some-model-id
         name: Some Model
+        requestModelId: Some Model
         api: openai-completions
         reasoning: false
         input: [text]
@@ -98,6 +101,11 @@ Configured maxima do not replace provider-advertised capacity. Models governed
 by a catalog override ceiling (such as Codex Astra) still clamp to that ceiling.
 Per-model overrides, including retired variant aliases, are resolved before
 selecting the extended window.
+
+`referenceProvider` selects the bundled provider used first when a custom model omits metadata such as
+`contextWindow`, `maxTokens`, pricing, or input capabilities. OMP matches the model id within that provider,
+keeps the custom provider's transport and authentication, and honors every explicitly configured model field.
+When the reference provider has no matching model, the existing generic proxy-reference lookup remains the fallback.
 
 ### Compaction options
 
@@ -168,6 +176,7 @@ It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 
 - `id` required
 - `contextWindow` and `maxTokens` must be positive if provided; `maxContextWindow` must be a positive integer no smaller than `contextWindow` when both are set
+- `requestModelId` optional; when set it must be a non-empty string. Local selection keeps `id`; the provider request sends `requestModelId`.
 
 ### Command-resolved secrets
 

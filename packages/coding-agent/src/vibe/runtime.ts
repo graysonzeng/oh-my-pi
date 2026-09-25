@@ -39,6 +39,7 @@ import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "..
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition } from "../task/types";
+import { resolveSubagentPerformanceClass } from "../task/review-performance";
 import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -59,7 +60,7 @@ import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 import { cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
- * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
+ * carries `gateway/deepseek-v4-flash:max` then `gateway/grok-4.6:high`, and `task`
  * carries `model: "@task"` (inherits the session's strong model).
  * Resolution goes through {@link resolveAgentModelSelection} exactly like a
  * `task` spawn, so `task.agentModelOverrides` and model-role settings apply.
@@ -1285,6 +1286,10 @@ export class VibeSessionRegistry {
 			modelRole: record.modelRole,
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
+			performanceClass: resolveSubagentPerformanceClass({
+				agentName: record.agent.name,
+				agentShadowReview: record.agent.shadowReview,
+			}),
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
@@ -1382,6 +1387,11 @@ export class VibeSessionRegistry {
 								eventBus: session.eventBus,
 								subagentEventBus: session.subagentEventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
+								performanceClass: resolveSubagentPerformanceClass({
+									agentName: record.agent.name,
+									agentShadowReview: record.agent.shadowReview,
+								}),
+								settings: session.settings,
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {

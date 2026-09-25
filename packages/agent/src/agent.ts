@@ -62,6 +62,7 @@ import type {
 	StreamFn,
 	ToolCallContext,
 	ToolChoiceDirective,
+	ToolSchedulingConfig,
 } from "./types";
 import { isSoftToolRequirement } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
@@ -70,10 +71,21 @@ import { EventLoopKeepalive } from "./utils/yield";
  * Default convertToLlm: Keep only LLM-compatible replay messages.
  */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter((m): m is Message => {
-		if (m.role === "assistant") return !isProviderRefusalMessage(m);
-		return m.role === "user" || m.role === "developer" || m.role === "toolResult";
-	});
+	const converted: Message[] = [];
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			if (!isProviderRefusalMessage(message)) converted.push(message);
+		} else if (message.role === "user" || message.role === "developer") {
+			converted.push(message);
+		} else if (message.role === "toolResult") {
+			if (message.omittedOriginal === undefined) converted.push(message);
+			else {
+				const { omittedOriginal: _omittedOriginal, ...visible } = message;
+				converted.push(visible);
+			}
+		}
+	}
+	return converted;
 }
 
 function refreshToolChoiceForActiveTools(
@@ -142,6 +154,12 @@ export interface AgentOptions {
 	 * - "wait": defer steering until the current turn completes
 	 */
 	interruptMode?: "immediate" | "wait";
+
+	/**
+	 * Tool batch scheduling (max concurrency, resource conflicts, call budget).
+	 * Forwarded to {@link AgentLoopConfig.toolScheduling}.
+	 */
+	toolScheduling?: ToolSchedulingConfig;
 
 	/**
 	 * API format for Kimi Code provider: "openai" or "anthropic" (default: "anthropic")
@@ -274,8 +292,9 @@ export interface AgentOptions {
 	 * Strip tool descriptions from provider-bound tool specs (top-level + nested
 	 * schema annotations). Use when the full catalog is rendered into the system
 	 * prompt so descriptions are not duplicated on the wire. Native tool calling only.
+	 * Accepts a live getter so mid-session model switches can refresh the decision.
 	 */
-	pruneToolDescriptions?: boolean;
+	pruneToolDescriptions?: boolean | (() => boolean);
 	/** Owned tool-calling dialect. Undefined keeps provider-native tool calling. */
 	dialect?: Dialect;
 	/**
@@ -338,6 +357,13 @@ export interface AgentOptions {
 	 * message are emitted. See {@link AgentLoopConfig.afterToolCall} for full semantics.
 	 */
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
+
+	/**
+	 * Serialized final admission for tool results, at the loop's emission point
+	 * on both ordered and unordered writeback. See
+	 * {@link AgentLoopConfig.admitToolResult} for full semantics.
+	 */
+	admitToolResult?: AgentLoopConfig["admitToolResult"];
 
 	/**
 	 * Called once an assistant message is finalized, before it reaches the
@@ -423,6 +449,7 @@ export class Agent {
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
 	#interruptMode: "immediate" | "wait";
+	#toolScheduling?: ToolSchedulingConfig;
 	#sessionId?: string;
 	#deadline?: number;
 	#promptCacheKey?: string;
@@ -456,7 +483,7 @@ export class Agent {
 	#resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 	#suggestFallbackToolNames?: () => Iterable<string>;
 	#intentTracing: boolean;
-	#pruneToolDescriptions: boolean;
+	#pruneToolDescriptions: boolean | (() => boolean);
 	#dialect?: Dialect;
 	#dialectResolver?: (model: Model) => Dialect | undefined;
 	#abortOnFabricatedToolResult?: boolean;
@@ -498,6 +525,12 @@ export class Agent {
 	 */
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
 	/**
+	 * Serialized final admission for tool results, invoked at the loop's
+	 * emission point on both ordered and unordered writeback. Reassign at any
+	 * time to swap the implementation. See {@link AgentLoopConfig.admitToolResult}.
+	 */
+	admitToolResult?: AgentLoopConfig["admitToolResult"];
+	/**
 	 * Hook invoked once an assistant message is finalized, before context append,
 	 * UI emission, and tool dispatch. Reassign at any time to swap the implementation.
 	 */
@@ -523,6 +556,7 @@ export class Agent {
 		this.#steeringMode = opts.steeringMode || "one-at-a-time";
 		this.#followUpMode = opts.followUpMode || "one-at-a-time";
 		this.#interruptMode = opts.interruptMode || "immediate";
+		this.#toolScheduling = opts.toolScheduling;
 		this.streamFn = opts.streamFn || streamSimple;
 		this.#sessionId = opts.sessionId;
 		this.#deadline = opts.deadline;
@@ -556,7 +590,7 @@ export class Agent {
 		this.#resolveFallbackTool = opts.resolveFallbackTool;
 		this.#suggestFallbackToolNames = opts.suggestFallbackToolNames;
 		this.#intentTracing = opts.intentTracing === true;
-		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
+		this.#pruneToolDescriptions = opts.pruneToolDescriptions ?? false;
 		this.#dialect = opts.dialect;
 		this.#dialectResolver = opts.dialectResolver;
 		this.#abortOnFabricatedToolResult = opts.abortOnFabricatedToolResult;
@@ -566,6 +600,7 @@ export class Agent {
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
 		this.beforeToolCall = opts.beforeToolCall;
 		this.afterToolCall = opts.afterToolCall;
+		this.admitToolResult = opts.admitToolResult;
 		this.transformAssistantMessage = opts.transformAssistantMessage;
 		this.#telemetry = opts.telemetry;
 		this.#appendOnlyContext = opts.appendOnlyContext;
@@ -770,10 +805,12 @@ export class Agent {
 
 	/** Strip tool descriptions from provider-bound specs; read per request. */
 	get pruneToolDescriptions(): boolean {
-		return this.#pruneToolDescriptions;
+		return typeof this.#pruneToolDescriptions === "function"
+			? this.#pruneToolDescriptions()
+			: this.#pruneToolDescriptions;
 	}
 
-	set pruneToolDescriptions(value: boolean) {
+	set pruneToolDescriptions(value: boolean | (() => boolean)) {
 		this.#pruneToolDescriptions = value;
 	}
 
@@ -883,7 +920,10 @@ export class Agent {
 			? []
 			: (normalizeTools(this.#toolsForModel(model), {
 					injectIntent: this.#intentTracing,
-					pruneDescriptions: this.#pruneToolDescriptions,
+					pruneDescriptions:
+						typeof this.#pruneToolDescriptions === "function"
+							? this.#pruneToolDescriptions()
+							: this.#pruneToolDescriptions,
 				}) ?? []);
 		let context: Context = { systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
@@ -1125,6 +1165,28 @@ export class Agent {
 
 	getInterruptMode(): "immediate" | "wait" {
 		return this.#interruptMode;
+	}
+
+	setToolScheduling(scheduling: ToolSchedulingConfig | undefined) {
+		this.#toolScheduling = scheduling;
+	}
+
+	getToolScheduling(): ToolSchedulingConfig | undefined {
+		return this.#toolScheduling;
+	}
+
+	/**
+	 * Live prune decision for provider tool schemas. Boolean freezes the value;
+	 * a getter re-evaluates on every provider request / side request.
+	 */
+	setPruneToolDescriptions(value: boolean | (() => boolean)): void {
+		this.#pruneToolDescriptions = value;
+	}
+
+	getPruneToolDescriptions(): boolean {
+		return typeof this.#pruneToolDescriptions === "function"
+			? this.#pruneToolDescriptions()
+			: this.#pruneToolDescriptions;
 	}
 
 	setTools(t: AgentTool<any>[]) {
@@ -1625,6 +1687,7 @@ export class Agent {
 			serviceTier: this.#serviceTier,
 			hideThinkingSummary: this.#hideThinkingSummary,
 			interruptMode: this.#interruptMode,
+			toolScheduling: this.#toolScheduling,
 			sessionId: this.#sessionId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
@@ -1680,6 +1743,9 @@ export class Agent {
 			appendOnlyContext: this.#appendOnlyContext,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
+			admitToolResult: this.admitToolResult
+				? (admission, signal) => this.admitToolResult?.(admission, signal)
+				: undefined,
 			transformAssistantMessage: this.transformAssistantMessage
 				? (message, signal) => this.transformAssistantMessage?.(message, signal)
 				: undefined,

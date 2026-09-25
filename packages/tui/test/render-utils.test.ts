@@ -472,6 +472,22 @@ describe("shortenEmbeddedPaths", () => {
 		expect(shortenEmbeddedPaths(sibling, home)).toBe(sibling);
 	});
 
+	it("rewrites a home path that is not the first token", () => {
+		const home = "/Users/alice";
+		expect(shortenEmbeddedPaths(`cat ${home}/private.txt`, home)).toBe("cat ~/private.txt");
+	});
+
+	it("rewrites every home path in compact arguments", () => {
+		const home = "/Users/alice";
+		expect(shortenEmbeddedPaths(`["${home}/a","${home}/b"]`, home)).toBe(`["~/a","~/b"]`);
+	});
+
+	it("does not rewrite a Windows sibling directory that shares a home prefix", () => {
+		const home = String.raw`C:\Users\me`;
+		const sibling = String.raw`C:\Users\me2\projects\demo`;
+		expect(shortenEmbeddedPaths(`open ${sibling}`, home)).toBe(`open ${sibling}`);
+	});
+
 	it("normalizes shortened Windows paths", () => {
 		const home = String.raw`C:\Users\Jane`;
 		const filePath = String.raw`C:\Users\Jane\projects\demo: failed`;

@@ -3714,7 +3714,7 @@ export function alibabaTokenPlanModelManagerOptions(
 								reasoning: true,
 								thinking: {
 									mode: "effort" as const,
-									efforts: [Effort.High, Effort.Max],
+									efforts: [Effort.Low, Effort.High, Effort.Max],
 								},
 							};
 						}

@@ -67,6 +67,14 @@ export interface JobSnapshot {
 	 * on collision, else the job id itself. See {@link AsyncJob.agentId}.
 	 */
 	agentUrlId?: string;
+	/** Live tool activity for a running task job, when the progress snapshot has one. */
+	liveActivity?: { tool?: string; detail?: string; elapsedMs?: number };
+	/** Terminal provenance copied from task progress. */
+	completionKind?: string;
+	/** Milliseconds spent waiting for a spawn permit. */
+	spawnQueueMs?: number;
+	/** Originating parent task tool call id. */
+	taskToolCallId?: string;
 }
 
 /** Outcome of cancelling one background job. */

@@ -462,6 +462,10 @@
 			"types": "./src/stt/*.ts",
 			"import": "./src/stt/*.ts"
 		},
+		"./shadow-mind": {
+			"types": "./src/shadow-mind/index.ts",
+			"import": "./src/shadow-mind/index.ts"
+		},
 		"./task": {
 			"types": "./src/task/index.ts",
 			"import": "./src/task/index.ts"

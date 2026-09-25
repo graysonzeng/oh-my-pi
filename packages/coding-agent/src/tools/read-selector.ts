@@ -1,7 +1,8 @@
 import type { LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { parseTailCount } from "./path-utils";
 import { parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { splitInternalUrlSel, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { parseTailCount } from "./path-utils";
 /** Parsed representation of a path-embedded selector. */
 export type ParsedSelector =
 	| { kind: "none" }
@@ -108,6 +109,26 @@ export function parseSel(sel: string | undefined): ParsedSelector {
  * Returns the FIRST range only — multi-range callers MUST branch on `isMultiRange` before
  * calling this helper.
  */
+export function parseReadPathSelector(path: unknown): ParsedSelector {
+	if (typeof path !== "string" || path.length === 0) return { kind: "none" };
+	const split = /^[a-z][a-z0-9+.-]*:\/\//i.test(path) ? splitInternalUrlSel(path) : splitPathAndSel(path);
+	return parseSel(split.sel);
+}
+
+/** Explicit bounded ranges and `:raw` must survive ordinary-session tool-output clamps. */
+export function shouldPreserveExplicitReadRange(path: unknown): boolean {
+	const parsed = parseReadPathSelector(path);
+	return parsed.kind === "raw" || parsed.kind === "lines";
+}
+
+/** Read tool args historically use `path`; some call sites still pass `file_path`. */
+export function readPathFromToolArgs(args: unknown): unknown {
+	if (!args || typeof args !== "object") return undefined;
+	if (Object.hasOwn(args, "path")) return Reflect.get(args, "path");
+	if (Object.hasOwn(args, "file_path")) return Reflect.get(args, "file_path");
+	return undefined;
+}
+
 export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; limit?: number } {
 	if (parsed.kind === "lines") {
 		const first = parsed.ranges[0];

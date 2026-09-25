@@ -111,6 +111,10 @@ export const launchHelp = {
 			options: ["always-ask", "write", "yolo"],
 			description: "Override tools.approvalMode for this session (always-ask|write|yolo)",
 		}),
+		ptc: Flags.string({
+			options: ["off", "on", "auto"],
+			description: "Override tools.ptc.mode for this session (off|on|auto)",
+		}),
 	},
 	examples: [
 		`# Interactive mode\n  ${APP_NAME}`,

@@ -14,17 +14,29 @@
  * resets, message_update content replacement, cancellation, and the final
  * flush. Snapshot arrays must also stay immutable after later refreshes.
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@oh-my-pi/pi-ai";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import type { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { copySpawnJobLiveProgress } from "@oh-my-pi/pi-coding-agent/task";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 const TAIL_BYTES = 8 * 1024;
@@ -461,5 +473,407 @@ describe("recentOutput event-sequence equivalence (deferred reconstruction)", ()
 		const result = await runScenario(ops);
 		expect(result.exitCode).toBe(0);
 		expectAllMatch(result, 20);
+	});
+});
+
+describe("executor live-tool progress snapshots", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+	});
+
+	it("publishes current-tool args and start timestamp, then clears them on tool end", async () => {
+		const snapshots: AgentProgress[] = [];
+		const eventBus = new EventBus();
+		resetSettingsForTest();
+		const tempDir = TempDir.createSync("@pi-executor-hud-");
+		let authStorage: AuthStorage | undefined;
+		let parentSession: AgentSession | undefined;
+		let mode: InteractiveMode | undefined;
+		try {
+			await Settings.init({
+				inMemory: true,
+				cwd: tempDir.path(),
+				overrides: { "startup.quiet": true },
+			});
+			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+			const modelRegistry = new ModelRegistry(authStorage);
+			const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+			parentSession = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model,
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+					},
+				}),
+				sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+				settings: Settings.isolated({ "startup.quiet": true }),
+				modelRegistry,
+			});
+			mode = new InteractiveMode(parentSession, "test", undefined, undefined, undefined, undefined, eventBus);
+			const hudMode = mode;
+			await hudMode.init({ suppressWelcomeIntro: true });
+			vi.spyOn(hudMode.ui, "requestRender").mockImplementation(() => {});
+
+			const afterStart = Promise.withResolvers<void>();
+			const afterEnd = Promise.withResolvers<void>();
+			const afterGrep = Promise.withResolvers<void>();
+			const { session } = createScriptedSession(async emit => {
+				emit({
+					type: "tool_execution_start",
+					toolCallId: "read-1",
+					toolName: "read",
+					args: { file_path: "src/auth.ts" },
+				} as AgentSessionEvent);
+				await afterStart.promise;
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "read-1",
+					toolName: "read",
+					result: { content: [{ type: "text", text: "ok" }] },
+					isError: false,
+				} as AgentSessionEvent);
+				await afterEnd.promise;
+				emit({
+					type: "tool_execution_start",
+					toolCallId: "grep-1",
+					toolName: "grep",
+					args: { pattern: "password" },
+				} as AgentSessionEvent);
+				await afterGrep.promise;
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "grep-1",
+					toolName: "grep",
+					result: { content: [{ type: "text", text: "ok" }] },
+					isError: false,
+				} as AgentSessionEvent);
+				for (const event of yieldEvents()) emit(event);
+			});
+			vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({ session } as CreateAgentSessionResult);
+			const running = runSubprocess({
+				cwd: "/tmp",
+				agent,
+				task: "live tool fields",
+				description: "live tool fields",
+				index: 0,
+				id: "AuthLoader",
+				detached: true,
+				settings: Settings.isolated(),
+				modelRegistry: { refresh: async () => {} } as ModelRegistry,
+				enableLsp: false,
+				eventBus,
+				onProgress: progress => {
+					snapshots.push({
+						...progress,
+						recentTools: progress.recentTools.map(tool => ({ ...tool })),
+					});
+				},
+			});
+			const waitFor = async (predicate: () => boolean, label: string) => {
+				const startedAt = Date.now();
+				while (!predicate()) {
+					if (Date.now() - startedAt > 2_000) throw new Error(`timed out waiting for ${label}`);
+					await Bun.sleep(10);
+				}
+			};
+			const waitForHud = async (predicate: (hud: string) => boolean, label: string) => {
+				const startedAt = Date.now();
+				while (true) {
+					const hud = Bun.stripANSI(hudMode.subagentContainer.render(120).join("\n"));
+					if (predicate(hud)) return hud;
+					if (Date.now() - startedAt > 2_000) throw new Error(`timed out waiting for ${label}: ${hud}`);
+					await Bun.sleep(20);
+				}
+			};
+			await waitFor(() => snapshots.some(progress => progress.currentTool === "read"), "current-tool snapshot");
+			const live = snapshots.findLast(progress => progress.currentTool === "read");
+			expect(live?.currentToolArgs).toBe("src/auth.ts");
+			expect(live?.currentToolStartMs).toBeGreaterThan(0);
+			const liveHud = await waitForHud(
+				hud => hud.includes("AuthLoader") && /read: src\/auth\.ts/.test(hud),
+				"live HUD read gist",
+			);
+			expect(liveHud).toContain("AuthLoader");
+			expect(liveHud).toMatch(/read: src\/auth\.ts/);
+			const liveNarrow = Bun.stripANSI(hudMode.subagentContainer.render(40).join("\n"));
+			expect(liveNarrow).toContain("AuthLoader");
+			expect(liveNarrow).toMatch(/read: src\/auth\.ts/);
+			for (const line of liveNarrow.split("\n")) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+			}
+			afterStart.resolve();
+			await waitFor(
+				() => snapshots.some(progress => progress.recentTools[0]?.tool === "read" && !progress.currentTool),
+				"recent-tool snapshot",
+			);
+			const ended = snapshots.findLast(
+				progress => progress.recentTools[0]?.tool === "read" && !progress.currentTool,
+			);
+			expect(ended?.currentTool).toBeUndefined();
+			expect(ended?.currentToolArgs).toBeUndefined();
+			expect(ended?.currentToolStartMs).toBeUndefined();
+			expect(ended?.recentTools[0]?.args).toBe("src/auth.ts");
+			const endedHud = await waitForHud(
+				hud => hud.includes("working") && !hud.includes("6.0s"),
+				"working HUD after tool completion",
+			);
+			expect(endedHud).not.toContain("src/auth.ts");
+			expect(endedHud).not.toContain("6.0s");
+			afterEnd.resolve();
+			await waitFor(() => snapshots.some(progress => progress.currentTool === "grep"), "grep snapshot");
+			const grep = snapshots.findLast(progress => progress.currentTool === "grep");
+			expect(grep?.currentToolArgs).toBe("password");
+			const grepHud = await waitForHud(
+				hud => /grep: password/.test(hud) && !hud.includes("src/auth.ts"),
+				"live HUD grep gist",
+			);
+			expect(grepHud).toMatch(/grep: password/);
+			expect(grepHud).not.toContain("src/auth.ts");
+			const grepNarrow = Bun.stripANSI(hudMode.subagentContainer.render(40).join("\n"));
+			expect(grepNarrow).toMatch(/grep: password/);
+			expect(grepNarrow).not.toContain("src/auth.ts");
+			for (const line of grepNarrow.split("\n")) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+			}
+			afterGrep.resolve();
+			const result = await running;
+			expect(result.exitCode).toBe(0);
+			await waitForHud(hud => !hud.includes("AuthLoader"), "cleared HUD");
+		} finally {
+			mode?.stop();
+			await parentSession?.dispose();
+			authStorage?.close();
+			tempDir.removeSync();
+			resetSettingsForTest();
+		}
+	});
+
+	it("feeds the same executor snapshot to the HUD and Agent Hub", async () => {
+		const eventBus = new EventBus();
+		resetSettingsForTest();
+		const tempDir = TempDir.createSync("@pi-executor-dual-");
+		let authStorage: AuthStorage | undefined;
+		let parentSession: AgentSession | undefined;
+		let mode: InteractiveMode | undefined;
+		let hub: AgentHubOverlayComponent | undefined;
+		const rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const colsDesc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => 24, set: () => {} });
+		Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => 140, set: () => {} });
+		try {
+			await Settings.init({
+				inMemory: true,
+				cwd: tempDir.path(),
+				overrides: { "startup.quiet": true },
+			});
+			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+			const modelRegistry = new ModelRegistry(authStorage);
+			const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+			parentSession = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model,
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+					},
+				}),
+				sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+				settings: Settings.isolated({ "startup.quiet": true }),
+				modelRegistry,
+			});
+			mode = new InteractiveMode(parentSession, "test", undefined, undefined, undefined, undefined, eventBus);
+			const hudMode = mode;
+			await hudMode.init({ suppressWelcomeIntro: true });
+			vi.spyOn(hudMode.ui, "requestRender").mockImplementation(() => {});
+			vi.spyOn(hudMode.ui, "showOverlay").mockImplementation(component => {
+				hub = component as AgentHubOverlayComponent;
+				return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+			});
+
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+			const registry = AgentRegistry.global();
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: null });
+			registry.register({
+				id: "AuthLoader",
+				displayName: "Auth Loader",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+			});
+
+			const jobProgress: AgentProgress = {
+				index: 0,
+				id: "AuthLoader",
+				agent: "task",
+				agentSource: "bundled",
+				status: "running",
+				task: "live tool fields",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 0,
+			};
+			const hang = Promise.withResolvers<string>();
+			const reported = Promise.withResolvers<(text: string, details?: Record<string, unknown>) => Promise<void>>();
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			manager.register(
+				"task",
+				"AuthLoader",
+				async ({ reportProgress }) => {
+					reported.resolve(reportProgress);
+					return hang.promise;
+				},
+				{ id: "AuthLoader", ownerId: "Main" },
+			);
+			const reportProgress = await reported.promise;
+
+			const afterStart = Promise.withResolvers<void>();
+			const afterEnd = Promise.withResolvers<void>();
+			const afterGrep = Promise.withResolvers<void>();
+			const { session } = createScriptedSession(async emit => {
+				emit({
+					type: "tool_execution_start",
+					toolCallId: "read-1",
+					toolName: "read",
+					args: { file_path: "src/auth.ts" },
+					intent: "Inspect login",
+				} as AgentSessionEvent);
+				await afterStart.promise;
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "read-1",
+					toolName: "read",
+					result: { content: [{ type: "text", text: "ok" }] },
+					isError: false,
+				} as AgentSessionEvent);
+				await afterEnd.promise;
+				emit({
+					type: "tool_execution_start",
+					toolCallId: "grep-1",
+					toolName: "grep",
+					args: { pattern: "password" },
+				} as AgentSessionEvent);
+				await afterGrep.promise;
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "grep-1",
+					toolName: "grep",
+					result: { content: [{ type: "text", text: "ok" }] },
+					isError: false,
+				} as AgentSessionEvent);
+				for (const event of yieldEvents()) emit(event);
+			});
+			vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({ session } as CreateAgentSessionResult);
+			const running = runSubprocess({
+				cwd: "/tmp",
+				agent,
+				task: "live tool fields",
+				description: "Refactor the auth flow",
+				index: 0,
+				id: "AuthLoader",
+				detached: true,
+				settings: Settings.isolated(),
+				modelRegistry: { refresh: async () => {} } as ModelRegistry,
+				enableLsp: false,
+				eventBus,
+				onProgress: async progress => {
+					copySpawnJobLiveProgress(jobProgress, progress);
+					jobProgress.id = "AuthLoader";
+					await reportProgress("running", { progress: [{ ...jobProgress }] });
+				},
+			});
+
+			const waitForHud = async (predicate: (hud: string) => boolean, label: string) => {
+				const startedAt = Date.now();
+				while (true) {
+					const hud = Bun.stripANSI(hudMode.subagentContainer.render(120).join("\n"));
+					if (predicate(hud)) return hud;
+					if (Date.now() - startedAt > 2_000) throw new Error(`timed out waiting for ${label}: ${hud}`);
+					await Bun.sleep(20);
+				}
+			};
+
+			const liveHud = await waitForHud(
+				hud => hud.includes("AuthLoader") && /read: Inspect login/.test(hud),
+				"live HUD read gist",
+			);
+			expect(liveHud).toMatch(/read: Inspect login/);
+			expect(liveHud).not.toContain("src/auth.ts");
+			const dualHudNarrow = Bun.stripANSI(hudMode.subagentContainer.render(40).join("\n"));
+			expect(dualHudNarrow).toMatch(/read: Inspect login/);
+			expect(dualHudNarrow).not.toContain("src/auth.ts");
+			for (const line of dualHudNarrow.split("\n")) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+			}
+			hudMode.showAgentHub();
+			if (!hub) throw new Error("expected Agent Hub overlay");
+			hub.handleInput("\t");
+			const liveHub = Bun.stripANSI(hub.render(140).join("\n"));
+			expect(liveHub).toContain("Current");
+			expect(liveHub).toContain("read · src/auth.ts");
+
+			afterStart.resolve();
+			await waitForHud(hud => /read: Inspect login/.test(hud) && !hud.includes("6.0s"), "recent HUD");
+			afterEnd.resolve();
+			const grepHud = await waitForHud(
+				hud => /grep: Inspect login/.test(hud) && !hud.includes("src/auth.ts"),
+				"grep HUD",
+			);
+			expect(grepHud).toMatch(/grep: Inspect login/);
+			expect(grepHud).not.toContain("password");
+			const grepHudNarrow = Bun.stripANSI(hudMode.subagentContainer.render(40).join("\n"));
+			expect(grepHudNarrow).toMatch(/grep: Inspect login/);
+			expect(grepHudNarrow).not.toContain("password");
+			for (const line of grepHudNarrow.split("\n")) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+			}
+			const grepHub = Bun.stripANSI(hub.render(140).join("\n"));
+			expect(grepHub).toContain("grep · password");
+			expect(grepHub).not.toContain("src/auth.ts");
+			afterGrep.resolve();
+			const result = await running;
+			expect(result.exitCode).toBe(0);
+			await waitForHud(hud => !hud.includes("AuthLoader"), "cleared HUD");
+			hang.resolve("done");
+			const settledHudNarrow = Bun.stripANSI(hudMode.subagentContainer.render(40).join("\n"));
+			expect(settledHudNarrow).not.toContain("AuthLoader");
+			expect(settledHudNarrow).not.toMatch(/grep: password/);
+			for (const line of settledHudNarrow.split("\n")) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+			}
+			const settledHub = Bun.stripANSI(hub.render(140).join("\n"));
+			expect(settledHub).toContain("AuthLoader");
+			expect(settledHub).toContain("Task");
+			expect(settledHub).toContain("Refactor the auth flow");
+			await manager.getJob("AuthLoader")?.promise;
+		} finally {
+			hub?.dispose();
+			mode?.stop();
+			await parentSession?.dispose();
+			authStorage?.close();
+			tempDir.removeSync();
+			resetSettingsForTest();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+			if (rowsDesc) Object.defineProperty(process.stdout, "rows", rowsDesc);
+			else Object.defineProperty(process.stdout, "rows", { configurable: true, value: undefined, writable: true });
+			if (colsDesc) Object.defineProperty(process.stdout, "columns", colsDesc);
+			else
+				Object.defineProperty(process.stdout, "columns", { configurable: true, value: undefined, writable: true });
+		}
 	});
 });

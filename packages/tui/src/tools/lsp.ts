@@ -40,6 +40,7 @@ export interface LspParams {
 		| "code_actions"
 		| "type_definition"
 		| "implementation"
+		| "call_hierarchy"
 		| "status"
 		| "reload"
 		| "capabilities"

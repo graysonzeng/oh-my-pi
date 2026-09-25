@@ -112,4 +112,20 @@ describe("isProviderRetryableError", () => {
 			expect(isProviderRetryableError(err)).toBe(false);
 		}
 	});
+
+	it("does not same-credential retry permanent auth or payment failures", () => {
+		expect(isProviderRetryableError(new Error("503 auth_unavailable: no auth available"))).toBe(false);
+		expect(isProviderRetryableError(new Error("503 Payment Required"))).toBe(false);
+		expect(isProviderRetryableError(new Error("401 Insufficient balance"))).toBe(false);
+		expect(
+			isProviderRetryableError(
+				new Error(
+					"503 auth_unavailable: no auth available (providers=xai, model=grok-4.6; last upstream error: You have run out of credits or need a Grok subscription. Add credits at https://accounts.x.ai)",
+				),
+			),
+		).toBe(false);
+		expect(isProviderRetryableError(new Error("usage_limit_reached"))).toBe(false);
+		expect(isProviderRetryableError(new Error("503 service unavailable"))).toBe(true);
+		expect(isProviderRetryableError(new Error("429 Too Many Requests"))).toBe(true);
+	});
 });

@@ -1,6 +1,7 @@
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
 import { cfgEditMode } from "../edit/settings";
 import { cfgEvalJs } from "../eval/settings";
+import { cfgToolsPtcMode } from "../config/workflow-settings";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -172,6 +173,7 @@ export const cfgCodeModeInputs = combine({
 	directTools: cfgProvidersOpenaiCodexCodeModeDirectTools,
 	evalJs: cfgEvalJs,
 	editMode: cfgEditMode,
+	ptcMode: cfgToolsPtcMode,
 });
 
 export const cfgImagesDescribeForTextModels = register({

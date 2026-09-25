@@ -35,6 +35,15 @@
 - Improved IDA database resource management with project sharing, bounded concurrency, idle cleanup, autosave, and clearer database status in listings.
 - Improved runtime configuration behavior with type-safe layered settings, live updates, and safe sequential saves.
 - Improved authentication and credential management to support live broker and credential-store changes.
+### Added
+
+- Added resumable, quality-gated multi-model workflows and `/delivery`, with independent review and verified worktree changes.
+- Added optional mid-turn `consult` with isolated context, usage budgets, and same-model auto-pause.
+- Added `code_intel`, structured compaction with recoverable tool output, and optional raw session-history search.
+- Added subagent performance-class budgets, live activity displays, deferred ordinary IRC messages, and offline latency reports.
+- Added session-wide programmatic tool calling via `tools.ptc.mode` (`off`/`on`/`auto`), CLI `--ptc`, and RPC `set_ptc_mode`, so any provider can collapse the direct tool surface into eval with a skeleton catalog and `catalog.searchTools`/`describeTools`.
+- Added `collab.autoStart` (`off` | `view` | `control`): every local interactive session hosts itself as it starts and rotates its room on `/new`, `/resume`, fork, or branch, so a phone or dashboard can reach any running session without running `/collab` first ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm) and [@sorphwer](https://github.com/sorphwer)).
+- Added `omp collab list [--json]` and `/collab list` to enumerate every live local Collab host (instance, generation, session, cwd, model, participants, relay/attention state, access) without exposing links, plus `omp collab link <instanceId|pid> [--view]` to fetch one generation-bound browser URL from a private per-room Unix socket/named pipe registry; room keys, write tokens, and URLs never touch disk ([#6099](https://github.com/can1357/oh-my-pi/issues/6099); [#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm) and [@sorphwer](https://github.com/sorphwer)).
 
 ### Fixed
 

@@ -2,6 +2,7 @@ import type { Component } from "../index";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "./renderer";
 import type { Theme } from "../theme/theme";
+import { classifyToolPresentation } from "../render/tool-presentation";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
 import { renderStatusLine, type StatusLineOptions } from "../render/status-line";
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
@@ -31,6 +32,8 @@ export interface DefaultToolRenderInput {
 		/** Synthetic placeholder for a call skipped mid-batch to service steering/peer
 		 * input — the tool never ran, so it renders neutral (info) rather than as an error. */
 		skipped?: boolean;
+		/** Full tool details, when the caller has them, so skipped/aborted cards are not collapsed into isError. */
+		details?: unknown;
 	};
 	/** Current expansion and lifecycle state. */
 	options: RenderResultOptions;
@@ -50,27 +53,34 @@ function buildDefaultToolSnapshot(
 	contentWidth: number,
 ): DefaultToolSnapshot {
 	const { options, result } = input;
+	const presentation = result ? classifyToolPresentation(result) : undefined;
+	const skipped = presentation === "skipped" || result?.skipped === true;
+	const failed = presentation === "failed" || presentation === "aborted" || result?.isError === true;
 	const status: StatusLineOptions = {
 		icon: options.isPartial
 			? options.spinnerFrame !== undefined
 				? "running"
 				: "pending"
-			: result?.skipped
-				? "info"
-				: result?.isError
-					? "error"
-					: "done",
+			: presentation === "skipped"
+				? "skipped"
+				: presentation === "aborted"
+					? "aborted"
+					: result?.skipped
+						? "info"
+						: presentation === "failed"
+							? "error"
+							: "done",
 		spinnerFrame: options.spinnerFrame,
 		title: input.label,
 	};
-	if (result?.skipped) status.titleColor = "muted";
+	if (skipped) status.titleColor = "muted";
 	const phase: ToolCardPhase = options.isPartial
 		? options.spinnerFrame !== undefined
 			? "running"
 			: "partial"
-		: result?.skipped
+		: skipped
 			? "info"
-			: result?.isError
+			: failed
 				? "error"
 				: "success";
 
