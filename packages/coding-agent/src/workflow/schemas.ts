@@ -390,6 +390,43 @@ export const ImplementationArtifactSchema = ArtifactHeaderSchema.extend({
 	unresolved: z.array(z.string()),
 }).strict();
 
+const VerificationValiditySchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		kind: z.literal("verification_validity"),
+		executor: z.enum(["workflow_verifier", "worker", "parent"]),
+		owner: z.enum(["workflow_verifier", "worker", "parent"]),
+		commands: z.array(z.string()),
+		scope: z
+			.object({
+				kind: z.enum(["commands", "paths", "repo"]),
+				paths: z.array(z.string()).optional(),
+			})
+			.strict(),
+		codeState: z
+			.object({
+				patchSha256: z.string().min(1),
+				changedFiles: z.array(z.string()),
+				implementationAttemptId: z.string().optional(),
+				fingerprint: z.string().min(1),
+			})
+			.strict(),
+		invalidatedBy: z.array(
+			z.enum([
+				"implementation_changed",
+				"commands_changed",
+				"scope_changed",
+				"repair_applied",
+				"owner_transfer",
+				"explicit",
+			]),
+		),
+		invalid: z.boolean().optional(),
+		invalidReason: z.string().optional(),
+		invalidatedAt: z.string().optional(),
+	})
+	.strict();
+
 export const VerificationArtifactSchema = ArtifactHeaderSchema.extend({
 	kind: z.literal("verification"),
 	passed: z.boolean(),
@@ -405,6 +442,7 @@ export const VerificationArtifactSchema = ArtifactHeaderSchema.extend({
 			})
 			.strict(),
 	),
+	validity: VerificationValiditySchema.optional(),
 }).strict();
 
 export const WorkflowStateSchema = z

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { logger } from "@oh-my-pi/pi-utils";
 import {
 	buildLatencyRolloutDecision,
 	freezeLatencyArmSnapshot,
@@ -31,6 +32,10 @@ import {
 	LatencyRolloutCohortStore,
 	type LatencyRolloutObservationV1,
 } from "../latency/rollout-cohort";
+import {
+	buildParentFinalVerificationDetails,
+	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+} from "../latency/parent-final-verification";
 import gateReviewAdapterPrompt from "../prompts/workflow/gate-review-adapter.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import {
@@ -129,6 +134,7 @@ import type { PlanReviewStageResult } from "./stages/plan-review";
 import { PlanReviewStage } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
+import { invalidateVerificationResult, isValidDeliveryEvidence } from "./verification-validity";
 import type {
 	Artifact,
 	AuthorResponseV1,
@@ -2296,10 +2302,56 @@ export class WorkflowEngine {
 					signal,
 					timeoutMs: this.#config.verificationTimeoutMs,
 					cwd,
+					// Reuse sealed implementation_verify greens only when code state + commands still match.
+					priorVerification: this.#verification,
 				});
-				this.#finalVerification = verification;
-				await this.#persistArtifact(workflowId, attemptId, "verification", verification);
-				const decision = verification.passed ? "passed" : "failed";
+				const deliveryOk = isValidDeliveryEvidence(verification);
+				const effectiveVerification =
+					deliveryOk || !verification.passed
+						? verification
+						: {
+								...verification,
+								passed: false,
+								checks: [
+									...verification.checks,
+									{
+										id: "delivery-evidence",
+										status: "failed" as const,
+										summary:
+											"Verification result is not valid delivery evidence (missing, invalidated, or non-delivery ownership)",
+									},
+								],
+							};
+				this.#finalVerification = effectiveVerification;
+				await this.#persistArtifact(workflowId, attemptId, "verification", effectiveVerification);
+				// Explicit parent-acceptance receipt for offline e2e association.
+				// Normal stage transitions alone must not imply verification.
+				// Ownership/validity must also hold — passed alone is not delivery evidence.
+				if (verification.passed && !deliveryOk) {
+					logger.warn("final_verify passed checks but lacks valid delivery evidence", {
+						workflowId,
+						attemptId,
+						hasValidity: Boolean(verification.validity),
+						invalid: verification.validity?.invalid === true,
+						owner: verification.validity?.owner,
+						executor: verification.validity?.executor,
+					});
+				}
+				try {
+					session.sessionManager?.appendCustomEntry(
+						PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+						buildParentFinalVerificationDetails(deliveryOk ? "passed" : "failed", "workflow"),
+					);
+				} catch (error) {
+					// Receipt bookkeeping must not fail final_verify, but missing
+					// receipts leave offline e2e as unknown — surface the write error.
+					logger.warn("parent_final_verification receipt write failed", {
+						workflowId,
+						attemptId,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+				const decision = deliveryOk ? "passed" : "failed";
 				const next = getNextStage("final_verify", decision);
 				await this.#completeTo(
 					workflowId,
@@ -2367,6 +2419,29 @@ export class WorkflowEngine {
 		evidence?: { modelFamily?: string | null },
 	): Promise<void> {
 		this.#implementation = implementation;
+		// Repair mutates code under test — prior greens are stale and must not be reused.
+		// Persist the invalidated seal so resume cannot reload a pre-repair green as valid.
+		if (this.#verification) {
+			this.#verification = invalidateVerificationResult(
+				this.#verification,
+				"repair_applied",
+				"repair_applied",
+			);
+			this.#verificationArtifactRef = await this.#persistArtifact(
+				workflowId,
+				attemptId,
+				"verification",
+				this.#verification,
+			);
+		}
+		if (this.#finalVerification) {
+			this.#finalVerification = invalidateVerificationResult(
+				this.#finalVerification,
+				"repair_applied",
+				"repair_applied",
+			);
+			await this.#persistArtifact(workflowId, attemptId, "verification", this.#finalVerification);
+		}
 		// Latest write author must drive independent-review exclusion after repair.
 		if (implementation.provider) this.#implementerVendor = implementation.provider;
 		if (evidence?.modelFamily) this.#implementerModelFamily = evidence.modelFamily;
@@ -3006,11 +3081,22 @@ export class WorkflowEngine {
 			const observed = await this.#inspectPersistedWritePatch(state, cwd);
 			changesApplied = observed === "applied";
 		}
-		const reconciled = withWorkPackageMerge(state, attemptId, {
-			patchPath: state.merge.patchPath,
-			changesApplied,
-			summary: reported.summary,
-		});
+		// P1-4: reconcile outcomes stay explainable; isolation is not a transaction.
+		const recoveryKind = !changesApplied
+			? "merge_conflict"
+			: trustMerger
+				? "merge_applied"
+				: "recovered_applied";
+		const reconciled = withWorkPackageMerge(
+			state,
+			attemptId,
+			{
+				patchPath: state.merge.patchPath,
+				changesApplied,
+				summary: reported.summary,
+			},
+			{ recoveryKind },
+		);
 		await this.#persistWorkPackageState(workflowId, attemptId, reconciled);
 		return reconciled;
 	}

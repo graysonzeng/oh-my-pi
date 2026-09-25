@@ -3,6 +3,9 @@
 This guide is a repeatable checklist for porting changes from pi-mono into this repo.
 Use it for any merge: single file, feature branch, or full release sync.
 
+For syncing **can1357/oh-my-pi → this fork** while preserving workflow
+customizations, use `docs/upstream-sync-hygiene.md` instead.
+
 ## Last Sync Point (historical upstream marker)
 
 **Commit:** `b21b42d032919de2f2e6920a76fa9a37c3920c0a`

@@ -71,6 +71,16 @@ export interface WorkPackageExecutionV1 extends WorkPackageV1 {
 	errorSummary?: string;
 }
 
+/** P1-4 explainable merge/recovery outcome; isolation is never a transaction. */
+export interface WorkPackageMergeRecoveryV1 {
+	kind: "merge_conflict" | "merge_applied" | "recovered_applied" | "needs_reconciliation";
+	explainable: true;
+	detail: string;
+	verifyRerunGuaranteed: false;
+	isolationIsTransaction: false;
+	unitIds?: string[];
+}
+
 export interface WorkPackageMergeV1 {
 	status: "pending" | "prepared" | "applied" | "failed";
 	order: string[];
@@ -79,6 +89,8 @@ export interface WorkPackageMergeV1 {
 	/** SHA-256 of the durable aggregate patch written before merge starts. */
 	patchSha256?: string;
 	summary?: string;
+	/** Explainable merge/recovery outcome (P1-4); does not rewrite `summary`. */
+	recovery?: WorkPackageMergeRecoveryV1;
 }
 
 export interface WorkPackageStateArtifactV1 extends ArtifactHeader {
@@ -320,6 +332,47 @@ export interface ImplementationArtifactV1 extends ArtifactHeader {
 	unresolved: string[];
 }
 
+/**
+ * Ownership + validity metadata for a verification result (P1-2).
+ * Defined here so artifact consumers need not import the validity module.
+ */
+export type VerificationExecutor = "workflow_verifier" | "worker" | "parent";
+export type VerificationOwnerRole = "workflow_verifier" | "worker" | "parent";
+export type VerificationInvalidationTrigger =
+	| "implementation_changed"
+	| "commands_changed"
+	| "scope_changed"
+	| "repair_applied"
+	| "owner_transfer"
+	| "explicit";
+export type VerificationScopeKind = "commands" | "paths" | "repo";
+
+export interface VerificationScope {
+	kind: VerificationScopeKind;
+	paths?: string[];
+}
+
+export interface VerificationCodeState {
+	patchSha256: string;
+	changedFiles: string[];
+	implementationAttemptId?: string;
+	fingerprint: string;
+}
+
+export interface VerificationValidityV1 {
+	schemaVersion: 1;
+	kind: "verification_validity";
+	executor: VerificationExecutor;
+	owner: VerificationOwnerRole;
+	commands: string[];
+	scope: VerificationScope;
+	codeState: VerificationCodeState;
+	invalidatedBy: VerificationInvalidationTrigger[];
+	invalid?: boolean;
+	invalidReason?: string;
+	invalidatedAt?: string;
+}
+
 export interface VerificationArtifactV1 extends ArtifactHeader {
 	kind: "verification";
 	passed: boolean;
@@ -331,6 +384,12 @@ export interface VerificationArtifactV1 extends ArtifactHeader {
 		summary: string;
 		logPath?: string;
 	}>;
+	/**
+	 * Optional validity seal: command+scope, code state, executor/owner identity,
+	 * and invalidation triggers. Absent on legacy artifacts → treat as unknown
+	 * (not reusable delivery evidence).
+	 */
+	validity?: VerificationValidityV1;
 }
 
 /** Kind of a preserved stage-handoff item (deterministic extract, not model summary). */

@@ -19,6 +19,7 @@ function jobWithSettledResult(opts: {
 	agentId?: string;
 	completionKind: "completed" | "budget_stop" | "timeout" | "hard_abort";
 	spawnQueueMs?: number;
+	requestPhaseQueueMs?: number;
 	resultText?: string;
 }): AsyncJob {
 	return {
@@ -41,6 +42,18 @@ function jobWithSettledResult(opts: {
 					reviewMetrics: {
 						...emptyReviewMetrics(),
 						...(opts.spawnQueueMs !== undefined ? { spawnQueueMs: opts.spawnQueueMs } : {}),
+						...(opts.requestPhaseQueueMs !== undefined
+							? {
+									requestPhases: [
+										{
+											index: 0,
+											startedAtMs: 1,
+											durationMs: 10,
+											queueMs: opts.requestPhaseQueueMs,
+										},
+									],
+								}
+							: {}),
 					},
 				},
 			],
@@ -125,10 +138,16 @@ describe("async/hub delivery persistence", () => {
 
 	it("recovers hub-consumed completionKind and spawnQueueMs from persisted job snapshot details", async () => {
 		using tempDir = TempDir.createSync("hub-delivery-persist-");
-		const job = jobWithSettledResult({ id: "Worker", completionKind: "completed", spawnQueueMs: 18 });
+		const job = jobWithSettledResult({
+			id: "Worker",
+			completionKind: "completed",
+			spawnQueueMs: 18,
+			requestPhaseQueueMs: 7,
+		});
 		const snapshot = snapshotJobs({} as ToolSession, [job]);
 		expect(snapshot[0]?.completionKind).toBe("completed");
 		expect(snapshot[0]?.spawnQueueMs).toBe(18);
+		expect(snapshot[0]?.requestPhaseQueueMs).toBe(7);
 
 		const file = path.join(tempDir.path(), "sessions", "demo", "sess1.jsonl");
 		await Bun.write(
@@ -200,6 +219,7 @@ describe("async/hub delivery persistence", () => {
 		expect(report.completionKinds.completed).toBe(1);
 		expect(report.coverage.completionKind).toEqual({ present: 1, unknown: 0 });
 		expect(report.spawnQueueMs).toEqual({ n: 1, p50: 18, p90: 18 });
+		expect(report.coverage.requestPhaseQueueMs).toEqual({ present: 1, unknown: 0 });
 	});
 
 	it("keeps IRC-only duration unknown for spawnQueueMs", async () => {

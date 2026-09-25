@@ -2,11 +2,13 @@ import * as path from "node:path";
 import { evaluateWorkflowFinalCompletion } from "../../model-policy/completion";
 import type { ScopeStatus } from "../scope-metrics";
 import type { ImplementationArtifactV1, ReviewFindingV1, VerificationArtifactV1, VerifierPort } from "../types";
-import { changedFilesFromPatch } from "./implementation-verify";
-
-function isMissingFile(err: unknown): boolean {
-	return typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code === "ENOENT";
-}
+import {
+	assessVerificationReuse,
+	buildVerificationCodeState,
+	projectReusedVerificationChecks,
+	resolveVerificationPatchEvidence,
+	sealWorkflowVerifierResult,
+} from "../verification-validity";
 
 export interface FinalVerifyInput {
 	workflowId: string;
@@ -20,6 +22,12 @@ export interface FinalVerifyInput {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	cwd?: string;
+	/**
+	 * Prior sealed verification (typically implementation_verify). When still
+	 * valid for the same code state + commands, command checks are reused
+	 * instead of re-running; completion gates still always run.
+	 */
+	priorVerification?: VerificationArtifactV1 | null;
 }
 
 export class FinalVerifyStage {
@@ -31,35 +39,78 @@ export class FinalVerifyStage {
 
 	async execute(input: FinalVerifyInput): Promise<VerificationArtifactV1> {
 		const impl = input.implementation;
-		let patchContent: string | undefined;
-		let changedFiles = [...(impl?.changedFiles ?? [])];
+		const cwd = input.cwd ?? process.cwd();
+		const { patchContent, changedFiles } = await resolveVerificationPatchEvidence(impl, cwd);
 
-		if (impl?.patchPath) {
-			const resolved = path.isAbsolute(impl.patchPath)
-				? impl.patchPath
-				: path.join(input.cwd ?? process.cwd(), impl.patchPath);
-			try {
-				patchContent = await Bun.file(resolved).text();
-				if (changedFiles.length === 0) {
-					changedFiles = changedFilesFromPatch(patchContent);
-				}
-			} catch (err) {
-				if (!isMissingFile(err)) throw err;
-			}
-		}
+		const codeState = buildVerificationCodeState({
+			implementation: impl,
+			patchContent,
+			changedFiles,
+		});
+		const scope =
+			changedFiles.length > 0
+				? { kind: "paths" as const, paths: changedFiles }
+				: { kind: "repo" as const };
 
-		const base = await this.#verifier.verify(
-			{
+		const reuse = assessVerificationReuse({
+			prior: input.priorVerification,
+			codeState,
+			commands: input.commands,
+			scope,
+		});
+
+		let base: VerificationArtifactV1;
+		if (reuse.reusable && input.priorVerification) {
+			base = projectReusedVerificationChecks(input.priorVerification, {
 				workflowId: input.workflowId,
 				attemptId: input.attemptId,
 				stage: "final_verify",
-				changedFiles,
-				patchContent,
-			},
-			input.commands,
-			input.forbiddenPaths ?? [],
-			{ signal: input.signal, timeoutMs: input.timeoutMs },
-		);
+			});
+			// Command checks are reused, but current forbidden-path policy still applies.
+			const forbidden = input.forbiddenPaths ?? [];
+			const forbiddenFile = changedFiles.find(file =>
+				forbidden.some(entry => {
+					const normalizedFile = path.normalize(file);
+					const normalizedForbidden = path.normalize(entry);
+					return (
+						normalizedFile === normalizedForbidden ||
+						normalizedFile.startsWith(`${normalizedForbidden}${path.sep}`)
+					);
+				}),
+			);
+			if (forbiddenFile) {
+				base = {
+					...base,
+					passed: false,
+					checks: [
+						...base.checks,
+						{
+							id: "forbidden-paths",
+							status: "failed",
+							summary: `Changed file is inside a forbidden path: ${forbiddenFile}`,
+						},
+					],
+				};
+			}
+		} else {
+			base = await this.#verifier.verify(
+				{
+					workflowId: input.workflowId,
+					attemptId: input.attemptId,
+					stage: "final_verify",
+					changedFiles,
+					patchContent,
+				},
+				input.commands,
+				input.forbiddenPaths ?? [],
+				{ signal: input.signal, timeoutMs: input.timeoutMs },
+			);
+			base = sealWorkflowVerifierResult(base, {
+				commands: input.commands,
+				codeState,
+				scope,
+			});
+		}
 
 		const checks = [...base.checks];
 		const openBlocking = (input.openFindings ?? []).filter(
@@ -96,10 +147,17 @@ export class FinalVerifyStage {
 			}
 		}
 
-		return {
-			...base,
-			passed: completion.passed && checks.every(c => c.status !== "failed"),
-			checks,
-		};
+		return sealWorkflowVerifierResult(
+			{
+				...base,
+				passed: completion.passed && checks.every(c => c.status !== "failed"),
+				checks,
+			},
+			{
+				commands: input.commands,
+				codeState,
+				scope,
+			},
+		);
 	}
 }

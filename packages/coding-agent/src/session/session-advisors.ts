@@ -112,7 +112,8 @@ import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
 import { cfgAdvisorImmuneTurns, cfgAdvisorMaxNotesPerUpdate, cfgAdvisorSyncBacklog } from "../advisor/settings";
-import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
+import { cfgContextPromotionEnabled } from "./context-settings";
+import { effectiveCompactionSettings } from "./context-strategy-experiment";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -1977,7 +1978,11 @@ export class SessionAdvisors {
 		const agent = advisor.agent;
 		const incomingTokens = agent.tokenizer.countMessage(incoming);
 
-		const configuredCompaction = cfgCompaction.get(this.#host.settings);
+		let advisorModel = agent.state.model;
+		const contextWindow = advisorModel.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+
+		const configuredCompaction = effectiveCompactionSettings(this.#host.settings, contextWindow);
 		const methods = resolveCompactionMethodOrder(configuredCompaction.methodOrder);
 		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
@@ -1986,10 +1991,6 @@ export class SessionAdvisors {
 			configuredCompaction,
 			methods.includes("remote") ? "remote" : "soft",
 		);
-
-		let advisorModel = agent.state.model;
-		const contextWindow = advisorModel.contextWindow ?? 0;
-		if (contextWindow <= 0) return false;
 
 		const messages = agent.state.messages;
 		const storedConversationTokens = agent.tokenizer.countMessages(messages, { excludeEncryptedReasoning: true });

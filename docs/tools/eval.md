@@ -217,6 +217,47 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Runtime exceptions become backend output with nonzero exit. Interactive stdin is an error. Output truncation does not fail the call.
 - A dead retained managed kernel may be replaced and the invocation retried once by its executor.
 
+## Couple a file mutation to its verifier
+
+SoL-Pi efficiency absorption here is a **control-flow recipe** over existing
+`tool.write` / `tool.bash` bridges — not a new runtime primitive. The locked
+contract is `packages/coding-agent/test/eval/mutation-then-verify.test.ts`.
+
+Recipe (JS sketch; same gate order in Python):
+
+1. Call `tool.write(...)` once.
+2. If the write throws or returns a bridged `{ hasError: true }`, **stop** —
+   do not start the verifier.
+3. Otherwise call a predetermined `tool.bash(...)` verifier **once**.
+4. If bash reports `details.async.state === "running"`, treat that as
+   background-start only — **not** verified success.
+5. If the verifier exits nonzero, report failure; **keep the written file**
+   (failed verify does not roll back the mutation).
+
+### Boundaries (explicit)
+
+| Claim | Status |
+|---|---|
+| Transaction / automatic rollback on verify fail | **No** — write is kept |
+| Background start ack (`async.running`) equals verified | **No** |
+| Cancel guarantees a re-run of verify | **No** |
+| Default sessions automatically save one model turn | **No** — unproven |
+| New `then_run` tool / second ObservationPack / tool rebuild | **Out of scope** |
+
+Absorb the recipe into docs and tests only. Do not invent `then_run`, stack
+ObservationPack, or rebuild write/bash for this contract.
+
+Design note: `docs/superpowers/specs/2026-09-13-sol-pi-efficiency-absorption.md`.
+
+## Subagent thrash go/no-go (Track E)
+
+Analysis of repeated identical-view reads has started. Offline
+`repeatedReads` / soft-cap signals (including any local “501 identical-view”
+candidate counts) are **investigation candidates**, not proven waste. Until
+humans attribute real thrash and decide **go**, **do not add Track E prompt
+rules**. Soft-cap advisory text already exists for subagent reads; expanding
+Track E prompts remains **no-go**.
+
 ## Notes
 
 - One call is one cell. Use separate calls to exploit persistence and rerun only the failed step.

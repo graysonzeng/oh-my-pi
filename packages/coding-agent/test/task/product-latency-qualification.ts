@@ -18,6 +18,12 @@ export const RUBRIC_ID = "product-latency-qualification-v2";
 export const DECLARED_EXPERIMENT_ID = "sonic-effort-ceiling";
 export const QUALIFICATION_VARIANTS: readonly Variant[] = ["scout", "reviewer", "sonic"];
 
+/** One primary factor per experiment surface — never bundle advisories with sonic effort. */
+export type PairedExperimentId = "advisories" | "sonic-effort";
+export const EXPERIMENT_VARIANTS: Record<PairedExperimentId, readonly Variant[]> = {
+	advisories: ["scout", "reviewer"],
+	"sonic-effort": ["sonic"],
+};
 export const ASSIGNMENT_IDS = {
 	scout: "product-latency-scout-assignment.md",
 	reviewer: "product-latency-reviewer-assignment.md",
@@ -176,9 +182,17 @@ export interface QualificationIdentity {
 		strictModelIdentity: true;
 		isolatedAuthModelsYml: true;
 		measuredCount: number;
-		allowedEffortDelta: { experiment: typeof DECLARED_EXPERIMENT_ID; variant: "sonic"; field: "effectiveEffort" };
+		allowedEffortDelta?: { experiment: typeof DECLARED_EXPERIMENT_ID; variant: "sonic"; field: "effectiveEffort" };
 		fingerprints: QualificationFingerprints;
 	};
+}
+
+export interface RoleBenefitVerdict {
+	variant: Variant;
+	status: BenefitStatus;
+	reason?: string;
+	acceptanceRate?: { baseline: number; treatment: number; measured: number };
+	p50AcceptanceMs?: { baseline: number | undefined; treatment: number | undefined };
 }
 
 export interface BenefitVerdict {
@@ -186,8 +200,17 @@ export interface BenefitVerdict {
 	reason?: string;
 	declaredExperiment?: typeof DECLARED_EXPERIMENT_ID;
 	sonicEffort?: { baseline: string | undefined; treatment: string | undefined };
-	acceptanceRates?: Record<Variant, { baseline: number; treatment: number; measured: number }>;
-	p50AcceptanceMs?: Record<Variant, { baseline: number | undefined; treatment: number | undefined }>;
+	acceptanceRates?: Partial<Record<Variant, { baseline: number; treatment: number; measured: number }>>;
+	p50AcceptanceMs?: Partial<Record<Variant, { baseline: number | undefined; treatment: number | undefined }>>;
+	/** Per-role outcomes so total wall-clock cannot hide a single-role regression. */
+	roleVerdicts?: RoleBenefitVerdict[];
+}
+
+export interface CompareQualificationOptions {
+	/** Roles in scope for this comparison. Defaults to all qualification variants. */
+	variants?: readonly Variant[];
+	/** When set, stamps/strips sonic-effort identity according to the experiment surface. */
+	experiment?: PairedExperimentId;
 }
 
 export interface QualificationReport {
@@ -234,11 +257,23 @@ export function launchCeiling(mode: Mode, variantCount = QUALIFICATION_VARIANTS.
 	return variantCount * (1 + measuredCount(mode));
 }
 
-export function qualificationIdentity(mode: Mode, modelsConfigSha256?: string): QualificationIdentity {
+function resolveVariants(variants?: readonly Variant[]): readonly Variant[] {
+	return variants && variants.length > 0 ? variants : QUALIFICATION_VARIANTS;
+}
+
+export function qualificationIdentity(
+	mode: Mode,
+	modelsConfigSha256?: string,
+	options?: { variants?: readonly Variant[]; experiment?: PairedExperimentId },
+): QualificationIdentity {
+	const variants = [...resolveVariants(options?.variants ?? (options?.experiment ? EXPERIMENT_VARIANTS[options.experiment] : undefined))];
+	const includeSonicEffort =
+		options?.experiment === "sonic-effort" ||
+		(options?.experiment !== "advisories" && variants.includes("sonic"));
 	return {
 		rubricId: RUBRIC_ID,
 		mode,
-		variants: [...QUALIFICATION_VARIANTS],
+		variants,
 		assignmentIds: { ...ASSIGNMENT_IDS },
 		modelChains: {
 			scout: [...SCOUT_MODEL_CHAIN],
@@ -249,16 +284,19 @@ export function qualificationIdentity(mode: Mode, modelsConfigSha256?: string): 
 			strictModelIdentity: true,
 			isolatedAuthModelsYml: true,
 			measuredCount: measuredCount(mode),
-			allowedEffortDelta: {
-				experiment: DECLARED_EXPERIMENT_ID,
-				variant: "sonic",
-				field: "effectiveEffort",
-			},
+			...(includeSonicEffort
+				? {
+						allowedEffortDelta: {
+							experiment: DECLARED_EXPERIMENT_ID,
+							variant: "sonic" as const,
+							field: "effectiveEffort" as const,
+						},
+					}
+				: {}),
 			fingerprints: qualificationFingerprints(modelsConfigSha256),
 		},
 	};
 }
-
 export function measuredAttempts(attempts: readonly AttemptRecord[], variant: Variant): AttemptRecord[] {
 	return attempts.filter(attempt => attempt.variant === variant && !attempt.warmup);
 }
@@ -425,7 +463,11 @@ export function aggregateVariant(mode: Mode, variant: Variant, attempts: readonl
 	};
 }
 
-export function evaluateRuntimeSmoke(mode: Mode, attempts: readonly AttemptRecord[]): GateVerdict {
+export function evaluateRuntimeSmoke(
+	mode: Mode,
+	attempts: readonly AttemptRecord[],
+	variants: readonly Variant[] = QUALIFICATION_VARIANTS,
+): GateVerdict {
 	if (attempts.some(attempt => attempt.skip)) {
 		return { status: "UNVERIFIED", reason: attempts.find(attempt => attempt.skip)?.reason ?? "skipped" };
 	}
@@ -447,7 +489,7 @@ export function evaluateRuntimeSmoke(mode: Mode, attempts: readonly AttemptRecor
 	if (executionError) {
 		return { status: "FAIL", reason: `${executionError.variant} child execution failure` };
 	}
-	for (const variant of QUALIFICATION_VARIANTS) {
+	for (const variant of variants) {
 		const launched = attempts.filter(attempt => attempt.variant === variant);
 		const warmups = launched.filter(attempt => attempt.warmup);
 		if (warmups.length !== 1 || warmups[0]?.repetition !== 0) {
@@ -482,7 +524,11 @@ export function evaluateRuntimeSmoke(mode: Mode, attempts: readonly AttemptRecor
 	return { status: "PASS" };
 }
 
-export function evaluateQualityAcceptance(mode: Mode, attempts: readonly AttemptRecord[]): GateVerdict {
+export function evaluateQualityAcceptance(
+	mode: Mode,
+	attempts: readonly AttemptRecord[],
+	variants: readonly Variant[] = QUALIFICATION_VARIANTS,
+): GateVerdict {
 	if (attempts.some(attempt => attempt.skip)) {
 		return { status: "UNVERIFIED", reason: attempts.find(attempt => attempt.skip)?.reason ?? "skipped" };
 	}
@@ -490,7 +536,7 @@ export function evaluateQualityAcceptance(mode: Mode, attempts: readonly Attempt
 	if (warmupRejected) {
 		return { status: "FAIL", reason: `warmup ${warmupRejected.variant}: ${warmupRejected.reason}` };
 	}
-	for (const variant of QUALIFICATION_VARIANTS) {
+	for (const variant of variants) {
 		const measured = measuredAttempts(attempts, variant);
 		if (measured.length !== measuredCount(mode)) {
 			return {
@@ -506,10 +552,14 @@ export function evaluateQualityAcceptance(mode: Mode, attempts: readonly Attempt
 	return { status: "PASS" };
 }
 
-export function evaluateE2eDelegateToAccepted(mode: Mode, attempts: readonly AttemptRecord[]): GateVerdict {
-	const quality = evaluateQualityAcceptance(mode, attempts);
+export function evaluateE2eDelegateToAccepted(
+	mode: Mode,
+	attempts: readonly AttemptRecord[],
+	variants: readonly Variant[] = QUALIFICATION_VARIANTS,
+): GateVerdict {
+	const quality = evaluateQualityAcceptance(mode, attempts, variants);
 	if (quality.status !== "PASS") return quality;
-	for (const variant of QUALIFICATION_VARIANTS) {
+	for (const variant of variants) {
 		const measured = measuredAttempts(attempts, variant);
 		if (measured.some(attempt => attempt.acceptanceWallMs === null)) {
 			return { status: "FAIL", reason: `${variant} missing parent acceptance wall` };
@@ -550,21 +600,26 @@ export function buildQualificationReport(args: {
 	elapsedMs: number;
 	benefit?: BenefitVerdict;
 	modelsConfigSha256?: string;
+	variants?: readonly Variant[];
+	experiment?: PairedExperimentId;
 }): QualificationReport {
-	let runtimeSmoke = evaluateRuntimeSmoke(args.mode, args.attempts);
+	const variants = resolveVariants(
+		args.variants ?? (args.experiment ? EXPERIMENT_VARIANTS[args.experiment] : undefined),
+	);
+	let runtimeSmoke = evaluateRuntimeSmoke(args.mode, args.attempts, variants);
 	if (runtimeSmoke.status === "PASS" && args.launches !== args.attempts.length) {
 		runtimeSmoke = {
 			status: "FAIL",
 			reason: `launches ${args.launches} != attempts ${args.attempts.length}`,
 		};
-	} else if (runtimeSmoke.status === "PASS" && args.launches > launchCeiling(args.mode)) {
+	} else if (runtimeSmoke.status === "PASS" && args.launches > launchCeiling(args.mode, variants.length)) {
 		runtimeSmoke = {
 			status: "FAIL",
-			reason: `launches ${args.launches} exceeds ceiling ${launchCeiling(args.mode)}`,
+			reason: `launches ${args.launches} exceeds ceiling ${launchCeiling(args.mode, variants.length)}`,
 		};
 	}
-	const qualityAcceptance = evaluateQualityAcceptance(args.mode, args.attempts);
-	const e2eDelegateToAccepted = evaluateE2eDelegateToAccepted(args.mode, args.attempts);
+	const qualityAcceptance = evaluateQualityAcceptance(args.mode, args.attempts, variants);
+	const e2eDelegateToAccepted = evaluateE2eDelegateToAccepted(args.mode, args.attempts, variants);
 	const aggregates = {
 		scout: aggregateVariant(args.mode, "scout", args.attempts),
 		reviewer: aggregateVariant(args.mode, "reviewer", args.attempts),
@@ -577,11 +632,14 @@ export function buildQualificationReport(args: {
 		e2eDelegateToAccepted,
 		benefit: args.benefit ?? { status: "NO_BASELINE", reason: "no comparable baseline supplied" },
 		mode: args.mode,
-		identity: qualificationIdentity(args.mode, args.modelsConfigSha256),
+		identity: qualificationIdentity(args.mode, args.modelsConfigSha256, {
+			variants,
+			experiment: args.experiment,
+		}),
 		launches: args.launches,
-		launchCeiling: launchCeiling(args.mode),
-		providerRequests: QUALIFICATION_VARIANTS.reduce((sum, variant) => sum + aggregates[variant].providerRequests, 0),
-		missingProviderRequestSamples: QUALIFICATION_VARIANTS.reduce(
+		launchCeiling: launchCeiling(args.mode, variants.length),
+		providerRequests: variants.reduce((sum, variant) => sum + aggregates[variant].providerRequests, 0),
+		missingProviderRequestSamples: variants.reduce(
 			(sum, variant) => sum + aggregates[variant].missingProviderRequestSamples,
 			0,
 		),
@@ -648,6 +706,12 @@ function reportFromAttempts(report: QualificationReport): QualificationReport {
 		attempts: report.attempts,
 		launches: report.launches,
 		elapsedMs: report.elapsedMs,
+		variants: report.identity.variants,
+		experiment: report.identity.config.allowedEffortDelta
+			? "sonic-effort"
+			: report.identity.variants.includes("sonic")
+				? undefined
+				: "advisories",
 	});
 	rebuilt.identity = report.identity;
 	return rebuilt;
@@ -670,7 +734,15 @@ function hasCostAndTokens(attempt: AttemptRecord): boolean {
 export function compareQualificationReports(
 	baseline: QualificationReport,
 	treatment: QualificationReport,
+	options: CompareQualificationOptions = {},
 ): BenefitVerdict {
+	const variants = resolveVariants(
+		options.variants ??
+			(options.experiment ? EXPERIMENT_VARIANTS[options.experiment] : undefined) ??
+			baseline.identity.variants,
+	);
+	const experiment = options.experiment;
+	const stampSonic = experiment === "sonic-effort" || (experiment !== "advisories" && variants.includes("sonic"));
 	const mismatch = identityMismatch(baseline.identity, treatment.identity);
 	if (mismatch) {
 		return { status: "INCOMPARABLE", reason: `identity mismatch: ${mismatch}` };
@@ -678,7 +750,7 @@ export function compareQualificationReports(
 	const baselineView = reportFromAttempts(baseline);
 	const treatmentView = reportFromAttempts(treatment);
 
-	for (const variant of QUALIFICATION_VARIANTS) {
+	for (const variant of variants) {
 		const baselineModel =
 			baselineView.aggregates[variant].models.length === 1 ? baselineView.aggregates[variant].models[0] : undefined;
 		const treatmentModel =
@@ -722,10 +794,12 @@ export function compareQualificationReports(
 		}
 	}
 
-	const sonicEffort = {
-		baseline: observedEffort(baselineView.aggregates.sonic),
-		treatment: observedEffort(treatmentView.aggregates.sonic),
-	};
+	const sonicEffort = variants.includes("sonic")
+		? {
+				baseline: observedEffort(baselineView.aggregates.sonic),
+				treatment: observedEffort(treatmentView.aggregates.sonic),
+			}
+		: undefined;
 	const baselineAbs = rollupStatus([
 		baselineView.runtimeSmoke,
 		baselineView.qualityAcceptance,
@@ -736,107 +810,120 @@ export function compareQualificationReports(
 		treatmentView.qualityAcceptance,
 		treatmentView.e2eDelegateToAccepted,
 	]);
-	if (baselineAbs === "UNVERIFIED" || treatmentAbs === "UNVERIFIED") {
-		return {
-			status: "INCOMPARABLE",
-			reason: "absolute runtime/quality/e2e gates unverified",
-			declaredExperiment: DECLARED_EXPERIMENT_ID,
-			sonicEffort,
-		};
-	}
-	if (baselineAbs !== "PASS" || treatmentAbs !== "PASS") {
-		return {
-			status: "FAIL",
-			reason: `absolute runtime/quality/e2e gates not PASS (baseline ${baselineAbs}, treatment ${treatmentAbs})`,
-			declaredExperiment: DECLARED_EXPERIMENT_ID,
-			sonicEffort,
-		};
-	}
+	const experimentStamp = stampSonic ? { declaredExperiment: DECLARED_EXPERIMENT_ID as typeof DECLARED_EXPERIMENT_ID } : {};
 
-	const acceptanceRates = {} as Record<Variant, { baseline: number; treatment: number; measured: number }>;
-	const p50AcceptanceMs = {} as Record<Variant, { baseline: number | undefined; treatment: number | undefined }>;
-	for (const variant of QUALIFICATION_VARIANTS) {
+	const acceptanceRates: BenefitVerdict["acceptanceRates"] = {};
+	const p50AcceptanceMs: BenefitVerdict["p50AcceptanceMs"] = {};
+	const roleVerdicts: RoleBenefitVerdict[] = [];
+
+	for (const variant of variants) {
 		const baselineAgg = baselineView.aggregates[variant];
 		const treatmentAgg = treatmentView.aggregates[variant];
 		if (baselineAgg.measured === 0 || treatmentAgg.measured === 0) {
-			return { status: "INCOMPARABLE", reason: `${variant} empty measured denominator` };
+			roleVerdicts.push({
+				variant,
+				status: "INCOMPARABLE",
+				reason: `${variant} empty measured denominator`,
+			});
+			continue;
 		}
 		if (baselineAgg.measured !== treatmentAgg.measured) {
-			return {
+			roleVerdicts.push({
+				variant,
 				status: "INCOMPARABLE",
 				reason: `${variant} measured denominator ${baselineAgg.measured} vs ${treatmentAgg.measured}`,
-			};
+			});
+			continue;
 		}
-		acceptanceRates[variant] = {
+		const acceptanceRate = {
 			baseline: baselineAgg.accepted / baselineAgg.measured,
 			treatment: treatmentAgg.accepted / treatmentAgg.measured,
 			measured: treatmentAgg.measured,
 		};
-		p50AcceptanceMs[variant] = {
+		const p50 = {
 			baseline: baselineAgg.p50AcceptanceMs,
 			treatment: treatmentAgg.p50AcceptanceMs,
 		};
-		if (acceptanceRates[variant].treatment < acceptanceRates[variant].baseline) {
-			return {
+		acceptanceRates[variant] = acceptanceRate;
+		p50AcceptanceMs[variant] = p50;
+
+		if (acceptanceRate.treatment < acceptanceRate.baseline) {
+			roleVerdicts.push({
+				variant,
 				status: "FAIL",
-				reason: `${variant} acceptance rate regression ${acceptanceRates[variant].treatment} < ${acceptanceRates[variant].baseline}`,
-				declaredExperiment: DECLARED_EXPERIMENT_ID,
-				sonicEffort,
-				acceptanceRates,
-				p50AcceptanceMs,
-			};
+				reason: `${variant} acceptance rate regression ${acceptanceRate.treatment} < ${acceptanceRate.baseline}`,
+				acceptanceRate,
+				p50AcceptanceMs: p50,
+			});
+			continue;
 		}
-		const baselineP50 = baselineAgg.p50AcceptanceMs;
-		const treatmentP50 = treatmentAgg.p50AcceptanceMs;
-		if (baselineP50 === undefined || treatmentP50 === undefined) {
-			return { status: "INCOMPARABLE", reason: `${variant} acceptance p50 missing` };
+		if (p50.baseline === undefined || p50.treatment === undefined) {
+			roleVerdicts.push({
+				variant,
+				status: "INCOMPARABLE",
+				reason: `${variant} acceptance p50 missing`,
+				acceptanceRate,
+				p50AcceptanceMs: p50,
+			});
+			continue;
 		}
-		if (treatmentP50 > baselineP50) {
-			return {
+		if (p50.treatment > p50.baseline) {
+			roleVerdicts.push({
+				variant,
 				status: "FAIL",
-				reason: `${variant} acceptance p50 regression ${treatmentP50}ms > ${baselineP50}ms`,
-				declaredExperiment: DECLARED_EXPERIMENT_ID,
-				sonicEffort,
-				acceptanceRates,
-				p50AcceptanceMs,
-			};
+				reason: `${variant} acceptance p50 regression ${p50.treatment}ms > ${p50.baseline}ms`,
+				acceptanceRate,
+				p50AcceptanceMs: p50,
+			});
+			continue;
 		}
 
 		const baselineAttempts = baselineView.attempts.filter(attempt => attempt.variant === variant && !attempt.skip);
 		const treatmentAttempts = treatmentView.attempts.filter(attempt => attempt.variant === variant && !attempt.skip);
 		if (baselineAttempts.length === 0 || treatmentAttempts.length === 0) {
-			return { status: "INCOMPARABLE", reason: `${variant} empty attempted completions` };
+			roleVerdicts.push({
+				variant,
+				status: "INCOMPARABLE",
+				reason: `${variant} empty attempted completions`,
+				acceptanceRate,
+				p50AcceptanceMs: p50,
+			});
+			continue;
 		}
 		if (baselineAttempts.length !== treatmentAttempts.length) {
-			return {
+			roleVerdicts.push({
+				variant,
 				status: "INCOMPARABLE",
 				reason: `${variant} attempted completions ${baselineAttempts.length} vs ${treatmentAttempts.length}`,
-			};
+				acceptanceRate,
+				p50AcceptanceMs: p50,
+			});
+			continue;
 		}
 		if (
 			baselineAttempts.some(attempt => !hasCostAndTokens(attempt)) ||
 			treatmentAttempts.some(attempt => !hasCostAndTokens(attempt))
 		) {
-			return {
+			roleVerdicts.push({
+				variant,
 				status: "INCOMPARABLE",
 				reason: `${variant} missing cost/token coverage`,
-				declaredExperiment: DECLARED_EXPERIMENT_ID,
-				sonicEffort,
-				acceptanceRates,
-				p50AcceptanceMs,
-			};
+				acceptanceRate,
+				p50AcceptanceMs: p50,
+			});
+			continue;
 		}
 		const baselineCost = baselineAttempts.reduce((sum, attempt) => sum + (attempt.costTotal ?? 0), 0);
 		const treatmentCost = treatmentAttempts.reduce((sum, attempt) => sum + (attempt.costTotal ?? 0), 0);
 		if (treatmentCost > baselineCost) {
-			return {
+			roleVerdicts.push({
+				variant,
 				status: "FAIL",
 				reason: `${variant} cost regression ${treatmentCost} > ${baselineCost}`,
-				declaredExperiment: DECLARED_EXPERIMENT_ID,
-				sonicEffort,
-				acceptanceRates,
-				p50AcceptanceMs,
-			};
+				acceptanceRate,
+				p50AcceptanceMs: p50,
+			});
+			continue;
 		}
 		const baselineTokens = baselineAttempts.reduce((sum, attempt) => sum + (attempt.tokenUsage?.totalTokens ?? 0), 0);
 		const treatmentTokens = treatmentAttempts.reduce(
@@ -844,23 +931,67 @@ export function compareQualificationReports(
 			0,
 		);
 		if (treatmentTokens > baselineTokens) {
-			return {
+			roleVerdicts.push({
+				variant,
 				status: "FAIL",
 				reason: `${variant} token regression ${treatmentTokens} > ${baselineTokens}`,
-				declaredExperiment: DECLARED_EXPERIMENT_ID,
-				sonicEffort,
-				acceptanceRates,
-				p50AcceptanceMs,
-			};
+				acceptanceRate,
+				p50AcceptanceMs: p50,
+			});
+			continue;
 		}
+		roleVerdicts.push({
+			variant,
+			status: "PASS",
+			reason: `${variant} non-regression`,
+			acceptanceRate,
+			p50AcceptanceMs: p50,
+		});
+	}
+
+	const shared = {
+		...experimentStamp,
+		...(sonicEffort ? { sonicEffort } : {}),
+		acceptanceRates,
+		p50AcceptanceMs,
+		roleVerdicts,
+	};
+
+	// Absolute gates still decide overall status, but roleVerdicts always ship so
+	// a single-role regression cannot be masked by total wall-clock or an early FAIL.
+	if (baselineAbs === "UNVERIFIED" || treatmentAbs === "UNVERIFIED") {
+		return {
+			status: "INCOMPARABLE",
+			reason: "absolute runtime/quality/e2e gates unverified",
+			...shared,
+		};
+	}
+	if (baselineAbs !== "PASS" || treatmentAbs !== "PASS") {
+		return {
+			status: "FAIL",
+			reason: `absolute runtime/quality/e2e gates not PASS (baseline ${baselineAbs}, treatment ${treatmentAbs})`,
+			...shared,
+		};
+	}
+
+	if (roleVerdicts.some(role => role.status === "INCOMPARABLE")) {
+		const first = roleVerdicts.find(role => role.status === "INCOMPARABLE")!;
+		return { status: "INCOMPARABLE", reason: first.reason, ...shared };
+	}
+	if (roleVerdicts.some(role => role.status === "FAIL")) {
+		const failed = roleVerdicts.filter(role => role.status === "FAIL");
+		return {
+			status: "FAIL",
+			reason: failed.map(role => role.reason).join("; "),
+			...shared,
+		};
 	}
 	return {
 		status: "PASS",
-		reason: "non-regression under matched identity; sonic effort delta is the declared experiment",
-		declaredExperiment: DECLARED_EXPERIMENT_ID,
-		sonicEffort,
-		acceptanceRates,
-		p50AcceptanceMs,
+		reason: stampSonic
+			? "non-regression under matched identity; sonic effort delta is the declared experiment"
+			: "non-regression under matched identity; advisories experiment excludes sonic effort",
+		...shared,
 	};
 }
 
@@ -986,8 +1117,10 @@ function parseStringArray(value: unknown): string[] | undefined {
 function parseIdentity(value: unknown): QualificationIdentity | undefined {
 	if (!isRecord(value) || value.rubricId !== RUBRIC_ID) return undefined;
 	if (value.mode !== "smoke" && value.mode !== "release") return undefined;
-	if (!Array.isArray(value.variants) || value.variants.length !== QUALIFICATION_VARIANTS.length) return undefined;
-	if (!value.variants.every((item, index) => item === QUALIFICATION_VARIANTS[index])) return undefined;
+	if (!Array.isArray(value.variants) || value.variants.length === 0) return undefined;
+	if (!value.variants.every(item => isVariant(item))) return undefined;
+	const variants = value.variants as Variant[];
+	if (new Set(variants).size !== variants.length) return undefined;
 	if (!isRecord(value.assignmentIds) || !isRecord(value.modelChains) || !isRecord(value.config)) return undefined;
 	const scoutIds = value.assignmentIds.scout;
 	const reviewerIds = value.assignmentIds.reviewer;
@@ -1002,29 +1135,33 @@ function parseIdentity(value: unknown): QualificationIdentity | undefined {
 	if (!fingerprints) return undefined;
 	if (value.config.strictModelIdentity !== true || value.config.isolatedAuthModelsYml !== true) return undefined;
 	if (typeof value.config.measuredCount !== "number") return undefined;
-	if (!isRecord(value.config.allowedEffortDelta)) return undefined;
-	if (
-		value.config.allowedEffortDelta.experiment !== DECLARED_EXPERIMENT_ID ||
-		value.config.allowedEffortDelta.variant !== "sonic" ||
-		value.config.allowedEffortDelta.field !== "effectiveEffort"
-	) {
-		return undefined;
+	let allowedEffortDelta: QualificationIdentity["config"]["allowedEffortDelta"];
+	if (value.config.allowedEffortDelta !== undefined) {
+		if (!isRecord(value.config.allowedEffortDelta)) return undefined;
+		if (
+			value.config.allowedEffortDelta.experiment !== DECLARED_EXPERIMENT_ID ||
+			value.config.allowedEffortDelta.variant !== "sonic" ||
+			value.config.allowedEffortDelta.field !== "effectiveEffort"
+		) {
+			return undefined;
+		}
+		allowedEffortDelta = {
+			experiment: DECLARED_EXPERIMENT_ID,
+			variant: "sonic",
+			field: "effectiveEffort",
+		};
 	}
 	return {
 		rubricId: RUBRIC_ID,
 		mode: value.mode,
-		variants: [...QUALIFICATION_VARIANTS],
+		variants: [...variants],
 		assignmentIds: { scout: scoutIds, reviewer: reviewerIds, sonic: sonicIds },
 		modelChains: { scout: scoutModels, reviewer: reviewerModels, sonic: sonicModels },
 		config: {
 			strictModelIdentity: true,
 			isolatedAuthModelsYml: true,
 			measuredCount: value.config.measuredCount,
-			allowedEffortDelta: {
-				experiment: DECLARED_EXPERIMENT_ID,
-				variant: "sonic",
-				field: "effectiveEffort",
-			},
+			...(allowedEffortDelta ? { allowedEffortDelta } : {}),
 			fingerprints,
 		},
 	};
@@ -1052,6 +1189,12 @@ export function parseQualificationReport(value: unknown): QualificationReport | 
 		attempts,
 		launches: value.launches,
 		elapsedMs: value.elapsedMs,
+		variants: identity.variants,
+		experiment: identity.config.allowedEffortDelta
+			? "sonic-effort"
+			: identity.variants.includes("sonic")
+				? undefined
+				: "advisories",
 	});
 	report.identity = identity;
 	if (value.checkpoint === "in_progress") {

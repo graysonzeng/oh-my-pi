@@ -11,6 +11,8 @@
  * Paired experiment (two isolated repo roots with identical harness/dependencies):
  *   --mode smoke --paired-control <root> --paired-treatment <root> --experiment advisories|sonic-effort --output <pairs.json>
  * Add --paired-preflight to verify source/config conditions without provider calls.
+ * Bare `--experiment advisories|sonic-effort` (including npm aliases) fail closed into
+ * paired mode and require the paired roots/output — never unpaired QUALIFICATION_VARIANTS.
  */
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -57,7 +59,7 @@ import {
 	QUALIFICATION_VARIANTS,
 	scoreAttempt,
 } from "./product-latency-qualification";
-import { runPairedQualification, type PairedQualificationReport } from "./product-latency-paired";
+import { runPairedQualification, requestsPairedQualification, type PairedQualificationReport } from "./product-latency-paired";
 import {
 	assertQualificationSourcePair,
 	captureQualificationSource,
@@ -989,7 +991,10 @@ async function main(): Promise<void> {
 			await runChild(argv);
 			return;
 		}
-		if (argv.some(argument => argument.startsWith("--paired-"))) {
+		// Fail closed: --experiment advisories|sonic-effort must enter paired mode
+		// (requires --paired-control/--paired-treatment/--output). Never fall through
+		// to unpaired QUALIFICATION_VARIANTS, which would mis-attribute the run.
+		if (requestsPairedQualification(argv)) {
 			await runPairedParent(argv);
 			return;
 		}

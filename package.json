@@ -170,6 +170,8 @@
 		"workflow-bench": "bun --cwd=packages/coding-agent src/cli.ts workflow-bench",
 		"test:latency:smoke": "bun packages/coding-agent/test/task/product-latency-fixture.ts --mode smoke",
 		"test:latency:release": "bun packages/coding-agent/test/task/product-latency-fixture.ts --mode release",
+		"test:latency:paired:advisories": "bun packages/coding-agent/test/task/product-latency-fixture.ts --mode smoke --experiment advisories",
+		"test:latency:paired:sonic-effort": "bun packages/coding-agent/test/task/product-latency-fixture.ts --mode smoke --experiment sonic-effort",
 		"stats:subagents": "bun scripts/session-stats/subagent-report.ts"
 	},
 	"dependencies": {

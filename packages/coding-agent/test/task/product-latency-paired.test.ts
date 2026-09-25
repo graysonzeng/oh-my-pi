@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
 	createPairedSchedule,
+	EXPERIMENT_VARIANTS,
+	requestsPairedQualification,
 	runPairedQualification,
 	type PairedExperiment,
 	type PairedQualificationReport,
@@ -8,7 +10,6 @@ import {
 } from "./product-latency-paired";
 import {
 	measuredCount,
-	QUALIFICATION_VARIANTS,
 	type AttemptRecord,
 	type FrontmatterIdentity,
 	type RuntimeProvenance,
@@ -126,28 +127,43 @@ async function runPaired(options: {
 }
 
 describe("product-latency paired schedule", () => {
-	it("keeps arms adjacent and alternates the first arm by pair index", () => {
-		const smoke = createPairedSchedule("smoke");
-		expect(smoke).toHaveLength(QUALIFICATION_VARIANTS.length * 2 * (1 + measuredCount("smoke")));
-		expect(createPairedSchedule("release")).toHaveLength(
-			QUALIFICATION_VARIANTS.length * 2 * (1 + measuredCount("release")),
-		);
+	it("scopes advisories and sonic-effort to disjoint role sets", () => {
+		expect(EXPERIMENT_VARIANTS.advisories).toEqual(["scout", "reviewer"]);
+		expect(EXPERIMENT_VARIANTS["sonic-effort"]).toEqual(["sonic"]);
+	});
 
-		let pairIndex = 0;
-		for (let repetition = 0; repetition <= measuredCount("smoke"); repetition++) {
-			for (const variant of QUALIFICATION_VARIANTS) {
-				const first = smoke[pairIndex * 2]!;
-				const second = smoke[pairIndex * 2 + 1]!;
-				expect(first.pairId).toBe(second.pairId);
-				expect(first.variant).toBe(variant);
-				expect(second.variant).toBe(variant);
-				expect(first.repetition).toBe(repetition);
-				expect(second.repetition).toBe(repetition);
-				expect(first.order).toBe(0);
-				expect(second.order).toBe(1);
-				expect(first.arm).toBe(pairIndex % 2 === 0 ? "control" : "treatment");
-				expect(second.arm).toBe(first.arm === "control" ? "treatment" : "control");
-				pairIndex += 1;
+	it("fail-closes bare experiment argv into paired mode (never unpaired full pack)", () => {
+		expect(requestsPairedQualification(["--mode", "smoke", "--experiment", "advisories"])).toBe(true);
+		expect(requestsPairedQualification(["--mode", "smoke", "--experiment", "sonic-effort"])).toBe(true);
+		expect(requestsPairedQualification(["--paired-control", "/tmp/c"])).toBe(true);
+		expect(requestsPairedQualification(["--mode", "smoke", "--output", "/tmp/out.json"])).toBe(false);
+	});
+
+	it("keeps arms adjacent and alternates the first arm by pair index", () => {
+		for (const experiment of ["advisories", "sonic-effort"] as const) {
+			const variants = EXPERIMENT_VARIANTS[experiment];
+			const smoke = createPairedSchedule("smoke", experiment);
+			expect(smoke).toHaveLength(variants.length * 2 * (1 + measuredCount("smoke")));
+			expect(createPairedSchedule("release", experiment)).toHaveLength(
+				variants.length * 2 * (1 + measuredCount("release")),
+			);
+
+			let pairIndex = 0;
+			for (let repetition = 0; repetition <= measuredCount("smoke"); repetition++) {
+				for (const variant of variants) {
+					const first = smoke[pairIndex * 2]!;
+					const second = smoke[pairIndex * 2 + 1]!;
+					expect(first.pairId).toBe(second.pairId);
+					expect(first.variant).toBe(variant);
+					expect(second.variant).toBe(variant);
+					expect(first.repetition).toBe(repetition);
+					expect(second.repetition).toBe(repetition);
+					expect(first.order).toBe(0);
+					expect(second.order).toBe(1);
+					expect(first.arm).toBe(pairIndex % 2 === 0 ? "control" : "treatment");
+					expect(second.arm).toBe(first.arm === "control" ? "treatment" : "control");
+					pairIndex += 1;
+				}
 			}
 		}
 	});
@@ -155,7 +171,7 @@ describe("product-latency paired schedule", () => {
 
 describe("product-latency paired qualification", () => {
 	it("retains a failed attempt and still runs the paired arm", async () => {
-		const schedule = createPairedSchedule("smoke");
+		const schedule = createPairedSchedule("smoke", "advisories");
 		const failed = schedule[0]!;
 		const { report, executions } = await runPaired({
 			attempt: slot =>
@@ -177,6 +193,8 @@ describe("product-latency paired qualification", () => {
 		expect(failedPair?.controlIndex).not.toBeNull();
 		expect(failedPair?.treatmentIndex).not.toBeNull();
 		expect(report.control.attempts.some(attempt => attempt.result === "error")).toBe(true);
+		expect(report.control.identity.variants).toEqual(["scout", "reviewer"]);
+		expect(report.slots.every(item => item.slot.variant !== "sonic")).toBe(true);
 	});
 
 	it("cannot PASS an aborted incomplete schedule and keeps prior evidence", async () => {
@@ -253,10 +271,14 @@ describe("product-latency paired qualification", () => {
 	it("rejects mixed experiment metadata as INCOMPARABLE", async () => {
 		const { report, executions } = await runPaired({
 			experiment: "advisories",
-			attempt: slot => attemptFor(slot, slot.variant === "sonic" ? "sonic-effort" : "advisories"),
+			attempt: slot =>
+				attemptFor(slot, "advisories", {
+					effectiveFrontmatterIdentity:
+						slot.arm === "treatment" ? { ...FRONTMATTER, maxEffort: "high" } : FRONTMATTER,
+				}),
 		});
 
-		expect(executions).toHaveLength(createPairedSchedule("smoke").length);
+		expect(executions).toHaveLength(createPairedSchedule("smoke", "advisories").length);
 		expect(report.phase).toBe("complete");
 		expect(report.status).toBe("INCOMPARABLE");
 		expect(report.benefit.status).toBe("INCOMPARABLE");
@@ -264,13 +286,15 @@ describe("product-latency paired qualification", () => {
 	});
 
 	it("compares a complete compatible advisories corpus without declaring sonic", async () => {
-		const schedule = createPairedSchedule("smoke");
+		const schedule = createPairedSchedule("smoke", "advisories");
 		const { report, checkpoints } = await runPaired({ experiment: "advisories" });
 
 		expect(report.phase).toBe("complete");
 		expect(report.status).toBe("PASS");
 		expect(report.benefit.status).toBe("PASS");
 		expect(report.benefit.declaredExperiment).toBeUndefined();
+		expect(report.benefit.sonicEffort).toBeUndefined();
+		expect(report.control.identity.variants).toEqual(["scout", "reviewer"]);
 		expect(report.slots).toHaveLength(schedule.length);
 		expect(report.control.launches).toBe(schedule.length / 2);
 		expect(report.treatment.launches).toBe(schedule.length / 2);
@@ -283,7 +307,7 @@ describe("product-latency paired qualification", () => {
 		let active = false;
 		let executed = 0;
 		let persisted = 0;
-		const schedule = createPairedSchedule("smoke");
+		const schedule = createPairedSchedule("smoke", "advisories");
 		const { report } = await runPaired({
 			attempt: async slot => {
 				if (active) throw new Error("overlapping paired executions");

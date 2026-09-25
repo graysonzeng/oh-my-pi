@@ -73,6 +73,8 @@ export interface JobSnapshot {
 	completionKind?: string;
 	/** Milliseconds spent waiting for a spawn permit. */
 	spawnQueueMs?: number;
+	/** First request-phase provider queue wait (ms), when reviewMetrics recorded one. */
+	requestPhaseQueueMs?: number;
 	/** Originating parent task tool call id. */
 	taskToolCallId?: string;
 }

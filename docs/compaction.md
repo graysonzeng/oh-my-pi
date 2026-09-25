@@ -513,3 +513,15 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `branchSummary.reserveTokens` = `16384`
 
 These values are consumed at runtime by `AgentSession`, `SessionMaintenance`, and the compaction/branch-summarization modules.
+
+### Context strategy experiment (opt-in, default off)
+
+Single-factor A/B overlay for long-session context maintenance. See
+[Context strategy experiment](./context-strategy-experiment.md).
+
+- `compaction.experiment.enabled` = `false` — production defaults unchanged until explicitly enabled
+- `compaction.experiment.factor` = `"none"` — one of `none` / `threshold_tokens` / `keep_recent_tokens` / `reserve_tokens`
+- `compaction.experiment.thresholdTokens` = `200000` — **experiment tier** for `threshold_tokens` only; not a global fixed cap; unsuitable windows fall back to control
+- `compaction.experiment.keepRecentTokens` / `compaction.experiment.reserveTokens` — treatment values for their respective single-factor runs
+
+`SessionMaintenance` applies at most one factor through the existing maintenance chain. Multi-factor declarations fail closed. Do not claim historical compaction latency percentages as current-version wins from this surface alone.

@@ -447,6 +447,26 @@ describe("product-latency baseline comparison", () => {
 		const benefit = compareQualificationReports(bad, structuredClone(bad));
 		expect(benefit.status).toBe("FAIL");
 		expect(benefit.reason).toContain("absolute runtime/quality/e2e");
+		// Absolute FAIL must still emit roleVerdicts so wall-clock cannot hide per-role outcomes.
+		expect(benefit.roleVerdicts?.map(role => role.variant)).toEqual(["scout", "reviewer", "sonic"]);
+		expect(benefit.roleVerdicts?.length).toBe(3);
+	});
+
+	it("emits roleVerdicts that surface a single-role p50 regression under overall FAIL", () => {
+		const baseline = reportFrom(suite());
+		const treatment = reportFrom(
+			suite((variant, _repetition) =>
+				variant === "reviewer" ? { acceptanceWallMs: 9_000, durationMs: 8_000, activeWallMs: 7_000 } : {},
+			),
+		);
+		const benefit = compareQualificationReports(baseline, treatment);
+		expect(benefit.status).toBe("FAIL");
+		expect(benefit.roleVerdicts).toBeDefined();
+		const byVariant = Object.fromEntries((benefit.roleVerdicts ?? []).map(role => [role.variant, role.status]));
+		expect(byVariant.scout).toBe("PASS");
+		expect(byVariant.sonic).toBe("PASS");
+		expect(byVariant.reviewer).toBe("FAIL");
+		expect(benefit.reason).toContain("reviewer");
 	});
 
 	it("counts failed attempts in denominators instead of dropping them", () => {

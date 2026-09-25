@@ -5,6 +5,12 @@
  */
 
 import { mapWithConcurrencyLimitAllSettled, type ParallelSettledResult, Semaphore } from "../task/parallel";
+import {
+	isBlockingSharedWrite,
+	resolveSharedWriteConflict,
+	sameSharedWorkspace,
+	workspaceKind,
+} from "./parallel-recovery-safety";
 import { sha256Hex, stableSerialize } from "./stable-serialize";
 export const WORKFLOW_CONCURRENCY_DECLARATION_KIND = "workflow_concurrency_declaration" as const;
 export const WORKFLOW_CONCURRENCY_DECLARATION_VERSION = 1 as const;
@@ -326,24 +332,28 @@ export function validateConcurrencyDeclaration(
 	}
 	if (ids.size > 0 && seen !== ids.size) errors.push({ code: "cycle", message: "dependency graph has a cycle" });
 
-	// Independent write ownership and same-isolation conflicts are unsafe even with disjoint paths.
+	// Shared-workspace write exclusivity (P1-4): block same-path concurrent writes
+	// (or allow ownership transfer at the decision seam). Read-only same-path is OK.
+	// Distinct isolated worktrees with the same path are merge/conflict risk — not
+	// shared-write overwrite — so they do not emit path_overlap here.
 	for (let left = 0; left < (decl.units ?? []).length; left++) {
 		for (let right = left + 1; right < (decl.units ?? []).length; right++) {
 			const a = decl.units[left]!;
 			const b = decl.units[right]!;
 			if (!a || !b || typeof a !== "object" || typeof b !== "object") continue;
-			const ordered = a.dependsOn.includes(b.id) || b.dependsOn.includes(a.id);
-			const overlap = pathSetsOverlap(a.paths ?? [], b.paths ?? []);
-			const sameIsolation = Boolean(a.isolationScope?.trim() && a.isolationScope === b.isolationScope);
-			if (!ordered && overlap && (a.mode === "write" || b.mode === "write")) {
+			const decision = resolveSharedWriteConflict(a, b);
+			if (decision.action === "block") {
 				errors.push({
 					code: "path_overlap",
-					message: `write path overlap between ${a.id} and ${b.id}`,
+					message: decision.detail,
 					unitId: a.id,
 				});
 			}
-			// Isolation scope conflicts are independent of path overlap.
-			if (sameIsolation) {
+			// Same *isolated* worktree with two units is still unsafe even with
+			// disjoint paths. Shared/default workspace aliases are not isolation.
+			const bothIsolated =
+				workspaceKind(a.isolationScope) === "isolated" && workspaceKind(b.isolationScope) === "isolated";
+			if (bothIsolated && sameSharedWorkspace(a.isolationScope, b.isolationScope)) {
 				errors.push({
 					code: "isolation_overlap",
 					message: `isolationScope overlap between ${a.id} and ${b.id}`,
@@ -379,23 +389,6 @@ export function validateConcurrencyDeclaration(
 		}
 	}
 	return { ok: errors.length === 0, errors };
-}
-
-function pathSetsOverlap(a: readonly string[], b: readonly string[]): boolean {
-	const setB = new Set(b.map(normalizePath));
-	for (const path of a) {
-		const normalized = normalizePath(path);
-		if (!normalized) continue;
-		if (setB.has(normalized)) return true;
-		for (const other of setB) {
-			if (normalized.startsWith(`${other}/`) || other.startsWith(`${normalized}/`)) return true;
-		}
-	}
-	return false;
-}
-
-function normalizePath(p: string): string {
-	return p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
 }
 
 /** Ready units: dependencies satisfied, not terminal. */
@@ -439,10 +432,12 @@ export function resolveEffectiveConcurrency(limits: {
 
 function unitsConflict(a: ConcurrencyUnitV1, b: ConcurrencyUnitV1): boolean {
 	if (a.dependsOn.includes(b.id) || b.dependsOn.includes(a.id)) return true;
-	const sameIsolation = Boolean(a.isolationScope?.trim() && a.isolationScope === b.isolationScope);
-	if (sameIsolation) return true;
-	if (!pathSetsOverlap(a.paths, b.paths)) return false;
-	return a.mode === "write" || b.mode === "write";
+	const bothIsolated =
+		workspaceKind(a.isolationScope) === "isolated" && workspaceKind(b.isolationScope) === "isolated";
+	if (bothIsolated && sameSharedWorkspace(a.isolationScope, b.isolationScope)) return true;
+	// merge_risk (distinct isolated worktrees) is not an auto-parallel blocker —
+	// merge/conflict is handled at the merge seam, not as shared-write overwrite.
+	return isBlockingSharedWrite(a, b);
 }
 
 /** Whether auto-parallel should fire: at least two independent ready units with no ownership conflict. */

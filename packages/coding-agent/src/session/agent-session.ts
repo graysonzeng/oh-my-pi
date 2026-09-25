@@ -228,6 +228,14 @@ import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import { clearToolErrorStreak, noteToolErrorStreak } from "../latency/tool-error-streak";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import {
+	buildParentFinalVerificationDetails,
+	ordinaryVerifierFromParentFinal,
+	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+	parseParentFinalVerificationDetails,
+	type ParentFinalVerificationSource,
+	type ParentFinalVerificationStatus,
+} from "../latency/parent-final-verification";
+import {
 	buildOrdinarySessionObservationJoin,
 	computeLatencyCohortMetrics,
 	deriveLatencyCohortKey,
@@ -568,10 +576,10 @@ import {
 import { cfgTaskBatch, cfgTaskDisabledAgents } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
-	cfgCompaction,
 	cfgExtendedContext,
 	cfgWorkspaceAdditionalDirectories,
 } from "./context-settings";
+import { effectiveCompactionSettings } from "./context-strategy-experiment";
 import { cfgTitleRefreshOnReplan } from "../goals/settings";
 import {
 	cfgComputerEnabled,
@@ -5003,7 +5011,7 @@ export class AgentSession implements SettingsScope {
 			pendingTokens += tokenizer.countMessage(message);
 			pendingImages += countImagesInMessage(message);
 		}
-		const compactionSettings = cfgCompaction.get(this.settings);
+		const compactionSettings = effectiveCompactionSettings(this.settings, contextWindow);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		// getContextUsage follows agent.state.messages, which may already hold
 		// emitted results that the loop has not merged into admission.context.
@@ -6310,7 +6318,7 @@ export class AgentSession implements SettingsScope {
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 		const tokenizer = this.agent.tokenizer;
-		const compactionSettings = cfgCompaction.get(this.settings);
+		const compactionSettings = effectiveCompactionSettings(this.settings, contextWindow);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		const candidateMessage: ToolResultMessage = {
 			role: "toolResult",
@@ -7356,6 +7364,68 @@ export class AgentSession implements SettingsScope {
 		return [...this.#firedLatencyArms];
 	}
 
+	/**
+	 * Persist explicit parent-final acceptance evidence.
+	 * Successful tools / normal session stop never imply acceptance — callers
+	 * must record passed/failed here (or via an equivalent custom entry) for
+	 * offline e2e association and ordinary cohort verifier joins.
+	 */
+	recordParentFinalVerification(
+		status: ParentFinalVerificationStatus,
+		source: ParentFinalVerificationSource = "extension",
+		verifiedAtMs: number = Date.now(),
+	): void {
+		const details = buildParentFinalVerificationDetails(status, source, verifiedAtMs);
+		this.sessionManager.appendCustomMessageEntry(
+			PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+			`parent final verification: ${status}`,
+			false,
+			details,
+			"agent",
+			verifiedAtMs,
+		);
+	}
+
+	#latestParentFinalVerificationFromEntries(): {
+		source: ParentFinalVerificationSource;
+		status: ParentFinalVerificationStatus;
+		ts: number | null;
+	} | null {
+		let latest: {
+			source: ParentFinalVerificationSource;
+			status: ParentFinalVerificationStatus;
+			ts: number | null;
+		} | null = null;
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type === "custom" && entry.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) {
+				const parsed = parseParentFinalVerificationDetails(entry.data);
+				if (!parsed) continue;
+				const ts =
+					parsed.verifiedAtMs ??
+					(typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN);
+				latest = {
+					status: parsed.status,
+					source: parsed.source,
+					ts: Number.isFinite(ts) ? ts : null,
+				};
+				continue;
+			}
+			if (entry.type === "custom_message" && entry.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) {
+				const parsed = parseParentFinalVerificationDetails(entry.details);
+				if (!parsed) continue;
+				const ts =
+					parsed.verifiedAtMs ??
+					(typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN);
+				latest = {
+					status: parsed.status,
+					source: parsed.source,
+					ts: Number.isFinite(ts) ? ts : null,
+				};
+			}
+		}
+		return latest;
+	}
+
 	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
 	invalidateLatencyArmSnapshot(): void {
 		this.#clearLatencyArmSnapshot();
@@ -7375,6 +7445,7 @@ export class AgentSession implements SettingsScope {
 				toolCalls.push({ name: content.name, arguments: content.arguments });
 			}
 		}
+		const verifier = ordinaryVerifierFromParentFinal(this.#latestParentFinalVerificationFromEntries());
 		return buildOrdinarySessionObservationJoin({
 			provider: this.model?.provider,
 			model: this.model?.id,
@@ -7385,6 +7456,8 @@ export class AgentSession implements SettingsScope {
 			toolCallCount: this.getSessionStats().toolCalls,
 			toolCalls,
 			fallbackCount: this.#retryFallbackAppliedCount,
+			verifierSource: verifier.source,
+			verifierStatus: verifier.status,
 		});
 	}
 	#evaluateLatencyRolloutAtSessionEnd(exitKind: SessionExitData["kind"] | null): void {

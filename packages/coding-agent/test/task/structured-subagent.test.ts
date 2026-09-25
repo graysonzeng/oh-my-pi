@@ -11,6 +11,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import {
+	buildEvidenceHandoff,
+	extractEvidenceHandoffFromContext,
+	renderEvidenceHandoffContext,
+} from "@oh-my-pi/pi-coding-agent/task/evidence-handoff";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
@@ -315,6 +320,113 @@ describe("structured subagent primitive", () => {
 			liveSettings.cancelPendingSaves();
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	it("projects evidence handoff context so reviewers omit author conclusions", async () => {
+		const reviewer = { ...AGENT, name: "reviewer" };
+		mockDiscovery(reviewer);
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const handoff = buildEvidenceHandoff({
+			goals: ["Ship handoff"],
+			acceptance: ["Reviewer omits author conclusions"],
+			confirmedFacts: [{ id: "f1", version: "v1", statement: "raw fact", evidence: "diff hunk" }],
+			openQuestions: ["Any residual risk?"],
+			failedAttempts: [{ attempt: "copy full parent history" }],
+			changeScope: { paths: ["packages/coding-agent/src/task/evidence-handoff.ts"] },
+			verificationOwnership: { owner: "parent", commands: ["bun test"] },
+			authorConclusions: ["Author thinks this is perfect"],
+		});
+		const context = renderEvidenceHandoffContext(handoff, { preamble: "Shared packet" });
+
+		const settled = await runStructuredSubagent(request({ agent: "reviewer", context, retainArtifacts: true }));
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted).not.toBeNull();
+		expect(extracted!.preamble).toContain("Shared packet");
+		expect(extracted!.handoff.goals).toEqual(["Ship handoff"]);
+		expect(extracted!.handoff.acceptance).toEqual(["Reviewer omits author conclusions"]);
+		expect(extracted!.handoff.confirmedFacts[0]?.statement).toBe("raw fact");
+		expect(extracted!.handoff.confirmedFacts[0]?.version).toBe("v1");
+		expect(extracted!.handoff.openQuestions).toEqual(["Any residual risk?"]);
+		expect(extracted!.handoff.failedAttempts).toEqual([{ attempt: "copy full parent history" }]);
+		expect(extracted!.handoff.changeScope.paths).toEqual(["packages/coding-agent/src/task/evidence-handoff.ts"]);
+		expect(extracted!.handoff.verificationOwnership).toEqual({ owner: "parent", commands: ["bun test"] });
+		expect(extracted!.handoff.authorConclusions).toBeUndefined();
+		expect(dispatched[0]?.context).not.toContain("Author thinks this is perfect");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("restores full evidence handoff fields for worker-class dispatch", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const handoff = buildEvidenceHandoff({
+			goals: ["Reuse worker context"],
+			acceptance: ["Worker keeps failed attempts + ownership"],
+			confirmedFacts: [{ id: "f-worker", version: "sha:1", statement: "prior probe passed" }],
+			openQuestions: ["Need live corpus?"],
+			failedAttempts: [{ attempt: "blind respawn", reason: "lost context" }],
+			changeScope: { paths: ["packages/coding-agent/src/task/"], symbols: ["decideWorkerReuse"] },
+			verificationOwnership: { owner: "worker", commands: ["bun test evidence-handoff"] },
+			authorConclusions: ["Keep for worker continuity"],
+		});
+		const context = renderEvidenceHandoffContext(handoff);
+
+		const settled = await runStructuredSubagent(request({ context, retainArtifacts: true }));
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted?.handoff.goals).toEqual(handoff.goals);
+		expect(extracted?.handoff.acceptance).toEqual(handoff.acceptance);
+		expect(extracted?.handoff.confirmedFacts).toEqual(handoff.confirmedFacts);
+		expect(extracted?.handoff.openQuestions).toEqual(handoff.openQuestions);
+		expect(extracted?.handoff.failedAttempts).toEqual(handoff.failedAttempts);
+		expect(extracted?.handoff.changeScope).toEqual(handoff.changeScope);
+		expect(extracted?.handoff.verificationOwnership).toEqual(handoff.verificationOwnership);
+		expect(extracted?.handoff.authorConclusions).toEqual(handoff.authorConclusions);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("synthesizes an evidence handoff fence from the task contract when context is freeform", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const assignment = [
+			"# Target",
+			"- packages/coding-agent/src/task/evidence-handoff.ts",
+			"# Change",
+			"- Wire ensureEvidenceHandoffContext into spawn",
+			"# Acceptance",
+			"- Dispatched context includes an evidence-handoff fence",
+		].join("\n");
+		const settled = await runStructuredSubagent(
+			request({
+				assignment,
+				context: "Freeform parent notes without a fence.",
+				retainArtifacts: true,
+			}),
+		);
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted).not.toBeNull();
+		expect(extracted!.preamble).toContain("Freeform parent notes");
+		expect(extracted!.handoff.goals).toEqual([
+			"- packages/coding-agent/src/task/evidence-handoff.ts",
+			"- Wire ensureEvidenceHandoffContext into spawn",
+		]);
+		expect(extracted!.handoff.acceptance).toEqual([
+			"- Dispatched context includes an evidence-handoff fence",
+		]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
