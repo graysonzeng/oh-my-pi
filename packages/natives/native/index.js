@@ -53,6 +53,11 @@ export const astEdit = nativeBindings.astEdit ?? missingNativeExport("astEdit");
 export const astGrep = nativeBindings.astGrep ?? missingNativeExport("astGrep");
 export const astMatch = nativeBindings.astMatch ?? missingNativeExport("astMatch");
 export const blockRangeAt = nativeBindings.blockRangeAt ?? missingNativeExport("blockRangeAt");
+export const codeIntelBuildGeneration = nativeBindings.codeIntelBuildGeneration ?? missingNativeExport("codeIntelBuildGeneration");
+export const codeIntelChunkFile = nativeBindings.codeIntelChunkFile ?? missingNativeExport("codeIntelChunkFile");
+export const codeIntelExtractCalls = nativeBindings.codeIntelExtractCalls ?? missingNativeExport("codeIntelExtractCalls");
+export const codeIntelExtractTags = nativeBindings.codeIntelExtractTags ?? missingNativeExport("codeIntelExtractTags");
+export const codeIntelRankGeneration = nativeBindings.codeIntelRankGeneration ?? missingNativeExport("codeIntelRankGeneration");
 export const copyToClipboard = nativeBindings.copyToClipboard ?? missingNativeExport("copyToClipboard");
 export const cosineSimilarityPairs = nativeBindings.cosineSimilarityPairs ?? missingNativeExport("cosineSimilarityPairs");
 export const countTokens = nativeBindings.countTokens ?? missingNativeExport("countTokens");
@@ -145,6 +150,10 @@ export const AstMatchStrictness = {
 	Relaxed: "relaxed",
 	Signature: "signature",
 	Template: "template",
+};
+export const CodeIntelTagKind = {
+	Def: "def",
+	Ref: "ref",
 };
 export const DiffSide = {
 	Old: "Old",

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as agentCore from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { Settings } from "../../src/config/settings";
+import { Settings } from "../../src/config/settings";
 import { WorkflowCancelledError } from "../../src/workflow/errors";
 import { createSessionPipelineAuditor } from "../../src/workflow/pipeline-auditor";
 
@@ -48,7 +48,7 @@ function assistant(stopReason: AssistantMessage["stopReason"]): AssistantMessage
 
 function host() {
 	return {
-		settings: { get: () => undefined } as unknown as Settings,
+		settings: Settings.isolated(),
 		modelRegistry: {
 			getAvailable: () => [flashModel()],
 			getApiKey: async () => "test-key",

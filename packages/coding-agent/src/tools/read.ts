@@ -1037,6 +1037,15 @@ export function resolveWorkflowCatalogToolDocs(
 	const schemaJson = typeof schema === "string" ? schema : JSON.stringify(schema, null, 2);
 	return [`# Tool: ${name}`, "", "```json", schemaJson, "```", ""].join("\n");
 }
+/** Structured children advertise `xd://tools/{name}` without an xd registry. */
+function workflowCatalogToolContent(url: string, session: ToolSession): string | undefined {
+	const match = /^xd:\/\/tools\/([^/?#]+)$/i.exec(url.trim());
+	const name = match?.[1];
+	if (!name) return undefined;
+	const workflowOpt = session.workflowToolOptimization;
+	if (!workflowOpt?.presentationToolSchemas) return undefined;
+	return resolveWorkflowCatalogToolDocs(name, workflowOpt);
+}
 
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
@@ -2814,6 +2823,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		if (parsedSel.kind === "image") throw new ToolError("The ':img' selector requires a file-backed path.");
+		const catalogDocs = workflowCatalogToolContent(url, this.session);
+		if (catalogDocs !== undefined) {
+			return buildInMemorySelectorResult(this.session, catalogDocs, parsedSel, {
+				details: { contentType: "text/plain" },
+				sourceInternal: url,
+				entityLabel: "resource",
+				immutable: true,
+			});
+		}
 		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 		const resourceDetails: NonNullable<InternalResource["details"]> = resource.details ?? {};

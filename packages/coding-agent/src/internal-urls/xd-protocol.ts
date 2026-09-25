@@ -174,13 +174,18 @@ export class XdProtocolHandler implements ProtocolHandler {
 					skills.map(item => item.name),
 				),
 			);
-		const content = await fs.readFile(skill.filePath, "utf-8");
+		// Prefer the prepared in-memory body. Discovered skills fall back to SKILL.md.
+		const rawContent = "content" in skill ? skill.content : undefined;
+		const content =
+			typeof rawContent === "string" && rawContent.length > 0
+				? rawContent
+				: await fs.readFile(skill.filePath, "utf-8");
 		return {
 			url: url.href,
 			content,
 			contentType: "text/markdown",
 			size: Buffer.byteLength(content),
-			sourcePath: skill.filePath,
+			...(typeof skill.filePath === "string" && skill.filePath.length > 0 ? { sourcePath: skill.filePath } : {}),
 		};
 	}
 }

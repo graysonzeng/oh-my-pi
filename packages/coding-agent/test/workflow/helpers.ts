@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
+import { Settings } from "../../src/config/settings";
 import type { ToolSession } from "../../src/tools";
 import { buildRequirementsSnapshot, satisfyMandatoryCoverage } from "../../src/workflow/requirements-snapshot";
 import type { StructuredRunner } from "../../src/workflow/runtime-adapter";
@@ -14,18 +15,14 @@ import type {
 	VerifierPort,
 } from "../../src/workflow/types";
 
-/** Minimal session mock — avoid Settings import (pulls pi-natives). */
+/** Session stand-in. Settings must be a real instance: model match and read now go through the registry. */
 export function fakeSession(overrides: Partial<ToolSession> = {}): ToolSession {
-	const settings = {
-		get: (_key: string) => undefined,
-		set: () => {},
-	};
 	return {
 		cwd: "/tmp",
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: settings as unknown as ToolSession["settings"],
+		settings: Settings.isolated(),
 		...overrides,
 	};
 }
