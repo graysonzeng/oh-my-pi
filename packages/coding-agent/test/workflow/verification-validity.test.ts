@@ -40,8 +40,6 @@ describe("verification ownership & result validity", () => {
 	const codeState = buildVerificationCodeState({
 		implementation: {
 			attemptId: "impl-1",
-			changedFiles: ["src/a.ts"],
-			patchPath: "/tmp/a.patch",
 		},
 		patchContent: "diff --git a/src/a.ts b/src/a.ts\n+hi\n",
 		changedFiles: ["src/a.ts"],
@@ -136,8 +134,6 @@ describe("verification ownership & result validity", () => {
 		const edited = buildVerificationCodeState({
 			implementation: {
 				attemptId: "impl-1",
-				changedFiles: ["src/a.ts"],
-				patchPath: "/tmp/a.patch",
 			},
 			patchContent: "diff --git a/src/a.ts b/src/a.ts\n+changed\n",
 			changedFiles: ["src/a.ts"],
@@ -195,21 +191,47 @@ describe("verification ownership & result validity", () => {
 
 	it("code-state fingerprints change when patch bytes change and stay stable for identical inputs", () => {
 		const a = buildVerificationCodeState({
-			implementation: { attemptId: "a1", changedFiles: ["x.ts"], patchPath: "p.patch" },
+			implementation: { attemptId: "a1" },
 			patchContent: "one",
 			changedFiles: ["x.ts"],
 		});
 		const b = buildVerificationCodeState({
-			implementation: { attemptId: "a1", changedFiles: ["x.ts"], patchPath: "p.patch" },
+			implementation: { attemptId: "a1" },
 			patchContent: "one",
 			changedFiles: ["x.ts"],
 		});
 		const c = buildVerificationCodeState({
-			implementation: { attemptId: "a1", changedFiles: ["x.ts"], patchPath: "p.patch" },
+			implementation: { attemptId: "a1" },
 			patchContent: "two",
 			changedFiles: ["x.ts"],
 		});
 		expect(a.fingerprint).toBe(b.fingerprint);
 		expect(a.fingerprint).not.toBe(c.fingerprint);
+	});
+
+	it("rejects reuse when fingerprint is copied but patch sha disagrees", () => {
+		const sealed = sealWorkflowVerifierResult(baseArtifact(), {
+			commands: ["bun check"],
+			codeState,
+		});
+		const tampered = {
+			...sealed,
+			validity: {
+				...sealed.validity!,
+				codeState: {
+					...sealed.validity!.codeState,
+					// Keep fingerprint, change underlying patch identity.
+					patchSha256: "0".repeat(64),
+				},
+			},
+		};
+		expect(
+			assessVerificationReuse({
+				prior: tampered,
+				codeState,
+				commands: ["bun check"],
+				scope: { kind: "paths", paths: ["src/a.ts"] },
+			}).reason,
+		).toBe("code_state_mismatch");
 	});
 });

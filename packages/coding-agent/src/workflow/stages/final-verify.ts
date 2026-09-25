@@ -6,13 +6,9 @@ import {
 	assessVerificationReuse,
 	buildVerificationCodeState,
 	projectReusedVerificationChecks,
+	resolveVerificationPatchEvidence,
 	sealWorkflowVerifierResult,
 } from "../verification-validity";
-import { changedFilesFromPatch } from "./implementation-verify";
-
-function isMissingFile(err: unknown): boolean {
-	return typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code === "ENOENT";
-}
 
 export interface FinalVerifyInput {
 	workflowId: string;
@@ -43,22 +39,8 @@ export class FinalVerifyStage {
 
 	async execute(input: FinalVerifyInput): Promise<VerificationArtifactV1> {
 		const impl = input.implementation;
-		let patchContent: string | undefined;
-		let changedFiles = [...(impl?.changedFiles ?? [])];
-
-		if (impl?.patchPath) {
-			const resolved = path.isAbsolute(impl.patchPath)
-				? impl.patchPath
-				: path.join(input.cwd ?? process.cwd(), impl.patchPath);
-			try {
-				patchContent = await Bun.file(resolved).text();
-				if (changedFiles.length === 0) {
-					changedFiles = changedFilesFromPatch(patchContent);
-				}
-			} catch (err) {
-				if (!isMissingFile(err)) throw err;
-			}
-		}
+		const cwd = input.cwd ?? process.cwd();
+		const { patchContent, changedFiles } = await resolveVerificationPatchEvidence(impl, cwd);
 
 		const codeState = buildVerificationCodeState({
 			implementation: impl,
@@ -165,7 +147,7 @@ export class FinalVerifyStage {
 			}
 		}
 
-		const sealed = sealWorkflowVerifierResult(
+		return sealWorkflowVerifierResult(
 			{
 				...base,
 				passed: completion.passed && checks.every(c => c.status !== "failed"),
@@ -177,6 +159,5 @@ export class FinalVerifyStage {
 				scope,
 			},
 		);
-		return sealed;
 	}
 }

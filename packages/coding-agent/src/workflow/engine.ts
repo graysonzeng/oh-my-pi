@@ -134,7 +134,7 @@ import type { PlanReviewStageResult } from "./stages/plan-review";
 import { PlanReviewStage } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
-import { invalidateVerificationResult } from "./verification-validity";
+import { invalidateVerificationResult, isValidDeliveryEvidence } from "./verification-validity";
 import type {
 	Artifact,
 	AuthorResponseV1,
@@ -2305,14 +2305,42 @@ export class WorkflowEngine {
 					// Reuse sealed implementation_verify greens only when code state + commands still match.
 					priorVerification: this.#verification,
 				});
-				this.#finalVerification = verification;
-				await this.#persistArtifact(workflowId, attemptId, "verification", verification);
+				const deliveryOk = isValidDeliveryEvidence(verification);
+				const effectiveVerification =
+					deliveryOk || !verification.passed
+						? verification
+						: {
+								...verification,
+								passed: false,
+								checks: [
+									...verification.checks,
+									{
+										id: "delivery-evidence",
+										status: "failed" as const,
+										summary:
+											"Verification result is not valid delivery evidence (missing, invalidated, or non-delivery ownership)",
+									},
+								],
+							};
+				this.#finalVerification = effectiveVerification;
+				await this.#persistArtifact(workflowId, attemptId, "verification", effectiveVerification);
 				// Explicit parent-acceptance receipt for offline e2e association.
 				// Normal stage transitions alone must not imply verification.
+				// Ownership/validity must also hold — passed alone is not delivery evidence.
+				if (verification.passed && !deliveryOk) {
+					logger.warn("final_verify passed checks but lacks valid delivery evidence", {
+						workflowId,
+						attemptId,
+						hasValidity: Boolean(verification.validity),
+						invalid: verification.validity?.invalid === true,
+						owner: verification.validity?.owner,
+						executor: verification.validity?.executor,
+					});
+				}
 				try {
 					session.sessionManager?.appendCustomEntry(
 						PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
-						buildParentFinalVerificationDetails(verification.passed ? "passed" : "failed", "workflow"),
+						buildParentFinalVerificationDetails(deliveryOk ? "passed" : "failed", "workflow"),
 					);
 				} catch (error) {
 					// Receipt bookkeeping must not fail final_verify, but missing
@@ -2323,7 +2351,7 @@ export class WorkflowEngine {
 						error: error instanceof Error ? error.message : String(error),
 					});
 				}
-				const decision = verification.passed ? "passed" : "failed";
+				const decision = deliveryOk ? "passed" : "failed";
 				const next = getNextStage("final_verify", decision);
 				await this.#completeTo(
 					workflowId,
@@ -2392,11 +2420,18 @@ export class WorkflowEngine {
 	): Promise<void> {
 		this.#implementation = implementation;
 		// Repair mutates code under test — prior greens are stale and must not be reused.
+		// Persist the invalidated seal so resume cannot reload a pre-repair green as valid.
 		if (this.#verification) {
 			this.#verification = invalidateVerificationResult(
 				this.#verification,
 				"repair_applied",
 				"repair_applied",
+			);
+			this.#verificationArtifactRef = await this.#persistArtifact(
+				workflowId,
+				attemptId,
+				"verification",
+				this.#verification,
 			);
 		}
 		if (this.#finalVerification) {
@@ -2405,6 +2440,7 @@ export class WorkflowEngine {
 				"repair_applied",
 				"repair_applied",
 			);
+			await this.#persistArtifact(workflowId, attemptId, "verification", this.#finalVerification);
 		}
 		// Latest write author must drive independent-review exclusion after repair.
 		if (implementation.provider) this.#implementerVendor = implementation.provider;

@@ -1,11 +1,11 @@
 import * as path from "node:path";
 import { parsePatchTouchedFiles } from "../../utils/parse-patch-touched-files";
 import type { ImplementationArtifactV1, VerificationArtifactV1, VerifierPort } from "../types";
-import { buildVerificationCodeState, sealWorkflowVerifierResult } from "../verification-validity";
-
-function isMissingFile(err: unknown): boolean {
-	return typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code === "ENOENT";
-}
+import {
+	buildVerificationCodeState,
+	resolveVerificationPatchEvidence,
+	sealWorkflowVerifierResult,
+} from "../verification-validity";
 
 export interface ImplementationVerifyInput {
 	workflowId: string;
@@ -33,31 +33,8 @@ export class ImplementationVerifyStage {
 
 	async execute(input: ImplementationVerifyInput): Promise<VerificationArtifactV1> {
 		const impl = input.implementation;
-		let patchContent: string | undefined;
-		const changedFiles: string[] = [];
 		const cwd = input.cwd ?? process.cwd();
-
-		// Collect current + prior patch paths (priorPatch: stored in unresolved after repair accumulate).
-		const patchPaths = [
-			impl.patchPath,
-			...(impl.unresolved ?? []).filter(u => u.startsWith("priorPatch:")).map(u => u.slice("priorPatch:".length)),
-		].filter((p): p is string => Boolean(p));
-
-		const chunks: string[] = [];
-		for (const patchPath of patchPaths) {
-			const resolved = path.isAbsolute(patchPath) ? patchPath : path.join(cwd, patchPath);
-			try {
-				const text = await Bun.file(resolved).text();
-				chunks.push(text);
-				const fromPatch = changedFilesFromPatch(text);
-				for (const f of fromPatch) {
-					if (!changedFiles.includes(f)) changedFiles.push(f);
-				}
-			} catch (err) {
-				if (!isMissingFile(err)) throw err;
-			}
-		}
-		if (chunks.length > 0) patchContent = chunks.join("\n");
+		const { patchContent, changedFiles } = await resolveVerificationPatchEvidence(impl, cwd);
 
 		// Branch names and model-reported files are not diff evidence.
 		if (!patchContent) {
@@ -83,7 +60,7 @@ export class ImplementationVerifyStage {
 			};
 			const codeState = buildVerificationCodeState({
 				implementation: impl,
-				changedFiles: impl.changedFiles,
+				changedFiles,
 			});
 			return sealWorkflowVerifierResult(failed, {
 				commands: input.commands,

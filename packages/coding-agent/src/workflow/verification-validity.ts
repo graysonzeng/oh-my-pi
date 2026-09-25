@@ -10,6 +10,8 @@
  */
 
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import * as path from "node:path";
+import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
 import { sha256Hex } from "./optimization-receipt";
 import type {
 	ImplementationArtifactV1,
@@ -126,27 +128,82 @@ function scopesEqual(left: VerificationScope, right: VerificationScope): boolean
 }
 
 function codeStatesEqual(left: VerificationCodeState, right: VerificationCodeState): boolean {
-	return left.fingerprint === right.fingerprint;
+	// Compare concrete fields — never trust fingerprint alone (could be copied forward).
+	if (left.patchSha256 !== right.patchSha256) return false;
+	if ((left.implementationAttemptId ?? null) !== (right.implementationAttemptId ?? null)) return false;
+	if (!commandsEqual(left.changedFiles, right.changedFiles)) return false;
+	if (left.fingerprint !== right.fingerprint) return false;
+	// Recompute fingerprint from sealed fields; mismatch means tampered / inconsistent seal.
+	const recomputed = fingerprintCodeState(left.patchSha256, left.changedFiles, left.implementationAttemptId);
+	return left.fingerprint === recomputed && right.fingerprint === recomputed;
 }
 
-/** Build the code-state identity under test from implementation + patch bytes. */
-export function buildVerificationCodeState(input: {
-	implementation?: Pick<ImplementationArtifactV1, "attemptId" | "changedFiles" | "patchPath"> | null;
-	patchContent?: string;
-	changedFiles?: readonly string[];
-}): VerificationCodeState {
-	const changedFiles = normalizePaths(input.changedFiles ?? input.implementation?.changedFiles ?? []);
-	const patchSha256 =
-		input.patchContent !== undefined ? sha256Hex(input.patchContent) : EMPTY_TREE_PATCH_SHA;
-	const implementationAttemptId = input.implementation?.attemptId?.trim() || undefined;
-	const fingerprint = sha256Hex(
+function fingerprintCodeState(
+	patchSha256: string,
+	changedFiles: readonly string[],
+	implementationAttemptId: string | undefined,
+): string {
+	return sha256Hex(
 		JSON.stringify({
 			patchSha256,
 			changedFiles,
 			implementationAttemptId: implementationAttemptId ?? null,
-			patchPath: input.implementation?.patchPath ?? null,
 		}),
 	);
+}
+
+function isMissingFile(err: unknown): boolean {
+	return typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code === "ENOENT";
+}
+
+/**
+ * Shared patch evidence for both implementation_verify and final_verify.
+ * Always hashes current + priorPatch:* bytes and derives changed files from
+ * the patch parse — never trusts model-reported changedFiles for validity.
+ */
+export async function resolveVerificationPatchEvidence(
+	implementation: Pick<ImplementationArtifactV1, "patchPath" | "unresolved"> | null | undefined,
+	cwd: string,
+): Promise<{ patchContent?: string; changedFiles: string[] }> {
+	if (!implementation) return { changedFiles: [] };
+	const patchPaths = [
+		implementation.patchPath,
+		...(implementation.unresolved ?? [])
+			.filter(u => u.startsWith("priorPatch:"))
+			.map(u => u.slice("priorPatch:".length)),
+	].filter((p): p is string => Boolean(p));
+
+	const chunks: string[] = [];
+	const changedFiles: string[] = [];
+	for (const patchPath of patchPaths) {
+		const resolved = path.isAbsolute(patchPath) ? patchPath : path.join(cwd, patchPath);
+		try {
+			const text = await Bun.file(resolved).text();
+			chunks.push(text);
+			for (const file of parsePatchTouchedFiles(text)) {
+				if (!changedFiles.includes(file)) changedFiles.push(file);
+			}
+		} catch (err) {
+			if (!isMissingFile(err)) throw err;
+		}
+	}
+	return {
+		...(chunks.length > 0 ? { patchContent: chunks.join("\n") } : {}),
+		changedFiles,
+	};
+}
+
+/** Build the code-state identity under test from implementation + patch bytes. */
+export function buildVerificationCodeState(input: {
+	implementation?: Pick<ImplementationArtifactV1, "attemptId"> | null;
+	patchContent?: string;
+	changedFiles?: readonly string[];
+}): VerificationCodeState {
+	const changedFiles = normalizePaths(input.changedFiles ?? []);
+	const patchSha256 =
+		input.patchContent !== undefined ? sha256Hex(input.patchContent) : EMPTY_TREE_PATCH_SHA;
+	const implementationAttemptId = input.implementation?.attemptId?.trim() || undefined;
+	const fingerprint = fingerprintCodeState(patchSha256, changedFiles, implementationAttemptId);
 	const state: VerificationCodeState = {
 		patchSha256,
 		changedFiles,
