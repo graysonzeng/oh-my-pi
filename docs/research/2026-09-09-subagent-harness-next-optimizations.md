@@ -148,3 +148,5 @@ LangChain 固定 GPT-5.2-Codex，仅改 harness，Terminal Bench 2.0 从 52.8 �
 ## 7. 后续实施
 
 用户已授权首批实施。当前代码、回归修复、194项相关测试、离线采样、本地mock并发验证与实网资格失败边界，见 `docs/superpowers/plans/2026-09-09-subagent-harness-next-optimizations-implementation.md`。只落地离线报告、关键证据交接和稳定前缀；完整fork及并发/effort/cap自动调整未启用。真实端到端/缓存收益仍未验证。
+
+P2（模型档位 / 并发 / code-intel 产品化 / 输出优化）在无新的 live 瓶颈证据前保持 **blocked-until** 状态板与实验入口：`docs/p2-optimization-blocked-until.md`。上游 `can1357/oh-my-pi` 小批量同步 hygiene：`docs/upstream-sync-hygiene.md`。

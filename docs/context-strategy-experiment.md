@@ -148,3 +148,7 @@ treatment as a default:
 4. No bundling with model / concurrency / Track E prompt changes
 
 Until that corpus exists, leave `compaction.experiment.enabled` off in production.
+
+See also: P2 model / concurrency / code-intel / output gates —
+`docs/p2-optimization-blocked-until.md` (still blocked without live evidence;
+do not bundle those levers into this experiment).
