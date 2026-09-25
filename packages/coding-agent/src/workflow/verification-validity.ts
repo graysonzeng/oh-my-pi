@@ -67,6 +67,30 @@ export interface SealVerificationValidityInput {
 	codeState: VerificationCodeState;
 	/** Override default invalidation trigger set. */
 	invalidatedBy?: readonly VerificationInvalidationTrigger[];
+	/**
+	 * P1-4: when sealing a full-repo verification that would duplicate an active
+	 * unowned repo verify, fail closed. Local/scoped seals are unaffected.
+	 */
+	duplicateOfActive?: boolean;
+	/** When false, a repo-scope seal is treated as not explicitly assigned. */
+	explicitlyAssigned?: boolean;
+}
+
+/**
+ * Fail closed when a verification spawn/seal violates P1-4 ownership rules.
+ * Local and explicitly assigned scoped verifies remain allowed.
+ */
+export function assertVerificationSpawnAllowed(input: {
+	scope: "repo" | "paths" | "commands" | "local";
+	owner?: string | null;
+	explicitlyAssigned: boolean;
+	duplicateOfActive?: boolean;
+}): VerificationSpawnAssessment {
+	const assessment = assessVerificationOwnership(input);
+	if (!assessment.allow) {
+		throw new Error(assessment.detail);
+	}
+	return assessment;
 }
 
 const EMPTY_TREE_PATCH_SHA = sha256Hex("");
@@ -301,6 +325,14 @@ export function sealVerificationValidity(
 	const commands = normalizeCommands(input.commands);
 	const codeState = input.codeState;
 	const scope = normalizeScope(input.scope, codeState.changedFiles);
+	if (scope.kind === "repo") {
+		assertVerificationSpawnAllowed({
+			scope: "repo",
+			owner: input.owner,
+			explicitlyAssigned: input.explicitlyAssigned !== false,
+			duplicateOfActive: input.duplicateOfActive,
+		});
+	}
 	const validity: VerificationValidityV1 = {
 		schemaVersion: 1,
 		kind: "verification_validity",

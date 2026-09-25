@@ -12,6 +12,7 @@ import { describe, expect, it } from "bun:test";
 import type { VerificationArtifactV1 } from "../../src/workflow/types";
 import {
 	assessVerificationReuse,
+	assertVerificationSpawnAllowed,
 	buildVerificationCodeState,
 	invalidateVerificationResult,
 	isValidDeliveryEvidence,
@@ -233,5 +234,34 @@ describe("verification ownership & result validity", () => {
 				scope: { kind: "paths", paths: ["src/a.ts"] },
 			}).reason,
 		).toBe("code_state_mismatch");
+	});
+
+	it("fails closed on unowned/unassigned full-repo seals but keeps assigned local/path seals", () => {
+		expect(() =>
+			sealVerificationValidity(baseArtifact(), {
+				executor: "worker",
+				owner: "worker",
+				commands: ["bun test"],
+				codeState,
+				scope: { kind: "repo" },
+				explicitlyAssigned: false,
+				duplicateOfActive: true,
+			}),
+		).toThrow(/full-repo verification/);
+
+		const local = sealVerificationValidity(baseArtifact(), {
+			executor: "worker",
+			owner: "worker",
+			commands: ["bun test packages/coding-agent/test/latency/parallel-recovery-safety.test.ts"],
+			codeState,
+			scope: { kind: "paths", paths: ["src/a.ts"] },
+			explicitlyAssigned: true,
+		});
+		expect(local.validity?.scope.kind).toBe("paths");
+		expect(assertVerificationSpawnAllowed({
+			scope: "local",
+			owner: "worker",
+			explicitlyAssigned: true,
+		}).allow).toBe(true);
 	});
 });
