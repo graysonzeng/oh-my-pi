@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	buildEvidenceHandoff,
 	decideWorkerReuse,
+	ensureEvidenceHandoffContext,
 	extractEvidenceHandoffFromContext,
 	invalidateFactIfVersionMismatch,
 	listStaleEvidence,
@@ -245,5 +246,33 @@ describe("worker reuse decision", () => {
 				handoff: { kind: "evidence_handoff", v: 2 } as never,
 			}),
 		).toEqual({ action: "spawn_fresh", reason: "invalid_handoff", agentId: "WorkerA" });
+	});
+});
+
+describe("ensureEvidenceHandoffContext producer", () => {
+	test("synthesizes a fence from contract goals/acceptance when context has none", () => {
+		const ensured = ensureEvidenceHandoffContext("Shared freeform brief.", {
+			target: ["- packages/coding-agent/src/task/evidence-handoff.ts"],
+			acceptance: ["- Child restores structured handoff"],
+		});
+		const extracted = extractEvidenceHandoffFromContext(ensured ?? "");
+		expect(extracted).not.toBeNull();
+		expect(extracted!.preamble).toContain("Shared freeform brief");
+		expect(extracted!.handoff.goals).toEqual(["- packages/coding-agent/src/task/evidence-handoff.ts"]);
+		expect(extracted!.handoff.acceptance).toEqual(["- Child restores structured handoff"]);
+		expect(extracted!.handoff.verificationOwnership.owner).toBe("parent");
+	});
+
+	test("leaves an existing valid fence alone instead of double-wrapping", () => {
+		const handoff = sampleHandoff();
+		const context = renderEvidenceHandoffContext(handoff, { preamble: "Keep me" });
+		const ensured = ensureEvidenceHandoffContext(context, {
+			target: ["- should not replace"],
+			acceptance: ["- should not replace"],
+		});
+		expect(ensured).toBe(context.trim());
+		expect(extractEvidenceHandoffFromContext(ensured ?? "")?.handoff.contentFingerprint).toBe(
+			handoff.contentFingerprint,
+		);
 	});
 });

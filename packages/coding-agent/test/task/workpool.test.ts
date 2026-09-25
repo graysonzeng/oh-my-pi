@@ -8,6 +8,11 @@ import type { AgentSession } from "../../src/session/agent-session";
 import { WaitTool } from "../../src/tools/wait";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
+import {
+	buildEvidenceHandoff,
+	markEvidenceStale,
+	renderEvidenceHandoffContext,
+} from "../../src/task/evidence-handoff";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
 import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
@@ -377,6 +382,53 @@ describe("WorkPool dispatch", () => {
 		await until(() => workpool.items[3]?.status !== "queued");
 		expect(workpool.items[3]?.agentId).toBe("loaded-2");
 		gates.get("loaded-3")?.resolve();
+		await finishPool(session, workpool);
+	});
+
+	it("spawns fresh when the shared evidence handoff is stale instead of reusing idle", async () => {
+		const session = makeSession([], 3);
+		const gates = new Map<string, PromiseWithResolvers<void>>();
+		const spawned: string[] = [];
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			spawned.push(id);
+			const gate = Promise.withResolvers<void>();
+			gates.set(id, gate);
+			await gate.promise;
+			markIdle(id);
+			return execution(id);
+		});
+		vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return singleResult(options.id);
+		});
+		const stale = markEvidenceStale(
+			buildEvidenceHandoff({
+				goals: ["Reuse only while fresh"],
+				acceptance: ["Stale facts force spawn_fresh"],
+				confirmedFacts: [{ id: "f1", version: "v1", statement: "prior probe" }],
+			}),
+			"f1",
+			"file changed",
+		);
+		const workpool = new WorkPool(session, {
+			name: "stale-handoff",
+			policy: POLICY,
+			context: renderEvidenceHandoffContext(stale),
+		});
+		// Keep one agent running so the pool does not drain/close mid-test.
+		workpool.push(["one", "hold"]);
+		await until(() => workpool.agents.length === 2);
+		const firstId = workpool.agents[0]!.id;
+		const holdId = workpool.agents[1]!.id;
+		gates.get(firstId)?.resolve();
+		await until(() => workpool.agents.some(agent => agent.id === firstId && agent.state === "idle"));
+		workpool.push(["three"]);
+		await until(() => workpool.agents.length === 3);
+		expect(workpool.items[2]?.agentId).not.toBe(firstId);
+		expect(spawned).toHaveLength(3);
+		gates.get(holdId)?.resolve();
+		gates.get(workpool.agents[2]!.id)?.resolve();
 		await finishPool(session, workpool);
 	});
 

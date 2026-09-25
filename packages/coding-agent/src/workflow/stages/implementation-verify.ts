@@ -97,7 +97,7 @@ export class ImplementationVerifyStage {
 		return sealWorkflowVerifierResult(result, {
 			commands: input.commands,
 			codeState,
-			scope: changedFiles.length ? { kind: "paths", paths: changedFiles } : { kind: "commands" },
+			scope: changedFiles.length ? { kind: "paths", paths: changedFiles } : { kind: "repo" },
 		});
 	}
 }

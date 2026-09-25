@@ -32,7 +32,7 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
 import { pickWorkflowToolSessionFields } from "../tools/workflow-session-fields";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
-import { prepareSubagentContext } from "./evidence-handoff";
+import { ensureEvidenceHandoffContext, prepareSubagentContext } from "./evidence-handoff";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
 	applyEligibleNestedPatches,
@@ -531,6 +531,9 @@ function buildExecutorOptions(
 		throw new Error(contract.detail);
 	}
 	const assignment = contract.assignment.trim();
+	// P1-1: synthesize a handoff fence from the completed contract when the
+	// caller did not embed one, then project by performance class.
+	const contextWithHandoff = ensureEvidenceHandoffContext(request.context, contract);
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -541,7 +544,7 @@ function buildExecutorOptions(
 		assignment,
 		// Project evidence handoffs by class so reviewers share raw evidence
 		// without inheriting author conclusions; freeform context passes through.
-		context: prepareSubagentContext(request.context, policy.performanceClass),
+		context: prepareSubagentContext(contextWithHandoff, policy.performanceClass),
 		planReference: undefined,
 		// Task `name` is the spawn handle (id allocation). Eval `label` is a
 		// real UI description. Copy it only for eval so generateTaskLabel can run.

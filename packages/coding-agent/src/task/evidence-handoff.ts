@@ -475,6 +475,43 @@ export function decideWorkerReuse(input: {
 }
 
 /**
+ * Seed used to synthesize a handoff fence from a completed task contract when
+ * the caller did not already embed one. Paths/symbols are intentionally omitted
+ * until a dedicated scope extractor exists — empty changeScope is valid.
+ */
+export interface EvidenceHandoffContractSeed {
+	target?: readonly string[];
+	change?: readonly string[];
+	acceptance?: readonly string[];
+}
+
+/**
+ * Ensure context carries a structured evidence-handoff fence when the spawn
+ * contract already has goals/acceptance. Existing valid fences are left alone
+ * (including broken fences that reviewers later strip).
+ */
+export function ensureEvidenceHandoffContext(
+	context: string | undefined,
+	contract: EvidenceHandoffContractSeed,
+): string | undefined {
+	const trimmed = context?.trim() || undefined;
+	if (trimmed && (extractEvidenceHandoffFromContext(trimmed) || contextHasEvidenceHandoffFence(trimmed))) {
+		return trimmed;
+	}
+	const goals = nonEmptyStrings([...(contract.target ?? []), ...(contract.change ?? [])]);
+	const acceptance = nonEmptyStrings(contract.acceptance);
+	if (goals.length === 0 && acceptance.length === 0) return trimmed;
+	return renderEvidenceHandoffContext(
+		buildEvidenceHandoff({
+			goals: goals.length ? goals : acceptance,
+			acceptance: acceptance.length ? acceptance : goals,
+			verificationOwnership: { owner: "parent" },
+		}),
+		{ preamble: trimmed },
+	);
+}
+
+/**
  * Prepare context for a child spawn: when an evidence handoff fence is present,
  * re-project it for the child's performance class; otherwise pass through.
  * Reviewers never receive an unparseable fence that could leak author conclusions.

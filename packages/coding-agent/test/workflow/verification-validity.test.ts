@@ -264,4 +264,26 @@ describe("verification ownership & result validity", () => {
 			explicitlyAssigned: true,
 		}).allow).toBe(true);
 	});
+
+	it("treats empty-path / commands seals as full-repo for the ownership gate", () => {
+		const emptyTree = buildVerificationCodeState({ changedFiles: [] });
+		expect(() =>
+			sealVerificationValidity(baseArtifact(), {
+				executor: "worker",
+				owner: "worker",
+				commands: ["bun test"],
+				codeState: emptyTree,
+				scope: { kind: "commands" },
+				explicitlyAssigned: false,
+				duplicateOfActive: true,
+			}),
+		).toThrow(/full-repo verification/);
+
+		const owned = sealWorkflowVerifierResult(baseArtifact(), {
+			commands: ["bun check"],
+			codeState: emptyTree,
+		});
+		expect(owned.validity?.scope.kind).toBe("repo");
+		expect(owned.validity?.owner).toBe("workflow_verifier");
+	});
 });

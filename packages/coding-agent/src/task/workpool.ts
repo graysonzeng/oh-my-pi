@@ -9,6 +9,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { runSubagentFollowUpTurn } from "./executor";
+import { decideWorkerReuse, extractEvidenceHandoffFromContext } from "./evidence-handoff";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
@@ -269,11 +270,30 @@ export class WorkPool {
 		}
 		const idle = this.#leastLoadedIdle();
 		if (idle) {
-			item.agentId = idle.id;
-			idle.queue.push(item);
-			this.#card("dispatched", idle.id, `[${item.id}] ${item.text}`);
-			this.#drain(idle);
-			return;
+			// P1-1: prefer continuing idle workers only when the shared handoff is
+			// still valid; stale / invalid / isolated → spawn_fresh instead.
+			const handoff = this.context ? (extractEvidenceHandoffFromContext(this.context)?.handoff ?? null) : null;
+			const ref = AgentRegistry.global().get(idle.id);
+			const decision = decideWorkerReuse({
+				candidate: {
+					id: idle.id,
+					status: ref?.status === "parked" ? "parked" : "idle",
+					isolated: false,
+				},
+				handoff,
+			});
+			if (decision.action === "continue") {
+				item.agentId = idle.id;
+				idle.queue.push(item);
+				this.#card("dispatched", idle.id, `[${item.id}] ${item.text}`);
+				this.#drain(idle);
+				return;
+			}
+			logger.debug("workpool: idle reuse rejected; preferring fresh spawn", {
+				pool: this.name,
+				idle: idle.id,
+				reason: decision.reason,
+			});
 		}
 		if (this.agents.length < this.limit()) {
 			await this.#spawn(item);

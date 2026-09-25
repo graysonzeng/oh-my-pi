@@ -50,7 +50,7 @@ export class FinalVerifyStage {
 		const scope =
 			changedFiles.length > 0
 				? { kind: "paths" as const, paths: changedFiles }
-				: { kind: "commands" as const };
+				: { kind: "repo" as const };
 
 		const reuse = assessVerificationReuse({
 			prior: input.priorVerification,

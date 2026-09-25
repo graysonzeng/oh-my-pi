@@ -155,12 +155,15 @@ function normalizePaths(paths: readonly string[] | undefined): string[] {
 }
 
 function normalizeScope(scope: VerificationScope | undefined, pathsFromCode: string[]): VerificationScope {
-	const kind = scope?.kind ?? (pathsFromCode.length > 0 ? "paths" : "commands");
+	const kind = scope?.kind ?? (pathsFromCode.length > 0 ? "paths" : "repo");
 	if (kind === "paths") {
 		const paths = normalizePaths(scope?.paths ?? pathsFromCode);
-		return paths.length ? { kind: "paths", paths } : { kind: "commands" };
+		// Empty path lists are full-repo verification, not a commands-only loophole.
+		return paths.length ? { kind: "paths", paths } : { kind: "repo" };
 	}
 	if (kind === "repo") return { kind: "repo" };
+	// Explicit commands scope with no changed files is still full-repo for ownership.
+	if (kind === "commands" && pathsFromCode.length === 0) return { kind: "repo" };
 	return { kind: "commands" };
 }
 
@@ -325,6 +328,7 @@ export function sealVerificationValidity(
 	const commands = normalizeCommands(input.commands);
 	const codeState = input.codeState;
 	const scope = normalizeScope(input.scope, codeState.changedFiles);
+	// P1-4: full-repo (including empty-path / commands remapped to repo) must pass ownership.
 	if (scope.kind === "repo") {
 		assertVerificationSpawnAllowed({
 			scope: "repo",
