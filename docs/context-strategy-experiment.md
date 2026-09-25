@@ -46,8 +46,13 @@ Or omit the block entirely — defaults are off / `factor: none`.
 
 ### Treatment example: 200k threshold tier
 
-Use only on models whose usable window can host the tier (otherwise the
-runtime falls back to control and records `tier_exceeds_usable_window`).
+Use only on models whose usable window can host the tier. If the tier cannot
+fit `contextWindow − reserve`, resolution returns `baseline_threshold_fallback`
+and keeps control settings. `SessionMaintenance` logs that fail-closed outcome
+once per distinct reason/fingerprint (`logger.warn`,
+`Context strategy experiment fell back to control`) so operators can tell
+treatment was requested but not applied. The UI status boundaries and recovery
+fit checks share the same `effectiveCompactionSettings` overlay.
 
 ```yaml
 compaction:

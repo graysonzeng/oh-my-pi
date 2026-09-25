@@ -130,7 +130,10 @@ import {
 	cfgContextPromotionEnabled,
 	cfgSnapcompactShape,
 } from "./context-settings";
-import { effectiveCompactionSettings } from "./context-strategy-experiment";
+import {
+	type ContextStrategyExperimentReceiptV1,
+	resolveSessionCompactionSettings,
+} from "./context-strategy-experiment";
 import { cfgRetry } from "./settings";
 
 export type CompactionCheckResult = Readonly<{
@@ -609,6 +612,8 @@ export class SessionMaintenance {
 	#incompleteRecoveryAttempts = 0;
 	/** Latest rollover boundary that already received its pre-threshold notebook reminder. */
 	#experimentalNotesReminderBoundaryId: string | undefined;
+	/** Latest context-strategy experiment receipt (observability; not fed to the model). */
+	#lastContextStrategyExperimentReceipt: ContextStrategyExperimentReceiptV1 | undefined;
 	readonly #host: SessionMaintenanceHost;
 	/**
 	 * Prepare-time authorization snapshots keyed by patch identity (the patch
@@ -637,12 +642,33 @@ export class SessionMaintenance {
 	 * single-factor context-strategy experiment overlay (P1-3). Defaults match
 	 * {@link cfgCompaction} when the experiment is off. Threshold treatments need
 	 * a context window; when omitted, the active model window is used.
+	 * Fail-closed outcomes (multi-factor, unfit tier, …) stay on control and are
+	 * logged once per distinct reason/fingerprint so operators can tell treatment
+	 * was requested but not applied.
 	 */
 	#compactionSettings(contextWindow?: number): CompactionSettings {
-		return effectiveCompactionSettings(
-			this.#host.settings,
-			contextWindow ?? this.#model?.contextWindow ?? undefined,
-		);
+		const resolution = resolveSessionCompactionSettings({
+			settings: this.#host.settings,
+			contextWindow: contextWindow ?? this.#model?.contextWindow ?? undefined,
+		});
+		const prev = this.#lastContextStrategyExperimentReceipt;
+		this.#lastContextStrategyExperimentReceipt = resolution.receipt;
+		if (
+			resolution.receipt.enabled &&
+			!resolution.applied &&
+			resolution.fallbackReason &&
+			resolution.fallbackReason !== "disabled" &&
+			resolution.fallbackReason !== "factor_none" &&
+			(prev?.fallbackReason !== resolution.fallbackReason ||
+				prev?.configFingerprint !== resolution.receipt.configFingerprint)
+		) {
+			logger.warn("Context strategy experiment fell back to control", {
+				factor: resolution.factor,
+				reason: resolution.fallbackReason,
+				source: resolution.source,
+			});
+		}
+		return resolution.settings;
 	}
 
 	/** Experimental rollover is safe only when the current effective tool surface can recover its state. */

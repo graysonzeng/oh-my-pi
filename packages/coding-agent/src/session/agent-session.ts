@@ -576,10 +576,10 @@ import {
 import { cfgTaskBatch, cfgTaskDisabledAgents } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
-	cfgCompaction,
 	cfgExtendedContext,
 	cfgWorkspaceAdditionalDirectories,
 } from "./context-settings";
+import { effectiveCompactionSettings } from "./context-strategy-experiment";
 import { cfgTitleRefreshOnReplan } from "../goals/settings";
 import {
 	cfgComputerEnabled,
@@ -5011,7 +5011,7 @@ export class AgentSession implements SettingsScope {
 			pendingTokens += tokenizer.countMessage(message);
 			pendingImages += countImagesInMessage(message);
 		}
-		const compactionSettings = cfgCompaction.get(this.settings);
+		const compactionSettings = effectiveCompactionSettings(this.settings, contextWindow);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		// getContextUsage follows agent.state.messages, which may already hold
 		// emitted results that the loop has not merged into admission.context.
@@ -6318,7 +6318,7 @@ export class AgentSession implements SettingsScope {
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 		const tokenizer = this.agent.tokenizer;
-		const compactionSettings = cfgCompaction.get(this.settings);
+		const compactionSettings = effectiveCompactionSettings(this.settings, contextWindow);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		const candidateMessage: ToolResultMessage = {
 			role: "toolResult",

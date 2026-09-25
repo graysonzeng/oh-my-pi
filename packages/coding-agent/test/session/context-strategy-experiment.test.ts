@@ -7,9 +7,11 @@
  * - 200k tier forced onto windows that cannot host it (must baseline fallback)
  * - keep_recent treatment drops below preserve floor for recent edits
  * - control/treatment arm recording loses factor identity or invents live wins
+ * - SessionMaintenance / UI boundaries bypass the overlay (arm contamination)
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { CompactionSettings } from "../../src/session/context-settings";
+import * as experimentModule from "../../src/session/context-strategy-experiment";
 import {
 	CONTEXT_STRATEGY_EXPERIMENT_KIND,
 	CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS,
@@ -22,6 +24,8 @@ import {
 	parseContextStrategyExperimentConfig,
 	readContextStrategyExperimentConfig,
 } from "../../src/session/context-strategy-experiment";
+import { getSessionCompactionBoundaries } from "../../src/session/context-usage-runtime";
+import { SessionMaintenance, type SessionMaintenanceHost } from "../../src/session/session-maintenance";
 import { Settings } from "../../src/config/settings";
 
 function baseSettings(overrides: Partial<CompactionSettings> = {}): CompactionSettings {
@@ -256,5 +260,58 @@ describe("context strategy experiment (P1-3)", () => {
 		});
 		expect(incomplete.status).toBe("incomplete_metrics");
 		expect(incomplete.claimedLiveWin).toBe(false);
+	});
+
+	it("applies the experiment overlay on session UI boundaries and SessionMaintenance settings resolution", () => {
+		const settings = Settings.isolated({
+			"compaction.enabled": true,
+			"compaction.asyncEnabled": false,
+			"compaction.experiment.enabled": true,
+			"compaction.experiment.factor": "threshold_tokens",
+			"compaction.experiment.thresholdTokens": CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS,
+		});
+
+		const boundaries = getSessionCompactionBoundaries(settings, 400_000);
+		expect(boundaries).toEqual({
+			thresholdPercent: 50,
+			speculationPercent: null,
+		});
+
+		const unfit = getSessionCompactionBoundaries(
+			Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.experiment.enabled": true,
+				"compaction.experiment.factor": "threshold_tokens",
+				"compaction.experiment.thresholdTokens": CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS,
+			}),
+			128_000,
+		);
+		// Fail-closed to control reserve path — not forced past the usable window as a 200k cap.
+		expect(unfit).not.toBeNull();
+		expect(typeof unfit!.thresholdPercent).toBe("number");
+		expect(unfit!.thresholdPercent).toBeLessThan(100);
+		expect(unfit!.thresholdPercent).not.toBe((CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS / 128_000) * 100);
+
+		const spy = spyOn(experimentModule, "resolveSessionCompactionSettings");
+		const host = {
+			settings,
+			model: () => ({ contextWindow: 400_000 }) as never,
+			isDisposed: () => false,
+			isGeneratingHandoff: () => false,
+			hasExperimentalContextRolloverTools: () => false,
+			extensionRunner: undefined,
+		} as unknown as SessionMaintenanceHost;
+		const maintenance = new SessionMaintenance(host);
+		maintenance.maybeStartSpeculativeCompaction(100_000, 400_000);
+		expect(spy).toHaveBeenCalled();
+		const call = spy.mock.calls.find(args => args[0]?.contextWindow === 400_000);
+		expect(call?.[0]?.settings).toBe(settings);
+		const resolved = experimentModule.resolveSessionCompactionSettings({
+			settings,
+			contextWindow: 400_000,
+		});
+		expect(resolved.applied).toBe(true);
+		expect(resolved.settings.thresholdTokens).toBe(CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS);
+		spy.mockRestore();
 	});
 });

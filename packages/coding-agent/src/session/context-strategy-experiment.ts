@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { resolveBudgetReserveTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
-import type { Settings } from "../config/settings";
+import type { ScopeLike } from "../config/registry";
 import {
 	cfgCompaction,
 	cfgCompactionExperiment,
@@ -253,7 +253,7 @@ export function settingsToExperimentConfig(value: ContextStrategyExperimentSetti
 	};
 }
 
-export function readContextStrategyExperimentConfig(settings: Settings): ContextStrategyExperimentConfig {
+export function readContextStrategyExperimentConfig(settings: ScopeLike): ContextStrategyExperimentConfig {
 	return settingsToExperimentConfig(cfgCompactionExperiment.get(settings));
 }
 
@@ -458,16 +458,12 @@ export function applyContextStrategyExperiment(input: {
  * SessionMaintenance entry: overlay one experiment factor onto cfgCompaction.
  * When the experiment is off, returns production settings unchanged.
  */
-export function effectiveCompactionSettings(settings: Settings, contextWindow?: number): CompactionSettings {
-	return applyContextStrategyExperiment({
-		base: cfgCompaction.get(settings),
-		experiment: readContextStrategyExperimentConfig(settings),
-		contextWindow,
-	}).settings;
+export function effectiveCompactionSettings(settings: ScopeLike, contextWindow?: number): CompactionSettings {
+	return resolveSessionCompactionSettings({ settings, contextWindow }).settings;
 }
 
 export function resolveSessionCompactionSettings(input: {
-	settings: Settings;
+	settings: ScopeLike;
 	base?: CompactionSettings;
 	contextWindow?: number;
 }): ContextStrategyExperimentResolution {
