@@ -42,7 +42,12 @@ the report fills `parentFinalVerification` and parent start→verify `e2eMs` /
 Repeated reads are grouped by selector-stripped resource within one parent
 session and emitted as SHA-256 keys, not raw paths/URLs. Different ranges or
 changed file contents can be legitimate reads: these counts are investigation
-signals, not proven redundant work. Timing/model usage summaries currently
+signals, not proven redundant work. A local “501 identical-view” style tally,
+when present, is likewise a **candidate** only. **Track E prompt rules remain
+no-go** until humans attribute thrash and decide go (see
+`docs/tools/eval.md` and
+`docs/superpowers/specs/2026-09-13-sol-pi-efficiency-absorption.md`).
+Timing/model usage summaries currently
 pool parent and child requests, so they are not per-model controlled experiments.
 No conversation bodies or raw tool arguments appear in report output.
 
