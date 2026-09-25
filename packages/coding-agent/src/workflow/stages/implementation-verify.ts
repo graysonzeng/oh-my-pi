@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { parsePatchTouchedFiles } from "../../utils/parse-patch-touched-files";
 import type { ImplementationArtifactV1, VerificationArtifactV1, VerifierPort } from "../types";
+import { buildVerificationCodeState, sealWorkflowVerifierResult } from "../verification-validity";
 
 function isMissingFile(err: unknown): boolean {
 	return typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code === "ENOENT";
@@ -60,7 +61,7 @@ export class ImplementationVerifyStage {
 
 		// Branch names and model-reported files are not diff evidence.
 		if (!patchContent) {
-			return {
+			const failed: VerificationArtifactV1 = {
 				kind: "verification",
 				passed: false,
 				checks: [
@@ -80,9 +81,17 @@ export class ImplementationVerifyStage {
 				model: impl.model,
 				promptVersion: impl.promptVersion,
 			};
+			const codeState = buildVerificationCodeState({
+				implementation: impl,
+				changedFiles: impl.changedFiles,
+			});
+			return sealWorkflowVerifierResult(failed, {
+				commands: input.commands,
+				codeState,
+			});
 		}
 
-		return this.#verifier.verify(
+		const result = await this.#verifier.verify(
 			{
 				workflowId: input.workflowId,
 				attemptId: input.attemptId,
@@ -102,5 +111,16 @@ export class ImplementationVerifyStage {
 				expectDirtyTree: changedFiles.length > 0 || Boolean(impl.patchPath) || Boolean(impl.branchName),
 			},
 		);
+
+		const codeState = buildVerificationCodeState({
+			implementation: impl,
+			patchContent,
+			changedFiles,
+		});
+		return sealWorkflowVerifierResult(result, {
+			commands: input.commands,
+			codeState,
+			scope: changedFiles.length ? { kind: "paths", paths: changedFiles } : { kind: "commands" },
+		});
 	}
 }

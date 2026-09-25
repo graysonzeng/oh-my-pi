@@ -134,6 +134,7 @@ import type { PlanReviewStageResult } from "./stages/plan-review";
 import { PlanReviewStage } from "./stages/plan-review";
 import { RepairStage } from "./stages/repair";
 import { getNextStage, isValidTransition } from "./transitions";
+import { invalidateVerificationResult } from "./verification-validity";
 import type {
 	Artifact,
 	AuthorResponseV1,
@@ -2301,6 +2302,8 @@ export class WorkflowEngine {
 					signal,
 					timeoutMs: this.#config.verificationTimeoutMs,
 					cwd,
+					// Reuse sealed implementation_verify greens only when code state + commands still match.
+					priorVerification: this.#verification,
 				});
 				this.#finalVerification = verification;
 				await this.#persistArtifact(workflowId, attemptId, "verification", verification);
@@ -2388,6 +2391,21 @@ export class WorkflowEngine {
 		evidence?: { modelFamily?: string | null },
 	): Promise<void> {
 		this.#implementation = implementation;
+		// Repair mutates code under test — prior greens are stale and must not be reused.
+		if (this.#verification) {
+			this.#verification = invalidateVerificationResult(
+				this.#verification,
+				"repair_applied",
+				"repair_applied",
+			);
+		}
+		if (this.#finalVerification) {
+			this.#finalVerification = invalidateVerificationResult(
+				this.#finalVerification,
+				"repair_applied",
+				"repair_applied",
+			);
+		}
 		// Latest write author must drive independent-review exclusion after repair.
 		if (implementation.provider) this.#implementerVendor = implementation.provider;
 		if (evidence?.modelFamily) this.#implementerModelFamily = evidence.modelFamily;
