@@ -325,6 +325,108 @@ export const cfgCompaction = combine({
 /** Configured compaction policy ({@link cfgCompaction}). */
 export type CompactionSettings = SettingValueOf<typeof cfgCompaction>;
 
+// ────────────────────────────────────────────────────────────────────────
+// Context strategy experiment (P1-3) — default off; single factor only
+// ────────────────────────────────────────────────────────────────────────
+
+export const CONTEXT_STRATEGY_EXPERIMENT_FACTOR_VALUES = [
+	"none",
+	"threshold_tokens",
+	"keep_recent_tokens",
+	"reserve_tokens",
+] as const;
+
+/** Master gate for the SessionMaintenance single-factor experiment overlay. Default off. */
+export const cfgCompactionExperimentEnabled = register({
+	id: "compaction.experiment.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Context Strategy Experiment",
+		description:
+			"Opt-in single-factor context maintenance experiment. Off preserves production compaction defaults. Does not add a second compaction scheduler.",
+	},
+});
+
+/** Which one compaction factor the experiment may override. */
+export const cfgCompactionExperimentFactor = register({
+	id: "compaction.experiment.factor",
+	type: "enum",
+	values: CONTEXT_STRATEGY_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Experiment Factor",
+		description:
+			"Change only one factor per run: threshold_tokens (~200k experiment tier), keep_recent_tokens, or reserve_tokens.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "threshold_tokens",
+				label: "Threshold tokens",
+				description: "Experiment tier (default 200k); falls back when the window cannot host it",
+			},
+			{
+				value: "keep_recent_tokens",
+				label: "Keep recent tokens",
+				description: "Verbatim recent-edit retention window (preserve floor enforced)",
+			},
+			{
+				value: "reserve_tokens",
+				label: "Reserve tokens",
+				description: "Usable-budget floor under the context window",
+			},
+		],
+	},
+});
+
+/** Experiment tier for threshold_tokens. Not a global fixed cap for all models. */
+export const cfgCompactionExperimentThresholdTokens = register({
+	id: "compaction.experiment.thresholdTokens",
+	type: "number",
+	default: 200_000,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Experiment Threshold Tier",
+		description:
+			"Used only when factor=threshold_tokens. ~200k is an experiment tier; unsuitable windows fall back to control.",
+		options: [
+			{ value: "150000", label: "150K tokens" },
+			{ value: "200000", label: "200K tokens (experiment tier)" },
+			{ value: "250000", label: "250K tokens" },
+			{ value: "300000", label: "300K tokens" },
+		],
+	},
+});
+
+/** Treatment value when factor=keep_recent_tokens. */
+export const cfgCompactionExperimentKeepRecentTokens = register({
+	id: "compaction.experiment.keepRecentTokens",
+	type: "number",
+	default: undefined,
+});
+
+/** Treatment value when factor=reserve_tokens. */
+export const cfgCompactionExperimentReserveTokens = register({
+	id: "compaction.experiment.reserveTokens",
+	type: "number",
+	default: undefined,
+});
+
+export const cfgCompactionExperiment = combine({
+	enabled: cfgCompactionExperimentEnabled,
+	factor: cfgCompactionExperimentFactor,
+	thresholdTokens: cfgCompactionExperimentThresholdTokens,
+	keepRecentTokens: cfgCompactionExperimentKeepRecentTokens,
+	reserveTokens: cfgCompactionExperimentReserveTokens,
+});
+
+export type ContextStrategyExperimentSettings = SettingValueOf<typeof cfgCompactionExperiment>;
+
 // Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 export const cfgSnapcompactSystemPrompt = register({
 	id: "snapcompact.systemPrompt",
