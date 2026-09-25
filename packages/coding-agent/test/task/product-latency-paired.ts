@@ -8,7 +8,7 @@ import {
 	type BenefitVerdict,
 	type Mode,
 	type QualificationReport,
-	QUALIFICATION_VARIANTS,
+	EXPERIMENT_VARIANTS,
 	type Variant,
 	buildQualificationReport,
 	compareQualificationReports,
@@ -17,6 +17,8 @@ import {
 
 export type PairedExperiment = "advisories" | "sonic-effort";
 export type PairedArm = "control" | "treatment";
+
+export { EXPERIMENT_VARIANTS };
 
 export interface PairedSlot {
 	pairId: string;
@@ -52,11 +54,12 @@ export interface PairedQualificationReport {
 	benefit: BenefitVerdict;
 }
 
-export function createPairedSchedule(mode: Mode): PairedSlot[] {
+export function createPairedSchedule(mode: Mode, experiment: PairedExperiment = "advisories"): PairedSlot[] {
+	const variants = EXPERIMENT_VARIANTS[experiment];
 	const slots: PairedSlot[] = [];
 	let pairIndex = 0;
 	for (let repetition = 0; repetition <= measuredCount(mode); repetition++) {
-		for (const variant of QUALIFICATION_VARIANTS) {
+		for (const variant of variants) {
 			const pairId = `${variant}:${repetition}`;
 			const first: PairedArm = pairIndex % 2 === 0 ? "control" : "treatment";
 			const second: PairedArm = first === "control" ? "treatment" : "control";
@@ -77,7 +80,7 @@ export async function runPairedQualification(args: {
 	verifyConditions: () => Promise<void>;
 	signal: AbortSignal;
 }): Promise<PairedQualificationReport> {
-	const schedule = createPairedSchedule(args.mode);
+	const schedule = createPairedSchedule(args.mode, args.experiment);
 	const recorded: PairedSlotResult[] = [];
 
 	const persist = async (
@@ -168,6 +171,8 @@ function assemblePairedReport(args: {
 		launches: controlAttempts.length,
 		elapsedMs: sumAcceptanceWallMs(controlAttempts),
 		modelsConfigSha256: args.modelsConfigSha256,
+		experiment: args.experiment,
+		variants: EXPERIMENT_VARIANTS[args.experiment],
 	});
 	const treatment = buildQualificationReport({
 		mode: args.mode,
@@ -175,8 +180,9 @@ function assemblePairedReport(args: {
 		launches: treatmentAttempts.length,
 		elapsedMs: sumAcceptanceWallMs(treatmentAttempts),
 		modelsConfigSha256: args.modelsConfigSha256,
-	});
-	const pairs = collectPairs(args.schedule, args.recorded);
+		experiment: args.experiment,
+		variants: EXPERIMENT_VARIANTS[args.experiment],
+	});	const pairs = collectPairs(args.schedule, args.recorded);
 	const benefit = finalizeBenefit({
 		experiment: args.experiment,
 		phase: args.phase,
@@ -269,7 +275,10 @@ function finalizeBenefit(args: {
 	if (identity) {
 		return { status: "INCOMPARABLE", reason: identity };
 	}
-	const compared = compareQualificationReports(args.control, args.treatment);
+	const compared = compareQualificationReports(args.control, args.treatment, {
+		experiment: args.experiment,
+		variants: EXPERIMENT_VARIANTS[args.experiment],
+	});
 	if (args.experiment !== "advisories" || !("declaredExperiment" in compared)) return compared;
 	const { declaredExperiment: _declaredExperiment, ...rest } = compared;
 	return rest;
