@@ -335,9 +335,10 @@ describe("structured subagent primitive", () => {
 			goals: ["Ship handoff"],
 			acceptance: ["Reviewer omits author conclusions"],
 			confirmedFacts: [{ id: "f1", version: "v1", statement: "raw fact", evidence: "diff hunk" }],
+			openQuestions: ["Any residual risk?"],
 			failedAttempts: [{ attempt: "copy full parent history" }],
 			changeScope: { paths: ["packages/coding-agent/src/task/evidence-handoff.ts"] },
-			verificationOwnership: { owner: "parent" },
+			verificationOwnership: { owner: "parent", commands: ["bun test"] },
 			authorConclusions: ["Author thinks this is perfect"],
 		});
 		const context = renderEvidenceHandoffContext(handoff, { preamble: "Shared packet" });
@@ -346,10 +347,49 @@ describe("structured subagent primitive", () => {
 		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
 		expect(extracted).not.toBeNull();
 		expect(extracted!.preamble).toContain("Shared packet");
+		expect(extracted!.handoff.goals).toEqual(["Ship handoff"]);
 		expect(extracted!.handoff.acceptance).toEqual(["Reviewer omits author conclusions"]);
 		expect(extracted!.handoff.confirmedFacts[0]?.statement).toBe("raw fact");
+		expect(extracted!.handoff.confirmedFacts[0]?.version).toBe("v1");
+		expect(extracted!.handoff.openQuestions).toEqual(["Any residual risk?"]);
+		expect(extracted!.handoff.failedAttempts).toEqual([{ attempt: "copy full parent history" }]);
+		expect(extracted!.handoff.changeScope.paths).toEqual(["packages/coding-agent/src/task/evidence-handoff.ts"]);
+		expect(extracted!.handoff.verificationOwnership).toEqual({ owner: "parent", commands: ["bun test"] });
 		expect(extracted!.handoff.authorConclusions).toBeUndefined();
 		expect(dispatched[0]?.context).not.toContain("Author thinks this is perfect");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("restores full evidence handoff fields for worker-class dispatch", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const handoff = buildEvidenceHandoff({
+			goals: ["Reuse worker context"],
+			acceptance: ["Worker keeps failed attempts + ownership"],
+			confirmedFacts: [{ id: "f-worker", version: "sha:1", statement: "prior probe passed" }],
+			openQuestions: ["Need live corpus?"],
+			failedAttempts: [{ attempt: "blind respawn", reason: "lost context" }],
+			changeScope: { paths: ["packages/coding-agent/src/task/"], symbols: ["decideWorkerReuse"] },
+			verificationOwnership: { owner: "worker", commands: ["bun test evidence-handoff"] },
+			authorConclusions: ["Keep for worker continuity"],
+		});
+		const context = renderEvidenceHandoffContext(handoff);
+
+		const settled = await runStructuredSubagent(request({ context, retainArtifacts: true }));
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted?.handoff.goals).toEqual(handoff.goals);
+		expect(extracted?.handoff.acceptance).toEqual(handoff.acceptance);
+		expect(extracted?.handoff.confirmedFacts).toEqual(handoff.confirmedFacts);
+		expect(extracted?.handoff.openQuestions).toEqual(handoff.openQuestions);
+		expect(extracted?.handoff.failedAttempts).toEqual(handoff.failedAttempts);
+		expect(extracted?.handoff.changeScope).toEqual(handoff.changeScope);
+		expect(extracted?.handoff.verificationOwnership).toEqual(handoff.verificationOwnership);
+		expect(extracted?.handoff.authorConclusions).toEqual(handoff.authorConclusions);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 

@@ -4,8 +4,9 @@
  * Failure modes covered:
  * - child spawn loses goals/acceptance/facts/questions/failures/scope/ownership
  * - stale version markers disappear or cannot be detected
- * - reviewer context still carries author conclusions
- * - parent keeps spawning fresh when an idle worker still has valid context
+ * - reviewer context still carries author conclusions (including broken fences)
+ * - parent claims valid_context / continues when handoff is missing, empty-scope, or stale
+ * - malformed facts vanish silently
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -81,10 +82,28 @@ describe("evidence handoff build/parse/serialize", () => {
 		expect(again?.contentFingerprint).toBe(handoff.contentFingerprint);
 	});
 
-	test("rejects wrong kind/version instead of inventing a handoff", () => {
+	test("rejects wrong kind/version and malformed facts instead of inventing or dropping silently", () => {
 		expect(parseEvidenceHandoff({ kind: "stage_handoff", v: 1 })).toBeNull();
 		expect(parseEvidenceHandoff({ kind: "evidence_handoff", v: 2 })).toBeNull();
 		expect(extractEvidenceHandoffFromContext("## plain notes\nno fence")).toBeNull();
+		expect(() =>
+			buildEvidenceHandoff({
+				confirmedFacts: [{ id: "x", version: "", statement: "missing version" }],
+			}),
+		).toThrow(/evidence_handoff_malformed_facts/);
+		expect(
+			parseEvidenceHandoff({
+				kind: "evidence_handoff",
+				v: 1,
+				confirmedFacts: [{ id: "x", version: "v1" }],
+			}),
+		).toBeNull();
+		expect(() =>
+			serializeEvidenceHandoff({
+				kind: "evidence_handoff",
+				v: 2,
+			} as never),
+		).toThrow(/evidence_handoff_serialize_invalid/);
 	});
 });
 
@@ -119,21 +138,45 @@ describe("role projection", () => {
 		expect(forWorker.authorConclusions).toEqual(handoff.authorConclusions);
 	});
 
-	test("prepareSubagentContext projects by performance class and leaves freeform alone", () => {
-		const context = renderEvidenceHandoffContext(sampleHandoff(), { preamble: "Contract: keep public API" });
+	test("prepareSubagentContext projects by class, restores worker fields, and strips broken reviewer fences", () => {
+		const handoff = sampleHandoff();
+		const context = renderEvidenceHandoffContext(handoff, { preamble: "Contract: keep public API" });
 		const reviewCtx = prepareSubagentContext(context, "review");
 		expect(reviewCtx).toBeDefined();
 		const reviewExtracted = extractEvidenceHandoffFromContext(reviewCtx!);
 		expect(reviewExtracted?.handoff.authorConclusions).toBeUndefined();
-		expect(reviewExtracted?.handoff.acceptance.length).toBeGreaterThan(0);
+		expect(reviewExtracted?.handoff.acceptance).toEqual(handoff.acceptance);
 		expect(reviewExtracted?.preamble).toContain("Contract");
 
 		const workerCtx = prepareSubagentContext(context, "worker");
 		const workerExtracted = extractEvidenceHandoffFromContext(workerCtx!);
-		expect(workerExtracted?.handoff.authorConclusions).toEqual(sampleHandoff().authorConclusions);
+		expect(workerExtracted?.handoff.goals).toEqual(handoff.goals);
+		expect(workerExtracted?.handoff.acceptance).toEqual(handoff.acceptance);
+		expect(workerExtracted?.handoff.confirmedFacts).toEqual(handoff.confirmedFacts);
+		expect(workerExtracted?.handoff.openQuestions).toEqual(handoff.openQuestions);
+		expect(workerExtracted?.handoff.failedAttempts).toEqual(handoff.failedAttempts);
+		expect(workerExtracted?.handoff.changeScope).toEqual(handoff.changeScope);
+		expect(workerExtracted?.handoff.verificationOwnership).toEqual(handoff.verificationOwnership);
+		expect(workerExtracted?.handoff.authorConclusions).toEqual(handoff.authorConclusions);
 
 		expect(prepareSubagentContext("just freeform notes", "review")).toBe("just freeform notes");
 		expect(prepareSubagentContext("  ", "worker")).toBeUndefined();
+
+		const broken = [
+			"Keep preamble",
+			"```evidence-handoff",
+			JSON.stringify({
+				kind: "evidence_handoff",
+				v: 2,
+				authorConclusions: ["Author thinks this is perfect"],
+				acceptance: ["should not reach reviewer"],
+			}),
+			"```",
+		].join("\n");
+		const scrubbed = prepareSubagentContext(broken, "review");
+		expect(scrubbed).toBe("Keep preamble");
+		expect(scrubbed).not.toContain("Author thinks this is perfect");
+		expect(scrubbed).not.toContain("evidence-handoff");
 	});
 });
 
@@ -148,6 +191,11 @@ describe("worker reuse decision", () => {
 			}),
 		).toEqual({ action: "continue", reason: "valid_context", agentId: "WorkerA" });
 
+		expect(decideWorkerReuse({ candidate: { id: "WorkerA", status: "idle" } })).toEqual({
+			action: "continue",
+			reason: "resumable_session",
+			agentId: "WorkerA",
+		});
 		expect(decideWorkerReuse({ candidate: null, handoff })).toEqual({
 			action: "spawn_fresh",
 			reason: "no_candidate",
@@ -177,5 +225,25 @@ describe("worker reuse decision", () => {
 				correctionScope: { paths: ["packages/catalog/src/unrelated.ts"] },
 			}),
 		).toEqual({ action: "spawn_fresh", reason: "scope_mismatch", agentId: "WorkerA" });
+
+		const emptyScope = buildEvidenceHandoff({
+			goals: ["g"],
+			acceptance: ["a"],
+			changeScope: {},
+		});
+		expect(
+			decideWorkerReuse({
+				candidate: { id: "WorkerA", status: "idle" },
+				handoff: emptyScope,
+				correctionScope: { paths: ["packages/catalog/src/unrelated.ts"] },
+			}),
+		).toEqual({ action: "spawn_fresh", reason: "scope_mismatch", agentId: "WorkerA" });
+
+		expect(
+			decideWorkerReuse({
+				candidate: { id: "WorkerA", status: "idle" },
+				handoff: { kind: "evidence_handoff", v: 2 } as never,
+			}),
+		).toEqual({ action: "spawn_fresh", reason: "invalid_handoff", agentId: "WorkerA" });
 	});
 });

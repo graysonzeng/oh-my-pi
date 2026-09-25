@@ -81,11 +81,13 @@ export type WorkerReuseAction = "continue" | "spawn_fresh";
 
 export type WorkerReuseReason =
 	| "valid_context"
+	| "resumable_session"
 	| "no_candidate"
 	| "not_resumable"
 	| "isolated"
 	| "stale_evidence"
-	| "scope_mismatch";
+	| "scope_mismatch"
+	| "invalid_handoff";
 
 export interface WorkerReuseCandidate {
 	id: string;
@@ -111,6 +113,8 @@ export interface BuildEvidenceHandoffInput {
 }
 
 const FENCE_RE = new RegExp(`\`\`\`${EVIDENCE_HANDOFF_FENCE}\\s*\\n([\\s\\S]*?)\\n\`\`\``, "m");
+/** Matches an evidence-handoff fence even when the body is malformed. */
+const FENCE_STRIP_RE = new RegExp(`\`\`\`${EVIDENCE_HANDOFF_FENCE}\\b[\\s\\S]*?\`\`\``, "gm");
 
 function nonEmptyStrings(values: readonly string[] | undefined): string[] {
 	if (!values) return [];
@@ -140,6 +144,43 @@ function normalizeFailedAttempt(raw: unknown): FailedAttempt | null {
 	const out: FailedAttempt = { attempt };
 	if (typeof raw.reason === "string" && raw.reason.trim()) out.reason = raw.reason.trim();
 	return out;
+}
+
+function requireNormalizedFacts(rawFacts: readonly unknown[] | undefined): ConfirmedFact[] {
+	if (!rawFacts || rawFacts.length === 0) return [];
+	const facts: ConfirmedFact[] = [];
+	const rejected: string[] = [];
+	for (const [index, raw] of rawFacts.entries()) {
+		const fact = normalizeFact(raw);
+		if (!fact) {
+			const id = isRecord(raw) && typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : `#${index}`;
+			rejected.push(id);
+			continue;
+		}
+		facts.push(fact);
+	}
+	if (rejected.length > 0) {
+		throw new Error(`evidence_handoff_malformed_facts:${rejected.join(",")}`);
+	}
+	return facts;
+}
+
+function requireNormalizedAttempts(rawAttempts: readonly unknown[] | undefined): FailedAttempt[] {
+	if (!rawAttempts || rawAttempts.length === 0) return [];
+	const attempts: FailedAttempt[] = [];
+	const rejected: number[] = [];
+	for (const [index, raw] of rawAttempts.entries()) {
+		const attempt = normalizeFailedAttempt(raw);
+		if (!attempt) {
+			rejected.push(index);
+			continue;
+		}
+		attempts.push(attempt);
+	}
+	if (rejected.length > 0) {
+		throw new Error(`evidence_handoff_malformed_attempts:${rejected.join(",")}`);
+	}
+	return attempts;
 }
 
 function normalizeChangeScope(raw: unknown): ChangeScope {
@@ -187,6 +228,10 @@ function fingerprintPayload(handoff: Omit<EvidenceHandoffV1, "contentFingerprint
 	});
 }
 
+function scopeHasTargets(scope: ChangeScope | undefined): boolean {
+	return (scope?.paths?.length ?? 0) > 0 || (scope?.symbols?.length ?? 0) > 0;
+}
+
 /** Build a versioned evidence handoff with a stable content fingerprint. */
 export function buildEvidenceHandoff(input: BuildEvidenceHandoffInput = {}): EvidenceHandoffV1 {
 	const base: Omit<EvidenceHandoffV1, "contentFingerprint"> = {
@@ -194,11 +239,9 @@ export function buildEvidenceHandoff(input: BuildEvidenceHandoffInput = {}): Evi
 		v: EVIDENCE_HANDOFF_VERSION,
 		goals: nonEmptyStrings(input.goals),
 		acceptance: nonEmptyStrings(input.acceptance),
-		confirmedFacts: (input.confirmedFacts ?? []).map(normalizeFact).filter((f): f is ConfirmedFact => f !== null),
+		confirmedFacts: requireNormalizedFacts(input.confirmedFacts),
 		openQuestions: nonEmptyStrings(input.openQuestions),
-		failedAttempts: (input.failedAttempts ?? [])
-			.map(normalizeFailedAttempt)
-			.filter((a): a is FailedAttempt => a !== null),
+		failedAttempts: requireNormalizedAttempts(input.failedAttempts),
 		changeScope: normalizeChangeScope(input.changeScope ?? {}),
 		verificationOwnership: normalizeVerificationOwnership(input.verificationOwnership ?? { owner: "parent" }),
 		...(input.authorConclusions && nonEmptyStrings(input.authorConclusions).length
@@ -208,41 +251,41 @@ export function buildEvidenceHandoff(input: BuildEvidenceHandoffInput = {}): Evi
 	return { ...base, contentFingerprint: fingerprintPayload(base) };
 }
 
-/** Parse a handoff object; returns null when shape/version is wrong. */
+/** Parse a handoff object; returns null when shape/version is wrong or entries malformed. */
 export function parseEvidenceHandoff(value: unknown): EvidenceHandoffV1 | null {
 	if (!isRecord(value)) return null;
 	if (value.kind !== EVIDENCE_HANDOFF_KIND || value.v !== EVIDENCE_HANDOFF_VERSION) return null;
-	const goals = Array.isArray(value.goals)
-		? nonEmptyStrings(value.goals.filter((g): g is string => typeof g === "string"))
-		: [];
-	const acceptance = Array.isArray(value.acceptance)
-		? nonEmptyStrings(value.acceptance.filter((g): g is string => typeof g === "string"))
-		: [];
-	const confirmedFacts = Array.isArray(value.confirmedFacts)
-		? value.confirmedFacts.map(normalizeFact).filter((f): f is ConfirmedFact => f !== null)
-		: [];
-	const openQuestions = Array.isArray(value.openQuestions)
-		? nonEmptyStrings(value.openQuestions.filter((g): g is string => typeof g === "string"))
-		: [];
-	const failedAttempts = Array.isArray(value.failedAttempts)
-		? value.failedAttempts.map(normalizeFailedAttempt).filter((a): a is FailedAttempt => a !== null)
-		: [];
-	const authorConclusions = Array.isArray(value.authorConclusions)
-		? nonEmptyStrings(value.authorConclusions.filter((g): g is string => typeof g === "string"))
-		: [];
-	return buildEvidenceHandoff({
-		goals,
-		acceptance,
-		confirmedFacts,
-		openQuestions,
-		failedAttempts,
-		changeScope: normalizeChangeScope(value.changeScope),
-		verificationOwnership: normalizeVerificationOwnership(value.verificationOwnership),
-		authorConclusions: authorConclusions.length ? authorConclusions : undefined,
-	});
+	try {
+		const goals = Array.isArray(value.goals)
+			? nonEmptyStrings(value.goals.filter((g): g is string => typeof g === "string"))
+			: [];
+		const acceptance = Array.isArray(value.acceptance)
+			? nonEmptyStrings(value.acceptance.filter((g): g is string => typeof g === "string"))
+			: [];
+		const confirmedFacts = requireNormalizedFacts(Array.isArray(value.confirmedFacts) ? value.confirmedFacts : []);
+		const openQuestions = Array.isArray(value.openQuestions)
+			? nonEmptyStrings(value.openQuestions.filter((g): g is string => typeof g === "string"))
+			: [];
+		const failedAttempts = requireNormalizedAttempts(Array.isArray(value.failedAttempts) ? value.failedAttempts : []);
+		const authorConclusions = Array.isArray(value.authorConclusions)
+			? nonEmptyStrings(value.authorConclusions.filter((g): g is string => typeof g === "string"))
+			: [];
+		return buildEvidenceHandoff({
+			goals,
+			acceptance,
+			confirmedFacts,
+			openQuestions,
+			failedAttempts,
+			changeScope: normalizeChangeScope(value.changeScope),
+			verificationOwnership: normalizeVerificationOwnership(value.verificationOwnership),
+			authorConclusions: authorConclusions.length ? authorConclusions : undefined,
+		});
+	} catch {
+		return null;
+	}
 }
 
-/** Extract a handoff JSON fence from a context string (if present). */
+/** Extract a handoff JSON fence from a context string (if present and valid). */
 export function extractEvidenceHandoffFromContext(context: string): {
 	handoff: EvidenceHandoffV1;
 	preamble: string;
@@ -265,9 +308,23 @@ export function extractEvidenceHandoffFromContext(context: string): {
 	};
 }
 
-/** Serialize a handoff as a recoverable fenced JSON block. */
+/** True when context contains an evidence-handoff fence (valid or not). */
+export function contextHasEvidenceHandoffFence(context: string): boolean {
+	return FENCE_STRIP_RE.test(context);
+}
+
+/** Remove every evidence-handoff fence from context (used when parse fails for reviewers). */
+export function stripEvidenceHandoffFences(context: string): string {
+	return context
+		.replace(FENCE_STRIP_RE, "")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+/** Serialize a handoff as a recoverable fenced JSON block. Rejects wrong kind/version. */
 export function serializeEvidenceHandoff(handoff: EvidenceHandoffV1): string {
-	const normalized = parseEvidenceHandoff(handoff) ?? buildEvidenceHandoff(handoff);
+	const normalized = parseEvidenceHandoff(handoff);
+	if (!normalized) throw new Error("evidence_handoff_serialize_invalid");
 	return `\`\`\`${EVIDENCE_HANDOFF_FENCE}\n${JSON.stringify(normalized, null, "\t")}\n\`\`\``;
 }
 
@@ -298,7 +355,8 @@ export function audienceForPerformanceClass(performanceClass: SubagentPerformanc
  * attempts, but never author conclusions.
  */
 export function projectEvidenceHandoff(handoff: EvidenceHandoffV1, audience: EvidenceAudience): EvidenceHandoffV1 {
-	const base = parseEvidenceHandoff(handoff) ?? buildEvidenceHandoff(handoff);
+	const base = parseEvidenceHandoff(handoff);
+	if (!base) throw new Error("evidence_handoff_project_invalid");
 	if (audience === "reviewer") {
 		return buildEvidenceHandoff({
 			goals: base.goals,
@@ -316,7 +374,8 @@ export function projectEvidenceHandoff(handoff: EvidenceHandoffV1, audience: Evi
 
 /** Mark one fact stale (version/invalidation). Missing id is a no-op. */
 export function markEvidenceStale(handoff: EvidenceHandoffV1, factId: string, reason: string): EvidenceHandoffV1 {
-	const base = parseEvidenceHandoff(handoff) ?? buildEvidenceHandoff(handoff);
+	const base = parseEvidenceHandoff(handoff);
+	if (!base) throw new Error("evidence_handoff_mark_stale_invalid");
 	const confirmedFacts = base.confirmedFacts.map(fact =>
 		fact.id === factId ? { ...fact, stale: true as const, staleReason: reason.trim() || "stale" } : fact,
 	);
@@ -359,14 +418,20 @@ function pathOverlaps(left: string, right: string): boolean {
 	return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
+/**
+ * Related when both scopes lack targets, or when at least one path/symbol overlaps.
+ * Nonempty correction against empty existing scope is a mismatch (unknown prior scope).
+ */
 function scopesRelated(existing: ChangeScope, correction: ChangeScope | undefined): boolean {
 	if (!correction) return true;
+	const correctionHas = scopeHasTargets(correction);
+	const existingHas = scopeHasTargets(existing);
+	if (!correctionHas) return true;
+	if (!existingHas) return false;
 	const correctionPaths = correction.paths ?? [];
 	const correctionSymbols = correction.symbols ?? [];
-	if (correctionPaths.length === 0 && correctionSymbols.length === 0) return true;
 	const existingPaths = existing.paths ?? [];
 	const existingSymbols = existing.symbols ?? [];
-	if (existingPaths.length === 0 && existingSymbols.length === 0) return true;
 	for (const path of correctionPaths) {
 		if (existingPaths.some(existingPath => pathOverlaps(path, existingPath))) return true;
 	}
@@ -378,7 +443,9 @@ function scopesRelated(existing: ChangeScope, correction: ChangeScope | undefine
 
 /**
  * Prefer continuing an idle/parked non-isolated worker that still has valid
- * context. Stale evidence or unrelated scope → spawn fresh.
+ * context. Stale evidence, invalid handoff, or unrelated scope → spawn fresh.
+ * Idle without a structured handoff may continue via session transcript
+ * (`resumable_session`) — never claimed as `valid_context`.
  */
 export function decideWorkerReuse(input: {
 	candidate?: WorkerReuseCandidate | null;
@@ -391,11 +458,17 @@ export function decideWorkerReuse(input: {
 	if (candidate.status !== "idle" && candidate.status !== "parked") {
 		return { action: "spawn_fresh", reason: "not_resumable", agentId: candidate.id };
 	}
-	const handoff = input.handoff ? (parseEvidenceHandoff(input.handoff) ?? input.handoff) : null;
-	if (handoff && listStaleEvidence(handoff).length > 0) {
+	if (input.handoff == null) {
+		return { action: "continue", reason: "resumable_session", agentId: candidate.id };
+	}
+	const handoff = parseEvidenceHandoff(input.handoff);
+	if (!handoff) {
+		return { action: "spawn_fresh", reason: "invalid_handoff", agentId: candidate.id };
+	}
+	if (listStaleEvidence(handoff).length > 0) {
 		return { action: "spawn_fresh", reason: "stale_evidence", agentId: candidate.id };
 	}
-	if (handoff && !scopesRelated(handoff.changeScope, input.correctionScope)) {
+	if (!scopesRelated(handoff.changeScope, input.correctionScope)) {
 		return { action: "spawn_fresh", reason: "scope_mismatch", agentId: candidate.id };
 	}
 	return { action: "continue", reason: "valid_context", agentId: candidate.id };
@@ -404,6 +477,7 @@ export function decideWorkerReuse(input: {
 /**
  * Prepare context for a child spawn: when an evidence handoff fence is present,
  * re-project it for the child's performance class; otherwise pass through.
+ * Reviewers never receive an unparseable fence that could leak author conclusions.
  */
 export function prepareSubagentContext(
 	context: string | undefined,
@@ -411,9 +485,16 @@ export function prepareSubagentContext(
 ): string | undefined {
 	const trimmed = context?.trim();
 	if (!trimmed) return undefined;
+	const audience = audienceForPerformanceClass(performanceClass);
 	const extracted = extractEvidenceHandoffFromContext(trimmed);
-	if (!extracted) return trimmed;
-	const projected = projectEvidenceHandoff(extracted.handoff, audienceForPerformanceClass(performanceClass));
+	if (!extracted) {
+		if (audience === "reviewer" && contextHasEvidenceHandoffFence(trimmed)) {
+			const stripped = stripEvidenceHandoffFences(trimmed);
+			return stripped || undefined;
+		}
+		return trimmed;
+	}
+	const projected = projectEvidenceHandoff(extracted.handoff, audience);
 	return renderEvidenceHandoffContext(projected, {
 		preamble: extracted.preamble,
 		postamble: extracted.postamble,
