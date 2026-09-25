@@ -11,6 +11,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import {
+	buildEvidenceHandoff,
+	extractEvidenceHandoffFromContext,
+	renderEvidenceHandoffContext,
+} from "@oh-my-pi/pi-coding-agent/task/evidence-handoff";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
@@ -315,6 +320,37 @@ describe("structured subagent primitive", () => {
 			liveSettings.cancelPendingSaves();
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	it("projects evidence handoff context so reviewers omit author conclusions", async () => {
+		const reviewer = { ...AGENT, name: "reviewer" };
+		mockDiscovery(reviewer);
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const handoff = buildEvidenceHandoff({
+			goals: ["Ship handoff"],
+			acceptance: ["Reviewer omits author conclusions"],
+			confirmedFacts: [{ id: "f1", version: "v1", statement: "raw fact", evidence: "diff hunk" }],
+			failedAttempts: [{ attempt: "copy full parent history" }],
+			changeScope: { paths: ["packages/coding-agent/src/task/evidence-handoff.ts"] },
+			verificationOwnership: { owner: "parent" },
+			authorConclusions: ["Author thinks this is perfect"],
+		});
+		const context = renderEvidenceHandoffContext(handoff, { preamble: "Shared packet" });
+
+		const settled = await runStructuredSubagent(request({ agent: "reviewer", context, retainArtifacts: true }));
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted).not.toBeNull();
+		expect(extracted!.preamble).toContain("Shared packet");
+		expect(extracted!.handoff.acceptance).toEqual(["Reviewer omits author conclusions"]);
+		expect(extracted!.handoff.confirmedFacts[0]?.statement).toBe("raw fact");
+		expect(extracted!.handoff.authorConclusions).toBeUndefined();
+		expect(dispatched[0]?.context).not.toContain("Author thinks this is perfect");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {

@@ -31,6 +31,7 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
 import { pickWorkflowToolSessionFields } from "../tools/workflow-session-fields";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
+import { prepareSubagentContext } from "./evidence-handoff";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
 	applyEligibleNestedPatches,
@@ -531,7 +532,9 @@ function buildExecutorOptions(
 		agent: policy.effectiveAgent,
 		task: renderSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),
-		context: request.context?.trim() || undefined,
+		// Project evidence handoffs by class so reviewers share raw evidence
+		// without inheriting author conclusions; freeform context passes through.
+		context: prepareSubagentContext(request.context, policy.performanceClass),
 		planReference: undefined,
 		// Task `name` is the spawn handle (id allocation). Eval `label` is a
 		// real UI description. Copy it only for eval so generateTaskLabel can run.
