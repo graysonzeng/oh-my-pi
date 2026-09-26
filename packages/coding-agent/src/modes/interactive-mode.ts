@@ -84,6 +84,7 @@ import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState } from "../goals/state";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
+import { recordExplicitUserAcceptance } from "../latency/ordinary-acceptance-sink";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
 import {
@@ -5803,6 +5804,27 @@ export class InteractiveMode implements InteractiveModeContext {
 			"This marks the goal complete from the host. Use only when the current repo evidence satisfies the objective.",
 		);
 		if (!confirmed) return;
+		// Ordinary trusted acceptance sink (Batch 1 W1): explicit host-confirmed
+		// user accept only — never auto on stop / LLM done / todo-complete.
+		const objective = state.goal.objective.trim();
+		if (objective) {
+			try {
+				const acceptance = recordExplicitUserAcceptance(this.session, {
+					acceptanceItems: [objective],
+					status: "passed",
+					eventId: `user-accept:goal:${this.session.sessionManager.getSessionId()}:${state.goal.id}`,
+				});
+				if (!acceptance.recorded) {
+					logger.warn("ordinary acceptance: goal complete gated out", { reason: acceptance.reason });
+					this.showWarning(`Acceptance receipt not recorded (${acceptance.reason}). Goal still completed.`);
+				}
+			} catch (error) {
+				logger.warn("ordinary acceptance: goal complete write failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				this.showWarning("Acceptance receipt write failed; goal still completed (not minted green).");
+			}
+		}
 		this.session.goalRuntime.cancelInFlightNominations("user_confirmed");
 		await this.session.goalRuntime.completeGoalFromTool();
 		await this.#exitGoalMode({ reason: "completed" });

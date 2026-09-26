@@ -10,7 +10,20 @@ import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { runSubagentFollowUpTurn } from "./executor";
 import { decideWorkerReuse, inspectEvidenceHandoffContext } from "./evidence-handoff";
-import { noteEvidenceHandoffInspect, noteEvidenceHandoffReuseDecision } from "./evidence-handoff-observe";
+import {
+	buildEvidenceHandoffObserveRecord,
+	noteEvidenceHandoffInspect,
+	noteEvidenceHandoffReuseDecision,
+	persistEvidenceHandoffObserve,
+} from "./evidence-handoff-observe";
+import {
+	acceptanceAndFreshnessFromContext,
+	consumeChildDeliveryForParent,
+	noteChildSettledObserve,
+	resolveParentConsumeEpisode,
+} from "./parent-delivery-consume";
+import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
+import type { ChildDeliveryEvidenceV1, ParentIntegrateDecision } from "./child-delivery-evidence";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
@@ -101,6 +114,8 @@ interface TurnOutcome {
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
+	deliveryEvidence?: ChildDeliveryEvidenceV1;
+	parentIntegrateDecision?: ParentIntegrateDecision;
 }
 
 const DELIVERY_OUTPUT_LIMIT = 6_000;
@@ -258,7 +273,10 @@ export class WorkPool {
 			}
 			return;
 		}
+		// Pool probe stays observe:false; durable observe fires once on the real
+		// continue vs spawn_fresh boundary below.
 		if (this.#blocksExistingAgents()) {
+			this.#reuseDecision("pool", "idle", { observe: true });
 			if (this.agents.length >= this.limit()) this.#evictIdleAgents();
 			if (this.agents.length < this.limit()) {
 				await this.#spawn(item);
@@ -270,6 +288,7 @@ export class WorkPool {
 		}
 		const idle = this.#leastLoadedResumableIdle();
 		if (idle) {
+			this.#reuseDecision(idle.id, "idle", { observe: true });
 			item.agentId = idle.id;
 			idle.queue.push(item);
 			this.#card("dispatched", idle.id, `[${item.id}] ${item.text}`);
@@ -319,7 +338,59 @@ export class WorkPool {
 			handoff: inspected.handoff,
 			invalidHandoff: inspected.invalid,
 		});
-		if (observe) noteEvidenceHandoffReuseDecision(decision, { agentId });
+		if (observe) {
+			noteEvidenceHandoffReuseDecision(decision, { agentId });
+			const sink = this.session.sessionManager;
+			if (sink?.appendCustomEntry) {
+				const phaseReason =
+					decision.reason === "stale_evidence"
+						? "stale"
+						: decision.action === "continue"
+							? "continue"
+							: "spawn_fresh";
+				const inspectReason = inspected.invalid ? "invalid" : inspected.handoff ? "valid" : "missing";
+				try {
+					persistEvidenceHandoffObserve(
+						sink,
+						buildEvidenceHandoffObserveRecord({
+							eventId: `wp:${this.name}:${agentId}:inspect:${inspectReason}`,
+							phase: "inspect",
+							ts: Date.now(),
+							reason: inspectReason,
+							agentId,
+						}),
+					);
+					if (decision.reason === "stale_evidence") {
+						persistEvidenceHandoffObserve(
+							sink,
+							buildEvidenceHandoffObserveRecord({
+								eventId: `wp:${this.name}:${agentId}:reject_stale`,
+								phase: "reject_stale",
+								ts: Date.now(),
+								reason: decision.reason,
+								agentId,
+							}),
+						);
+					}
+					persistEvidenceHandoffObserve(
+						sink,
+						buildEvidenceHandoffObserveRecord({
+							eventId: `wp:${this.name}:${agentId}:reuse:${phaseReason}`,
+							phase: "reuse",
+							ts: Date.now(),
+							reason: decision.action === "continue" ? "continue" : "spawn_fresh",
+							agentId,
+						}),
+					);
+				} catch (error) {
+					logger.warn("workpool: durable observe persist failed", {
+						pool: this.name,
+						agent: agentId,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		}
 		return decision;
 	}
 
@@ -520,6 +591,59 @@ export class WorkPool {
 		for (const item of batch.items) item.status = batch.status;
 		agent.turns++;
 		agent.jobId = undefined;
+
+		const sink = this.session.sessionManager;
+		if (sink?.appendCustomEntry && batch.status === "completed") {
+			try {
+				noteChildSettledObserve({
+					sink,
+					eventId: `wp:${this.name}:${agent.id}:${batch.id}:child_settled`,
+					jobId: batch.jobId || batch.id,
+					agentId: agent.id,
+					reason: "completed",
+				});
+			} catch (error) {
+				logger.warn("workpool: child_settled observe failed", {
+					pool: this.name,
+					agent: agent.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			if (result.deliveryEvidence) {
+				try {
+					const episode = resolveParentConsumeEpisode(sink);
+					if (episode) {
+						const currentCodeVersion =
+							(await resolveCurrentWorkspaceCodeVersion(this.session.cwd)) ||
+							result.deliveryEvidence.codeVersion.version;
+						const fromContext = acceptanceAndFreshnessFromContext(this.context);
+						const consumed = consumeChildDeliveryForParent({
+							delivery: result.deliveryEvidence,
+							currentCodeVersion,
+							requiredAcceptance: fromContext.requiredAcceptance,
+							staleEvidence: fromContext.staleEvidence,
+							// Parent must confirm release — never inherit child claim.
+							writeOwnershipReleased: false,
+							episodeSessionId: episode.sessionId,
+							rootUserEntryId: episode.rootUserEntryId,
+							jobId: batch.jobId || batch.id,
+							agentId: agent.id,
+							sink,
+							eventIdPrefix: `wp:${this.name}:${agent.id}:${batch.id}`,
+						});
+						// Replace packet-only settle decision with workspace-bound consume.
+						result.parentIntegrateDecision = consumed.decision;
+					}
+				} catch (error) {
+					logger.warn("workpool: parent consume reclassify failed", {
+						pool: this.name,
+						agent: agent.id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		}
+
 		const ref = AgentRegistry.global().get(agent.id);
 		// Retained idle workers can wake through IRC, so clear the runtime schema and cached inline declaration together.
 		// A refresh failure must not strand the pool in #waitForDrain(): items are

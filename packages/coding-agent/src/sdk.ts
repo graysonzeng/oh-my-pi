@@ -139,6 +139,7 @@ import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import type { LatencyArmId, LatencyArmSnapshotV1 } from "./latency/arms";
 import { executionIdTable, prepareLatencySnapshot } from "./latency/prepare-snapshot";
 import { LatencyRolloutCohortStore, mintProcessScopedRolloutContext } from "./latency/rollout-cohort";
+import { resolveRuntimeBuildIdentity, RUNTIME_BUILD_IDENTITY_CUSTOM_TYPE } from "./latency/runtime-build-identity";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -4793,6 +4794,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 		hasSession = true;
 		credentialNoticeSession = session;
+		// Batch 1 W0: persist runtime build identity once for top-level sessions so
+		// receipts can associate a real build. Fail-open — never block session init.
+		if (taskDepth === 0 && !options.parentTaskPrefix) {
+			void (async () => {
+				try {
+					const identity = await resolveRuntimeBuildIdentity({
+						cwd,
+						model: session.model?.id ?? null,
+						provider: session.model?.provider ?? null,
+						api: session.model?.api ?? null,
+					});
+					session.sessionManager.appendCustomEntry(RUNTIME_BUILD_IDENTITY_CUSTOM_TYPE, identity);
+				} catch (error) {
+					logger.warn("runtime build identity persist failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			})();
+		}
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
 		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage);
 		// One coalesced prompt rebuild for every prompt input (rule bucketing, the

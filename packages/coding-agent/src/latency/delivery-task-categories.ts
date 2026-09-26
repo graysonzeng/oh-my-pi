@@ -88,4 +88,5 @@ export function deliveryTaskCategory(id: DeliveryTaskCategoryId): DeliveryTaskCa
 }
 
 /** Batch 1 explicitly cannot claim live paired cost wins. */
-export const BATCH1_PAIRED_EVIDENCE_READY = false as const;
+export { BATCH1_PAIRED_EVIDENCE_READY, BATCH1_STATUS, batch1Status } from "./batch1-status";
+export type { Batch1WorkPackageId, Batch1WorkPackageStatus } from "./batch1-status";

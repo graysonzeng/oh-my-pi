@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { evaluateWorkflowFinalCompletion } from "../../model-policy/completion";
-import { buildLayeredVerificationPlan } from "../layered-verification";
+import { buildLayeredVerificationPlan, layeredVerificationObserveEvents } from "../layered-verification";
 import type { ScopeStatus } from "../scope-metrics";
 import type { ImplementationArtifactV1, ReviewFindingV1, VerificationArtifactV1, VerifierPort } from "../types";
 import {
@@ -11,6 +11,7 @@ import {
 	sealWorkflowVerifierResult,
 	verificationExecutionCwd,
 } from "../verification-validity";
+import { noteVerificationObserve, type EvidenceHandoffObservePersistSink } from "../../task/evidence-handoff-observe";
 
 export interface FinalVerifyInput {
 	workflowId: string;
@@ -37,6 +38,8 @@ export interface FinalVerifyInput {
 	 * matches — never after code/command/scope mismatch.
 	 */
 	alreadyGreenLocalCommands?: readonly string[];
+	/** Durable observe sink (Batch 1 W3) — session custom entries. */
+	observeSink?: EvidenceHandoffObservePersistSink;
 }
 
 export class FinalVerifyStage {
@@ -73,6 +76,13 @@ export class FinalVerifyStage {
 			priorVerification: input.priorVerification,
 			alreadyGreenLocalCommands: input.alreadyGreenLocalCommands,
 		});
+		if (input.observeSink) {
+			for (const event of layeredVerificationObserveEvents(plan, {
+				eventIdPrefix: `wf:${input.workflowId}:${input.attemptId}:final_verify`,
+			})) {
+				noteVerificationObserve({ ...event, sink: input.observeSink });
+			}
+		}
 		const canReuse = plan.toReuse.length > 0 && plan.toRun.length === 0 && Boolean(input.priorVerification);
 
 		let base: VerificationArtifactV1;
