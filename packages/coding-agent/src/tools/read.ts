@@ -782,6 +782,9 @@ function attestCanonicalSkillFullText(
 	details.branchOrWorktreeScope = readBranchOrWorktreeScope(cwd) || "immutable:session";
 	details.outputMode = resource.contentType === "text/markdown" ? "converted" : "raw";
 	details.providerViewIdentity = `${scheme}-immutable:${name}`;
+	if (resource.content.length > 0) {
+		details.contentOrRevisionIdentity = new Bun.CryptoHasher("sha256").update(resource.content).digest("hex");
+	}
 }
 
 type ReadParams = ReadToolInput;
@@ -1857,6 +1860,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Protocol reads render Markdown regardless of `read.renderMarkdown`, as their resources always did.
 		if (!details.contentType && isMarkdownPath(located.path)) details.contentType = "text/markdown";
 		details.meta = { ...details.meta, source: { type: "internal", value: located.url } };
+		// Located skill:// files skip `#handleInternalUrl`; attest here so a second
+		// identical full-text read can form a ReadViewKey (ranged/raw/query stay fail-open).
+		const locatedText =
+			result.content
+				?.filter((block): block is TextContent => block.type === "text")
+				.map(block => block.text)
+				.join("\n") ?? "";
+		attestCanonicalSkillFullText(
+			located.url,
+			parseSel(located.sel),
+			{
+				content: locatedText,
+				contentType: details.contentType,
+				immutable: located.spec.immutable,
+			},
+			details,
+			this.session.cwd,
+		);
 		return { ...result, details };
 	}
 
