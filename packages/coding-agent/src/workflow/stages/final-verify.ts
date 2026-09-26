@@ -1,9 +1,9 @@
 import * as path from "node:path";
 import { evaluateWorkflowFinalCompletion } from "../../model-policy/completion";
+import { buildLayeredVerificationPlan } from "../layered-verification";
 import type { ScopeStatus } from "../scope-metrics";
 import type { ImplementationArtifactV1, ReviewFindingV1, VerificationArtifactV1, VerifierPort } from "../types";
 import {
-	assessVerificationReuse,
 	buildVerificationCodeState,
 	captureVerificationWorkspace,
 	projectReusedVerificationChecks,
@@ -31,6 +31,12 @@ export interface FinalVerifyInput {
 	 * Completion gates still always run.
 	 */
 	priorVerification?: VerificationArtifactV1 | null;
+	/**
+	 * Local/scoped commands already green for this code state (Package 3).
+	 * Final layer may skip re-running them only when a trusted prior seal still
+	 * matches — never after code/command/scope mismatch.
+	 */
+	alreadyGreenLocalCommands?: readonly string[];
 }
 
 export class FinalVerifyStage {
@@ -58,15 +64,19 @@ export class FinalVerifyStage {
 		const scope =
 			changedFiles.length > 0 ? { kind: "paths" as const, paths: changedFiles } : { kind: "repo" as const };
 
-		const reuse = assessVerificationReuse({
-			prior: input.priorVerification,
-			codeState,
+		// Package 3 layered planner owns final_repo reuse vs run dispositions.
+		const plan = buildLayeredVerificationPlan({
+			layer: "final_repo",
 			commands: input.commands,
+			codeState,
 			scope,
+			priorVerification: input.priorVerification,
+			alreadyGreenLocalCommands: input.alreadyGreenLocalCommands,
 		});
+		const canReuse = plan.toReuse.length > 0 && plan.toRun.length === 0 && Boolean(input.priorVerification);
 
 		let base: VerificationArtifactV1;
-		if (reuse.reusable && input.priorVerification) {
+		if (canReuse && input.priorVerification) {
 			base = projectReusedVerificationChecks(input.priorVerification, {
 				workflowId: input.workflowId,
 				attemptId: input.attemptId,
@@ -99,6 +109,7 @@ export class FinalVerifyStage {
 				};
 			}
 		} else {
+			const commandsToRun = plan.toRun.length > 0 ? plan.toRun : input.commands;
 			base = await this.#verifier.verify(
 				{
 					workflowId: input.workflowId,
@@ -107,7 +118,7 @@ export class FinalVerifyStage {
 					changedFiles,
 					patchContent,
 				},
-				input.commands,
+				commandsToRun,
 				input.forbiddenPaths ?? [],
 				{ signal: input.signal, timeoutMs: input.timeoutMs },
 			);

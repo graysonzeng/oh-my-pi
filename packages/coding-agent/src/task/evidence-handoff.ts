@@ -11,6 +11,7 @@
 
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { fingerprintStable } from "../latency/stable-serialize";
+import { noteEvidenceHandoffGenerate } from "./evidence-handoff-observe";
 import type { SubagentPerformanceClass } from "./review-performance";
 
 export const EVIDENCE_HANDOFF_KIND = "evidence_handoff" as const;
@@ -524,7 +525,7 @@ export function ensureEvidenceHandoffContext(
 	const goals = nonEmptyStrings([...(contract.target ?? []), ...(contract.change ?? [])]);
 	const acceptance = nonEmptyStrings(contract.acceptance);
 	if (goals.length === 0 && acceptance.length === 0) return trimmed;
-	return renderEvidenceHandoffContext(
+	const rendered = renderEvidenceHandoffContext(
 		buildEvidenceHandoff({
 			goals: goals.length ? goals : acceptance,
 			acceptance: acceptance.length ? acceptance : goals,
@@ -532,6 +533,8 @@ export function ensureEvidenceHandoffContext(
 		}),
 		{ preamble: trimmed },
 	);
+	noteEvidenceHandoffGenerate({ synthesized: true });
+	return rendered;
 }
 
 /**

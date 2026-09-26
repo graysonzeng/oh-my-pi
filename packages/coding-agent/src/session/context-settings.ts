@@ -642,3 +642,152 @@ export const cfgBranchSummaryReserveTokens = register({
 	type: "number",
 	default: 16384,
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// Delivery-first Package 4 experiments (opt-in; defaults off; separate factors)
+// ────────────────────────────────────────────────────────────────────────
+
+export const READ_DEDUPE_EXPERIMENT_FACTOR_VALUES = ["none", "same_version_view_reuse"] as const;
+
+/** Master gate for read-dedupe experiment A. Default off — production read path unchanged. */
+export const cfgReadDedupeExperimentEnabled = register({
+	id: "deliveryExperiment.readDedupe.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Read dedupe experiment",
+		description:
+			"Opt-in Experiment A: reuse same version+view reads only. Off preserves production. Does not lower output caps or add don’t-re-read prompts. Separate from stable-prefix cache and from latency.arms.readDedupe. Enabling together with Experiment B fails closed.",
+	},
+});
+
+export const cfgReadDedupeExperimentFactor = register({
+	id: "deliveryExperiment.readDedupe.factor",
+	type: "enum",
+	values: READ_DEDUPE_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Read dedupe factor",
+		description: "Change only one factor per run. Separate from stable-prefix cache experiment.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "same_version_view_reuse",
+				label: "Same version+view reuse",
+				description: "Reuse only when ReadViewKey matches; keep full truncation recovery",
+			},
+		],
+	},
+});
+
+export const cfgReadDedupeExperiment = combine({
+	enabled: cfgReadDedupeExperimentEnabled,
+	factor: cfgReadDedupeExperimentFactor,
+});
+
+export type ReadDedupeExperimentSettings = SettingValueOf<typeof cfgReadDedupeExperiment>;
+
+export const STABLE_PREFIX_CACHE_EXPERIMENT_FACTOR_VALUES = [
+	"none",
+	"inspect_provider_prefix",
+	"reorder_static_prefix",
+] as const;
+
+/** Master gate for stable-prefix cache experiment B. Default off. */
+export const cfgStablePrefixCacheExperimentEnabled = register({
+	id: "deliveryExperiment.stablePrefixCache.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Stable-prefix cache experiment",
+		description:
+			"Opt-in Experiment B: inspect/reorder provider request prefixes for cache study. Off preserves production assembly. Does not auto-run paid traffic. Enabling together with Experiment A fails closed.",
+	},
+});
+
+export const cfgStablePrefixCacheExperimentFactor = register({
+	id: "deliveryExperiment.stablePrefixCache.factor",
+	type: "enum",
+	values: STABLE_PREFIX_CACHE_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Stable-prefix factor",
+		description: "One factor per run. Do not attribute together with read-dedupe experiment.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "inspect_provider_prefix",
+				label: "Inspect provider prefix",
+				description: "Measure whether static rules/tools are cut by dynamic content",
+			},
+			{
+				value: "reorder_static_prefix",
+				label: "Reorder static prefix",
+				description: "Opt-in reorder: static rules/tools before dynamic context (permissions unchanged)",
+			},
+		],
+	},
+});
+
+export const cfgStablePrefixCacheExperiment = combine({
+	enabled: cfgStablePrefixCacheExperimentEnabled,
+	factor: cfgStablePrefixCacheExperimentFactor,
+});
+
+export type StablePrefixCacheExperimentSettings = SettingValueOf<typeof cfgStablePrefixCacheExperiment>;
+
+// ────────────────────────────────────────────────────────────────────────
+// History supplement S2 — phase-handoff / carry-slim (opt-in; default off)
+// ────────────────────────────────────────────────────────────────────────
+
+export const PHASE_HANDOFF_EXPERIMENT_FACTOR_VALUES = ["none", "phase_boundary_carry_slim"] as const;
+
+/** Master gate for phase-handoff experiment. Default off — production unchanged. */
+export const cfgPhaseHandoffExperimentEnabled = register({
+	id: "deliveryExperiment.phaseHandoff.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Phase-handoff experiment",
+		description:
+			"Opt-in S2: at natural phase boundaries, reduce bulky carried context while retaining open constraints, modification state, and acceptance basis. Off preserves production. Does not change model/concurrency or force a global 200k cap.",
+	},
+});
+
+export const cfgPhaseHandoffExperimentFactor = register({
+	id: "deliveryExperiment.phaseHandoff.factor",
+	type: "enum",
+	values: PHASE_HANDOFF_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Phase-handoff factor",
+		description: "One factor per run. Do not change model or concurrency in the same experiment.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "phase_boundary_carry_slim",
+				label: "Phase-boundary carry slim",
+				description: "Drop bulky carry at phase boundaries; keep constraints / mods / acceptance",
+			},
+		],
+	},
+});
+
+export const cfgPhaseHandoffExperiment = combine({
+	enabled: cfgPhaseHandoffExperimentEnabled,
+	factor: cfgPhaseHandoffExperimentFactor,
+});
+
+export type PhaseHandoffExperimentSettings = SettingValueOf<typeof cfgPhaseHandoffExperiment>;

@@ -4261,6 +4261,12 @@ export class AgentSession implements SettingsScope {
 			};
 			maintenanceRoute("entered");
 
+			// A successful turn clears process-local config-unavailable marks so brief
+			// prior faults do not keep blocking a recovered route (S0).
+			if (msg.stopReason !== "error" && msg.stopReason !== "aborted") {
+				this.#recovery.clearConfigCredentialRouteFailure();
+			}
+
 			// Surface provider stream failures in the main log. The routing trace
 			// above is debug-only and drops the error fields, so a session dying
 			// repeatedly on provider errors otherwise leaves no actionable trace
@@ -4380,11 +4386,14 @@ export class AgentSession implements SettingsScope {
 			let checkedCompaction = false;
 			if (activeGoal) {
 				// Payload rejections get a pre-compaction chain consult; checkCompaction()'s overflow path commits a remedy before returning (#9235).
-				if (AIError.isPayloadRejection(msg) && this.#recovery.isHardErrorFallbackEligible(msg)) {
-					const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
-					if (didRetry) {
-						await emitAgentEndNotification({ willContinue: true });
-						return;
+				if (AIError.isPayloadRejection(msg)) {
+					this.#recovery.noteConfigCredentialRouteFailure(msg);
+					if (this.#recovery.isHardErrorFallbackEligible(msg)) {
+						const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
+						if (didRetry) {
+							await emitAgentEndNotification({ willContinue: true });
+							return;
+						}
 					}
 				}
 				maintenanceRoute("active-goal-pre-empt-checkCompaction");
@@ -4478,16 +4487,21 @@ export class AgentSession implements SettingsScope {
 				maintenanceRoute("malformed-function-call-handled");
 				await emitAgentEndNotification({ willContinue: true });
 				return;
-			} else if (!requestBodyTimeoutTerminal && this.#recovery.isHardErrorFallbackEligible(msg)) {
-				// A non-retryable hard error on a model covered by a configured
-				// fallback chain: retrying the SAME model is pointless, but a
-				// DIFFERENT model is a fresh chance — consult the chain before
-				// surfacing the failure. #handleRetryableError bails out (no
-				// backoff-retry of the failing model) when no switch happens.
-				const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
-				if (didRetry) {
-					await emitAgentEndNotification({ willContinue: true });
-					return;
+			} else if (!requestBodyTimeoutTerminal) {
+				// Note config credential/route failures before eligibility so the
+				// chain skips known-dead sibling routes (history supplement S0).
+				this.#recovery.noteConfigCredentialRouteFailure(msg);
+				if (this.#recovery.isHardErrorFallbackEligible(msg)) {
+					// A non-retryable hard error on a model covered by a configured
+					// fallback chain: retrying the SAME model is pointless, but a
+					// DIFFERENT model is a fresh chance — consult the chain before
+					// surfacing the failure. #handleRetryableError bails out (no
+					// backoff-retry of the failing model) when no switch happens.
+					const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
+					if (didRetry) {
+						await emitAgentEndNotification({ willContinue: true });
+						return;
+					}
 				}
 			}
 			// Classifier refusals are persisted-skipped above; also prune the trailing

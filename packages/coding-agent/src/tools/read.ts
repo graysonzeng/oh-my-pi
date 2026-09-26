@@ -143,6 +143,7 @@ import {
 } from "../utils/video";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import {
+	composeReadPaginationArgs,
 	isMultiRange,
 	isRawSelector,
 	type ParsedSelector,
@@ -677,7 +678,15 @@ export function splitImageQuestionTarget(readPath: string): { path: string; ques
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
 const readSchema = type({
-	path: type("string").describe("Local path, internal URI, or URL; selectors inline."),
+	path: type("string").describe(
+		"Local path, internal URI, or URL; page via inline selectors (preferred: path:301 or path:raw:301-).",
+	),
+	"offset?": type("number.integer>0").describe(
+		"Optional 1-indexed start line. Composed onto path when no range selector is present; prefer embedding :N in path.",
+	),
+	"limit?": type("number.integer>0").describe(
+		"Optional line count. Composed onto path when no range selector is present; prefer embedding :N+K in path.",
+	),
 });
 
 export type ReadToolInput = typeof readSchema.infer;
@@ -1719,13 +1728,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
-		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
+		const composed = composeReadPaginationArgs({
+			path: params.path,
+			offset: params.offset,
+			limit: params.limit,
+		});
+		const effectiveParams: ReadParams = { ...params, path: composed.path };
+		const result = await this.#executeInner(toolCallId, effectiveParams, signal, onUpdate, toolContext);
+		const displayTarget = InternalUrlRouter.instance().locateSync(effectiveParams.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		// Byte-identical hint is skipped when providerViewIdentity is set (dedupe owns that path).
 		// Subagent soft-cap uses the existing digest of the delivered view and its source version.
 		if (!result.details?.providerViewIdentity) {
-			appendRepeatReadHint(this.session, params.path, result);
+			appendRepeatReadHint(this.session, effectiveParams.path, result);
 		}
 		appendPathRereadSoftCapHint(this.session, result);
 		return result;

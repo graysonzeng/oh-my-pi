@@ -9,6 +9,14 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import { resolveSubagentPerformanceClass, type SubagentPerformanceClass } from "../task/review-performance";
 import { computeActiveWallMs } from "./active-wall";
 import {
+	buildDeliveryCostBaselineReport,
+	type DeliveryCostBaselineReport,
+	DELIVERY_QUALITY_OUTCOME_MESSAGE_TYPE,
+	formatDeliveryCostBaselineReport,
+	parseDeliveryQualityOutcomeDetails,
+	type DeliveryQualityOutcomeObservation,
+} from "./delivery-cost-baseline";
+import {
 	criticalPathMsFromIntervals,
 	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
 	parseParentFinalVerificationDetails,
@@ -84,6 +92,8 @@ export interface SubagentBaselineReport {
 	unmatchedToolResults: number;
 	repeatedReads: { key: string; count: number }[];
 	toolFailures: { tool: string; calls: number; errors: number }[];
+	/** Delivery-first cost baseline; ordinary vs workflow kept separate. */
+	deliveryCost: DeliveryCostBaselineReport;
 }
 
 export interface ParsedSession {
@@ -107,6 +117,8 @@ export interface ParsedSession {
 	thinkingLevels: string[];
 	spawnObservations: SpawnResultRow[];
 	parentFinalVerifications: ParentFinalVerificationObservation[];
+	/** Optional quality-defect receipts; absent ⇒ unknown, never zero-filled. */
+	qualityOutcomes?: DeliveryQualityOutcomeObservation[];
 }
 
 interface UsageRequest {
@@ -634,6 +646,23 @@ function collectParentFinalVerification(
 	});
 }
 
+function collectDeliveryQualityOutcome(
+	session: ParsedSession,
+	customType: unknown,
+	details: unknown,
+	ts: number | null,
+): void {
+	if (customType !== DELIVERY_QUALITY_OUTCOME_MESSAGE_TYPE) return;
+	const parsed = parseDeliveryQualityOutcomeDetails(details);
+	if (!parsed) return;
+	session.qualityOutcomes ??= [];
+	session.qualityOutcomes.push({
+		falseAccept: parsed.falseAccept,
+		missedDefect: parsed.missedDefect,
+		ts,
+	});
+}
+
 function collectTerminalObservations(
 	session: ParsedSession,
 	customType: unknown,
@@ -642,6 +671,7 @@ function collectTerminalObservations(
 	ts: number | null = null,
 ): void {
 	collectParentFinalVerification(session, customType, details, ts);
+	collectDeliveryQualityOutcome(session, customType, details, ts);
 	const type = typeof customType === "string" ? customType : "";
 	const text = textFromContent(content);
 	const hasJobs = isRecord(details) && Array.isArray(details.jobs);
@@ -707,6 +737,7 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 			const ts = entryTimestamp(raw, undefined);
 			touchTs(session, ts);
 			collectParentFinalVerification(session, raw.customType, raw.data, ts);
+			collectDeliveryQualityOutcome(session, raw.customType, raw.data, ts);
 			continue;
 		}
 		if (type === "custom_message") {
@@ -1279,6 +1310,7 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 		unmatchedToolResults,
 		repeatedReads,
 		toolFailures,
+		deliveryCost: buildDeliveryCostBaselineReport(sessions),
 	};
 }
 
@@ -1334,6 +1366,7 @@ export function formatSubagentBaselineReport(report: SubagentBaselineReport): st
 		`repeatedReads: ${JSON.stringify(report.repeatedReads)}`,
 		`toolFailures: ${JSON.stringify(report.toolFailures)}`,
 		`usage: ${JSON.stringify(report.usage)}`,
+		formatDeliveryCostBaselineReport(report.deliveryCost),
 	];
 	return lines.join("\n");
 }

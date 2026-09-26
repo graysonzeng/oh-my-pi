@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import {
+	type CredentialRouteUnavailableRegistry,
+	isConfigCredentialRouteUnavailable,
+	sharedCredentialRouteUnavailableRegistry,
+} from "../latency/credential-route-unavailable";
 import { PROVIDER_HEALTH_BREAKER_ERROR_SUMMARY, type ProviderHealthBreaker } from "../latency/provider-health-breaker";
 import type { ToolSession } from "../tools";
 import { AVAILABILITY_PROBE_TIMEOUT_MS } from "./availability-adapter";
@@ -60,6 +65,12 @@ export interface RunAvailabilityPreflightOptions {
 	nowMs?: () => number;
 	/** Engine-scoped breaker. Omitted when the latency arm is off (fail-open). */
 	providerHealthBreaker?: ProviderHealthBreaker;
+	/**
+	 * Process-local config-unavailable registry (history supplement S0).
+	 * Defaults to the shared singleton so sibling engines skip known-dead routes.
+	 * Pass a fresh registry in tests for isolation.
+	 */
+	credentialRouteUnavailable?: CredentialRouteUnavailableRegistry;
 }
 
 /**
@@ -109,7 +120,9 @@ export async function runAvailabilityPreflight(
 
 	// Group candidates by physical probe key (first member is the live probe representative).
 	// Open breaker profiles skip the physical probe and emit a stable unavailable row.
+	// Known config-unavailable routes (shared registry) skip without re-probing.
 	const breaker = options.providerHealthBreaker;
+	const routeUnavailable = options.credentialRouteUnavailable ?? sharedCredentialRouteUnavailableRegistry();
 	const skippedProfiles: WorkflowAvailabilityProfileResult[] = [];
 	const groups = new Map<string, typeof candidates>();
 	for (const candidate of candidates) {
@@ -118,6 +131,11 @@ export async function runAvailabilityPreflight(
 			continue;
 		}
 		const key = availabilityProbeDedupeKey(candidate.profile, authScope);
+		const known = routeUnavailable.get(key);
+		if (known) {
+			skippedProfiles.push(knownConfigUnavailableRow(candidate, known.errorKind, known.errorSummary));
+			continue;
+		}
 		const group = groups.get(key);
 		if (group) group.push(candidate);
 		else groups.set(key, [candidate]);
@@ -237,6 +255,7 @@ export async function runAvailabilityPreflight(
 	const usage = aggregateUsage(physicalResults.map(result => result.usage));
 	const reportedCostUsd = aggregateReportedCost(physicalResults);
 	if (breaker) breaker.observeProfiles(profiles);
+	observeCredentialRouteUnavailable(routeUnavailable, groupEntries, profiles);
 
 	return {
 		workflowId: options.workflowId,
@@ -411,6 +430,61 @@ function openBreakerRow(candidate: AvailabilityCandidate): WorkflowAvailabilityP
 		errorSummary: PROVIDER_HEALTH_BREAKER_ERROR_SUMMARY,
 		latencyMs: 0,
 	};
+}
+
+function knownConfigUnavailableRow(
+	candidate: AvailabilityCandidate,
+	errorKind: string | undefined,
+	errorSummary: string,
+): WorkflowAvailabilityProfileResult {
+	return {
+		profileId: candidate.profile.id,
+		role: candidate.role,
+		requirement: candidate.requirement,
+		status: "unavailable",
+		runtime: "embedded",
+		usageKind: "diagnostic",
+		errorKind: errorKind ?? "authentication",
+		errorSummary,
+		latencyMs: 0,
+	};
+}
+
+/**
+ * Record config-unavailable probe outcomes on the shared route registry and clear
+ * on live success. Cooldown/transport outcomes do not write the registry.
+ */
+function observeCredentialRouteUnavailable(
+	registry: CredentialRouteUnavailableRegistry,
+	groupEntries: ReadonlyArray<readonly [string, AvailabilityCandidate[]]>,
+	profiles: readonly WorkflowAvailabilityProfileResult[],
+): void {
+	const liveByProfile = new Map(
+		profiles.filter(row => row.source === "live").map(row => [row.profileId, row] as const),
+	);
+	for (const [key, group] of groupEntries) {
+		const head = group[0];
+		if (!head) continue;
+		const live = liveByProfile.get(head.profile.id);
+		if (!live) continue;
+		if (live.status === "available") {
+			registry.clear(key);
+			continue;
+		}
+		if (live.status !== "unavailable") continue;
+		if (
+			!isConfigCredentialRouteUnavailable({
+				errorKind: live.errorKind,
+				errorMessage: live.errorSummary,
+			})
+		) {
+			continue;
+		}
+		registry.noteFailure(key, {
+			errorKind: live.errorKind,
+			errorMessage: live.errorSummary,
+		});
+	}
 }
 
 /** Report row when a role is in scope but no ModelProfile is registered for it. */

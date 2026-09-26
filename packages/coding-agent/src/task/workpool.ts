@@ -10,6 +10,7 @@ import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { runSubagentFollowUpTurn } from "./executor";
 import { decideWorkerReuse, inspectEvidenceHandoffContext } from "./evidence-handoff";
+import { noteEvidenceHandoffInspect, noteEvidenceHandoffReuseDecision } from "./evidence-handoff-observe";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
@@ -297,12 +298,19 @@ export class WorkPool {
 	}
 
 	#blocksExistingAgents(): boolean {
-		return this.#reuseDecision("pool", "idle").action !== "continue";
+		// Pool probe only — do not inflate observe counters on dispatch/evict/yield gates.
+		return this.#reuseDecision("pool", "idle", { observe: false }).action !== "continue";
 	}
 
-	#reuseDecision(agentId: string, status: string) {
+	#reuseDecision(agentId: string, status: string, options?: { observe?: boolean }) {
+		const observe = options?.observe !== false;
 		const inspected = inspectEvidenceHandoffContext(this.context);
-		return decideWorkerReuse({
+		if (observe) {
+			if (inspected.invalid) noteEvidenceHandoffInspect("invalid");
+			else if (inspected.handoff) noteEvidenceHandoffInspect("valid");
+			else noteEvidenceHandoffInspect("missing");
+		}
+		const decision = decideWorkerReuse({
 			candidate: {
 				id: agentId,
 				status,
@@ -311,6 +319,8 @@ export class WorkPool {
 			handoff: inspected.handoff,
 			invalidHandoff: inspected.invalid,
 		});
+		if (observe) noteEvidenceHandoffReuseDecision(decision, { agentId });
+		return decision;
 	}
 
 	#resumableStatus(agentId: string): "idle" | "parked" | undefined {

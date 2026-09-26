@@ -3,6 +3,7 @@ export * from "./arms";
 export * from "./assignment";
 export * from "./bash-attempt-ledger";
 export * from "./concurrency-declaration";
+export * from "./credential-route-unavailable";
 export * from "./eval-parity";
 export * from "./mechanical-class";
 export * from "./parallel-recovery-safety";

@@ -137,3 +137,48 @@ export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; l
 	}
 	return {};
 }
+
+/**
+ * Compose optional Claude-style `offset`/`limit` kwargs onto the path-inline
+ * selector contract (history supplement S3). Prefer embedding `:N` / `:raw:N-`
+ * in `path`. When a range selector is already present, kwargs are rejected
+ * with an explicit message instead of silently re-reading page 1.
+ *
+ * Artifact URLs without an existing `:raw` get `:raw` injected so continue-read
+ * pages the verbatim body (history E2/E3). Plain filesystem paths compose as
+ * `path:301` / `path:301+K` — never force `:raw` onto hashline/preview reads.
+ */
+export function composeReadPaginationArgs(input: { path: string; offset?: number; limit?: number }): { path: string } {
+	const hasOffset = input.offset !== undefined;
+	const hasLimit = input.limit !== undefined;
+	if (!hasOffset && !hasLimit) return { path: input.path };
+
+	const offset = hasOffset ? Math.floor(input.offset!) : undefined;
+	const limit = hasLimit ? Math.floor(input.limit!) : undefined;
+	if (offset !== undefined && !(offset >= 1)) {
+		throw new ToolError(`Invalid offset ${input.offset}: must be a 1-indexed positive line number.`);
+	}
+	if (limit !== undefined && !(limit >= 1)) {
+		throw new ToolError(`Invalid limit ${input.limit}: must be a positive line count.`);
+	}
+
+	const parsed = parseReadPathSelector(input.path);
+	if (parsed.kind === "lines" || parsed.kind === "tail") {
+		const next = offset !== undefined ? (limit !== undefined ? `:${offset}+${limit}` : `:${offset}-`) : `:1+${limit}`;
+		const example = input.path.includes("artifact://") ? "artifact://…:raw:301-" : "path:301";
+		throw new ToolError(
+			`Stale pagination kwargs: path already declares a line selector (${input.path}). ` +
+				`Do not pass separate offset/limit — use the next-page locator from the previous read ` +
+				`(for example ${example} or compose onto the path as ${next}). ` +
+				`Received offset=${offset ?? "unset"} limit=${limit ?? "unset"}.`,
+		);
+	}
+
+	const rangeSuffix =
+		offset === undefined ? `:1+${limit}` : limit === undefined ? `:${offset}-` : `:${offset}+${limit}`;
+	const hasRaw = parsed.kind === "raw" || input.path.split(":").some(chunk => chunk.toLowerCase() === "raw");
+	if (hasRaw) return { path: `${input.path}${rangeSuffix}` };
+	// Verbatim artifact continue-read needs :raw; ordinary files keep hashline selectors.
+	if (/^artifact:\/\//i.test(input.path)) return { path: `${input.path}:raw${rangeSuffix}` };
+	return { path: `${input.path}${rangeSuffix}` };
+}
