@@ -58,14 +58,17 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 	{
 		id: "W6",
 		code_complete: true,
-		runtime_wired: true,
+		// Production still lacks a caller that supplies real phase transitions +
+		// carried retain state and feeds shouldRewriteContext into the compaction
+		// owner. observePhaseHandoffBoundary exists; library/tests exercise it.
+		// A stub unknown→unknown call that discards the result is not runtime_wired.
+		runtime_wired: false,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "SessionMaintenance.checkCompaction shadows phase-handoff when flag on; treatment via observePhaseHandoffBoundary + existing compaction owner; off = unchanged",
+		note: "Library + SessionMaintenance.observePhaseHandoffBoundary API ready; no production caller supplies real phase/carried state or consumes shouldRewriteContext — treatment not runtime_wired",
 		call_sites: [
 			"packages/coding-agent/src/session/phase-handoff-maintenance.ts#runPhaseHandoffMaintenance",
 			"packages/coding-agent/src/session/session-maintenance.ts#observePhaseHandoffBoundary",
-			"packages/coding-agent/src/session/session-maintenance.ts#checkCompaction",
 		],
 	},
 	{
