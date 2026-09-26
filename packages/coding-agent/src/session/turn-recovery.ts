@@ -28,6 +28,11 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
+import {
+	buildCredentialRouteKey,
+	isConfigCredentialRouteUnavailable,
+	sharedCredentialRouteUnavailableRegistry,
+} from "../latency/credential-route-unavailable";
 
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
@@ -2083,6 +2088,9 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				// Skip routes already known config-unavailable (same dead credential /
+				// missing model). Preserves healthy cross-provider fallbacks.
+				if (!this.#isHealthyCredentialRouteCandidate(selector)) continue;
 				// A candidate that would leave the request exactly as it is — same
 				// routed model, same effective thinking level — is not a switch, and
 				// must never be applied: `findRetryFallbackCandidates` excludes the
@@ -2195,7 +2203,9 @@ export class TurnRecovery {
 	 * model switch cannot fix or must not replay: cancellations (abort-flavored
 	 * errors are not model faults), context overflow (compaction's job),
 	 * classifier refusals (chain consult is handled on the retryable path with
-	 * `pinFallback`), and turns that already emitted replay-unsafe output.
+	 * `pinFallback`), turns that already emitted replay-unsafe output, and
+	 * config credential/route failures whose remaining chain candidates share a
+	 * known-unavailable route (history supplement S0).
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
@@ -2222,9 +2232,70 @@ export class TurnRecovery {
 		}
 		if (this.#hasReplayUnsafeOutput(message)) return false;
 		const currentSelector = formatRetryFallbackSelector(model, this.#host.thinkingLevel());
-		return this.retryFallbackChainKeys(currentSelector).some(
-			role => this.findRetryFallbackCandidates(role, currentSelector).length > 0,
+		return this.retryFallbackChainKeys(currentSelector).some(role =>
+			this.findRetryFallbackCandidates(role, currentSelector).some(candidate =>
+				this.#isHealthyCredentialRouteCandidate(candidate),
+			),
 		);
+	}
+
+	/**
+	 * Record a config-unavailable failure for the active model route (process-local)
+	 * so sibling fallback candidates sharing the dead credential are skipped.
+	 * Cooldown/transport/unknown do not write the registry.
+	 */
+	noteConfigCredentialRouteFailure(message: AssistantMessage): void {
+		const model = this.#host.model();
+		if (!model || message.stopReason !== "error") return;
+		const input = {
+			errorMessage: message.errorMessage,
+			errorStatus: message.errorStatus,
+			errorId: message.errorId,
+		};
+		if (!isConfigCredentialRouteUnavailable(input)) return;
+		const registry = sharedCredentialRouteUnavailableRegistry();
+		const providerScoped = AIError.is(this.#classifyRetryMessage(message), AIError.Flag.AuthFailed);
+		registry.noteFailure(
+			buildCredentialRouteKey({
+				provider: model.provider,
+				modelId: model.id,
+				providerScoped,
+			}),
+			input,
+		);
+		// Auth failures also mark the provider scope so sibling models on the same
+		// dead credential stop walking an identical chain.
+		if (providerScoped) {
+			registry.noteFailure(
+				buildCredentialRouteKey({ provider: model.provider, providerScoped: true }),
+				input,
+			);
+		}
+	}
+
+	/** Clear known-unavailable marks for the active model after a successful turn. */
+	clearConfigCredentialRouteFailure(): void {
+		const model = this.#host.model();
+		if (!model) return;
+		const registry = sharedCredentialRouteUnavailableRegistry();
+		registry.clear(buildCredentialRouteKey({ provider: model.provider, modelId: model.id }));
+		registry.clear(buildCredentialRouteKey({ provider: model.provider, providerScoped: true }));
+	}
+
+	/** False when the candidate's provider/model route is already known config-unavailable. */
+	#isHealthyCredentialRouteCandidate(candidate: RetryFallbackSelector): boolean {
+		const registry = sharedCredentialRouteUnavailableRegistry();
+		const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
+		const model = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
+		const provider = model?.provider ?? candidate.provider;
+		const modelId = model?.id ?? candidate.id;
+		if (registry.isUnavailable(buildCredentialRouteKey({ provider, providerScoped: true }))) {
+			return false;
+		}
+		if (registry.isUnavailable(buildCredentialRouteKey({ provider, modelId }))) {
+			return false;
+		}
+		return true;
 	}
 
 	/**

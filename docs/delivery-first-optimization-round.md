@@ -34,3 +34,4 @@ Paid live-net experiments need separate authorization.
 - `docs/p2-optimization-blocked-until.md`
 - `docs/delivery-read-cache-experiments.md`
 - `docs/context-strategy-experiment.md`
+- `docs/session-history-optimization-supplement.md` (independent S0–S4 add-on; does not weaken Packages 1–5)
