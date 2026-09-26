@@ -1,6 +1,10 @@
 import * as path from "node:path";
 import { evaluateWorkflowFinalCompletion } from "../../model-policy/completion";
-import { buildLayeredVerificationPlan, layeredVerificationObserveEvents } from "../layered-verification";
+import {
+	buildLayeredVerificationPlan,
+	layeredVerificationObserveEvents,
+	layeredVerificationRunEndObserveEvents,
+} from "../layered-verification";
 import type { ScopeStatus } from "../scope-metrics";
 import type { ImplementationArtifactV1, ReviewFindingV1, VerificationArtifactV1, VerifierPort } from "../types";
 import {
@@ -76,10 +80,12 @@ export class FinalVerifyStage {
 			priorVerification: input.priorVerification,
 			alreadyGreenLocalCommands: input.alreadyGreenLocalCommands,
 		});
+		const observeMeta = {
+			eventIdPrefix: `wf:${input.workflowId}:${input.attemptId}:final_verify`,
+		};
 		if (input.observeSink) {
-			for (const event of layeredVerificationObserveEvents(plan, {
-				eventIdPrefix: `wf:${input.workflowId}:${input.attemptId}:final_verify`,
-			})) {
+			// Plan/start + reuse/reject only — never mint verify_run before execute.
+			for (const event of layeredVerificationObserveEvents(plan, observeMeta)) {
 				noteVerificationObserve({ ...event, sink: input.observeSink });
 			}
 		}
@@ -132,6 +138,11 @@ export class FinalVerifyStage {
 				input.forbiddenPaths ?? [],
 				{ signal: input.signal, timeoutMs: input.timeoutMs },
 			);
+			if (input.observeSink && plan.toRun.length > 0) {
+				for (const event of layeredVerificationRunEndObserveEvents(plan, observeMeta)) {
+					noteVerificationObserve({ ...event, sink: input.observeSink });
+				}
+			}
 			base = sealWorkflowVerifierResult(base, {
 				commands: input.commands,
 				codeState,

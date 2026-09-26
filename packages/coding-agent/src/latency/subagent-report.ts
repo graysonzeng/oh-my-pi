@@ -134,6 +134,15 @@ interface UsageRequest {
 	stopReason: string | null;
 	/** True when the assistant message is an error / aborted turn. */
 	isError: boolean;
+	/** Entry timestamp when known. */
+	ts: number | null;
+	/**
+	 * Episode key (`sessionId::rootUserEntryId`) when the offline parser could
+	 * attribute this request to an episode window; null when unattributed.
+	 */
+	episodeKey: string | null;
+	/** Persisted entry id for branch filtering / durable identity. */
+	entryId: string | null;
 }
 
 interface SpawnMember {
@@ -617,7 +626,10 @@ function parseToolCall(block: Record<string, unknown>, ts: number | null): Parse
 	return call;
 }
 
-function parseUsageRequest(msg: Record<string, unknown>): UsageRequest {
+function parseUsageRequest(
+	msg: Record<string, unknown>,
+	meta?: { ts?: number | null; entryId?: string | null; episodeKey?: string | null },
+): UsageRequest {
 	const durationMs = asNonNegativeNumber(msg.duration);
 	const ttftMs = asNonNegativeNumber(msg.ttft);
 	const usage = isRecord(msg.usage) ? msg.usage : undefined;
@@ -639,6 +651,9 @@ function parseUsageRequest(msg: Record<string, unknown>): UsageRequest {
 		costTotal: cost,
 		stopReason,
 		isError,
+		ts: meta?.ts ?? null,
+		episodeKey: meta?.episodeKey ?? null,
+		entryId: meta?.entryId ?? null,
 	};
 }
 
@@ -714,6 +729,46 @@ function collectTerminalObservations(
 	}
 }
 
+/**
+ * Reconstruct the active branch (leaf→root) the same way SessionManager does.
+ * When the journal is flat (all parentId null), treat chronological order as
+ * the active branch — no branching was recorded.
+ */
+function activeBranchEntryIds(records: readonly unknown[]): Set<string> | null {
+	type Node = { id: string; parentId: string | null };
+	const nodes: Node[] = [];
+	let sawNonNullParent = false;
+	for (const raw of records) {
+		if (!isRecord(raw)) continue;
+		const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : "";
+		if (!id) continue;
+		const parentId =
+			typeof raw.parentId === "string" && raw.parentId.trim()
+				? raw.parentId.trim()
+				: raw.parentId === null
+					? null
+					: null;
+		if (typeof raw.parentId === "string" && raw.parentId.trim()) sawNonNullParent = true;
+		nodes.push({ id, parentId });
+	}
+	if (nodes.length === 0) return null;
+	if (!sawNonNullParent) {
+		// Flat journal: every entry with an id is on the "branch".
+		return new Set(nodes.map(n => n.id));
+	}
+	const byId = new Map(nodes.map(n => [n.id, n] as const));
+	const leaf = nodes[nodes.length - 1]!;
+	const active = new Set<string>();
+	const seen = new Set<string>();
+	let cursor: Node | undefined = leaf;
+	while (cursor && !seen.has(cursor.id)) {
+		seen.add(cursor.id);
+		active.add(cursor.id);
+		cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+	}
+	return active;
+}
+
 export function parseSessionRecords(records: readonly unknown[], filePath: string): ParsedSession {
 	const layout = sessionLayoutFromPath(filePath);
 	const session: ParsedSession = {
@@ -734,8 +789,19 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 		spawnObservations: [],
 		parentFinalVerifications: [],
 	};
+	const activeIds = activeBranchEntryIds(records);
+	// Episode window: first user message after previous passed PFV becomes root.
+	let currentRootUserEntryId: string | null = null;
+	let afterAccepted = false;
+	const episodeFor = (): string | null => {
+		if (!session.id || !currentRootUserEntryId) return null;
+		return `${session.id}::${currentRootUserEntryId}`;
+	};
+
 	for (const raw of records) {
 		if (!isRecord(raw)) continue;
+		const entryId = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : null;
+		const onActiveBranch = !activeIds || !entryId || activeIds.has(entryId);
 		const type = raw.type;
 		if (type === "session") {
 			if (typeof raw.id === "string" && raw.id) session.id = raw.id;
@@ -756,36 +822,62 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 			continue;
 		}
 		if (type === "thinking_level_change" && typeof raw.thinkingLevel === "string" && raw.thinkingLevel) {
-			session.thinkingLevels.push(raw.thinkingLevel);
+			if (onActiveBranch) session.thinkingLevels.push(raw.thinkingLevel);
 			continue;
 		}
 		if (type === "custom") {
 			const ts = entryTimestamp(raw, undefined);
-			touchTs(session, ts);
-			collectParentFinalVerification(session, raw.customType, raw.data, ts);
-			collectDeliveryQualityOutcome(session, raw.customType, raw.data, ts);
+			if (onActiveBranch) {
+				touchTs(session, ts);
+				collectParentFinalVerification(session, raw.customType, raw.data, ts);
+				collectDeliveryQualityOutcome(session, raw.customType, raw.data, ts);
+				if (raw.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) {
+					const parsed = parseParentFinalVerificationDetails(raw.data);
+					if (parsed?.status === "passed") afterAccepted = true;
+				}
+			}
 			continue;
 		}
 		if (type === "custom_message") {
 			const ts = entryTimestamp(raw, undefined);
-			touchTs(session, ts);
-			collectTerminalObservations(session, raw.customType, raw.content, raw.details, ts);
+			if (onActiveBranch) {
+				touchTs(session, ts);
+				collectTerminalObservations(session, raw.customType, raw.content, raw.details, ts);
+				if (raw.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) {
+					const parsed = parseParentFinalVerificationDetails(raw.details);
+					if (parsed?.status === "passed") afterAccepted = true;
+				}
+			}
 			continue;
 		}
 		if (type !== "message") continue;
 		const msg = isRecord(raw.message) ? raw.message : undefined;
 		if (!msg) continue;
+		if (!onActiveBranch) continue;
 		if (msg.role === "custom") {
 			const ts = entryTimestamp(raw, msg);
 			touchTs(session, ts);
 			collectTerminalObservations(session, msg.customType, msg.content, msg.details, ts);
+			if (msg.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) {
+				const parsed = parseParentFinalVerificationDetails(msg.details);
+				if (parsed?.status === "passed") afterAccepted = true;
+			}
 			continue;
 		}
 		const ts = entryTimestamp(raw, msg);
 		touchTs(session, ts);
+		if (msg.role === "user") {
+			if (!currentRootUserEntryId || afterAccepted) {
+				if (entryId) {
+					currentRootUserEntryId = entryId;
+					afterAccepted = false;
+				}
+			}
+			continue;
+		}
 		if (msg.role === "assistant") {
 			if (ts !== null) session.assistantTimestamps.push(ts);
-			session.usageRequests.push(parseUsageRequest(msg));
+			session.usageRequests.push(parseUsageRequest(msg, { ts, entryId, episodeKey: episodeFor() }));
 			if (Array.isArray(msg.content)) {
 				for (const block of msg.content) {
 					if (!isRecord(block)) continue;

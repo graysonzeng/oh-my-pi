@@ -85,6 +85,7 @@ import type { GoalModeState } from "../goals/state";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
 import { recordExplicitUserAcceptance } from "../latency/ordinary-acceptance-sink";
+import { resolveParentFinalCodeStateRef } from "../task/workspace-code-version";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
 import {
@@ -5809,14 +5810,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		const objective = state.goal.objective.trim();
 		if (objective) {
 			try {
+				const codeState = await resolveParentFinalCodeStateRef(this.session.sessionManager.getCwd());
 				const acceptance = recordExplicitUserAcceptance(this.session, {
 					acceptanceItems: [objective],
 					status: "passed",
 					eventId: `user-accept:goal:${this.session.sessionManager.getSessionId()}:${state.goal.id}`,
+					...(codeState ? { codeState } : {}),
 				});
 				if (!acceptance.recorded) {
 					logger.warn("ordinary acceptance: goal complete gated out", { reason: acceptance.reason });
 					this.showWarning(`Acceptance receipt not recorded (${acceptance.reason}). Goal still completed.`);
+				} else if (codeState?.fingerprint) {
+					this.session.setWorkspaceCodeFingerprint(codeState.fingerprint);
 				}
 			} catch (error) {
 				logger.warn("ordinary acceptance: goal complete write failed", {

@@ -198,17 +198,26 @@ function emptyAttemptCost(): AttemptCostByCompletionKind {
 function sumUsage(
 	into: DeliveryUsageSlice,
 	session: ParsedSession,
+	opts?: { episodeKey?: string | null; requireEpisodeMatch?: boolean },
 ): {
 	costComplete: boolean;
 	zeroCostErrorRequests: number;
 	sawPriced: boolean;
 	sawMissingPrice: boolean;
+	matchedRequests: number;
 } {
-	let costComplete = session.usageRequests.length > 0;
+	const requireMatch = opts?.requireEpisodeMatch === true;
+	const targetEpisode = opts?.episodeKey ?? null;
+	const requests = session.usageRequests.filter(request => {
+		if (!requireMatch) return true;
+		if (!targetEpisode) return request.episodeKey === null;
+		return request.episodeKey === targetEpisode;
+	});
+	let costComplete = requests.length > 0;
 	let zeroCostErrorRequests = 0;
 	let sawPriced = false;
 	let sawMissingPrice = false;
-	for (const request of session.usageRequests) {
+	for (const request of requests) {
 		into.input = addPresent(into.input, request.input);
 		into.output = addPresent(into.output, request.output);
 		into.cacheRead = addPresent(into.cacheRead, request.cacheRead);
@@ -222,11 +231,17 @@ function sumUsage(
 			if (request.costTotal === 0 && request.isError) zeroCostErrorRequests += 1;
 		}
 	}
-	if (session.usageRequests.length === 0) {
+	if (requests.length === 0) {
 		costComplete = false;
 		sawMissingPrice = true;
 	}
-	return { costComplete, zeroCostErrorRequests, sawPriced, sawMissingPrice };
+	return {
+		costComplete,
+		zeroCostErrorRequests,
+		sawPriced,
+		sawMissingPrice,
+		matchedRequests: requests.length,
+	};
 }
 
 function priceProvenanceOf(args: {
@@ -663,15 +678,27 @@ export function observeDeliveryCostTask(args: {
 	let zeroCostErrorRequests = 0;
 	let sawPriced = false;
 	let sawMissingPrice = false;
-	const fold = (session: ParsedSession): void => {
-		const piece = sumUsage(usage, session);
+	const episodeSlice = args.episodeKey !== undefined ? args.episodeKey : null;
+	const multiEpisodeParent =
+		args.episodeKey !== undefined &&
+		parent.parentFinalVerifications.some(v => {
+			const key = v.attempt?.episode ? episodeKey(v.attempt.episode) : null;
+			return key !== null && key !== args.episodeKey;
+		});
+	const fold = (session: ParsedSession, isParent: boolean): void => {
+		// Parent multi-episode: attribute only matching episode-tagged requests.
+		// Children stay whole-session (child sessions are typically one episode).
+		const piece = sumUsage(usage, session, {
+			episodeKey: episodeSlice,
+			requireEpisodeMatch: isParent && multiEpisodeParent,
+		});
 		if (!piece.costComplete) costComplete = false;
 		zeroCostErrorRequests += piece.zeroCostErrorRequests;
 		sawPriced ||= piece.sawPriced;
 		sawMissingPrice ||= piece.sawMissingPrice;
 	};
-	fold(parent);
-	for (const child of children) fold(child);
+	fold(parent, true);
+	for (const child of children) fold(child, false);
 	const quality = qualityFromSession(parent);
 	const sorted = sortedVerifications(verifications);
 	const last = sorted.length > 0 ? sorted[sorted.length - 1]! : undefined;
@@ -780,35 +807,32 @@ export function buildDeliveryCostBaselineReport(sessions: readonly ParsedSession
 	}
 
 	const tasks: DeliveryCostTaskObservation[] = [];
+	const seenEventIds = new Set<string>();
+	const seenSessionIds = new Set<string>();
 	for (const parent of parents) {
+		// Copied session history via two paths: keep the first session id only.
+		if (parent.id) {
+			if (seenSessionIds.has(parent.id)) continue;
+			seenSessionIds.add(parent.id);
+		}
 		const kids = childrenByParent.get(parent.path) ?? [];
 		const groups = groupVerificationsByEpisode(parent.parentFinalVerifications);
-		// Multi-episode same session: emit one observation per episode so
-		// acceptance denominators stay isolated. Without per-request episode
-		// tags we cannot split usage — do NOT dump all session spend onto the
-		// first episode (that over-bills epA and under-bills epB). Mark every
-		// unsplit group cost-incomplete with empty usage so costPerAccepted
-		// stays null rather than misattributing or double-billing.
-		const cannotSplitUsage = groups.length > 1;
 		for (const group of groups) {
+			// Cross-parse eventId dedupe (forked / copied receipts).
+			const verifications = group.verifications.filter(v => {
+				if (!v.eventId) return true;
+				if (seenEventIds.has(v.eventId)) return false;
+				seenEventIds.add(v.eventId);
+				return true;
+			});
+			if (verifications.length === 0 && group.verifications.length > 0) continue;
 			const observation = observeDeliveryCostTask({
 				parent,
 				children: kids,
-				verifications: group.verifications,
+				verifications: verifications.length > 0 ? verifications : group.verifications,
 				episodeKey: group.episodeKey,
 			});
-			if (cannotSplitUsage) {
-				tasks.push({
-					...observation,
-					usage: emptyUsage(),
-					attemptCostComplete: false,
-					priceProvenance: "unknown",
-					zeroCostErrorRequests: 0,
-					attemptCostByKind: emptyAttemptCost(),
-				});
-			} else {
-				tasks.push(observation);
-			}
+			tasks.push(observation);
 		}
 	}
 

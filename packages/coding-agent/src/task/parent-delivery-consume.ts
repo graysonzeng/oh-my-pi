@@ -8,13 +8,14 @@
  * `done_valid` / integrate-eligible ≠ final parent acceptance.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import { resolveRootUserEntryIdFromBranch } from "../latency/task-episode";
+import { resolveEpisodeRootFromBranch } from "../latency/task-episode";
 import {
 	bindParentIntegrateDecisionEntry,
 	PARENT_INTEGRATE_DECISION_CUSTOM_TYPE,
 	reclassifyParentIntegrateAgainstWorkspace,
 	type ChildDeliveryEvidenceV1,
 	type ParentIntegrateDecision,
+	type ParentIntegrateDecisionEntry,
 } from "./child-delivery-evidence";
 import { inspectEvidenceHandoffContext } from "./evidence-handoff";
 import {
@@ -52,7 +53,7 @@ export interface ParentDeliveryConsumeInput {
 
 export interface ParentDeliveryConsumeResult {
 	decision: ParentIntegrateDecision & { boundToWorkspaceVersion: string };
-	entry: ReturnType<typeof bindParentIntegrateDecisionEntry>;
+	entry: ParentIntegrateDecisionEntry;
 	entryId: string;
 }
 
@@ -163,7 +164,7 @@ export function resolveParentConsumeEpisode(sink: ParentDeliveryConsumeSink): {
 } | null {
 	const sessionId = sink.getSessionId?.();
 	if (!sessionId) return null;
-	const rootUserEntryId = resolveRootUserEntryIdFromBranch(sink.getBranch?.() ?? []);
+	const rootUserEntryId = resolveEpisodeRootFromBranch(sink.getBranch?.() ?? []);
 	if (!rootUserEntryId) return null;
 	return { sessionId, rootUserEntryId };
 }

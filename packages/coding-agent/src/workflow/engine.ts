@@ -36,7 +36,7 @@ import {
 	buildParentFinalVerificationDetails,
 	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
 } from "../latency/parent-final-verification";
-import { buildAcceptanceContractRef, resolveRootUserEntryIdFromBranch } from "../latency/task-episode";
+import { buildAcceptanceContractRef, resolveEpisodeRootFromBranch } from "../latency/task-episode";
 import gateReviewAdapterPrompt from "../prompts/workflow/gate-review-adapter.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import {
@@ -2343,7 +2343,7 @@ export class WorkflowEngine {
 				try {
 					const sessionId = session.sessionManager?.getSessionId?.() ?? workflowId;
 					const resolvedRoot = session.sessionManager
-						? resolveRootUserEntryIdFromBranch(session.sessionManager.getBranch())
+						? resolveEpisodeRootFromBranch(session.sessionManager.getBranch())
 						: null;
 					// Never invent a user-entry id from workflowId — leave episode
 					// null (unattributed) when the branch has no user message root.

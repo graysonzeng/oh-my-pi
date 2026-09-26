@@ -100,6 +100,28 @@ describe("W3 durable evidence-handoff observe", () => {
 		expect(recomputed.reuseContinue).toBe(1);
 	});
 
+	it("persist observe is fail-open on sink write errors (does not throw)", () => {
+		const manager = SessionManager.inMemory();
+		const original = manager.appendCustomEntry.bind(manager);
+		manager.appendCustomEntry = (() => {
+			throw new Error("disk full");
+		}) as SessionManager["appendCustomEntry"];
+		const result = persistEvidenceHandoffObserve(
+			manager,
+			buildEvidenceHandoffObserveRecord({
+				eventId: "fail-open-1",
+				phase: "verify_plan",
+				ts: 1,
+				reason: "start",
+			}),
+		);
+		expect(result.persisted).toBe(false);
+		expect(result.error).toMatch(/disk full/);
+		// In-process snapshot still advanced; durable restart would miss this boundary.
+		expect(getEvidenceHandoffObserveSnapshot().verifyPlan).toBe(1);
+		manager.appendCustomEntry = original;
+	});
+
 	it("never treats async.running as verify reuse/pass and exposes reject reasons", () => {
 		const manager = SessionManager.inMemory();
 		noteVerificationObserve({
@@ -157,5 +179,25 @@ describe("W3 durable evidence-handoff observe", () => {
 		const rejectEvents = layeredVerificationObserveEvents(rejected, { eventIdPrefix: "fv2" });
 		expect(rejectEvents.some(e => e.disposition === "reject")).toBe(true);
 		expect(rejectEvents.find(e => e.disposition === "reject")?.reason).toBeTruthy();
+	});
+
+	it("plan observe emits plan/start not verify_run before execute", () => {
+		const codeState = buildVerificationCodeState({
+			implementation: { attemptId: "impl-1" },
+			patchContent: "diff --git a/a.ts b/a.ts\n+x\n",
+			changedFiles: ["a.ts"],
+			workspace: provenWorkspace,
+		});
+		const plan = buildLayeredVerificationPlan({
+			layer: "slice_local",
+			commands: ["bun check"],
+			codeState,
+			scope: { kind: "paths", paths: ["a.ts"] },
+		});
+		expect(plan.toRun).toContain("bun check");
+		const events = layeredVerificationObserveEvents(plan, { eventIdPrefix: "iv" });
+		expect(events.map(e => e.disposition)).toEqual(["plan"]);
+		expect(events[0]?.reason).toBe("start");
+		expect(events[0]?.eventId).toContain(":plan:");
 	});
 });

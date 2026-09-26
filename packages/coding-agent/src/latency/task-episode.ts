@@ -150,3 +150,68 @@ export function resolveRootUserEntryIdFromBranch(
 	}
 	return root;
 }
+
+/** Entry shapes that can carry a parent-final acceptance receipt. */
+export type BranchEntryForEpisodeBoundary = {
+	id: string;
+	type: string;
+	customType?: string;
+	data?: unknown;
+	details?: unknown;
+	message?: { role?: string; customType?: string; details?: unknown };
+};
+
+/**
+ * Latest **passed** parent-final verification entry id on the branch.
+ * Used as `afterEntryId` so the next user message opens a new episode instead
+ * of rebinding to the session's first user message.
+ */
+export function resolvePreviousAcceptedBoundaryEntryId(
+	entries: readonly BranchEntryForEpisodeBoundary[],
+): string | null {
+	let boundary: string | null = null;
+	for (const entry of entries) {
+		let customType: string | undefined;
+		let payload: unknown;
+		if (entry.type === "custom") {
+			customType = typeof entry.customType === "string" ? entry.customType : undefined;
+			payload = entry.data;
+		} else if (entry.type === "custom_message") {
+			customType = typeof entry.customType === "string" ? entry.customType : undefined;
+			payload = entry.details;
+		} else if (entry.type === "message" && entry.message?.role === "custom") {
+			customType = typeof entry.message.customType === "string" ? entry.message.customType : undefined;
+			payload = entry.message.details;
+		} else {
+			continue;
+		}
+		if (customType !== "parent_final_verification") continue;
+		if (!isRecord(payload)) continue;
+		if (payload.status !== "passed") continue;
+		boundary = entry.id;
+	}
+	return boundary;
+}
+
+/**
+ * Episode root for ordinary / workflow / child delivery: first user message
+ * after the previous accepted receipt boundary (or earliest user message).
+ */
+export function resolveEpisodeRootFromBranch(entries: readonly BranchEntryForEpisodeBoundary[]): string | null {
+	const afterEntryId = resolvePreviousAcceptedBoundaryEntryId(entries);
+	return resolveRootUserEntryIdFromBranch(entries, { afterEntryId });
+}
+
+/**
+ * Prefer an explicit attempt id; otherwise reuse a durable receipt event id so
+ * fail→repair→pass keeps distinct attempts under one episode.
+ */
+export function resolveAttemptId(
+	explicit: string | null | undefined,
+	eventId: string | null | undefined,
+): string | null {
+	const fromExplicit = typeof explicit === "string" && explicit.trim() ? explicit.trim() : null;
+	if (fromExplicit) return fromExplicit;
+	const fromEvent = typeof eventId === "string" && eventId.trim() ? eventId.trim() : null;
+	return fromEvent;
+}

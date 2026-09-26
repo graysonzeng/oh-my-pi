@@ -24,6 +24,7 @@ export type EvidenceHandoffObservePhase =
 	| "reuse"
 	| "child_settled"
 	| "parent_consumed"
+	| "verify_plan"
 	| "verify_run"
 	| "verify_reuse"
 	| "verify_reject"
@@ -39,6 +40,7 @@ export interface EvidenceHandoffObserveSnapshot {
 	reuseSpawnFresh: number;
 	childSettled: number;
 	parentConsumed: number;
+	verifyPlan: number;
 	verifyRun: number;
 	verifyReuse: number;
 	verifyReject: number;
@@ -76,6 +78,7 @@ const emptySnapshot = (): EvidenceHandoffObserveSnapshot => ({
 	reuseSpawnFresh: 0,
 	childSettled: 0,
 	parentConsumed: 0,
+	verifyPlan: 0,
 	verifyRun: 0,
 	verifyReuse: 0,
 	verifyReject: 0,
@@ -121,6 +124,9 @@ function applyPhaseToSnapshot(
 			break;
 		case "parent_consumed":
 			snapshot.parentConsumed += 1;
+			break;
+		case "verify_plan":
+			snapshot.verifyPlan += 1;
 			break;
 		case "verify_run":
 			snapshot.verifyRun += 1;
@@ -229,15 +235,24 @@ export function parseEvidenceHandoffObserveRecord(value: unknown): EvidenceHando
 
 /**
  * Single owner for durable observe persist+dedupe. Duplicate eventId is a no-op
- * (in-memory and when replaying). Write failures are logged and rethrown so
- * callers cannot treat a failed persist as observed.
+ * (in-memory and when replaying). Write failures are fail-open: log + diagnostics,
+ * return `{ persisted: false }` — never throw so verify/workpool cannot abort on
+ * observe I/O (mirrors workpool catch around durable observe).
  */
 export function persistEvidenceHandoffObserve(
 	sink: EvidenceHandoffObservePersistSink,
 	record: EvidenceHandoffObserveRecord,
-): { persisted: boolean; entryId?: string } {
+): { persisted: boolean; entryId?: string; error?: string } {
 	const normalized = parseEvidenceHandoffObserveRecord(record);
-	if (!normalized) throw new Error("evidence_handoff_observe_invalid_record");
+	if (!normalized) {
+		const error = "evidence_handoff_observe_invalid_record";
+		logger.warn("evidence-handoff: observe persist skipped", {
+			error,
+			eventId: isRecord(record) && typeof record.eventId === "string" ? record.eventId : undefined,
+			phase: isRecord(record) && typeof record.phase === "string" ? record.phase : undefined,
+		});
+		return { persisted: false, error };
+	}
 	if (seenEventIds.has(normalized.eventId)) {
 		return { persisted: false };
 	}
@@ -255,13 +270,15 @@ export function persistEvidenceHandoffObserve(
 		});
 		return { persisted: true, entryId };
 	} catch (error) {
-		seenEventIds.delete(normalized.eventId);
+		// Keep seen + in-process snapshot so retries do not double-count; durable
+		// restart recompute simply misses this boundary (diagnostics via log).
+		const message = error instanceof Error ? error.message : String(error);
 		logger.warn("evidence-handoff: observe persist failed", {
 			eventId: normalized.eventId,
 			phase: normalized.phase,
-			error: error instanceof Error ? error.message : String(error),
+			error: message,
 		});
-		throw error;
+		return { persisted: false, error: message };
 	}
 }
 
@@ -298,6 +315,9 @@ export function recomputeEvidenceHandoffObserveSnapshot(
 			case "parent_consumed":
 				out.parentConsumed += 1;
 				break;
+			case "verify_plan":
+				out.verifyPlan += 1;
+				break;
 			case "verify_run":
 				out.verifyRun += 1;
 				break;
@@ -318,11 +338,12 @@ export function recomputeEvidenceHandoffObserveSnapshot(
 }
 
 /**
- * Convenience: note verify reuse/reject with an observable reason.
+ * Convenience: note verify plan/start, run/end, reuse, or reject.
  * `async.running` must never be recorded as verify_reuse/pass.
+ * Persist failures are fail-open (never abort verify).
  */
 export function noteVerificationObserve(input: {
-	disposition: "run" | "reuse" | "reject";
+	disposition: "plan" | "run" | "reuse" | "reject";
 	reason?: string;
 	asyncRunning?: boolean;
 	eventId: string;
@@ -352,7 +373,13 @@ export function noteVerificationObserve(input: {
 		return;
 	}
 	const phase: EvidenceHandoffObservePhase =
-		input.disposition === "run" ? "verify_run" : input.disposition === "reuse" ? "verify_reuse" : "verify_reject";
+		input.disposition === "plan"
+			? "verify_plan"
+			: input.disposition === "run"
+				? "verify_run"
+				: input.disposition === "reuse"
+					? "verify_reuse"
+					: "verify_reject";
 	if (input.sink) {
 		persistEvidenceHandoffObserve(
 			input.sink,

@@ -33,7 +33,7 @@ describe("W2 executor producer", () => {
 		);
 	});
 
-	test("rejects bare prose locations as proven forge surface", () => {
+	test("rejects bare prose and path-only locations as proven forge surface", () => {
 		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
 			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
 			acceptanceItems: [
@@ -43,13 +43,41 @@ describe("W2 executor producer", () => {
 		});
 		expect(delivery.acceptanceProven.find(item => item.id === "Looks done")?.proven).toBe(false);
 		expect(delivery.acceptanceProven.find(item => item.id === "Looks done")?.evidenceLocations).toEqual([]);
-		expect(delivery.acceptanceProven.find(item => item.id === "File evidence")?.proven).toBe(true);
+		// Path-looking locations alone never seal proven without a terminal receipt.
+		expect(delivery.acceptanceProven.find(item => item.id === "File evidence")?.proven).toBe(false);
+		expect(delivery.acceptanceProven.find(item => item.id === "File evidence")?.evidenceLocations).toEqual([
+			"src/ok.ts",
+		]);
+	});
+
+	test("forged proven + does-not-exist.ts without terminal does not integrate", () => {
+		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
+			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
+			acceptanceItems: [
+				{
+					id: "ok",
+					claimedProven: true,
+					evidenceLocations: ["does-not-exist.ts"],
+				},
+			],
+			writeOwnershipReleased: true,
+		});
+		expect(delivery.acceptanceProven.find(item => item.id === "ok")?.proven).toBe(false);
+		const decision = reclassifyParentIntegrateAgainstWorkspace({
+			delivery,
+			currentCodeVersion: "v1",
+			requiredAcceptance: ["ok"],
+			writeOwnershipReleased: true,
+		});
+		expect(decision.action).not.toBe("integrate");
+		expect(decision.classification).toBe("missing_local_evidence");
 	});
 
 	test("worker cannot seal integrate without parent workspace reclassify", () => {
-		const delivery = buildChildDeliveryEvidence({
+		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
 			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
-			acceptanceProven: [{ id: "ok", proven: true, evidenceLocations: ["a.ts"] }],
+			acceptanceItems: [{ id: "ok", claimedProven: true, evidenceLocations: ["a.ts"] }],
+			terminalChecksPassed: [{ id: "ok", evidenceLocation: "a.ts" }],
 			writeOwnershipReleased: true,
 		});
 		const packetOnly = classifyParentIntegrate({
@@ -68,10 +96,25 @@ describe("W2 executor producer", () => {
 		expect(stale.boundToWorkspaceVersion).toBe("v2-moved");
 	});
 
+	test("author-built packets never keep proven:true (path-only forge)", () => {
+		const delivery = buildChildDeliveryEvidence({
+			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
+			acceptanceProven: [{ id: "ok", proven: true, evidenceLocations: ["a.ts"] }],
+			writeOwnershipReleased: true,
+		});
+		expect(delivery.acceptanceProven.every(item => item.proven === false)).toBe(true);
+		const decision = classifyParentIntegrate({
+			delivery,
+			requiredAcceptance: ["ok"],
+		});
+		expect(decision.action).not.toBe("integrate");
+	});
+
 	test("unreleased write ownership and missing required acceptance cannot integrate", () => {
 		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
 			codeVersion: { version: "v1", changedFiles: ["api.ts"] },
 			acceptanceItems: [{ id: "shared contract", claimedProven: true, evidenceLocations: ["api.ts"] }],
+			terminalChecksPassed: [{ id: "shared contract", evidenceLocation: "api.ts" }],
 			sharedInterfaces: ["api.ts"],
 			writeOwnershipReleased: false,
 		});
@@ -107,9 +150,10 @@ describe("W2 executor producer", () => {
 	});
 
 	test("done_valid bind entry is not final acceptance", () => {
-		const delivery = buildChildDeliveryEvidence({
+		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
 			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
-			acceptanceProven: [{ id: "ok", proven: true, evidenceLocations: ["a.ts"] }],
+			acceptanceItems: [{ id: "ok", claimedProven: true, evidenceLocations: ["a.ts"] }],
+			terminalChecksPassed: [{ id: "ok", evidenceLocation: "a.ts" }],
 			writeOwnershipReleased: true,
 		});
 		const decision = reclassifyParentIntegrateAgainstWorkspace({
@@ -129,5 +173,17 @@ describe("W2 executor producer", () => {
 		expect(entry.kind).toBe(PARENT_INTEGRATE_DECISION_CUSTOM_TYPE);
 		expect(entry.finalAccepted).toBe(false);
 		expect(entry.action).toBe("integrate");
+	});
+
+	test("empty requiredAcceptance fail-closed (no child-invented contract)", () => {
+		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
+			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
+			acceptanceItems: [{ id: "ok", claimedProven: true, evidenceLocations: ["a.ts"] }],
+			terminalChecksPassed: [{ id: "ok", evidenceLocation: "a.ts" }],
+			writeOwnershipReleased: true,
+		});
+		const decision = classifyParentIntegrate({ delivery });
+		expect(decision.action).not.toBe("integrate");
+		expect(decision.reasons).toContain("acceptance_unproven:<acceptance_contract>");
 	});
 });
