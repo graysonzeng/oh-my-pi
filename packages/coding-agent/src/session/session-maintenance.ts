@@ -674,6 +674,12 @@ export class SessionMaintenance {
 		rewriteToolResultsDropped?: number;
 		rewriteBlocksDropped?: number;
 		rewriteArtifactId?: string;
+		/**
+		 * When false, the boundary was observed but not successfully processed
+		 * (e.g. shake_failed_open). Next pass must still see the pending boundary.
+		 * Defaults to true for observe-only / terminal skip paths.
+		 */
+		boundaryProcessed?: boolean;
 	}): PhaseHandoffMaintenanceResult | undefined {
 		const raw = cfgPhaseHandoffExperiment.get(this.#host.settings);
 		const config = parsePhaseHandoffExperimentConfig(raw);
@@ -703,6 +709,7 @@ export class SessionMaintenance {
 				shouldRewriteContext: result.shouldRewriteContext,
 				boundaryKey: input.boundaryKey ?? `${input.fromPhase}->${input.toPhase}`,
 				rewriteApplied: input.rewriteApplied === true,
+				boundaryProcessed: input.boundaryProcessed !== false,
 				...(input.rewriteSkippedReason ? { rewriteSkippedReason: input.rewriteSkippedReason } : {}),
 				...(input.rewriteTokensFreed !== undefined ? { rewriteTokensFreed: input.rewriteTokensFreed } : {}),
 				...(input.rewriteToolResultsDropped !== undefined
@@ -736,6 +743,18 @@ export class SessionMaintenance {
 		const config = parsePhaseHandoffExperimentConfig(raw);
 		if (!config.enabled) {
 			return { observed: false, rewritten: false, shouldRewriteContext: false };
+		}
+
+		// Single-factor mutex: refuse when A/B delivery experiments are also on.
+		const readDedupeOn = this.#host.settings.get("deliveryExperiment.readDedupe.enabled" as never) === true;
+		const stablePrefixOn = this.#host.settings.get("deliveryExperiment.stablePrefixCache.enabled" as never) === true;
+		if (readDedupeOn || stablePrefixOn) {
+			return {
+				observed: false,
+				rewritten: false,
+				shouldRewriteContext: false,
+				rewriteSkippedReason: "multi_factor_rejected",
+			};
 		}
 
 		const branch = this.#host.sessionManager.getBranch();
@@ -809,12 +828,35 @@ export class SessionMaintenance {
 		}
 
 		try {
+			// Auto rewrite only when recover artifact save succeeds. Without
+			// requireArtifact, allocate/write failure still elides into a
+			// placeholder with no recover address and the original body is gone.
 			const shakeResult = await this.shake("elide", {
 				config: DEFAULT_SHAKE_CONFIG,
 				toolResultsOnly: true,
+				requireArtifact: true,
 			});
 			const rewritten =
 				shakeResult.toolResultsDropped + shakeResult.blocksDropped > 0 || shakeResult.tokensFreed > 0;
+			if (rewritten && !shakeResult.artifactId) {
+				// Defensive: requireArtifact should have thrown; never advance boundary.
+				this.observePhaseHandoffBoundary({
+					fromPhase: boundary.fromPhase,
+					toPhase: boundary.toPhase,
+					explicitStageComplete: boundary.explicitStageComplete,
+					carried,
+					boundaryKey: boundary.boundaryKey,
+					rewriteApplied: false,
+					rewriteSkippedReason: "shake_failed_open",
+					boundaryProcessed: false,
+				});
+				return {
+					observed: true,
+					rewritten: false,
+					shouldRewriteContext: true,
+					rewriteSkippedReason: "shake_failed_open",
+				};
+			}
 			this.observePhaseHandoffBoundary({
 				fromPhase: boundary.fromPhase,
 				toPhase: boundary.toPhase,
@@ -830,6 +872,7 @@ export class SessionMaintenance {
 				rewriteToolResultsDropped: shakeResult.toolResultsDropped,
 				rewriteBlocksDropped: shakeResult.blocksDropped,
 				rewriteArtifactId: shakeResult.artifactId,
+				boundaryProcessed: true,
 			});
 			return {
 				observed: true,
@@ -839,6 +882,8 @@ export class SessionMaintenance {
 			};
 		} catch (error) {
 			// shake rolls back entry mutations on persist failure; fail open here.
+			// Keep the boundary pending so the next maintenance pass retries
+			// (do not advance fromPhase → toPhase as successfully processed).
 			logger.debug("phase_handoff rewrite via shake failed open", { error: String(error) });
 			this.observePhaseHandoffBoundary({
 				fromPhase: boundary.fromPhase,
@@ -848,6 +893,7 @@ export class SessionMaintenance {
 				boundaryKey: boundary.boundaryKey,
 				rewriteApplied: false,
 				rewriteSkippedReason: "shake_failed_open",
+				boundaryProcessed: false,
 			});
 			return {
 				observed: true,

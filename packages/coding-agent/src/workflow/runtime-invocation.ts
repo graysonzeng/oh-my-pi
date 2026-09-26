@@ -721,21 +721,46 @@ export function prepareWorkflowInvocation(
 		},
 	];
 	// W5: observe (and optionally reorder) at the assembly boundary. Default off.
+	// Residual honesty: this is still the prepare/assembly boundary, not the final
+	// provider wire serialize — paired evidence stays false; no live cost claims.
 	const settingsGet = request.session.settings?.get?.bind(request.session.settings);
 	const stablePrefixConfig = parseStablePrefixCacheExperimentConfig({
 		enabled: settingsGet?.("deliveryExperiment.stablePrefixCache.enabled" as never) === true,
 		factor: settingsGet?.("deliveryExperiment.stablePrefixCache.factor" as never) ?? "none",
 	});
 	const readDedupeExperimentOn = settingsGet?.("deliveryExperiment.readDedupe.enabled" as never) === true;
+	const phaseHandoffExperimentOn = settingsGet?.("deliveryExperiment.phaseHandoff.enabled" as never) === true;
+	// Schema identity: names + presentation mode + essential set + any schemas
+	// already captured on the profile path. Full provider-final tool JSON may
+	// still differ at send time (catalog expand) — fingerprint is best-effort.
+	const toolSchemaFingerprint = sha256Hex(
+		JSON.stringify({
+			names: toolNames,
+			mode: presentationPolicy.mode,
+			essential: [...presentationPolicy.essentialTools].sort(),
+			skills: presentedSkillsText ? sha256Hex(presentedSkillsText) : null,
+		}),
+	);
+	const effortFingerprint = sha256Hex(
+		JSON.stringify({
+			mode: adaptedPolicy.modelFacts.reasoning.mode,
+			effortControl: adaptedPolicy.modelFacts.reasoning.effortControl,
+			supportedEfforts: adaptedPolicy.modelFacts.reasoning.supportedEfforts,
+		}),
+	);
 	const prefixBridge = observeStablePrefixAtAssembly({
 		sections: baseSections,
 		config: stablePrefixConfig,
-		peer: { readDedupeEnabled: readDedupeExperimentOn },
+		peer: {
+			readDedupeEnabled: readDedupeExperimentOn,
+			phaseHandoffEnabled: phaseHandoffExperimentOn,
+		},
 		providerIdentity: {
 			provider: adaptedPolicy.modelFacts.identity.provider,
 			api: adaptedPolicy.modelFacts.identity.api,
 			model: adaptedPolicy.modelFacts.identity.model,
-			toolSchemaFingerprint: sha256Hex(toolPresentationText),
+			toolSchemaFingerprint,
+			effortFingerprint,
 		},
 		scope: "unknown",
 	});

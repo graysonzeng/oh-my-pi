@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	CredentialRouteUnavailableRegistry,
 	resetSharedCredentialRouteUnavailableRegistryForTests,
@@ -8,6 +9,7 @@ import { availabilityProbeDedupeKey } from "../../src/workflow/availability-cand
 import { availabilityCredentialRouteScope, runAvailabilityPreflight } from "../../src/workflow/availability-preflight";
 import { ModelRouter } from "../../src/workflow/model-router";
 import type { ModelProfile, WorkflowAvailabilityPort, WorkflowRole } from "../../src/workflow/types";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { fakeSession } from "./helpers";
 
 afterEach(() => {
@@ -34,6 +36,50 @@ function profile(partial: Partial<ModelProfile> & Pick<ModelProfile, "id" | "rol
 	};
 }
 
+/** Real auth identity fixture — does not weaken production isolation. */
+function sessionWithAuthIdentity(options?: {
+	sessionId?: string;
+	provider?: string;
+	modelId?: string;
+	apiKey?: string;
+}): ToolSession {
+	const provider = options?.provider ?? "anthropic";
+	const modelId = options?.modelId ?? "dead-model";
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime(provider, options?.apiKey ?? "sk-test-fixture-not-for-logs");
+	const model = {
+		provider,
+		id: modelId,
+		api: "anthropic-messages",
+		identity: { class: "unknown" },
+		name: modelId,
+		baseUrl: "https://example.invalid",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1000,
+		maxTokens: 100,
+	} as Model;
+	return fakeSession({
+		getSessionId: () => options?.sessionId ?? "cred-route-fixture",
+		modelRegistry: {
+			authStorage,
+			getAvailable: () => [model],
+		} as unknown as ToolSession["modelRegistry"],
+	});
+}
+
+/** Profile pattern that resolves against {@link sessionWithAuthIdentity}'s single model. */
+function authProfile(
+	partial: Partial<ModelProfile> & Pick<ModelProfile, "id" | "roles"> & { modelId?: string },
+): ModelProfile {
+	const modelId = partial.modelId ?? "dead-model";
+	return profile({
+		...partial,
+		modelPattern: `anthropic/${modelId}`,
+	});
+}
+
 function routeKey(session: ToolSession, target: ModelProfile): string {
 	const scope = availabilityCredentialRouteScope(session, target);
 	if (!scope) throw new Error("expected an established credential-route scope");
@@ -42,7 +88,7 @@ function routeKey(session: ToolSession, target: ModelProfile): string {
 
 describe("availability preflight credential-route unavailable (S0)", () => {
 	it("notes config auth failure and skips the next physical probe for the same route key", async () => {
-		const target = profile({ id: "p1", roles: ["planner"], modelPattern: "dead-model" });
+		const target = authProfile({ id: "p1", roles: ["planner"], modelId: "dead-model" });
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
 		const probes = { count: 0 };
 		const port: WorkflowAvailabilityPort = {
@@ -63,7 +109,7 @@ describe("availability preflight credential-route unavailable (S0)", () => {
 			operation: "start" as const,
 			status: "planning" as const,
 			singleStep: true,
-			session: fakeSession(),
+			session: sessionWithAuthIdentity({ modelId: "dead-model" }),
 			credentialRouteUnavailable: registry,
 		};
 		const first = await runAvailabilityPreflight(options);
@@ -84,9 +130,9 @@ describe("availability preflight credential-route unavailable (S0)", () => {
 	});
 
 	it("does not mark transport blips and still re-probes", async () => {
-		const target = profile({ id: "p1", roles: ["planner"], modelPattern: "flaky" });
+		const target = authProfile({ id: "p1", roles: ["planner"], modelId: "flaky" });
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
-		const session = fakeSession();
+		const session = sessionWithAuthIdentity({ modelId: "flaky" });
 		const probes = { count: 0 };
 		const port: WorkflowAvailabilityPort = {
 			async probe() {
@@ -117,10 +163,10 @@ describe("availability preflight credential-route unavailable (S0)", () => {
 
 	it("shares config-unavailable across sibling profiles with the same probe dedupe key", async () => {
 		const roles: WorkflowRole[] = ["planner", "plan_reviewer"];
-		const a = profile({ id: "a", roles: ["planner"], modelPattern: "shared-model" });
-		const b = profile({ id: "b", roles: ["plan_reviewer"], modelPattern: "shared-model" });
+		const a = authProfile({ id: "a", roles: ["planner"], modelId: "shared-model" });
+		const b = authProfile({ id: "b", roles: ["plan_reviewer"], modelId: "shared-model" });
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
-		const session = fakeSession();
+		const session = sessionWithAuthIdentity({ modelId: "shared-model" });
 		const probes = { count: 0 };
 		const port: WorkflowAvailabilityPort = {
 			async probe() {
@@ -166,7 +212,7 @@ describe("availability preflight credential-route unavailable (S0)", () => {
 	});
 
 	it("does not reuse a config-unavailable mark for a different session", async () => {
-		const target = profile({ id: "p1", roles: ["planner"], modelPattern: "dead-model" });
+		const target = authProfile({ id: "p1", roles: ["planner"], modelId: "dead-model" });
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
 		const probes = { count: 0 };
 		const port: WorkflowAvailabilityPort = {
@@ -191,30 +237,36 @@ describe("availability preflight credential-route unavailable (S0)", () => {
 				session,
 				credentialRouteUnavailable: registry,
 			});
-		await run(fakeSession({ getSessionId: () => "owner-a" }));
-		const second = await run(fakeSession({ getSessionId: () => "owner-b" }));
+		await run(sessionWithAuthIdentity({ sessionId: "owner-a", modelId: "dead-model" }));
+		const second = await run(sessionWithAuthIdentity({ sessionId: "owner-b", modelId: "dead-model" }));
 		expect(probes.count).toBe(2);
 		expect(second.profiles[0]?.source).toBe("live");
 		expect(second.profiles[0]?.errorKind).toBe("authentication");
 	});
 
 	it("re-probes the same session after the auth override epoch changes", async () => {
-		const target = profile({ id: "p1", roles: ["planner"], modelPattern: "dead-model" });
+		const target = authProfile({ id: "p1", roles: ["planner"], modelId: "dead-model" });
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
-		let epoch = 1;
-		const authStorage = {
-			credentials: { generation: 1 },
-			keys: {
-				get overrideEpoch() {
-					return epoch;
-				},
-				source: () => ({ kind: "runtime" as const, concrete: true }),
-			},
-		};
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "sk-epoch-1");
+		const model = {
+			provider: "anthropic",
+			id: "dead-model",
+			api: "anthropic-messages",
+			identity: { class: "unknown" },
+			name: "dead-model",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000,
+			maxTokens: 100,
+		} as Model;
 		const session = fakeSession({
 			getSessionId: () => "same-session",
 			modelRegistry: {
 				authStorage,
+				getAvailable: () => [model],
 			} as unknown as ToolSession["modelRegistry"],
 		});
 		const probes = { count: 0 };
@@ -243,15 +295,15 @@ describe("availability preflight credential-route unavailable (S0)", () => {
 		await run();
 		await run();
 		expect(probes.count).toBe(1);
-		epoch += 1;
+		authStorage.keys.setRuntime("anthropic", "sk-epoch-2-rotated");
 		await run();
 		expect(probes.count).toBe(2);
 	});
 
 	it("clears the mark after a live success so recovery can resume", async () => {
-		const target = profile({ id: "p1", roles: ["planner"], modelPattern: "recover" });
+		const target = authProfile({ id: "p1", roles: ["planner"], modelId: "recover" });
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
-		const session = fakeSession();
+		const session = sessionWithAuthIdentity({ modelId: "recover" });
 		let mode: "auth" | "ok" = "auth";
 		const port: WorkflowAvailabilityPort = {
 			async probe() {
@@ -287,9 +339,9 @@ describe("availability preflight credential-route unavailable (S0)", () => {
 	});
 
 	it("does not sticky-mark usage-limit / insufficient balance even when probe kind is authentication", async () => {
-		const target = profile({ id: "p1", roles: ["planner"], modelPattern: "balance" });
+		const target = authProfile({ id: "p1", roles: ["planner"], modelId: "balance" });
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
-		const session = fakeSession();
+		const session = sessionWithAuthIdentity({ modelId: "balance" });
 		const probes = { count: 0 };
 		const port: WorkflowAvailabilityPort = {
 			async probe() {

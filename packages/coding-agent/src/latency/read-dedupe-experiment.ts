@@ -106,10 +106,10 @@ export function defaultReadDedupeExperimentConfig(): ReadDedupeExperimentConfig 
  */
 export function assertSingleReadDedupeFactor(
 	config: ReadDedupeExperimentConfig,
-	peer?: { stablePrefixCacheEnabled?: boolean },
+	peer?: { stablePrefixCacheEnabled?: boolean; phaseHandoffEnabled?: boolean },
 ): ReadDedupeFallbackReason | null {
 	if (!config.enabled) return "disabled";
-	if (peer?.stablePrefixCacheEnabled === true) return "multi_factor_rejected";
+	if (peer?.stablePrefixCacheEnabled === true || peer?.phaseHandoffEnabled === true) return "multi_factor_rejected";
 	if (config.factor === "none") return "factor_none";
 	if (!isFactor(config.factor)) return "unknown_factor";
 	return null;
@@ -117,7 +117,7 @@ export function assertSingleReadDedupeFactor(
 
 export function resolveReadDedupeExperiment(
 	config: ReadDedupeExperimentConfig,
-	peer?: { stablePrefixCacheEnabled?: boolean },
+	peer?: { stablePrefixCacheEnabled?: boolean; phaseHandoffEnabled?: boolean },
 ): {
 	applied: boolean;
 	receipt: ReadDedupeExperimentReceiptV1;
@@ -164,9 +164,12 @@ export function decideReadViewReuse(input: {
 	prior: ReadViewKeyV1 | null | undefined;
 	/** When Experiment B is also enabled, fail closed (A/B must stay separate). */
 	peerStablePrefixCacheEnabled?: boolean;
+	/** When S2 phase-handoff is also enabled, fail closed (single-factor only). */
+	peerPhaseHandoffEnabled?: boolean;
 }): ReadReuseDecision {
 	const { applied, receipt } = resolveReadDedupeExperiment(input.config, {
 		stablePrefixCacheEnabled: input.peerStablePrefixCacheEnabled,
+		phaseHandoffEnabled: input.peerPhaseHandoffEnabled,
 	});
 	if (!applied) {
 		return {

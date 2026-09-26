@@ -4,6 +4,9 @@
  * Separates code_complete / runtime_wired / mechanism_verified /
  * paired_evidence_ready. Never claim live cost wins from library tests alone.
  * paired_evidence_ready remains false for the whole batch (no paid live pairs).
+ *
+ * completed ≠ accepted: mechanisms may pass while 效果证据不足. Do not raise
+ * any package to fully closed / paired_evidence_ready until residuals are honest.
  */
 export type Batch2WorkPackageId = "W4" | "W5" | "W6" | "W7";
 
@@ -24,8 +27,8 @@ export interface Batch2WorkPackageStatus {
 }
 
 /**
- * Status after Batch 2 wiring. Update only when call sites or evidence change.
- * paired_evidence_ready remains false for the whole batch.
+ * Status after Batch 2 review-fix residuals. Update only when call sites or
+ * evidence change. paired_evidence_ready remains false for the whole batch.
  */
 export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 	{
@@ -34,9 +37,10 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 		runtime_wired: true,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "selectedRoute identity+revision in KeysApi; credentialRouteAuthScope uses it; AgentSession/TurnRecovery stream-stall+thinking-loop paths retained; no 13.60min savings claim",
+		note: "selectedRoute parse-owner revision for config env/!command (unobservable → fail-open); credentialRouteAuthScope wired; stream-stall thinking-loop fixtures retained but full side-effect durable reopen acceptance still residual; no live cost / 13.60min claim",
 		call_sites: [
 			"packages/ai/src/auth/cascade.ts#selectedRoute",
+			"packages/ai/src/auth/cascade.ts#KeyOverrides.configParseRevision",
 			"packages/coding-agent/src/latency/credential-route-unavailable.ts#credentialRouteAuthScope",
 			"packages/coding-agent/src/session/turn-recovery.ts#credentialRouteScope",
 			"packages/coding-agent/src/workflow/availability-preflight.ts#availabilityCredentialRouteScope",
@@ -46,10 +50,10 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 	{
 		id: "W5",
 		code_complete: true,
-		runtime_wired: true,
+		runtime_wired: false,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "prepareWorkflowInvocation observes (+ optional reorder) at assembly boundary; claimedLiveWin stays false; no auto warmup/paid traffic",
+		note: "NOT fully request-wired: observe remains at prepare/assembly (not provider-final serialize); toolSchemaFingerprint is presentation-mode best-effort not full send schema; scope often unknown; reorder_static_prefix refuses applied when treatment===control; A/B/S2 single-factor mutex at entrypoints; claimedLiveWin false; no auto warmup/paid traffic",
 		call_sites: [
 			"packages/coding-agent/src/latency/stable-prefix-assembly-bridge.ts#observeStablePrefixAtAssembly",
 			"packages/coding-agent/src/workflow/runtime-invocation.ts#prepareWorkflowInvocation",
@@ -61,7 +65,7 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 		runtime_wired: true,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "checkCompaction → applyPhaseHandoffAtMaintenanceBoundary builds real phase/retain from branch; shouldRewriteContext consumed via shake(elide); flag off unchanged; claimedLiveWin false; no paired cost wins",
+		note: "requireArtifact on phase rewrite (save failure keeps original); failed rewrite leaves boundary pending; boundaryKey includes durable entry id; refuses A/B cross-experiment; claimedLiveWin false; no paired cost wins",
 		call_sites: [
 			"packages/coding-agent/src/session/phase-handoff-carry.ts#buildPhaseHandoffCarriedFromBranch",
 			"packages/coding-agent/src/session/phase-handoff-carry.ts#resolvePhaseHandoffBoundaryObservation",
@@ -76,11 +80,12 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 		runtime_wired: true,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "Experiment A selection layer over ordinary read-dedupe arm (no second cache); S3 pagination replay fixtures retained; reuse≠toolCall drop claim",
+		note: "Experiment A selection layer over ordinary read-dedupe arm; >8MiB in-memory artifacts spill to temp file so line-range recover works; S3 pagination replay fixtures retained; reuse≠toolCall drop claim; no second cache table",
 		call_sites: [
 			"packages/coding-agent/src/latency/read-dedupe-selection.ts#selectReadDedupeReuse",
 			"packages/coding-agent/src/session/agent-session.ts#dedupeOrdinaryReadResult",
 			"packages/coding-agent/src/tools/read.ts (composeReadPaginationArgs)",
+			"packages/coding-agent/src/internal-urls/artifact-protocol.ts#locate (spill oversized in-memory)",
 		],
 	},
 ] as const;

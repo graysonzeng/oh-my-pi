@@ -75,7 +75,7 @@ export function segmentsFromPromptSections(sections: readonly PromptSection[]): 
 export function observeStablePrefixAtAssembly(input: {
 	sections: readonly PromptSection[];
 	config: StablePrefixCacheExperimentConfig;
-	peer?: { readDedupeEnabled?: boolean };
+	peer?: { readDedupeEnabled?: boolean; phaseHandoffEnabled?: boolean };
 	providerIdentity?: StablePrefixAssemblyObserveV1["providerIdentity"];
 	scope?: StablePrefixAssemblyObserveV1["scope"];
 }): {
@@ -85,7 +85,8 @@ export function observeStablePrefixAtAssembly(input: {
 	/** True only when reorder_static_prefix actually reordered. */
 	reordered: boolean;
 } {
-	const { applied, receipt } = resolveStablePrefixCacheExperiment(input.config, input.peer);
+	const resolved = resolveStablePrefixCacheExperiment(input.config, input.peer);
+	let { applied, receipt } = resolved;
 	const segments = segmentsFromPromptSections(input.sections);
 	const planned =
 		applied && receipt.factor === "reorder_static_prefix"
@@ -107,6 +108,15 @@ export function observeStablePrefixAtAssembly(input: {
 		const next = [...staticSecs, ...rest];
 		reordered = next.length === sections.length && next.some((s, i) => s.id !== sections[i]!.id);
 		sections = next;
+		// Honesty: reorder_static_prefix must not claim applied when treatment === control.
+		if (!reordered) {
+			applied = false;
+			receipt = {
+				...receipt,
+				applied: false,
+			};
+			delete (receipt as { fallbackReason?: StablePrefixCacheExperimentReceiptV1["fallbackReason"] }).fallbackReason;
+		}
 	}
 
 	const run = buildStablePrefixCacheExperimentRun({

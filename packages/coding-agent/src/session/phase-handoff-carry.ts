@@ -61,6 +61,9 @@ export interface PhaseHandoffMaintenanceObserveData {
 	shouldRewriteContext?: unknown;
 	rewriteApplied?: unknown;
 	boundaryKey?: unknown;
+	/** False when rewrite was attempted but failed — boundary stays pending. */
+	boundaryProcessed?: unknown;
+	rewriteSkippedReason?: unknown;
 }
 
 function isPhase(value: unknown): value is PhaseHandoffPhase {
@@ -165,7 +168,7 @@ export function inferPriorPhaseHandoffPhase(
 	return ordered[currentIdx - 1]!;
 }
 
-/** Read last observed toPhase from phase_handoff_maintenance custom entries. */
+/** Read last *successfully processed* toPhase from phase_handoff_maintenance entries. */
 export function readLastObservedPhaseHandoff(entries: readonly SessionEntry[]):
 	| {
 			toPhase: PhaseHandoffPhase;
@@ -177,6 +180,10 @@ export function readLastObservedPhaseHandoff(entries: readonly SessionEntry[]):
 		const entry = entries[i];
 		if (entry.type !== "custom" || entry.customType !== PHASE_HANDOFF_MAINTENANCE_CUSTOM_TYPE) continue;
 		const data = entry.data as PhaseHandoffMaintenanceObserveData | undefined;
+		// Failed rewrite leaves the boundary pending — skip so fromPhase does not
+		// advance (research→implement must not become implement→implement).
+		if (data?.boundaryProcessed === false) continue;
+		if (data?.rewriteSkippedReason === "shake_failed_open") continue;
 		const toPhase = isPhase(data?.shadow?.toPhase) ? data.shadow.toPhase : undefined;
 		if (!toPhase) continue;
 		return {
@@ -214,8 +221,43 @@ function todoExplicitStageComplete(entries: readonly SessionEntry[]): boolean {
 }
 
 /**
+ * Durable id for the branch entry that introduced `toPhase` after `fromPhase`.
+ * Collapses same-named phase transitions across distinct task instances.
+ */
+export function resolvePhaseHandoffBoundaryEntryId(
+	entries: readonly SessionEntry[],
+	toPhase: PhaseHandoffPhase,
+): string {
+	if (toPhase === "unknown") {
+		const last = entries[entries.length - 1];
+		return last && "id" in last && typeof last.id === "string" ? last.id : `tip:${entries.length}`;
+	}
+	let lastMatchId: string | undefined;
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
+		if (!entry || entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const content = entry.message.content;
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			if (!isRecord(block) || block.type !== "toolCall") continue;
+			const toolName = typeof block.name === "string" ? block.name : "";
+			if (!toolName) continue;
+			const mapped = phaseFromToolName(toolName, block.arguments);
+			if (mapped === toPhase) {
+				lastMatchId = typeof entry.id === "string" ? entry.id : `entry:${i}`;
+			}
+		}
+	}
+	if (lastMatchId) return lastMatchId;
+	const tip = entries[entries.length - 1];
+	return tip && "id" in tip && typeof tip.id === "string" ? tip.id : `tip:${entries.length}`;
+}
+
+/**
  * Resolve from/to phase for a maintenance-boundary observation.
- * Uses prior custom entry when present; otherwise reconstructs prior from history.
+ * Uses prior *processed* custom entry when present; otherwise reconstructs prior from history.
+ * Boundary key includes a durable entry id so distinct tasks with the same named
+ * phases (research→implement) do not collapse under one idempotency key.
  */
 export function resolvePhaseHandoffBoundaryObservation(
 	entries: readonly SessionEntry[],
@@ -224,7 +266,8 @@ export function resolvePhaseHandoffBoundaryObservation(
 	const last = readLastObservedPhaseHandoff(entries);
 	const fromPhase = last?.toPhase ?? inferPriorPhaseHandoffPhase(entries, toPhase);
 	const explicitStageComplete = todoExplicitStageComplete(entries) && fromPhase !== toPhase ? true : undefined;
-	const boundaryKey = `${fromPhase}->${toPhase}`;
+	const boundaryEntryId = resolvePhaseHandoffBoundaryEntryId(entries, toPhase);
+	const boundaryKey = `${fromPhase}->${toPhase}#${boundaryEntryId}`;
 	return { fromPhase, toPhase, explicitStageComplete, boundaryKey };
 }
 

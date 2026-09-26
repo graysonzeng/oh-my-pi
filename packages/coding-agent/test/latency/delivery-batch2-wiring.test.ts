@@ -26,20 +26,24 @@ import { detectPhaseBoundaryShadow, hasRequiredRetainedState } from "../../src/s
 import { runPhaseHandoffMaintenance } from "../../src/session/phase-handoff-maintenance";
 
 describe("Batch2 status honesty", () => {
-	it("marks W4–W7 runtime_wired; paired_evidence_ready stays false", () => {
+	it("keeps paired_evidence_ready false; W5 stays not fully runtime_wired", () => {
 		for (const id of ["W4", "W5", "W6", "W7"] as const) {
 			const row = batch2Status(id);
 			expect(row.code_complete).toBe(true);
-			expect(row.runtime_wired).toBe(true);
 			expect(row.mechanism_verified).toBe(true);
 			expect(row.paired_evidence_ready).toBe(false);
 			expect(row.call_sites.length).toBeGreaterThan(0);
 		}
+		expect(batch2Status("W4").runtime_wired).toBe(true);
+		expect(batch2Status("W5").runtime_wired).toBe(false);
+		expect(batch2Status("W5").note.toLowerCase()).toContain("not fully request-wired");
+		expect(batch2Status("W6").runtime_wired).toBe(true);
+		expect(batch2Status("W7").runtime_wired).toBe(true);
 		const w6 = batch2Status("W6");
 		expect(w6.call_sites.some(s => s.includes("checkCompaction"))).toBe(true);
 		expect(w6.call_sites.some(s => s.includes("applyPhaseHandoffAtMaintenanceBoundary"))).toBe(true);
 		expect(w6.call_sites.some(s => s.includes("shake"))).toBe(true);
-		expect(w6.note.toLowerCase()).not.toContain("theater");
+		expect(w6.note.toLowerCase()).toContain("requireartifact");
 		expect(BATCH2_STATUS.every(row => row.paired_evidence_ready === false)).toBe(true);
 		expect(BATCH2_PAIRED_EVIDENCE_READY).toBe(false);
 	});
@@ -107,12 +111,79 @@ describe("W4 selectedRoute + auth scope", () => {
 	});
 
 	it("observable config env reference yields identity without hashing secret", () => {
-		authStorage.keys.setConfig("anthropic", "ANTHROPIC_API_KEY");
-		const selected = authStorage.keys.selectedRoute("anthropic");
-		expect(selected?.kind).toBe("config");
-		expect(selected?.identityKey).toBe("config:ANTHROPIC_API_KEY");
-		expect(JSON.stringify(selected)).not.toMatch(/sk-/);
-		authStorage.keys.removeConfig("anthropic");
+		const prev = process.env.ANTHROPIC_API_KEY;
+		process.env.ANTHROPIC_API_KEY = "sk-observed-not-for-logs";
+		try {
+			authStorage.keys.removeRuntime("anthropic");
+			authStorage.keys.setConfig("anthropic", "ANTHROPIC_API_KEY");
+			const selected = authStorage.keys.selectedRoute("anthropic");
+			expect(selected?.kind).toBe("config");
+			expect(selected?.identityKey).toBe("config:ANTHROPIC_API_KEY");
+			expect(selected?.revision).toMatch(/^e\d+:p\d+$/);
+			expect(JSON.stringify(selected)).not.toMatch(/sk-/);
+			authStorage.keys.removeConfig("anthropic");
+		} finally {
+			if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = prev;
+		}
+	});
+
+	it("same config ref with rotated env secret changes revision and auth scope", () => {
+		const prev = process.env.OMP_W4_ROTATE_KEY;
+		const envName = "OMP_W4_ROTATE_KEY";
+		try {
+			authStorage.keys.removeRuntime("anthropic");
+			process.env[envName] = "sk-old-rotating-value";
+			authStorage.keys.setConfig("anthropic", envName);
+			const before = authStorage.keys.selectedRoute("anthropic");
+			expect(before?.kind).toBe("config");
+			const scopeBefore = credentialRouteAuthScope({
+				authStorage,
+				owner: authStorage,
+				sessionId: "rotate-s",
+				provider: "anthropic",
+			});
+			expect(scopeBefore).toBeTruthy();
+
+			process.env[envName] = "sk-new-rotated-value";
+			const after = authStorage.keys.selectedRoute("anthropic");
+			expect(after?.identityKey).toBe(before?.identityKey);
+			expect(after?.revision).not.toBe(before?.revision);
+			const scopeAfter = credentialRouteAuthScope({
+				authStorage,
+				owner: authStorage,
+				sessionId: "rotate-s",
+				provider: "anthropic",
+			});
+			expect(scopeAfter).not.toBe(scopeBefore);
+			// credentialChanged:true, scopeChanged:false at identity key; new secret not blocked by old mark
+			expect(after?.identityKey).toBe(`config:${envName}`);
+			authStorage.keys.removeConfig("anthropic");
+		} finally {
+			if (prev === undefined) delete process.env[envName];
+			else process.env[envName] = prev;
+		}
+	});
+
+	it("unobservable config env (unset) fails open — does not reuse failure cache", () => {
+		const prev = process.env.OMP_W4_MISSING_KEY;
+		delete process.env.OMP_W4_MISSING_KEY;
+		try {
+			authStorage.keys.removeRuntime("anthropic");
+			authStorage.keys.setConfig("anthropic", "OMP_W4_MISSING_KEY");
+			expect(authStorage.keys.selectedRoute("anthropic")).toBeUndefined();
+			expect(
+				credentialRouteAuthScope({
+					authStorage,
+					owner: authStorage,
+					sessionId: "missing",
+					provider: "anthropic",
+				}),
+			).toBeUndefined();
+			authStorage.keys.removeConfig("anthropic");
+		} finally {
+			if (prev !== undefined) process.env.OMP_W4_MISSING_KEY = prev;
+		}
 	});
 });
 
