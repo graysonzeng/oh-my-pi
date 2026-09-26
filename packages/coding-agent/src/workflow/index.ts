@@ -43,6 +43,7 @@ export * from "./tool-scheduling";
 export * from "./transitions";
 export * from "./types";
 export * from "./verification-validity";
+export * from "./layered-verification";
 export * from "./verifier";
 export * from "./work-packages";
 export * from "./workflow-tool";
