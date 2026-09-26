@@ -5,7 +5,8 @@
 **Desensitized stats:** `docs/research/2026-09-26-session-history-optimization-evidence.json`
 
 This stack is an **independent add-on**. It does **not** rewrite or weaken
-delivery-first Packages 1–5, and it does **not** merge to `workflow`.
+delivery-first Packages 1–5. Landed on `workflow` via tip merge `#9`–`#21`
+(full-stack review Conditional GO; no live latency/cost claims).
 
 ## Package map
 
