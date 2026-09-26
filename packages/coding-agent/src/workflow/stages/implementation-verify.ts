@@ -1,5 +1,5 @@
 import { parsePatchTouchedFiles } from "../../utils/parse-patch-touched-files";
-import { buildLayeredVerificationPlan } from "../layered-verification";
+import { buildLayeredVerificationPlan, layeredVerificationObserveEvents } from "../layered-verification";
 import type { ImplementationArtifactV1, VerificationArtifactV1, VerifierPort } from "../types";
 import {
 	buildVerificationCodeState,
@@ -8,6 +8,7 @@ import {
 	sealWorkflowVerifierResult,
 	verificationExecutionCwd,
 } from "../verification-validity";
+import { noteVerificationObserve, type EvidenceHandoffObservePersistSink } from "../../task/evidence-handoff-observe";
 
 export interface ImplementationVerifyInput {
 	workflowId: string;
@@ -24,6 +25,8 @@ export interface ImplementationVerifyInput {
 	 * are not auto-run by this stage.
 	 */
 	parentOwnsVerify?: boolean;
+	/** Durable observe sink (Batch 1 W3) — session custom entries. */
+	observeSink?: EvidenceHandoffObservePersistSink;
 }
 
 /** Best-effort path extraction from unified diff headers. */
@@ -63,6 +66,13 @@ export class ImplementationVerifyStage {
 			scope,
 			parentOwnsVerify: input.parentOwnsVerify === true,
 		});
+		if (input.observeSink) {
+			for (const event of layeredVerificationObserveEvents(plan, {
+				eventIdPrefix: `wf:${input.workflowId}:${input.attemptId}:implementation_verify`,
+			})) {
+				noteVerificationObserve({ ...event, sink: input.observeSink });
+			}
+		}
 
 		// Branch names and model-reported files are not diff evidence.
 		if (!patchContent) {

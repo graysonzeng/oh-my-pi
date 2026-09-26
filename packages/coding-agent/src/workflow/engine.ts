@@ -1934,6 +1934,7 @@ export class WorkflowEngine {
 					signal,
 					timeoutMs: this.#config.verificationTimeoutMs,
 					cwd,
+					observeSink: session.sessionManager,
 				});
 				this.#verification = verification;
 				this.#verificationArtifactRef = await this.#persistArtifact(
@@ -2305,6 +2306,7 @@ export class WorkflowEngine {
 					cwd,
 					// Reuse sealed implementation_verify greens only when code state + commands still match.
 					priorVerification: this.#verification,
+					observeSink: session.sessionManager,
 				});
 				const deliveryOk = isValidDeliveryEvidence(verification);
 				const effectiveVerification =

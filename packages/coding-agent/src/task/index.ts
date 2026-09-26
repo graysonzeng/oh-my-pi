@@ -56,6 +56,13 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import {
+	acceptanceAndFreshnessFromContext,
+	consumeChildDeliveryForParent,
+	noteChildSettledObserve,
+	resolveParentConsumeEpisode,
+} from "./parent-delivery-consume";
+import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
 
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
@@ -1755,6 +1762,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					});
 				},
 			});
+			await this.#consumeParentDeliveryAfterSpawn(toolCallId, execution.result);
 			return this.#buildResultPayload(
 				execution.result,
 				execution.policy.discovery.projectAgentsDir,
@@ -1772,6 +1780,58 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					...(latestProgress ? { progress: [latestProgress] } : {}),
 				},
 			};
+		}
+	}
+
+	/**
+	 * Batch 1 W2/W3: after a structured child settles, reclassify against the
+	 * current workspace and bind a parent_integrate_decision custom entry.
+	 * Packet-only settle decisions are never integrate-of-record.
+	 */
+	async #consumeParentDeliveryAfterSpawn(toolCallId: string, result: SingleResult): Promise<void> {
+		const sink = this.session.sessionManager;
+		if (!sink?.appendCustomEntry) return;
+		if (result.exitCode === 0 && !result.error && !result.aborted) {
+			try {
+				noteChildSettledObserve({
+					sink,
+					eventId: `task:${toolCallId}:${result.id}:child_settled`,
+					agentId: result.id,
+					jobId: toolCallId,
+					reason: "completed",
+				});
+			} catch (error) {
+				logger.warn("task: child_settled observe failed", {
+					toolCallId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		if (!result.deliveryEvidence) return;
+		try {
+			const episode = resolveParentConsumeEpisode(sink);
+			if (!episode) return;
+			const currentCodeVersion =
+				(await resolveCurrentWorkspaceCodeVersion(this.session.cwd)) || result.deliveryEvidence.codeVersion.version;
+			const consumed = consumeChildDeliveryForParent({
+				delivery: result.deliveryEvidence,
+				currentCodeVersion,
+				requiredAcceptance: acceptanceAndFreshnessFromContext(undefined).requiredAcceptance,
+				staleEvidence: false,
+				writeOwnershipReleased: false,
+				episodeSessionId: episode.sessionId,
+				rootUserEntryId: episode.rootUserEntryId,
+				taskToolCallId: toolCallId,
+				agentId: result.id,
+				sink,
+				eventIdPrefix: `task:${toolCallId}:${result.id}`,
+			});
+			result.parentIntegrateDecision = consumed.decision;
+		} catch (error) {
+			logger.warn("task: parent consume reclassify failed", {
+				toolCallId,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 	}
 

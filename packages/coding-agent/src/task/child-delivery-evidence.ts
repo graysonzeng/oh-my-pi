@@ -92,6 +92,25 @@ function nonEmptyStrings(values: readonly string[] | undefined): string[] {
 	return values.map(v => v.trim()).filter(Boolean);
 }
 
+/**
+ * Strong evidence locations for sealing `proven` (Batch 1 forge tighten).
+ * Accepts path-like, file-with-extension, or URI/scheme refs — rejects bare
+ * prose ("done", "looks good") that previously forged proven via any non-empty string.
+ */
+export function isStrongEvidenceLocation(location: string): boolean {
+	const trimmed = location.trim();
+	if (!trimmed) return false;
+	if (trimmed.includes("://")) return true;
+	if (trimmed.includes("/") || trimmed.includes("\\")) return true;
+	// Bare filename with extension (e.g. a.ts) — code-state path fragment.
+	if (/\.[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed)) return true;
+	return false;
+}
+
+function strongEvidenceLocations(values: readonly string[] | undefined): string[] {
+	return nonEmptyStrings(values).filter(isStrongEvidenceLocation);
+}
+
 function normalizeCodeVersion(raw: unknown): CodeVersionIdentity | null {
 	if (!isRecord(raw)) return null;
 	const version = typeof raw.version === "string" ? raw.version.trim() : "";
@@ -111,9 +130,11 @@ function normalizeAcceptanceItem(raw: unknown): AcceptanceItemEvidence | null {
 	const id = typeof raw.id === "string" ? raw.id.trim() : "";
 	if (!id || typeof raw.proven !== "boolean") return null;
 	const evidenceLocations = Array.isArray(raw.evidenceLocations)
-		? nonEmptyStrings(raw.evidenceLocations.filter((p): p is string => typeof p === "string"))
+		? strongEvidenceLocations(raw.evidenceLocations.filter((p): p is string => typeof p === "string"))
 		: [];
-	return { id, proven: raw.proven, evidenceLocations };
+	// Never advertise proven without strong evidence locations (forge surface).
+	const proven = raw.proven === true && evidenceLocations.length > 0;
+	return { id, proven, evidenceLocations };
 }
 
 function normalizeCheckNotRun(raw: unknown): CheckNotRun | null {
@@ -453,11 +474,11 @@ export function buildChildDeliveryEvidenceFromExecutorFacts(input: {
 	const terminalById = new Map((input.terminalChecksPassed ?? []).map(check => [check.id, check] as const));
 	const acceptanceProven: AcceptanceItemEvidence[] = (input.acceptanceItems ?? []).map(item => {
 		const terminal = terminalById.get(item.id);
-		const locations = nonEmptyStrings([
+		const locations = strongEvidenceLocations([
 			...(item.evidenceLocations ?? []),
 			...(terminal?.evidenceLocation ? [terminal.evidenceLocation] : []),
 		]);
-		// Worker cannot seal proven without at least one evidence location.
+		// Strong locations only (path/URI/terminal). Bare prose cannot forge proven.
 		const proven = locations.length > 0 && item.claimedProven !== false;
 		return { id: item.id.trim(), proven, evidenceLocations: locations };
 	});

@@ -33,6 +33,19 @@ describe("W2 executor producer", () => {
 		);
 	});
 
+	test("rejects bare prose locations as proven forge surface", () => {
+		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
+			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
+			acceptanceItems: [
+				{ id: "Looks done", claimedProven: true, evidenceLocations: ["done"] },
+				{ id: "File evidence", claimedProven: true, evidenceLocations: ["src/ok.ts"] },
+			],
+		});
+		expect(delivery.acceptanceProven.find(item => item.id === "Looks done")?.proven).toBe(false);
+		expect(delivery.acceptanceProven.find(item => item.id === "Looks done")?.evidenceLocations).toEqual([]);
+		expect(delivery.acceptanceProven.find(item => item.id === "File evidence")?.proven).toBe(true);
+	});
+
 	test("worker cannot seal integrate without parent workspace reclassify", () => {
 		const delivery = buildChildDeliveryEvidence({
 			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
