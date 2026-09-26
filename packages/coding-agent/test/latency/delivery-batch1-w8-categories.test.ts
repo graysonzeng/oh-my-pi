@@ -50,11 +50,13 @@ describe("W8 offline task categories (L0)", () => {
 			"diagnosed_local_fix",
 			"shared_interface",
 			"independent_review_known_defect",
+			"long_session_cross_phase",
+			"auth_transport_recovery",
 			"multi_episode_receipt_metrics",
 		]);
 		expect(deliveryTaskCategory("two_independent_modules").l0FixtureReady).toBe(false);
-		expect(deliveryTaskCategory("long_session_cross_phase").l0FixtureReady).toBe(false);
-		expect(deliveryTaskCategory("auth_transport_recovery").l0FixtureReady).toBe(false);
+		expect(deliveryTaskCategory("long_session_cross_phase").l0FixtureReady).toBe(true);
+		expect(deliveryTaskCategory("auth_transport_recovery").l0FixtureReady).toBe(true);
 	});
 
 	it("small_scope_query: stop alone is not accepted", () => {

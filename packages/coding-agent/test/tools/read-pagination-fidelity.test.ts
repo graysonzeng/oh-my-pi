@@ -124,4 +124,29 @@ describe("read tool pagination fidelity (S3)", () => {
 			/Stale pagination kwargs/,
 		);
 	});
+
+	it("W7 replay: range selector vs full view are distinct; changed path is not reused as page-2", async () => {
+		const page1 = await tool.execute("v1", { path: "artifact://0:raw:1-100" });
+		const page1Text = getTextOutput(page1);
+		expect(page1Text).toContain("line-001");
+		expect(page1Text).not.toContain("line-150");
+
+		const page2Locator = await tool.execute("v2", { path: "artifact://0:raw:101-200" });
+		const page2Text = getTextOutput(page2Locator);
+		expect(page2Text).toContain("line-101");
+		expect(page2Text).not.toContain("line-001");
+
+		// Different view (no :raw range) must not silently return prior page-2 bytes.
+		const full = await tool.execute("v3", { path: "artifact://0:raw", limit: 50 });
+		const fullText = getTextOutput(full);
+		expect(fullText).toContain("line-001");
+		expect(fullText).not.toContain("line-101");
+	});
+
+	it("W7 replay: filesystem path next-page locator does not force :raw", () => {
+		expect(composeReadPaginationArgs({ path: "src/view.ts", offset: 50, limit: 25 })).toEqual({
+			path: "src/view.ts:50+25",
+		});
+		expect(() => composeReadPaginationArgs({ path: "src/view.ts:1-40", offset: 50 })).toThrow(/Stale pagination/);
+	});
 });

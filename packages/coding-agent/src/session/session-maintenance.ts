@@ -128,12 +128,23 @@ import {
 	cfgCompactionEnabled,
 	cfgCompactionMethodOrder,
 	cfgContextPromotionEnabled,
+	cfgPhaseHandoffExperiment,
 	cfgSnapcompactShape,
 } from "./context-settings";
 import {
 	type ContextStrategyExperimentReceiptV1,
 	resolveSessionCompactionSettings,
 } from "./context-strategy-experiment";
+import {
+	type PhaseHandoffCarriedContext,
+	type PhaseHandoffPhase,
+	parsePhaseHandoffExperimentConfig,
+} from "./phase-handoff-experiment";
+import {
+	PHASE_HANDOFF_MAINTENANCE_CUSTOM_TYPE,
+	type PhaseHandoffMaintenanceResult,
+	runPhaseHandoffMaintenance,
+} from "./phase-handoff-maintenance";
 import { cfgRetry } from "./settings";
 
 export type CompactionCheckResult = Readonly<{
@@ -635,6 +646,54 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
+	}
+
+	/**
+	 * W6: shadow-detect / optionally apply phase-handoff carry slim at a
+	 * maintenance boundary. When `deliveryExperiment.phaseHandoff` is off,
+	 * returns undefined and production compaction is unchanged. Treatment
+	 * never invents retained state — callers supply carried context; missing
+	 * required state fails open (no bulky drop). Idempotent custom entry.
+	 */
+	observePhaseHandoffBoundary(input: {
+		fromPhase: PhaseHandoffPhase;
+		toPhase: PhaseHandoffPhase;
+		explicitStageComplete?: boolean;
+		carried?: PhaseHandoffCarriedContext;
+	}): PhaseHandoffMaintenanceResult | undefined {
+		const raw = cfgPhaseHandoffExperiment.get(this.#host.settings);
+		const config = parsePhaseHandoffExperimentConfig(raw);
+		if (!config.enabled) return undefined;
+
+		const carried = input.carried ?? {
+			bulkyCarry: [],
+			retained: {
+				openConstraints: [],
+				modificationState: [],
+				acceptanceBasis: [],
+			},
+		};
+		const result = runPhaseHandoffMaintenance({
+			config,
+			fromPhase: input.fromPhase,
+			toPhase: input.toPhase,
+			explicitStageComplete: input.explicitStageComplete,
+			carried,
+		});
+		try {
+			this.#host.sessionManager.appendCustomEntry(PHASE_HANDOFF_MAINTENANCE_CUSTOM_TYPE, {
+				shadow: result.shadow,
+				applied: result.apply.applied,
+				droppedBulkyCount: result.apply.droppedBulkyCount,
+				fallbackReason: result.apply.receipt.fallbackReason,
+				shouldRewriteContext: result.shouldRewriteContext,
+				claimedLiveWin: false,
+				recordedAt: result.shadow.recordedAt,
+			});
+		} catch (error) {
+			logger.debug("phase_handoff_maintenance persist failed open", { error: String(error) });
+		}
+		return result;
 	}
 
 	/**
@@ -3749,6 +3808,10 @@ export class SessionMaintenance {
 		allowDefer = true,
 		autoContinue = true,
 	): Promise<CompactionCheckResult> {
+		// W6 shadow: when phase-handoff experiment is enabled, record a boundary
+		// observation (unknown→unknown unless an explicit stage signal is later
+		// supplied via observePhaseHandoffBoundary). Off → no-op.
+		this.observePhaseHandoffBoundary({ fromPhase: "unknown", toPhase: "unknown" });
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;

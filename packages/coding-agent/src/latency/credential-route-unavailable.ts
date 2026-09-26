@@ -61,6 +61,18 @@ export function buildCredentialRouteKey(parts: {
 }
 
 /**
+ * Non-secret selected credential/route identity used by {@link credentialRouteAuthScope}.
+ * Mirrors `@oh-my-pi/pi-ai` SelectedCredentialRoute without importing the class graph.
+ */
+export interface CredentialRouteSelectedIdentity {
+	kind: string;
+	identityKey?: string;
+	credentialId?: number;
+	revision: string;
+	envVar?: string;
+}
+
+/**
  * Non-secret inputs that change which credential a route resolves.
  * Does not accept tokens, API keys, or a guessed account.
  */
@@ -71,6 +83,15 @@ export interface CredentialRouteAuthScopeInput {
 		keys?: {
 			readonly overrideEpoch?: number;
 			source?: (provider: string) => { kind: string; envVar?: string } | undefined;
+			/**
+			 * Preferred: non-secret selected credential/route identity+revision.
+			 * When absent or undefined for the provider, scope fails open unless
+			 * the legacy runtime+overrideEpoch path applies.
+			 */
+			selectedRoute?: (
+				provider: string,
+				options?: { sessionId?: string | null },
+			) => CredentialRouteSelectedIdentity | undefined;
 		};
 	};
 	/**
@@ -102,14 +123,14 @@ function ownerToken(owner: object): string {
  *
  * Returns undefined when no auth owner or caller object is available — callers
  * must then skip the shared registry (fail open) rather than use `"default"`.
- * Does not call OAuth identity lookup: the first stored account is not the
- * account a later resolve will select.
- * Rotating stored accounts and externally resolved env/config keys have no
- * synchronous selected-credential revision here, so they are not cached.
+ * Prefers {@link CredentialRouteAuthScopeInput.authStorage.keys.selectedRoute}
+ * when it returns a proven identity+revision. Without that, only the legacy
+ * runtime + overrideEpoch path is cached. Env/config literals and unpinned
+ * OAuth (would guess “first account”) stay fail-open.
  *
  * Same inputs early-fail together. A different owner, session, base URL,
- * account-access set, source kind, credential generation, or override epoch
- * does not reuse the mark.
+ * account-access set, selected identity/revision, credential generation, or
+ * override epoch does not reuse the mark.
  */
 export function credentialRouteAuthScope(input: CredentialRouteAuthScopeInput): string | undefined {
 	const storage = input.authStorage;
@@ -118,8 +139,26 @@ export function credentialRouteAuthScope(input: CredentialRouteAuthScopeInput): 
 	if (!owner) return undefined;
 	const sessionId = input.sessionId?.trim() ?? "";
 	const provider = (input.provider ?? "").trim().toLowerCase();
+	const selected = provider ? storage?.keys?.selectedRoute?.(provider, { sessionId: input.sessionId }) : undefined;
 	const source = provider ? storage?.keys?.source?.(provider) : undefined;
-	if (source && (source.kind !== "runtime" || storage?.keys?.overrideEpoch === undefined)) return undefined;
+
+	let routeKind = "";
+	let routeIdentity = "";
+	let routeRevision = "";
+	let routeEnvVar = "";
+	if (selected?.revision) {
+		routeKind = selected.kind;
+		routeIdentity = selected.identityKey ?? "";
+		routeRevision = selected.revision;
+		routeEnvVar = selected.envVar ?? "";
+	} else if (source?.kind === "runtime" && storage?.keys?.overrideEpoch !== undefined) {
+		// Legacy runtime path when selectedRoute is not implemented on the mock/owner.
+		routeKind = "runtime";
+		routeRevision = `e${storage.keys.overrideEpoch}`;
+	} else {
+		return undefined;
+	}
+
 	const accountIds = (input.accountIds ?? [])
 		.map(id => id.trim())
 		.filter(id => id.length > 0)
@@ -135,8 +174,10 @@ export function credentialRouteAuthScope(input: CredentialRouteAuthScopeInput): 
 				provider,
 				(input.baseUrl ?? "").trim(),
 				accountIds.join(","),
-				source?.kind ?? "",
-				source?.envVar ?? "",
+				routeKind,
+				routeIdentity,
+				routeRevision,
+				routeEnvVar,
 			].join("\0"),
 		)
 		.digest("hex");

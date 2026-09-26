@@ -226,6 +226,8 @@ import {
 } from "../latency/assignment";
 import { clearBashAttemptLedgerStore } from "../latency/bash-attempt-ledger";
 import { clearToolErrorStreak, noteToolErrorStreak } from "../latency/tool-error-streak";
+import { parseReadDedupeExperimentConfig } from "../latency/read-dedupe-experiment";
+import { selectReadDedupeReuse } from "../latency/read-dedupe-selection";
 import { normalizeReadSelector } from "../latency/read-view-key";
 import {
 	buildParentFinalVerificationDetails,
@@ -591,6 +593,8 @@ import { cfgTaskBatch, cfgTaskDisabledAgents } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
 	cfgExtendedContext,
+	cfgReadDedupeExperiment,
+	cfgStablePrefixCacheExperimentEnabled,
 	cfgWorkspaceAdditionalDirectories,
 } from "./context-settings";
 import { effectiveCompactionSettings } from "./context-strategy-experiment";
@@ -5256,12 +5260,28 @@ export class AgentSession implements SettingsScope {
 			if (!readEntry || !readViewKey?.eligible || !immutableSha256) return visibleText;
 
 			const retained = this.#readDedupeArtifacts.get(readViewKey.key);
+			// W7: Experiment A is a controlled selection layer over this ordinary
+			// arm — same ReadViewKey table, no second cache / output processor.
+			const experimentConfig = parseReadDedupeExperimentConfig(cfgReadDedupeExperiment.get(this.settings));
+			const selection = selectReadDedupeReuse({
+				ordinaryArmEnabled: true,
+				experimentConfig,
+				current: readViewKey,
+				prior: retained ? readViewKey : null,
+				peerStablePrefixCacheEnabled: cfgStablePrefixCacheExperimentEnabled.get(this.settings) === true,
+			});
 			if (retained) {
 				if (
+					selection.allowReuse &&
 					retained.immutableSha256 === immutableSha256 &&
 					(await this.#verifyReadArtifact(retained.artifactRef, immutableSha256))
 				) {
 					return `[context ref: ${retained.artifactRef} sha256:${immutableSha256}]`;
+				}
+				if (!selection.allowReuse) {
+					// Force reread / experiment mismatch — drop stale map entry.
+					this.#readDedupeArtifacts.delete(readViewKey.key);
+					return visibleText;
 				}
 				this.#readDedupeArtifacts.delete(readViewKey.key);
 				return visibleText;

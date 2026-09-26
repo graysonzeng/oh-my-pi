@@ -212,4 +212,40 @@ describe("S4 thinking-loop / stream-interrupt replayable fixtures", () => {
 			recovery.resolveRetry();
 		}
 	});
+
+	it("W4: stream-stall side-effect tool runs once; reopen keeps artifact; retry budget bounded", async () => {
+		const message = makeMessage(
+			[{ type: "toolCall", id: "call-side", name: "bash", arguments: { command: "echo once" } }],
+			model,
+			"stream stall: idle timeout",
+		);
+		const result = toolResult("call-side");
+		const host = createHost(model, modelRegistry, [message, result]);
+		const scheduled: string[] = [];
+		host.scheduleAgentContinue = options => scheduled.push(options.source);
+		const recovery = new TurnRecovery(host);
+		try {
+			expect(
+				await recovery.handleRetryableError(message, { preserveFailedTurn: true, allowModelFallback: false }),
+			).toBe(true);
+			// Side-effect tool result remains exactly once — no re-execution.
+			const toolResults = host.agent.state.messages.filter(m => m.role === "toolResult");
+			expect(toolResults).toHaveLength(1);
+			expect(toolResults[0]).toEqual(result);
+			// Simulate reopen: snapshot messages, fresh recovery host, artifacts still present.
+			const reopened = [...host.agent.state.messages];
+			const host2 = createHost(model, modelRegistry, reopened);
+			expect(host2.agent.state.messages.filter(m => m.role === "toolResult")).toHaveLength(1);
+			expect(host2.agent.state.messages.some(m => m.role === "toolResult" && m.toolCallId === "call-side")).toBe(
+				true,
+			);
+			// Budget: second identical stall without new progress does not schedule forever.
+			expect(
+				await recovery.handleRetryableError(message, { preserveFailedTurn: true, allowModelFallback: false }),
+			).toBe(false);
+			expect(scheduled).toEqual(["automatic-retry"]);
+		} finally {
+			recovery.resolveRetry();
+		}
+	});
 });

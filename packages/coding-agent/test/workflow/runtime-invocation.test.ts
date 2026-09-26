@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { Settings } from "../../src/config/settings";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { prepareWorkflowInvocation } from "../../src/workflow/runtime-invocation";
 import type { WorkflowAgentRequest } from "../../src/workflow/types";
@@ -137,5 +138,28 @@ describe("prepareWorkflowInvocation", () => {
 		expect(prepared.allowedTools).not.toContain("todo");
 		const compiledIds = prepared.compiledPolicy?.tools.descriptors.map(d => d.id) ?? [];
 		expect(compiledIds).not.toContain("todo");
+	});
+
+	it("W5: stable-prefix observe is always attached; applied only when experiment enabled", () => {
+		const control = prepareWorkflowInvocation(baseRequest());
+		expect(control.stablePrefixObserve).toBeDefined();
+		expect(control.stablePrefixObserve?.applied).toBe(false);
+		expect(control.stablePrefixObserve?.claimedLiveWin).toBe(false);
+		expect(control.stablePrefixObserve?.segments.every(s => typeof s.fingerprint === "string")).toBe(true);
+
+		const treatment = prepareWorkflowInvocation(
+			baseRequest({
+				session: fakeSession({
+					settings: Settings.isolated({
+						"deliveryExperiment.stablePrefixCache.enabled": true,
+						"deliveryExperiment.stablePrefixCache.factor": "inspect_provider_prefix",
+					}),
+				}),
+			}),
+		);
+		expect(treatment.stablePrefixObserve?.applied).toBe(true);
+		expect(treatment.stablePrefixObserve?.claimedLiveWin).toBe(false);
+		expect(treatment.stablePrefixObserve?.receipt.permissionsChanged).toBe(false);
+		expect(JSON.stringify(treatment.stablePrefixObserve)).not.toContain("implement safely");
 	});
 });
