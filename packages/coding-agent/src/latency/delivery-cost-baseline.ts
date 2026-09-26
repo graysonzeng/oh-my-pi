@@ -7,6 +7,7 @@
  */
 import { resolveSubagentPerformanceClass } from "../task/review-performance";
 import { unionChildIntervalMs, type ParentFinalVerificationObservation } from "./parent-final-verification";
+import { episodeKey } from "./task-episode";
 import type { CoverageCount, ParsedSession, PercentileSummary } from "./subagent-report";
 
 /** Optional producer receipt for quality defects (absent ⇒ unknown, not 0). */
@@ -16,10 +17,13 @@ export type DeliveryCohort = "ordinary" | "workflow" | "unknown";
 
 export type FirstDeliveryAccepted = boolean | "unknown";
 
+export type PriceProvenance = "priced" | "partial" | "unknown" | "zero_cost_error";
+
 export interface DeliveryUsageSlice {
 	input: number | null;
 	output: number | null;
 	cacheRead: number | null;
+	cacheWrite: number | null;
 	costTotal: number | null;
 }
 
@@ -48,6 +52,13 @@ export interface AttemptCostByCompletionKind {
 export interface DeliveryCostTaskObservation {
 	parentPathHash: string;
 	cohort: DeliveryCohort;
+	/**
+	 * Episode key (`sessionId::rootUserEntryId`) when receipts carry episode
+	 * linkage; null for legacy session-level rows.
+	 */
+	episodeKey: string | null;
+	/** Distinct attempt ids retained for this episode (including failures). */
+	attemptIds: string[];
 	/** Latest parent-final status is passed (accepted task). False when failed/missing. */
 	accepted: boolean;
 	firstDeliveryAccepted: FirstDeliveryAccepted;
@@ -61,6 +72,10 @@ export interface DeliveryCostTaskObservation {
 	usage: DeliveryUsageSlice;
 	/** Whether every parent/child transcript has fully priced usage. */
 	attemptCostComplete: boolean;
+	/** Price coverage signal — never treat zero-cost errors as free successful work. */
+	priceProvenance: PriceProvenance;
+	/** Count of zero-priced error/aborted assistant rows (kept separate from free successes). */
+	zeroCostErrorRequests: number;
 	attemptCostByKind: AttemptCostByCompletionKind;
 	e2eMs: number | null;
 	falseAccept: boolean | "unknown";
@@ -167,7 +182,7 @@ function summarizeMs(values: number[]): PercentileSummary | null {
 }
 
 function emptyUsage(): DeliveryUsageSlice {
-	return { input: null, output: null, cacheRead: null, costTotal: null };
+	return { input: null, output: null, cacheRead: null, cacheWrite: null, costTotal: null };
 }
 
 function emptyAttemptCost(): AttemptCostByCompletionKind {
@@ -180,16 +195,51 @@ function emptyAttemptCost(): AttemptCostByCompletionKind {
 	};
 }
 
-function sumUsage(into: DeliveryUsageSlice, session: ParsedSession): boolean {
+function sumUsage(
+	into: DeliveryUsageSlice,
+	session: ParsedSession,
+): {
+	costComplete: boolean;
+	zeroCostErrorRequests: number;
+	sawPriced: boolean;
+	sawMissingPrice: boolean;
+} {
 	let costComplete = session.usageRequests.length > 0;
+	let zeroCostErrorRequests = 0;
+	let sawPriced = false;
+	let sawMissingPrice = false;
 	for (const request of session.usageRequests) {
 		into.input = addPresent(into.input, request.input);
 		into.output = addPresent(into.output, request.output);
 		into.cacheRead = addPresent(into.cacheRead, request.cacheRead);
+		into.cacheWrite = addPresent(into.cacheWrite, request.cacheWrite);
 		into.costTotal = addPresent(into.costTotal, request.costTotal);
-		if (request.costTotal === null) costComplete = false;
+		if (request.costTotal === null) {
+			costComplete = false;
+			sawMissingPrice = true;
+		} else {
+			sawPriced = true;
+			if (request.costTotal === 0 && request.isError) zeroCostErrorRequests += 1;
+		}
 	}
-	return costComplete;
+	if (session.usageRequests.length === 0) {
+		costComplete = false;
+		sawMissingPrice = true;
+	}
+	return { costComplete, zeroCostErrorRequests, sawPriced, sawMissingPrice };
+}
+
+function priceProvenanceOf(args: {
+	costComplete: boolean;
+	sawPriced: boolean;
+	sawMissingPrice: boolean;
+	zeroCostErrorRequests: number;
+}): PriceProvenance {
+	if (args.zeroCostErrorRequests > 0 && !args.sawPriced) return "zero_cost_error";
+	if (args.costComplete && args.sawPriced) return "priced";
+	if (args.sawPriced && args.sawMissingPrice) return "partial";
+	if (args.sawPriced) return "priced";
+	return "unknown";
 }
 
 function sessionCost(session: ParsedSession): number | null {
@@ -554,6 +604,7 @@ function summarizeCohort(tasks: readonly DeliveryCostTaskObservation[]): Deliver
 		summary.usage.input = addPresent(summary.usage.input, task.usage.input);
 		summary.usage.output = addPresent(summary.usage.output, task.usage.output);
 		summary.usage.cacheRead = addPresent(summary.usage.cacheRead, task.usage.cacheRead);
+		summary.usage.cacheWrite = addPresent(summary.usage.cacheWrite, task.usage.cacheWrite);
 		summary.usage.costTotal = addPresent(summary.usage.costTotal, task.usage.costTotal);
 		summary.totalAttemptCost = addPresent(summary.totalAttemptCost, task.usage.costTotal);
 		mergeAttemptCost(summary.attemptCostByKind, task.attemptCostByKind);
@@ -597,16 +648,28 @@ function summarizeCohort(tasks: readonly DeliveryCostTaskObservation[]): Deliver
 export function observeDeliveryCostTask(args: {
 	parent: ParsedSession;
 	children: readonly ParsedSession[];
+	/** When set, only consider these verifications (one episode slice). */
+	verifications?: readonly ParentFinalVerificationObservation[];
+	episodeKey?: string | null;
 }): DeliveryCostTaskObservation {
 	const { parent, children } = args;
-	const verifications = parent.parentFinalVerifications;
+	const verifications = args.verifications ?? parent.parentFinalVerifications;
 	const cohort = classifyCohort(verifications);
-	const boundaryTs = firstDeliveryBoundaryTs(parent, children);
+	const boundaryTs = firstDeliveryBoundaryTs({ ...parent, parentFinalVerifications: [...verifications] }, children);
 	const usage = emptyUsage();
-	let costComplete = sumUsage(usage, parent);
-	for (const child of children) {
-		if (!sumUsage(usage, child)) costComplete = false;
-	}
+	let costComplete = true;
+	let zeroCostErrorRequests = 0;
+	let sawPriced = false;
+	let sawMissingPrice = false;
+	const fold = (session: ParsedSession): void => {
+		const piece = sumUsage(usage, session);
+		if (!piece.costComplete) costComplete = false;
+		zeroCostErrorRequests += piece.zeroCostErrorRequests;
+		sawPriced ||= piece.sawPriced;
+		sawMissingPrice ||= piece.sawMissingPrice;
+	};
+	fold(parent);
+	for (const child of children) fold(child);
 	const quality = qualityFromSession(parent);
 	const sorted = sortedVerifications(verifications);
 	const last = sorted.length > 0 ? sorted[sorted.length - 1]! : undefined;
@@ -614,23 +677,80 @@ export function observeDeliveryCostTask(args: {
 	const verifyTs = last?.ts ?? null;
 	const e2eMs =
 		parent.firstTs !== null && verifyTs !== null && verifyTs >= parent.firstTs ? verifyTs - parent.firstTs : null;
+	const attemptIds = [
+		...new Set(
+			verifications
+				.map(v => v.attempt?.attemptId)
+				.filter((id): id is string => typeof id === "string" && id.length > 0),
+		),
+	];
+	const episode =
+		args.episodeKey !== undefined
+			? args.episodeKey
+			: (() => {
+					const withEpisode = verifications.find(v => v.attempt?.episode);
+					return withEpisode?.attempt?.episode ? episodeKey(withEpisode.attempt.episode) : null;
+				})();
 
 	return {
 		parentPathHash: pathHash(parent.path),
 		cohort,
+		episodeKey: episode,
+		attemptIds,
 		accepted,
 		firstDeliveryAccepted: firstDeliveryAccepted(verifications),
-		cyclesAfterFirstDelivery: cyclesAfterFirstDelivery(parent, children, boundaryTs),
+		cyclesAfterFirstDelivery: cyclesAfterFirstDelivery(
+			{ ...parent, parentFinalVerifications: [...verifications] },
+			children,
+			boundaryTs,
+		),
 		parentWaitMs: parentWaitMs(parent),
-		parentIntegrateMs: parentIntegrateMs(parent, children),
+		parentIntegrateMs: parentIntegrateMs({ ...parent, parentFinalVerifications: [...verifications] }, children),
 		childTaskMs: childTaskUnionMs(children),
 		usage,
 		attemptCostComplete: costComplete,
+		priceProvenance: priceProvenanceOf({
+			costComplete,
+			sawPriced,
+			sawMissingPrice,
+			zeroCostErrorRequests,
+		}),
+		zeroCostErrorRequests,
 		attemptCostByKind: attributeAttemptCosts(parent, children),
 		e2eMs,
 		falseAccept: quality.falseAccept,
 		missedDefect: quality.missedDefect,
 	};
+}
+
+/**
+ * Group parent-final receipts by episode. Legacy receipts without episode
+ * anchors stay in a single session-level bucket (episodeKey null).
+ */
+function groupVerificationsByEpisode(
+	verifications: readonly ParentFinalVerificationObservation[],
+): Array<{ episodeKey: string | null; verifications: ParentFinalVerificationObservation[] }> {
+	if (verifications.length === 0) {
+		return [{ episodeKey: null, verifications: [] }];
+	}
+	const buckets = new Map<string, ParentFinalVerificationObservation[]>();
+	const legacy: ParentFinalVerificationObservation[] = [];
+	for (const v of verifications) {
+		if (v.attempt?.episode) {
+			const key = episodeKey(v.attempt.episode);
+			const list = buckets.get(key);
+			if (list) list.push(v);
+			else buckets.set(key, [v]);
+		} else {
+			legacy.push(v);
+		}
+	}
+	const out: Array<{ episodeKey: string | null; verifications: ParentFinalVerificationObservation[] }> = [];
+	for (const [key, rows] of buckets) out.push({ episodeKey: key, verifications: rows });
+	if (legacy.length > 0 || out.length === 0) {
+		out.push({ episodeKey: null, verifications: legacy });
+	}
+	return out;
 }
 
 export function buildDeliveryCostBaselineReport(sessions: readonly ParsedSession[]): DeliveryCostBaselineReport {
@@ -657,7 +777,32 @@ export function buildDeliveryCostBaselineReport(sessions: readonly ParsedSession
 	const tasks: DeliveryCostTaskObservation[] = [];
 	for (const parent of parents) {
 		const kids = childrenByParent.get(parent.path) ?? [];
-		tasks.push(observeDeliveryCostTask({ parent, children: kids }));
+		const groups = groupVerificationsByEpisode(parent.parentFinalVerifications);
+		// Multi-episode same session: emit one observation per episode so
+		// acceptance denominators stay isolated. Without per-request episode
+		// tags we cannot split usage — attribute priced usage only once (first
+		// group) and mark later groups incomplete so costPerAccepted stays null
+		// rather than double-billing.
+		for (const [index, group] of groups.entries()) {
+			const observation = observeDeliveryCostTask({
+				parent,
+				children: kids,
+				verifications: group.verifications,
+				episodeKey: group.episodeKey,
+			});
+			if (groups.length > 1 && index > 0) {
+				tasks.push({
+					...observation,
+					usage: emptyUsage(),
+					attemptCostComplete: false,
+					priceProvenance: "unknown",
+					zeroCostErrorRequests: 0,
+					attemptCostByKind: emptyAttemptCost(),
+				});
+			} else {
+				tasks.push(observation);
+			}
+		}
 	}
 
 	const ordinary = tasks.filter(t => t.cohort === "ordinary");
@@ -678,7 +823,7 @@ export function formatDeliveryCostBaselineReport(report: DeliveryCostBaselineRep
 		return `n=${summary.n} p50=${summary.p50} p90=${summary.p90}`;
 	};
 	const fmtUsage = (u: DeliveryUsageSlice): string =>
-		`input=${u.input} output=${u.output} cacheRead=${u.cacheRead} costTotal=${u.costTotal}`;
+		`input=${u.input} output=${u.output} cacheRead=${u.cacheRead} cacheWrite=${u.cacheWrite} costTotal=${u.costTotal}`;
 	const fmtCohort = (name: string, c: DeliveryCostCohortSummary): string[] => [
 		`${name}: tasks=${c.taskCount} accepted=${c.acceptedTaskCount} costPerAccepted=${c.costPerAcceptedTask} totalAttemptCost=${c.totalAttemptCost}`,
 		`  firstPassRate=${c.firstPassRate} falseAccept=${c.falseAccept} missedDefects=${c.missedDefects}`,

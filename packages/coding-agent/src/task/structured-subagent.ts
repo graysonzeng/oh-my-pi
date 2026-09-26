@@ -34,6 +34,7 @@ import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import {
 	type ChildDeliveryEvidenceV1,
+	buildChildDeliveryEvidenceFromExecutorFacts,
 	classifyChildResultForParentIntegrate,
 	extractChildDeliveryEvidence,
 	type ParentIntegrateDecision,
@@ -870,10 +871,30 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		}
 
 		completedSuccessfully = completedRun;
-		const deliveryEvidence =
+		const extractedDelivery =
 			extractChildDeliveryEvidence(result.structuredOutput?.data) ??
 			extractChildDeliveryEvidence(result.output) ??
 			undefined;
+		// Stable producer from executor facts when the child did not emit a packet.
+		// Worker cannot seal parent acceptance — synthesised items stay unproven
+		// unless terminal evidence locations exist (none here → claimedProven false).
+		const deliveryEvidence =
+			extractedDelivery ??
+			(result.patchPath || (result.nestedPatchPaths?.length ?? 0) > 0
+				? buildChildDeliveryEvidenceFromExecutorFacts({
+						codeVersion: {
+							version: result.branchName?.trim() || `artifact:${result.id}`,
+							changedFiles: [
+								...(result.patchPath ? [result.patchPath] : []),
+								...(result.nestedPatchPaths ?? []),
+							],
+						},
+						acceptanceItems: [],
+						writeOwnershipReleased: true,
+						finishOwner: "original_worker",
+						checksNotRun: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
+					})
+				: undefined);
 		const packetDecision = classifyChildResultForParentIntegrate({
 			deliveryEvidence: deliveryEvidence ?? null,
 		});

@@ -229,12 +229,26 @@ import { clearToolErrorStreak, noteToolErrorStreak } from "../latency/tool-error
 import { normalizeReadSelector } from "../latency/read-view-key";
 import {
 	buildParentFinalVerificationDetails,
+	canRecordTrustedParentFinal,
 	ordinaryVerifierFromParentFinal,
 	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
 	parseParentFinalVerificationDetails,
+	type BuildParentFinalVerificationDetailsInput,
+	type ParentFinalVerificationDetails,
 	type ParentFinalVerificationSource,
 	type ParentFinalVerificationStatus,
 } from "../latency/parent-final-verification";
+import {
+	buildAcceptanceContractRef,
+	resolveRootUserEntryIdFromBranch,
+	type AcceptanceAuthority,
+	type TaskAttemptIdentity,
+} from "../latency/task-episode";
+import {
+	RUNTIME_BUILD_IDENTITY_CUSTOM_TYPE,
+	runtimeBuildIdentityRef,
+	type RuntimeBuildIdentityV1,
+} from "../latency/runtime-build-identity";
 import {
 	buildOrdinarySessionObservationJoin,
 	computeLatencyCohortMetrics,
@@ -7379,25 +7393,111 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Persist explicit parent-final acceptance evidence.
-	 * Successful tools / normal session stop never imply acceptance — callers
-	 * must record passed/failed here (or via an equivalent custom entry) for
-	 * offline e2e association and ordinary cohort verifier joins.
+	 * Persist explicit parent-final acceptance evidence as a `custom` entry
+	 * (never model context). Successful tools / normal session stop never imply
+	 * acceptance — callers must record passed/failed here for offline e2e
+	 * association and ordinary cohort verifier joins.
+	 *
+	 * Write failures propagate to the caller; they must not be swallowed into a
+	 * green acceptance signal.
 	 */
 	recordParentFinalVerification(
 		status: ParentFinalVerificationStatus,
 		source: ParentFinalVerificationSource = "extension",
 		verifiedAtMs: number = Date.now(),
-	): void {
-		const details = buildParentFinalVerificationDetails(status, source, verifiedAtMs);
-		this.sessionManager.appendCustomMessageEntry(
-			PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
-			`parent final verification: ${status}`,
-			false,
-			details,
-			"agent",
-			verifiedAtMs,
-		);
+		extended?: Omit<BuildParentFinalVerificationDetailsInput, "status" | "source" | "verifiedAtMs">,
+	): string {
+		const details = buildParentFinalVerificationDetails(status, source, verifiedAtMs, extended);
+		return this.sessionManager.appendCustomEntry(PARENT_FINAL_VERIFICATION_MESSAGE_TYPE, details);
+	}
+
+	/**
+	 * Ordinary trusted verification sink (Batch 1 W1).
+	 *
+	 * Only records when acceptance criteria exist and authority is trusted.
+	 * Does NOT fire on every query/stop. LLM "done", child proven, exit 0, and
+	 * todo-complete are rejected by {@link canRecordTrustedParentFinal}.
+	 *
+	 * Returns `{ recorded:false, reason }` when gated out, or `{ recorded:true, entryId }`
+	 * on success. Throws on write failure so callers cannot mint green from a
+	 * failed persist.
+	 */
+	tryRecordTrustedParentFinalVerification(input: {
+		status: ParentFinalVerificationStatus;
+		authority: AcceptanceAuthority;
+		acceptanceItems: readonly string[];
+		source?: ParentFinalVerificationSource;
+		verifiedAtMs?: number;
+		attempt?: Partial<TaskAttemptIdentity> | null;
+		codeState?: ParentFinalVerificationDetails["codeState"];
+		evidenceRefs?: readonly string[];
+		eventId?: string;
+		buildIdentity?: RuntimeBuildIdentityV1 | null;
+		/** When true, also persist the full build identity custom entry once. */
+		persistBuildIdentity?: boolean;
+	}):
+		| { recorded: true; entryId: string; details: ParentFinalVerificationDetails }
+		| { recorded: false; reason: string } {
+		const gate = canRecordTrustedParentFinal({
+			acceptanceItems: input.acceptanceItems,
+			authority: input.authority,
+			status: input.status,
+		});
+		if (!gate.ok) return { recorded: false, reason: gate.reason };
+
+		const acceptanceContract = buildAcceptanceContractRef(input.acceptanceItems);
+		if (!acceptanceContract) return { recorded: false, reason: "missing_acceptance_criteria" };
+
+		const sessionId = this.sessionManager.getSessionId();
+		const rootUserEntryId =
+			input.attempt?.episode?.rootUserEntryId ?? resolveRootUserEntryIdFromBranch(this.sessionManager.getBranch());
+		if (!rootUserEntryId) {
+			return { recorded: false, reason: "missing_root_user_entry" };
+		}
+
+		const attempt: TaskAttemptIdentity = {
+			episode: {
+				sessionId: input.attempt?.episode?.sessionId ?? sessionId,
+				rootUserEntryId,
+			},
+			attemptId: input.attempt?.attemptId ?? null,
+			workflowId: input.attempt?.workflowId ?? null,
+			branchLeafId: input.attempt?.branchLeafId ?? this.sessionManager.getLeafId(),
+			taskToolCallId: input.attempt?.taskToolCallId ?? null,
+			jobId: input.attempt?.jobId ?? null,
+			agentId: input.attempt?.agentId ?? null,
+		};
+
+		const verifiedAtMs = input.verifiedAtMs ?? Date.now();
+		const source: ParentFinalVerificationSource =
+			input.source ??
+			(input.authority === "workflow"
+				? "workflow"
+				: input.authority === "fixture"
+					? "fixture"
+					: input.authority === "extension" || input.authority === "user_explicit"
+						? "extension"
+						: "extension");
+
+		let buildIdentityRef: string | undefined;
+		if (input.buildIdentity) {
+			buildIdentityRef = runtimeBuildIdentityRef(input.buildIdentity);
+			if (input.persistBuildIdentity === true) {
+				this.sessionManager.appendCustomEntry(RUNTIME_BUILD_IDENTITY_CUSTOM_TYPE, input.buildIdentity);
+			}
+		}
+
+		const details = buildParentFinalVerificationDetails(input.status, source, verifiedAtMs, {
+			eventId: input.eventId,
+			attempt,
+			acceptanceContract,
+			codeState: input.codeState,
+			authority: input.authority,
+			buildIdentityRef,
+			evidenceRefs: input.evidenceRefs,
+		});
+		const entryId = this.sessionManager.appendCustomEntry(PARENT_FINAL_VERIFICATION_MESSAGE_TYPE, details);
+		return { recorded: true, entryId, details };
 	}
 
 	/**

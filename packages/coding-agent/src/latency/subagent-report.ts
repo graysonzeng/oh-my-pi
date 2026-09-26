@@ -130,6 +130,10 @@ interface UsageRequest {
 	cacheRead: number | null;
 	cacheWrite: number | null;
 	costTotal: number | null;
+	/** Assistant stopReason when present (error rows stay distinct from free successful calls). */
+	stopReason: string | null;
+	/** True when the assistant message is an error / aborted turn. */
+	isError: boolean;
 }
 
 interface SpawnMember {
@@ -618,6 +622,12 @@ function parseUsageRequest(msg: Record<string, unknown>): UsageRequest {
 	const ttftMs = asNonNegativeNumber(msg.ttft);
 	const usage = isRecord(msg.usage) ? msg.usage : undefined;
 	const cost = usage && isRecord(usage.cost) ? asNonNegativeNumber(usage.cost.total) : null;
+	const stopReason = typeof msg.stopReason === "string" && msg.stopReason.trim() ? msg.stopReason.trim() : null;
+	const isError =
+		msg.isError === true ||
+		stopReason === "error" ||
+		stopReason === "aborted" ||
+		(typeof msg.errorMessage === "string" && msg.errorMessage.length > 0);
 	return {
 		model: typeof msg.model === "string" && msg.model ? msg.model : null,
 		ttftMs,
@@ -627,6 +637,8 @@ function parseUsageRequest(msg: Record<string, unknown>): UsageRequest {
 		cacheRead: usage ? asNonNegativeNumber(usage.cacheRead) : null,
 		cacheWrite: usage ? asNonNegativeNumber(usage.cacheWrite) : null,
 		costTotal: cost,
+		stopReason,
+		isError,
 	};
 }
 
@@ -639,11 +651,24 @@ function collectParentFinalVerification(
 	if (customType !== PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) return;
 	const parsed = parseParentFinalVerificationDetails(details);
 	if (!parsed) return;
-	session.parentFinalVerifications.push({
+	const observation: ParentFinalVerificationObservation = {
 		status: parsed.status,
 		source: parsed.source,
 		ts: parsed.verifiedAtMs ?? ts,
-	});
+		...(parsed.eventId ? { eventId: parsed.eventId } : {}),
+		...(parsed.attempt ? { attempt: parsed.attempt } : {}),
+		...(parsed.acceptanceContract ? { acceptanceContract: parsed.acceptanceContract } : {}),
+		...(parsed.codeState ? { codeState: parsed.codeState } : {}),
+		...(parsed.authority ? { authority: parsed.authority } : {}),
+		...(parsed.buildIdentityRef ? { buildIdentityRef: parsed.buildIdentityRef } : {}),
+		...(parsed.evidenceRefs ? { evidenceRefs: parsed.evidenceRefs } : {}),
+	};
+	// Idempotent: duplicate eventId (fork/recovery/dup receipt) keeps the first.
+	if (observation.eventId) {
+		const exists = session.parentFinalVerifications.some(row => row.eventId === observation.eventId);
+		if (exists) return;
+	}
+	session.parentFinalVerifications.push(observation);
 }
 
 function collectDeliveryQualityOutcome(

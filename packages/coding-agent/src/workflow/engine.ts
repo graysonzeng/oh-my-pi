@@ -36,6 +36,7 @@ import {
 	buildParentFinalVerificationDetails,
 	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
 } from "../latency/parent-final-verification";
+import { buildAcceptanceContractRef, resolveRootUserEntryIdFromBranch } from "../latency/task-episode";
 import gateReviewAdapterPrompt from "../prompts/workflow/gate-review-adapter.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import {
@@ -2338,9 +2339,39 @@ export class WorkflowEngine {
 					});
 				}
 				try {
+					const sessionId = session.sessionManager?.getSessionId?.() ?? workflowId;
+					const rootUserEntryId =
+						(session.sessionManager
+							? resolveRootUserEntryIdFromBranch(session.sessionManager.getBranch())
+							: null) ?? workflowId;
+					const acceptanceContract = buildAcceptanceContractRef(this.#plan?.acceptanceCriteria ?? []);
+					const validityCode = effectiveVerification.validity?.codeState;
 					session.sessionManager?.appendCustomEntry(
 						PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
-						buildParentFinalVerificationDetails(deliveryOk ? "passed" : "failed", "workflow"),
+						buildParentFinalVerificationDetails(deliveryOk ? "passed" : "failed", "workflow", Date.now(), {
+							eventId: `wf:${workflowId}:${attemptId}:final_verify`,
+							attempt: {
+								episode: { sessionId, rootUserEntryId },
+								attemptId,
+								workflowId,
+								branchLeafId: session.sessionManager?.getLeafId?.() ?? null,
+								taskToolCallId: null,
+								jobId: null,
+								agentId: null,
+							},
+							acceptanceContract: acceptanceContract ?? undefined,
+							codeState: validityCode
+								? {
+										fingerprint: validityCode.fingerprint,
+										...(validityCode.patchSha256 ? { patchSha256: validityCode.patchSha256 } : {}),
+										...(validityCode.workspace?.headId ? { headId: validityCode.workspace.headId } : {}),
+									}
+								: undefined,
+							authority: "workflow",
+							evidenceRefs: effectiveVerification.checks
+								.filter(check => check.status === "passed")
+								.map(check => check.id),
+						}),
 					);
 				} catch (error) {
 					// Receipt bookkeeping must not fail final_verify, but missing

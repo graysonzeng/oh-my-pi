@@ -423,3 +423,157 @@ export function classifyChildResultForParentIntegrate(input: {
 		crossModule: input.crossModule,
 	});
 }
+
+/**
+ * Stable producer from executor facts (Batch 1 W2).
+ *
+ * Builds a packet from real patch / code version / terminal checks / write
+ * ownership. The worker may claim local evidence locations, but cannot seal
+ * parent-final acceptance — forged `proven:true` without evidence locations is
+ * stripped. Missing deterministic sources stay missing/unchecked.
+ */
+export function buildChildDeliveryEvidenceFromExecutorFacts(input: {
+	codeVersion: CodeVersionIdentity;
+	/** Acceptance items with optional evidence paths from terminal checks. */
+	acceptanceItems?: readonly {
+		id: string;
+		evidenceLocations?: readonly string[];
+		/** Ignored when evidenceLocations is empty — worker cannot forge proven. */
+		claimedProven?: boolean;
+	}[];
+	checksNotRun?: readonly CheckNotRun[];
+	/** Terminal checks that actually ran green for this code version. */
+	terminalChecksPassed?: readonly { id: string; evidenceLocation?: string }[];
+	finishOwner?: FinishOwner;
+	finishOwnerReason?: string;
+	sharedInterfaces?: readonly string[];
+	writeOwnershipReleased?: boolean;
+	authorConclusions?: readonly string[];
+}): ChildDeliveryEvidenceV1 {
+	const terminalById = new Map((input.terminalChecksPassed ?? []).map(check => [check.id, check] as const));
+	const acceptanceProven: AcceptanceItemEvidence[] = (input.acceptanceItems ?? []).map(item => {
+		const terminal = terminalById.get(item.id);
+		const locations = nonEmptyStrings([
+			...(item.evidenceLocations ?? []),
+			...(terminal?.evidenceLocation ? [terminal.evidenceLocation] : []),
+		]);
+		// Worker cannot seal proven without at least one evidence location.
+		const proven = locations.length > 0 && item.claimedProven !== false;
+		return { id: item.id.trim(), proven, evidenceLocations: locations };
+	});
+	return buildChildDeliveryEvidence({
+		codeVersion: input.codeVersion,
+		acceptanceProven,
+		checksNotRun: input.checksNotRun ? [...input.checksNotRun] : undefined,
+		finishOwner: input.finishOwner,
+		finishOwnerReason: input.finishOwnerReason,
+		sharedInterfaces: input.sharedInterfaces ? [...input.sharedInterfaces] : undefined,
+		writeOwnershipReleased: input.writeOwnershipReleased,
+		authorConclusions: input.authorConclusions ? [...input.authorConclusions] : undefined,
+	});
+}
+
+/**
+ * Parent reclassification against the **current** workspace + acceptance
+ * contract + freshness (Batch 1 W2). Bind the decision to the parent integrate
+ * prompt / controlled decision entry — never inherit child packet-only integrate.
+ *
+ * `done_valid` here means integrate-eligible, NOT final parent acceptance.
+ */
+export function reclassifyParentIntegrateAgainstWorkspace(input: {
+	delivery: ChildDeliveryEvidenceV1 | null | undefined;
+	/** Current workspace / patch identity fingerprint. */
+	currentCodeVersion: string;
+	requiredAcceptance?: readonly string[];
+	/** Inbound handoff / facts marked stale. */
+	staleEvidence?: boolean;
+	outOfScopeEdits?: boolean;
+	crossModule?: boolean;
+	/** When false/undefined, write ownership still held blocks integrate. */
+	writeOwnershipReleased?: boolean;
+}): ParentIntegrateDecision & { boundToWorkspaceVersion: string } {
+	const delivery = input.delivery ? parseChildDeliveryEvidence(input.delivery) : null;
+	const current = input.currentCodeVersion.trim();
+	const codeVersionStale = !delivery || !current || delivery.codeVersion.version !== current;
+
+	const decision = classifyParentIntegrate({
+		delivery,
+		staleEvidence: input.staleEvidence === true,
+		codeVersionStale,
+		requiredAcceptance: input.requiredAcceptance,
+		outOfScopeEdits: input.outOfScopeEdits,
+		crossModule:
+			input.crossModule === true ||
+			(delivery !== null && delivery.sharedInterfaces.length > 0 && input.writeOwnershipReleased === false),
+	});
+
+	// Packet-only freshness already handled by codeVersionStale. Unreleased
+	// write ownership cannot integrate even if the child claimed release.
+	if (
+		decision.action === "integrate" &&
+		delivery &&
+		delivery.sharedInterfaces.length > 0 &&
+		input.writeOwnershipReleased === false
+	) {
+		return {
+			classification: "cross_module",
+			action: "parent_coordinate",
+			reasons: ["write_ownership_unreleased"],
+			usedAuthorSelfAssessment: false,
+			boundToWorkspaceVersion: current,
+		};
+	}
+
+	return { ...decision, boundToWorkspaceVersion: current };
+}
+
+/**
+ * Bind a parent integrate decision onto a controlled decision entry payload
+ * (custom entry / prompt injection metadata — not model-context prose).
+ */
+export function bindParentIntegrateDecisionEntry(input: {
+	decision: ParentIntegrateDecision;
+	episodeSessionId: string;
+	rootUserEntryId: string;
+	taskToolCallId?: string | null;
+	jobId?: string | null;
+	agentId?: string | null;
+	workspaceVersion: string;
+	recordedAtMs?: number;
+}): {
+	kind: "parent_integrate_decision";
+	v: 1;
+	classification: ParentIntegrateClass;
+	action: ParentIntegrateAction;
+	reasons: string[];
+	usedAuthorSelfAssessment: false;
+	episode: { sessionId: string; rootUserEntryId: string };
+	taskToolCallId: string | null;
+	jobId: string | null;
+	agentId: string | null;
+	workspaceVersion: string;
+	recordedAtMs: number;
+	/** Explicit: integrate-eligible is not final acceptance. */
+	finalAccepted: false;
+} {
+	return {
+		kind: "parent_integrate_decision",
+		v: 1,
+		classification: input.decision.classification,
+		action: input.decision.action,
+		reasons: [...input.decision.reasons],
+		usedAuthorSelfAssessment: false,
+		episode: {
+			sessionId: input.episodeSessionId,
+			rootUserEntryId: input.rootUserEntryId,
+		},
+		taskToolCallId: input.taskToolCallId ?? null,
+		jobId: input.jobId ?? null,
+		agentId: input.agentId ?? null,
+		workspaceVersion: input.workspaceVersion,
+		recordedAtMs: input.recordedAtMs ?? Date.now(),
+		finalAccepted: false,
+	};
+}
+
+export const PARENT_INTEGRATE_DECISION_CUSTOM_TYPE = "parent_integrate_decision";

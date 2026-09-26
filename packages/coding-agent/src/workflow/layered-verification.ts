@@ -288,6 +288,9 @@ export function observeFingerprintOverhead(input: {
 /**
  * Aggregate how many full-repo command runs a layered plan avoided via reuse.
  * Used by fixtures — not a live latency claim.
+ *
+ * Only counts reuse when disposition is reuse (prior terminal green + matching
+ * command/scope/codeState). Never counts async.running.
  */
 export function countFullRepoRunsAvoided(plans: readonly LayeredVerificationPlan[]): number {
 	let avoided = 0;
@@ -296,6 +299,61 @@ export function countFullRepoRunsAvoided(plans: readonly LayeredVerificationPlan
 		avoided += plan.toReuse.length;
 	}
 	return avoided;
+}
+
+/**
+ * Observable reuse/reject reasons for durable observe (Batch 1 W3).
+ * Callers persist via evidence-handoff-observe; this does not invent acceptance.
+ */
+export function layeredVerificationObserveEvents(
+	plan: LayeredVerificationPlan,
+	meta: { eventIdPrefix: string; episodeKey?: string; jobId?: string; overheadMs?: number },
+): Array<{
+	disposition: "run" | "reuse" | "reject";
+	reason: string;
+	eventId: string;
+	episodeKey?: string;
+	jobId?: string;
+	overheadMs?: number;
+}> {
+	const events: Array<{
+		disposition: "run" | "reuse" | "reject";
+		reason: string;
+		eventId: string;
+		episodeKey?: string;
+		jobId?: string;
+		overheadMs?: number;
+	}> = [];
+	const prefix = meta.eventIdPrefix.trim() || "layered";
+	if (plan.reuseDecision && !plan.reuseDecision.reusable) {
+		events.push({
+			disposition: "reject",
+			reason: plan.reuseDecision.reason,
+			eventId: `${prefix}:reject:${plan.reuseDecision.reason}`,
+			episodeKey: meta.episodeKey,
+			jobId: meta.jobId,
+			overheadMs: meta.overheadMs,
+		});
+	}
+	for (const id of plan.toReuse) {
+		events.push({
+			disposition: "reuse",
+			reason: "prior_seal_still_valid",
+			eventId: `${prefix}:reuse:${id}`,
+			episodeKey: meta.episodeKey,
+			jobId: meta.jobId,
+		});
+	}
+	for (const command of plan.toRun) {
+		events.push({
+			disposition: "run",
+			reason: "execute",
+			eventId: `${prefix}:run:${command}`,
+			episodeKey: meta.episodeKey,
+			jobId: meta.jobId,
+		});
+	}
+	return events;
 }
 
 export type { VerificationReuseReason };
