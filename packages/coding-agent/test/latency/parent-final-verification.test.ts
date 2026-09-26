@@ -25,6 +25,7 @@ describe("parent-final-verification", () => {
 			status: "passed",
 			source: "extension",
 			verifiedAtMs: 99,
+			v: 1,
 		});
 	});
 
