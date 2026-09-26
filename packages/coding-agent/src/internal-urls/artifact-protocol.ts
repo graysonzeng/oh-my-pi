@@ -7,7 +7,9 @@
  * URL form:
  * - artifact://<id> - Full artifact content
  *
- * Pagination is handled by the read tool via offset/limit parameters.
+ * Pagination uses read-tool inline selectors on the path (e.g. artifact://0:301,
+ * artifact://0:raw:301-), not separate offset/limit kwargs. Optional kwargs are
+ * composed onto the path only when no range selector is already present.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";

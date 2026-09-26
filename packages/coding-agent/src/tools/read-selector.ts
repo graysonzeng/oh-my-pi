@@ -137,3 +137,55 @@ export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; l
 	}
 	return {};
 }
+
+/**
+ * Compose optional Claude-style `offset`/`limit` kwargs onto the path-inline
+ * selector contract (history supplement S3). Prefer embedding `:N` / `:raw:N-`
+ * in `path`. When a range selector is already present, kwargs kwargs are rejected
+ * with an explicit message instead of silently re-reading page 1.
+ */
+export function composeReadPaginationArgs(input: {
+	path: string;
+	offset?: number;
+	limit?: number;
+}): { path: string } {
+	const hasOffset = input.offset !== undefined;
+	const hasLimit = input.limit !== undefined;
+	if (!hasOffset && !hasLimit) return { path: input.path };
+
+	const offset = hasOffset ? Math.floor(input.offset!) : undefined;
+	const limit = hasLimit ? Math.floor(input.limit!) : undefined;
+	if (offset !== undefined && !(offset >= 1)) {
+		throw new ToolError(`Invalid offset ${input.offset}: must be a 1-indexed positive line number.`);
+	}
+	if (limit !== undefined && !(limit >= 1)) {
+		throw new ToolError(`Invalid limit ${input.limit}: must be a positive line count.`);
+	}
+
+	const parsed = parseReadPathSelector(input.path);
+	if (parsed.kind === "lines" || parsed.kind === "tail") {
+		const next =
+			offset !== undefined
+				? limit !== undefined
+					? `:${offset}+${limit}`
+					: `:${offset}-`
+				: `:1+${limit}`;
+		const example = input.path.includes("artifact://") ? "artifact://…:raw:301-" : "path:301";
+		throw new ToolError(
+			`Stale pagination kwargs: path already declares a line selector (${input.path}). ` +
+				`Do not pass separate offset/limit — use the next-page locator from the previous read ` +
+				`(for example ${example} or compose onto the path as ${next}). ` +
+				`Received offset=${offset ?? "unset"} limit=${limit ?? "unset"}.`,
+		);
+	}
+
+	const hasRaw =
+		parsed.kind === "raw" ||
+		input.path
+			.split(":")
+			.some(chunk => chunk.toLowerCase() === "raw");
+	const base = hasRaw ? input.path : `${input.path}:raw`;
+	if (offset === undefined) return { path: `${base}:1+${limit}` };
+	if (limit === undefined) return { path: `${base}:${offset}-` };
+	return { path: `${base}:${offset}+${limit}` };
+}

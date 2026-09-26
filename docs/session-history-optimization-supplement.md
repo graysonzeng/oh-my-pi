@@ -14,7 +14,7 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
 | S0 | P0 | Credential/route unavailable early-fail + bounded recovery | `credential-route-unavailable.ts`, availability preflight, turn-recovery |
 | S1 | P0 | Acceptance metric readiness + observe handoff (no schema expand) | delivery-cost / parent_final / evidence-handoff observe |
 | S2 | P1 | Opt-in main-session context / phase-handoff experiment | `phase-handoff-experiment.ts`, `docs/phase-handoff-experiment.md` |
-| S3 | P1 | Pagination / continue-read contract fidelity | `read` tool selectors / artifact locators |
+| S3 | P1 | Pagination / continue-read contract fidelity | `composeReadPaginationArgs`, read tool selectors |
 | S4 | P1 | thinking-loop / stream-interrupt replayable fixtures | turn-recovery fixtures |
 
 ## S0 contract
@@ -39,6 +39,15 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
   retain open constraints, modification state, and acceptance basis.
 - No model/concurrency change in the same experiment; no global 200k forced cap;
   `claimedLiveWin` always false on harness receipts.
+
+## S3 contract
+
+- Prefer next-page locators (`artifact://…:raw:301-`) and compose optional
+  `offset`/`limit` onto path when no range selector is present.
+- Stale kwargs with an existing range selector get **explicit** feedback — not a
+  silent page-1 re-read.
+- No global “don’t re-read” prompt rules (strict identical-text re-read was only
+  0.94% of successful reads).
 
 ## Out of scope
 
