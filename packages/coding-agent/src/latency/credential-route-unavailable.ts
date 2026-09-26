@@ -9,6 +9,7 @@
  * `provider_health_breaker` and does not invent account-permission guesses.
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { redactSecretsInText } from "../workflow/secret-redact";
 
 export const CREDENTIAL_ROUTE_CONFIG_UNAVAILABLE_TTL_MS = 10 * 60_000;
 export const CREDENTIAL_ROUTE_UNAVAILABLE_SUMMARY = "credential/route unavailable (known config failure)";
@@ -51,19 +52,13 @@ export function buildCredentialRouteKey(parts: {
 }
 
 /**
- * Classify a failure for early-fail policy. Prefer structured `errorKind` when
- * present; otherwise use existing AIError flags. Does not guess org/plan
+ * Classify a failure for early-fail policy. Message/AIError UsageLimit wins over
+ * a probe `errorKind` of `authentication` (adapters often label "401 Insufficient
+ * balance" as auth because status 401 matches first). Does not guess org/plan
  * permissions beyond AuthFailed / UsageLimit / permanent-billing already owned
  * by `@oh-my-pi/pi-ai/error`.
  */
 export function classifyCredentialRouteFailure(input: CredentialRouteFailureInput): CredentialRouteFailureClass {
-	const kind = input.errorKind?.trim().toLowerCase();
-	if (kind === "authentication" || kind === "configuration" || kind === "identity_mismatch") {
-		return "config_unavailable";
-	}
-	if (kind === "rate_limit" || kind === "quota") return "short_cooldown";
-	if (kind === "timeout" || kind === "provider_transient") return "transport_blip";
-
 	const message = input.errorMessage ?? "";
 	const id =
 		typeof input.errorId === "number" && input.errorId !== 0
@@ -78,8 +73,17 @@ export function classifyCredentialRouteFailure(input: CredentialRouteFailureInpu
 		return "config_unavailable";
 	}
 	// UsageLimit (including rotatable 401 Insufficient balance) stays on the
-	// sibling-rotate / wait path — not a sticky config-unavailable mark.
+	// sibling-rotate / wait path — not a sticky config-unavailable mark. Check
+	// before trusting structured authentication kinds from probe adapters.
 	if (AIError.is(id, AIError.Flag.UsageLimit)) return "short_cooldown";
+
+	const kind = input.errorKind?.trim().toLowerCase();
+	if (kind === "authentication" || kind === "configuration" || kind === "identity_mismatch") {
+		return "config_unavailable";
+	}
+	if (kind === "rate_limit" || kind === "quota") return "short_cooldown";
+	if (kind === "timeout" || kind === "provider_transient") return "transport_blip";
+
 	if (AIError.isPermanentBillingFailureText(message)) return "config_unavailable";
 	if (AIError.is(id, AIError.Flag.AuthFailed)) return "config_unavailable";
 	if (AIError.is(id, AIError.Flag.Transient) || AIError.is(id, AIError.Flag.Timeout)) {
@@ -93,10 +97,10 @@ export function isConfigCredentialRouteUnavailable(input: CredentialRouteFailure
 	return classifyCredentialRouteFailure(input) === "config_unavailable";
 }
 
-/** Bound stored summaries; callers should pass already-redacted text when available. */
+/** Bound + redact stored summaries so raw secrets never persist in the registry. */
 function boundSummary(summary: string | undefined, fallback: string): string {
 	const raw = (summary ?? "").trim() || fallback;
-	return raw.slice(0, 500);
+	return redactSecretsInText(raw).slice(0, 500);
 }
 
 export class CredentialRouteUnavailableRegistry {

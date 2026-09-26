@@ -56,8 +56,10 @@ export function noteEvidenceHandoffInspect(kind: "valid" | "missing" | "invalid"
 }
 
 /**
- * Record a worker-reuse decision. Stale/invalid reasons increment reject
- * counters so generate→consume→reject-stale can be asserted without new fields.
+ * Record a worker-reuse decision. Stale reasons increment `rejectStale` here
+ * (inspect only sees parse validity). Invalid handoffs are counted only by
+ * {@link noteEvidenceHandoffInspect} so the live workpool path does not
+ * double-count `rejectInvalid`.
  */
 export function noteEvidenceHandoffReuseDecision(
 	decision: WorkerReuseDecision,
@@ -66,7 +68,6 @@ export function noteEvidenceHandoffReuseDecision(
 	if (decision.action === "continue") snapshot.reuseContinue += 1;
 	else snapshot.reuseSpawnFresh += 1;
 	if (decision.reason === "stale_evidence") snapshot.rejectStale += 1;
-	else if (decision.reason === "invalid_handoff") snapshot.rejectInvalid += 1;
 	logger.debug("workpool: evidence-handoff reuse", {
 		action: decision.action,
 		reason: decision.reason,

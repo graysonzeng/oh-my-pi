@@ -301,14 +301,18 @@ export class WorkPool {
 	}
 
 	#blocksExistingAgents(): boolean {
-		return this.#reuseDecision("pool", "idle").action !== "continue";
+		// Pool probe only — do not inflate observe counters on dispatch/evict/yield gates.
+		return this.#reuseDecision("pool", "idle", { observe: false }).action !== "continue";
 	}
 
-	#reuseDecision(agentId: string, status: string) {
+	#reuseDecision(agentId: string, status: string, options?: { observe?: boolean }) {
+		const observe = options?.observe !== false;
 		const inspected = inspectEvidenceHandoffContext(this.context);
-		if (inspected.invalid) noteEvidenceHandoffInspect("invalid");
-		else if (inspected.handoff) noteEvidenceHandoffInspect("valid");
-		else noteEvidenceHandoffInspect("missing");
+		if (observe) {
+			if (inspected.invalid) noteEvidenceHandoffInspect("invalid");
+			else if (inspected.handoff) noteEvidenceHandoffInspect("valid");
+			else noteEvidenceHandoffInspect("missing");
+		}
 		const decision = decideWorkerReuse({
 			candidate: {
 				id: agentId,
@@ -318,7 +322,7 @@ export class WorkPool {
 			handoff: inspected.handoff,
 			invalidHandoff: inspected.invalid,
 		});
-		noteEvidenceHandoffReuseDecision(decision, { agentId });
+		if (observe) noteEvidenceHandoffReuseDecision(decision, { agentId });
 		return decision;
 	}
 

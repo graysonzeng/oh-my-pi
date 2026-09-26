@@ -42,6 +42,15 @@ describe("classifyCredentialRouteFailure", () => {
 				errorStatus: 401,
 			}),
 		).toBe("short_cooldown");
+		// Probe adapters historically label this authentication (401 matches first);
+		// UsageLimit from the message must still win so we do not sticky-block.
+		expect(
+			classifyCredentialRouteFailure({
+				errorKind: "authentication",
+				errorMessage: "401 Insufficient balance",
+				errorStatus: 401,
+			}),
+		).toBe("short_cooldown");
 		expect(
 			classifyCredentialRouteFailure({
 				errorMessage:
@@ -97,13 +106,19 @@ describe("CredentialRouteUnavailableRegistry", () => {
 		expect(registry.isUnavailable(key)).toBe(false);
 	});
 
-	it("bounds stored summaries and does not embed raw sk- keys as credentials", () => {
+	it("bounds stored summaries and redacts raw sk- keys", () => {
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
 		const key = buildCredentialRouteKey({ provider: "test", modelId: "m" });
 		const long = `invalid api key ${"x".repeat(600)}`;
 		const entry = registry.noteFailure(key, { errorMessage: long });
 		expect(entry?.errorSummary.length).toBeLessThanOrEqual(500);
 		expect(entry?.errorSummary).not.toMatch(/sk-[A-Za-z0-9]{20,}/);
+
+		const secretEntry = registry.noteFailure(key, {
+			errorMessage: "401 invalid api key sk-proj-abcdefghijklmnopqrstuvwxyz012345",
+		});
+		expect(secretEntry?.errorSummary).toContain("sk-[REDACTED]");
+		expect(secretEntry?.errorSummary).not.toContain("sk-proj-abcdefghijklmnopqrstuvwxyz012345");
 	});
 
 	it("shares the process-local singleton across callers", () => {

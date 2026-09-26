@@ -262,9 +262,11 @@ function classifyProbeError(message: string, aborted: boolean): WorkflowErrorKin
 		return "cancelled";
 	}
 	const lower = message.toLowerCase();
-	if (/auth|api[_-]?key|unauthorized|401|403|credential|login/i.test(lower)) return "authentication";
+	// Quota/billing before auth: "401 Insufficient balance" matches both; sticky
+	// credential-route early-fail must treat it as short_cooldown, not authentication.
 	if (/quota|billing|insufficient/i.test(lower)) return "quota";
 	if (/rate.?limit|429|too many requests/i.test(lower)) return "rate_limit";
+	if (/auth|api[_-]?key|unauthorized|401|403|credential|login/i.test(lower)) return "authentication";
 	if (/config|model registry|not found|unknown model|invalid model/i.test(lower)) return "configuration";
 	if (/timeout|timed out|deadline/i.test(lower)) return "timeout";
 	if (/temporary|unavailable|502|503|504|overloaded/i.test(lower)) return "provider_transient";

@@ -38,6 +38,12 @@ deliveryExperiment:
 
 ## Programmatic harness
 
+Settings under `deliveryExperiment.phaseHandoff.*` register the opt-in gate
+(same shape as Package 4 read-dedupe). **Enabling the setting alone does not
+mutate live session context** — call `applyPhaseHandoffExperiment` from a
+harness or an explicit phase-boundary call site. Live compaction remains
+unchanged until that apply path is wired.
+
 ```ts
 import {
   applyPhaseHandoffExperiment,

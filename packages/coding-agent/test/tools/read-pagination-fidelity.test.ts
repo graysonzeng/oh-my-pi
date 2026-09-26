@@ -50,6 +50,15 @@ describe("composeReadPaginationArgs", () => {
 		});
 	});
 
+	it("composes plain filesystem paths without forcing :raw", () => {
+		expect(composeReadPaginationArgs({ path: "src/foo.ts", offset: 301 })).toEqual({
+			path: "src/foo.ts:301-",
+		});
+		expect(composeReadPaginationArgs({ path: "src/foo.ts", offset: 10, limit: 20 })).toEqual({
+			path: "src/foo.ts:10+20",
+		});
+	});
+
 	it("rejects stale offset kwargs when a range selector is already present", () => {
 		expect(() =>
 			composeReadPaginationArgs({ path: "artifact://0:raw:1-300", offset: 301, limit: 300 }),

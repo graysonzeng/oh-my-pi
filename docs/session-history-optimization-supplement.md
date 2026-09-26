@@ -39,6 +39,8 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
   retain open constraints, modification state, and acceptance basis.
 - No model/concurrency change in the same experiment; no global 200k forced cap;
   `claimedLiveWin` always false on harness receipts.
+- Settings gate + harness apply API only this round (same Package 4 pattern);
+  enabling the toggle does not yet mutate live session compaction.
 
 ## S3 contract
 

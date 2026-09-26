@@ -88,4 +88,15 @@ describe("evidence-handoff observe (S1)", () => {
 		expect(snap.generate).toBeGreaterThan(0);
 		expect("costPerAcceptedTask" in snap).toBe(false);
 	});
+
+	it("counts rejectInvalid once when inspect and reuse both see invalid handoff", () => {
+		noteEvidenceHandoffInspect("invalid");
+		noteEvidenceHandoffReuseDecision(
+			{ action: "spawn_fresh", reason: "invalid_handoff", agentId: "WorkerA" },
+			{ agentId: "WorkerA" },
+		);
+		const snap = getEvidenceHandoffObserveSnapshot();
+		expect(snap.rejectInvalid).toBe(1);
+		expect(snap.reuseSpawnFresh).toBe(1);
+	});
 });

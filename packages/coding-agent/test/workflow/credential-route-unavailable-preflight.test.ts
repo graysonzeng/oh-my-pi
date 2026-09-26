@@ -192,4 +192,36 @@ describe("availability preflight credential-route unavailable (S0)", () => {
 		await run();
 		expect(registry.isUnavailable(availabilityProbeDedupeKey(target, "default"))).toBe(false);
 	});
+
+	it("does not sticky-mark usage-limit / insufficient balance even when probe kind is authentication", async () => {
+		const target = profile({ id: "p1", roles: ["planner"], modelPattern: "balance" });
+		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
+		const probes = { count: 0 };
+		const port: WorkflowAvailabilityPort = {
+			async probe() {
+				probes.count += 1;
+				return {
+					status: "unavailable",
+					latencyMs: 4,
+					// Historical adapter mislabel — message is UsageLimit / short_cooldown.
+					errorKind: "authentication",
+					errorSummary: "401 Insufficient balance",
+				};
+			},
+		};
+		const options = {
+			port,
+			router: new ModelRouter([target]),
+			workflowId: "wf-balance",
+			operation: "start" as const,
+			status: "planning" as const,
+			singleStep: true,
+			session: fakeSession(),
+			credentialRouteUnavailable: registry,
+		};
+		await runAvailabilityPreflight(options);
+		expect(registry.isUnavailable(availabilityProbeDedupeKey(target, "default"))).toBe(false);
+		await runAvailabilityPreflight(options);
+		expect(probes.count).toBe(2);
+	});
 });

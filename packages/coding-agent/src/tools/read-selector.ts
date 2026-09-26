@@ -141,8 +141,12 @@ export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; l
 /**
  * Compose optional Claude-style `offset`/`limit` kwargs onto the path-inline
  * selector contract (history supplement S3). Prefer embedding `:N` / `:raw:N-`
- * in `path`. When a range selector is already present, kwargs kwargs are rejected
+ * in `path`. When a range selector is already present, kwargs are rejected
  * with an explicit message instead of silently re-reading page 1.
+ *
+ * Artifact URLs without an existing `:raw` get `:raw` injected so continue-read
+ * pages the verbatim body (history E2/E3). Plain filesystem paths compose as
+ * `path:301` / `path:301+K` — never force `:raw` onto hashline/preview reads.
  */
 export function composeReadPaginationArgs(input: {
 	path: string;
@@ -179,13 +183,15 @@ export function composeReadPaginationArgs(input: {
 		);
 	}
 
+	const rangeSuffix =
+		offset === undefined ? `:1+${limit}` : limit === undefined ? `:${offset}-` : `:${offset}+${limit}`;
 	const hasRaw =
 		parsed.kind === "raw" ||
 		input.path
 			.split(":")
 			.some(chunk => chunk.toLowerCase() === "raw");
-	const base = hasRaw ? input.path : `${input.path}:raw`;
-	if (offset === undefined) return { path: `${base}:1+${limit}` };
-	if (limit === undefined) return { path: `${base}:${offset}-` };
-	return { path: `${base}:${offset}+${limit}` };
+	if (hasRaw) return { path: `${input.path}${rangeSuffix}` };
+	// Verbatim artifact continue-read needs :raw; ordinary files keep hashline selectors.
+	if (/^artifact:\/\//i.test(input.path)) return { path: `${input.path}:raw${rangeSuffix}` };
+	return { path: `${input.path}${rangeSuffix}` };
 }
