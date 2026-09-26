@@ -39,6 +39,16 @@ durations are not summed into end-to-end latency. When an explicit
 the report fills `parentFinalVerification` and parent start→verify `e2eMs` /
 `criticalPathMs`; failures and timeouts stay in `completionKinds`.
 
+`deliveryCost` (ordinary vs workflow cohorts kept separate) answers the
+delivery-first cost baseline: first-delivery accept, investigate/fix/verify
+cycles after that boundary, parent wait vs integrate vs child union time,
+input/output/cache-read tokens and priced cost, and attempt cost sliced by
+completion kind (timeout/cancelled/budget_stop). Core metric:
+`costPerAcceptedTask = totalAttemptCost ÷ acceptedTaskCount`. Missing signals
+stay `null` / `"unknown"` — never zero-filled. Optional
+`delivery_quality_outcome` receipts surface false-accept / missed-defect
+counts; absent receipts leave those fields `"unknown"`.
+
 Repeated reads are grouped by selector-stripped resource within one parent
 session and emitted as SHA-256 keys, not raw paths/URLs. Different ranges or
 changed file contents can be legitimate reads: these counts are investigation
