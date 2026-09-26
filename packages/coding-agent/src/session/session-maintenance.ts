@@ -3808,10 +3808,11 @@ export class SessionMaintenance {
 		allowDefer = true,
 		autoContinue = true,
 	): Promise<CompactionCheckResult> {
-		// W6 shadow: when phase-handoff experiment is enabled, record a boundary
-		// observation (unknown→unknown unless an explicit stage signal is later
-		// supplied via observePhaseHandoffBoundary). Off → no-op.
-		this.observePhaseHandoffBoundary({ fromPhase: "unknown", toPhase: "unknown" });
+		// W6 phase-handoff: do NOT stub unknown→unknown here. That path never
+		// detects a boundary, never supplies retained carry, and previously
+		// discarded shouldRewriteContext — theater, not runtime wiring.
+		// Call observePhaseHandoffBoundary from a real phase-boundary owner with
+		// carried retain state, then feed shouldRewriteContext into compaction.
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;

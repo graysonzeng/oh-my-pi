@@ -39,14 +39,16 @@ deliveryExperiment:
 ## Programmatic harness
 
 Settings under `deliveryExperiment.phaseHandoff.*` register the opt-in gate
-(same shape as Package 4 read-dedupe). **Batch 2 wiring:** when enabled,
-`SessionMaintenance.checkCompaction` / `observePhaseHandoffBoundary` shadow-
-detect phase boundaries and may apply carry-slim through the existing
-compaction owner when retained state is complete. When the flag is **off**,
-the production context path is unchanged. Treatment still requires a detected
-boundary + semantic retained state (constraints, mods, acceptance, and
-recovery locators when declared) — not merely “three arrays non-empty”.
-`claimedLiveWin` stays false; paired evidence is insufficient.
+(same shape as Package 4 read-dedupe). **Batch 2 honesty:** the library and
+`SessionMaintenance.observePhaseHandoffBoundary` API exist and are covered by
+fixtures, but **treatment is not production-wired** — no production caller yet
+supplies real phase transitions + carried retain state, and
+`shouldRewriteContext` is not fed into the compaction/elide owner. When the
+flag is **off**, the production context path is unchanged. Treatment still
+requires a detected boundary + semantic retained state (constraints, mods,
+acceptance, and recovery locators when declared) — not merely “three arrays
+non-empty”. `claimedLiveWin` stays false; `runtime_wired=false`; paired
+evidence is insufficient.
 
 ```ts
 import {

@@ -4,7 +4,8 @@
  * Failure modes if these regress:
  * - W4 selectedRoute absent → oauth/config scopes stay fail-open forever / or guess first account
  * - W5 observe missing from prepareWorkflowInvocation → flag is a no-op
- * - W6 SessionMaintenance never calls phase-handoff → shadow/apply dead
+ * - W6 status claims runtime_wired while checkCompaction only stubs unknown→unknown
+ *   or discards shouldRewriteContext (treatment never reaches compaction owner)
  * - W7 Experiment A builds a second cache table beside ordinary arm
  * - Status table claims runtime_wired while callers absent
  * - paired_evidence_ready flips true without paid pairs
@@ -25,8 +26,8 @@ import { detectPhaseBoundaryShadow, hasRequiredRetainedState } from "../../src/s
 import { runPhaseHandoffMaintenance } from "../../src/session/phase-handoff-maintenance";
 
 describe("Batch2 status honesty", () => {
-	it("marks W4–W7 code_complete/runtime_wired/mechanism_verified with paired_evidence_ready=false", () => {
-		for (const id of ["W4", "W5", "W6", "W7"] as const) {
+	it("marks W4/W5/W7 runtime_wired; W6 stays unwired until treatment feeds compaction", () => {
+		for (const id of ["W4", "W5", "W7"] as const) {
 			const row = batch2Status(id);
 			expect(row.code_complete).toBe(true);
 			expect(row.runtime_wired).toBe(true);
@@ -34,6 +35,12 @@ describe("Batch2 status honesty", () => {
 			expect(row.paired_evidence_ready).toBe(false);
 			expect(row.call_sites.length).toBeGreaterThan(0);
 		}
+		const w6 = batch2Status("W6");
+		expect(w6.code_complete).toBe(true);
+		expect(w6.runtime_wired).toBe(false);
+		expect(w6.mechanism_verified).toBe(true);
+		expect(w6.paired_evidence_ready).toBe(false);
+		expect(w6.call_sites.some(s => s.includes("checkCompaction"))).toBe(false);
 		expect(BATCH2_STATUS.every(row => row.paired_evidence_ready === false)).toBe(true);
 		expect(BATCH2_PAIRED_EVIDENCE_READY).toBe(false);
 	});
@@ -162,6 +169,26 @@ describe("W5 stable-prefix observe at assembly", () => {
 });
 
 describe("W6 phase-handoff shadow + retain semantics", () => {
+	it("unknown→unknown stub never detects a boundary or rewrites context", () => {
+		const maintained = runPhaseHandoffMaintenance({
+			config: { enabled: true, factor: "phase_boundary_carry_slim" },
+			fromPhase: "unknown",
+			toPhase: "unknown",
+			carried: {
+				bulkyCarry: ["huge"],
+				retained: {
+					openConstraints: [],
+					modificationState: [],
+					acceptanceBasis: [],
+				},
+			},
+		});
+		expect(maintained.shadow.boundaryDetected).toBe(false);
+		expect(maintained.apply.applied).toBe(false);
+		expect(maintained.shouldRewriteContext).toBe(false);
+		expect(maintained.bulkyCarry).toEqual(["huge"]);
+	});
+
 	it("shadow-detects research→implement and skips drop without boundary", () => {
 		const shadow = detectPhaseBoundaryShadow({ fromPhase: "research", toPhase: "implement" });
 		expect(shadow.boundaryDetected).toBe(true);
