@@ -359,5 +359,16 @@ describe("W7 read-dedupe arm duties + selection layer", () => {
 			forceReread: true,
 		});
 		expect(forced.allowReuse).toBe(false);
+
+		// A/S2 single-factor: selection layer must refuse reuse when phase-handoff is on.
+		const withPhase = selectReadDedupeReuse({
+			ordinaryArmEnabled: true,
+			experimentConfig: { enabled: true, factor: "same_version_view_reuse" },
+			current: key,
+			prior: key,
+			peerPhaseHandoffEnabled: true,
+		});
+		expect(withPhase.allowReuse).toBe(false);
+		expect(withPhase.decision.reason).toBe("multi_factor_rejected");
 	});
 });
