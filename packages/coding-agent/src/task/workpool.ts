@@ -11,6 +11,10 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { runSubagentFollowUpTurn } from "./executor";
 import { decideWorkerReuse, inspectEvidenceHandoffContext } from "./evidence-handoff";
 import {
+	noteEvidenceHandoffInspect,
+	noteEvidenceHandoffReuseDecision,
+} from "./evidence-handoff-observe";
+import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
 	runStructuredSubagent,
@@ -302,7 +306,10 @@ export class WorkPool {
 
 	#reuseDecision(agentId: string, status: string) {
 		const inspected = inspectEvidenceHandoffContext(this.context);
-		return decideWorkerReuse({
+		if (inspected.invalid) noteEvidenceHandoffInspect("invalid");
+		else if (inspected.handoff) noteEvidenceHandoffInspect("valid");
+		else noteEvidenceHandoffInspect("missing");
+		const decision = decideWorkerReuse({
 			candidate: {
 				id: agentId,
 				status,
@@ -311,6 +318,8 @@ export class WorkPool {
 			handoff: inspected.handoff,
 			invalidHandoff: inspected.invalid,
 		});
+		noteEvidenceHandoffReuseDecision(decision, { agentId });
+		return decision;
 	}
 
 	#resumableStatus(agentId: string): "idle" | "parked" | undefined {

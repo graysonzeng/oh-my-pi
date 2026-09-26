@@ -25,6 +25,13 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
 - `provider_health_breaker` stays workflow/profile-scoped and default-off; S0 does **not** global-enable it or add `authentication` to its trip kinds.
 - Preserve user-visible failure reasons; no credential leaks; healthy routes remain usable after success clears the mark.
 
+## S1 contract
+
+- **Cost per accepted task remains future** until explicit `parent_final_verification` receipts exist in the corpus. History alone (0/351 parent finals) cannot compute first-pass rate or cost-per-accepted-task.
+- When a receipt exists (workflow `final_verify` or `AgentSession.recordParentFinalVerification`), Package 1 producers already emit what `stats:subagents` / `deliveryCost` need — including `verifiedAtMs` from `buildParentFinalVerificationDetails`.
+- Evidence-handoff observe path (`evidence-handoff-observe.ts`): generate → consume/inspect → reject-stale → reuse decision, via metrics/logging/tests only. **No schema expansion** this round.
+- Normal session stop / tool success never invent acceptance.
+
 ## Out of scope
 
 Raising global concurrency, globally lowering effort, expanding handoff schema,

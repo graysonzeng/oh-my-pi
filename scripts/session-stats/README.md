@@ -52,6 +52,14 @@ signals stay `null` / `"unknown"` — never zero-filled. Optional
 `delivery_quality_outcome` receipts surface false-accept / missed-defect
 counts; absent receipts leave those fields `"unknown"`.
 
+**History supplement S1:** until sessions emit explicit
+`parent_final_verification` receipts, `costPerAcceptedTask` and first-pass
+rate remain **future / uncomputable** for that corpus — do not treat tool
+success or process exit as acceptance. When receipts exist (with
+`verifiedAtMs`), the Package 1 pipeline fills accepted-task cost. Evidence
+handoff observe (generate → consume → reject-stale) is metrics/logging only;
+the handoff schema is not expanded in this round.
+
 Repeated reads are grouped by selector-stripped resource within one parent
 session and emitted as SHA-256 keys, not raw paths/URLs. Different ranges or
 changed file contents can be legitimate reads: these counts are investigation
