@@ -8,11 +8,7 @@ import type { AgentSession } from "../../src/session/agent-session";
 import { WaitTool } from "../../src/tools/wait";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
-import {
-	buildEvidenceHandoff,
-	markEvidenceStale,
-	renderEvidenceHandoffContext,
-} from "../../src/task/evidence-handoff";
+import { buildEvidenceHandoff, markEvidenceStale, renderEvidenceHandoffContext } from "../../src/task/evidence-handoff";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
 import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
@@ -429,6 +425,83 @@ describe("WorkPool dispatch", () => {
 		expect(spawned).toHaveLength(3);
 		gates.get(holdId)?.resolve();
 		gates.get(workpool.agents[2]!.id)?.resolve();
+		await finishPool(session, workpool);
+	});
+
+	it("holds a stale item at the pool limit instead of continuing the running worker", async () => {
+		const session = makeSession([], 1);
+		const gate = Promise.withResolvers<void>();
+		const spawned: string[] = [];
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			spawned.push(id);
+			await gate.promise;
+			markIdle(id);
+			return execution(id);
+		});
+		const followSpy = vi.spyOn(executor, "runSubagentFollowUpTurn");
+		const stale = markEvidenceStale(
+			buildEvidenceHandoff({
+				goals: ["Do not continue a stale worker"],
+				acceptance: ["At the limit, wait for a fresh slot"],
+				confirmedFacts: [{ id: "f1", version: "v1", statement: "prior probe" }],
+			}),
+			"f1",
+			"file changed",
+		);
+		const workpool = new WorkPool(session, {
+			name: "stale-cap",
+			policy: POLICY,
+			context: renderEvidenceHandoffContext(stale),
+		});
+		workpool.push(["one"]);
+		await until(() => workpool.agents.length === 1 && workpool.items[0]?.status === "running");
+		const firstId = workpool.agents[0]!.id;
+		workpool.push(["two"]);
+		await until(() => workpool.items[1]?.status === "queued");
+		expect(workpool.agents).toHaveLength(1);
+		expect(workpool.items[1]?.agentId).toBeUndefined();
+		expect(followSpy).not.toHaveBeenCalled();
+		gate.resolve();
+		await until(() => spawned.length === 2 && workpool.items[1]?.agentId !== firstId);
+		expect(workpool.items[1]?.agentId).not.toBe(firstId);
+		expect(followSpy).not.toHaveBeenCalled();
+		await finishPool(session, workpool);
+	});
+
+	it("replaces an idle malformed worker at the limit instead of continuing it", async () => {
+		const session = makeSession([], 2);
+		const gates = new Map<string, PromiseWithResolvers<void>>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			const itemGate = Promise.withResolvers<void>();
+			gates.set(id, itemGate);
+			await itemGate.promise;
+			markIdle(id);
+			return execution(id);
+		});
+		const followSpy = vi.spyOn(executor, "runSubagentFollowUpTurn");
+		const workpool = new WorkPool(session, {
+			name: "broken-fence",
+			policy: POLICY,
+			context: ["```evidence-handoff", "{not-json", "```"].join("\n"),
+		});
+		// Hold stays running so the first completion cannot drain and close the pool.
+		workpool.push(["one", "hold"]);
+		await until(() => workpool.agents.length === 2 && gates.size === 2);
+		const firstId = workpool.agents[0]!.id;
+		const holdId = workpool.agents[1]!.id;
+		gates.get(firstId)?.resolve();
+		await until(() => workpool.agents.some(agent => agent.id === firstId && agent.state === "idle"));
+		workpool.push(["three"]);
+		await until(() => {
+			const id = workpool.items[2]?.agentId;
+			return Boolean(id && id !== firstId && id !== holdId && gates.has(id));
+		});
+		expect(workpool.items[2]?.agentId).not.toBe(firstId);
+		expect(followSpy).not.toHaveBeenCalled();
+		expect(workpool.agents.length).toBeLessThanOrEqual(workpool.limit());
+		for (const gate of gates.values()) gate.resolve();
 		await finishPool(session, workpool);
 	});
 

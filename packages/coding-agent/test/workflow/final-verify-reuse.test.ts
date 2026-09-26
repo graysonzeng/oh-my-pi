@@ -11,9 +11,39 @@ import { FinalVerifyStage } from "../../src/workflow/stages/final-verify";
 import type { ImplementationArtifactV1, VerificationArtifactV1, VerifierPort } from "../../src/workflow/types";
 import {
 	buildVerificationCodeState,
+	captureVerificationWorkspace,
 	invalidateVerificationResult,
 	sealWorkflowVerifierResult,
 } from "../../src/workflow/verification-validity";
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+	const proc = Bun.spawn(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: {
+			...process.env,
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
+		},
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) throw new Error(stderr || stdout);
+	return stdout.trimEnd();
+}
+
+async function initIsolatedRepo(root: string): Promise<void> {
+	await git(root, "init", "-b", "main");
+	await git(root, "config", "user.name", "Native Test");
+	await git(root, "config", "user.email", "native@example.test");
+	await Bun.write(path.join(root, "tracked.txt"), "one\ntwo\n");
+	await git(root, "add", "tracked.txt");
+	await git(root, "commit", "-m", "initial");
+}
 
 function makeImpl(overrides: Partial<ImplementationArtifactV1> = {}): ImplementationArtifactV1 {
 	return {
@@ -42,6 +72,7 @@ describe("FinalVerifyStage verification reuse", () => {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-final-verify-reuse-"));
 		patchPath = path.join(dir, "change.patch");
 		patchContent = "diff --git a/src/math.ts b/src/math.ts\n+++ b/src/math.ts\n+export const n = 1\n";
+		await initIsolatedRepo(dir);
 		await Bun.write(patchPath, patchContent);
 		implementation = makeImpl({
 			attemptId: "impl-1",
@@ -55,11 +86,14 @@ describe("FinalVerifyStage verification reuse", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	function sealedPrior(commands: string[]): VerificationArtifactV1 {
+	async function sealedPrior(commands: string[]): Promise<VerificationArtifactV1> {
+		const workspace = await captureVerificationWorkspace(dir);
+		if (!workspace) throw new Error("fixture workspace was not provable");
 		const codeState = buildVerificationCodeState({
 			implementation,
 			patchContent,
 			changedFiles: ["src/math.ts"],
+			workspace,
 		});
 		return sealWorkflowVerifierResult(
 			{
@@ -89,36 +123,34 @@ describe("FinalVerifyStage verification reuse", () => {
 	it("reuses a sealed prior green instead of re-spawning verification commands", async () => {
 		let verifyCalls = 0;
 		const verifier: VerifierPort = {
+			workspaceCwd: () => dir,
 			async verify() {
 				verifyCalls += 1;
 				throw new Error("verifier should not run when prior is reusable");
 			},
 		};
 		const stage = new FinalVerifyStage(verifier);
+		const prior = await sealedPrior(["bun check"]);
 		const result = await stage.execute({
 			workflowId: "wf1",
 			attemptId: "final-1",
 			commands: ["bun check"],
 			implementation,
-			priorVerification: sealedPrior(["bun check"]),
-			cwd: dir,
+			priorVerification: prior,
+			cwd: path.join(dir, "not-the-execution-root"),
 		});
 		expect(verifyCalls).toBe(0);
 		expect(result.passed).toBe(true);
 		expect(result.checks.some(c => c.command === "bun check")).toBe(true);
 		expect(result.validity?.executor).toBe("workflow_verifier");
-		expect(result.validity?.codeState.fingerprint).toBe(
-			buildVerificationCodeState({
-				implementation,
-				patchContent,
-				changedFiles: ["src/math.ts"],
-			}).fingerprint,
-		);
+		expect(result.validity?.codeState.fingerprint).toBe(prior.validity?.codeState.fingerprint);
+		expect(result.validity?.codeState.workspace?.cwd).toBe(prior.validity?.codeState.workspace?.cwd);
 	});
 
 	it("re-runs commands when a prior green was invalidated by repair", async () => {
 		let verifyCalls = 0;
 		const verifier: VerifierPort = {
+			workspaceCwd: () => dir,
 			async verify(artifact, commands) {
 				verifyCalls += 1;
 				return {
@@ -139,7 +171,7 @@ describe("FinalVerifyStage verification reuse", () => {
 				};
 			},
 		};
-		const stale = invalidateVerificationResult(sealedPrior(["bun check"]), "repair_applied", "repair_applied");
+		const stale = invalidateVerificationResult(await sealedPrior(["bun check"]), "repair_applied", "repair_applied");
 		const stage = new FinalVerifyStage(verifier);
 		const result = await stage.execute({
 			workflowId: "wf1",
@@ -156,6 +188,7 @@ describe("FinalVerifyStage verification reuse", () => {
 
 	it("still applies completion gates when commands are reused", async () => {
 		const verifier: VerifierPort = {
+			workspaceCwd: () => dir,
 			async verify() {
 				throw new Error("should reuse");
 			},
@@ -166,7 +199,7 @@ describe("FinalVerifyStage verification reuse", () => {
 			attemptId: "final-3",
 			commands: ["bun check"],
 			implementation,
-			priorVerification: sealedPrior(["bun check"]),
+			priorVerification: await sealedPrior(["bun check"]),
 			openFindings: [
 				{
 					id: "f1",
@@ -189,6 +222,7 @@ describe("FinalVerifyStage verification reuse", () => {
 
 	it("still applies forbidden-path policy when command checks are reused", async () => {
 		const verifier: VerifierPort = {
+			workspaceCwd: () => dir,
 			async verify() {
 				throw new Error("should reuse");
 			},
@@ -199,11 +233,157 @@ describe("FinalVerifyStage verification reuse", () => {
 			attemptId: "final-4",
 			commands: ["bun check"],
 			implementation,
-			priorVerification: sealedPrior(["bun check"]),
+			priorVerification: await sealedPrior(["bun check"]),
 			forbiddenPaths: ["src"],
 			cwd: dir,
 		});
 		expect(result.passed).toBe(false);
 		expect(result.checks.some(c => c.id === "forbidden-paths")).toBe(true);
+	});
+
+	it("re-runs when the workspace changes even if the patch file is unchanged", async () => {
+		let verifyCalls = 0;
+		const verifier: VerifierPort = {
+			workspaceCwd: () => dir,
+			async verify(artifact, commands) {
+				verifyCalls += 1;
+				return {
+					kind: "verification",
+					passed: true,
+					checks: commands.map((command, index) => ({
+						id: `command-${index + 1}`,
+						command,
+						status: "passed" as const,
+						summary: "rerun",
+						exitCode: 0,
+					})),
+					schemaVersion: 1,
+					workflowId: artifact.workflowId,
+					attemptId: artifact.attemptId,
+					stage: artifact.stage,
+					createdAt: new Date().toISOString(),
+				};
+			},
+		};
+		const prior = await sealedPrior(["bun check"]);
+		await Bun.write(path.join(dir, "stage-note.txt"), "mutated\n");
+		const stage = new FinalVerifyStage(verifier);
+		const result = await stage.execute({
+			workflowId: "wf1",
+			attemptId: "final-mutated",
+			commands: ["bun check"],
+			implementation,
+			priorVerification: prior,
+			cwd: path.join(dir, "not-the-execution-root"),
+		});
+		expect(verifyCalls).toBe(1);
+		expect(result.passed).toBe(true);
+		expect(result.validity?.codeState.workspace?.contentSha256).not.toBe(
+			prior.validity?.codeState.workspace?.contentSha256,
+		);
+	});
+
+	it("re-runs when the executed cwd differs even if the patch bytes match", async () => {
+		const other = await fs.mkdtemp(path.join(os.tmpdir(), "wf-final-verify-other-"));
+		try {
+			await initIsolatedRepo(other);
+			let verifyCalls = 0;
+			const verifier: VerifierPort = {
+				workspaceCwd: () => other,
+				async verify(artifact, commands) {
+					verifyCalls += 1;
+					return {
+						kind: "verification",
+						passed: true,
+						checks: commands.map((command, index) => ({
+							id: `command-${index + 1}`,
+							command,
+							status: "passed" as const,
+							summary: "other-cwd",
+							exitCode: 0,
+						})),
+						schemaVersion: 1,
+						workflowId: artifact.workflowId,
+						attemptId: artifact.attemptId,
+						stage: artifact.stage,
+						createdAt: new Date().toISOString(),
+					};
+				},
+			};
+			const stage = new FinalVerifyStage(verifier);
+			const result = await stage.execute({
+				workflowId: "wf1",
+				attemptId: "final-other",
+				commands: ["bun check"],
+				implementation,
+				priorVerification: await sealedPrior(["bun check"]),
+				cwd: dir,
+			});
+			expect(verifyCalls).toBe(1);
+			expect(result.checks[0]?.summary).toBe("other-cwd");
+			expect(result.validity?.codeState.workspace?.cwd).toBe(await fs.realpath(other));
+		} finally {
+			await fs.rm(other, { recursive: true, force: true });
+		}
+	});
+
+	it("re-runs when the port does not expose its execution directory", async () => {
+		let verifyCalls = 0;
+		const verifier: VerifierPort = {
+			async verify(artifact, commands) {
+				verifyCalls += 1;
+				return {
+					kind: "verification",
+					passed: true,
+					checks: commands.map((command, index) => ({
+						id: `command-${index + 1}`,
+						command,
+						status: "passed" as const,
+						summary: "no-cwd",
+						exitCode: 0,
+					})),
+					schemaVersion: 1,
+					workflowId: artifact.workflowId,
+					attemptId: artifact.attemptId,
+					stage: artifact.stage,
+					createdAt: new Date().toISOString(),
+				};
+			},
+		};
+		const stage = new FinalVerifyStage(verifier);
+		const result = await stage.execute({
+			workflowId: "wf1",
+			attemptId: "final-unproven-cwd",
+			commands: ["bun check"],
+			implementation,
+			priorVerification: await sealedPrior(["bun check"]),
+			cwd: dir,
+		});
+		expect(verifyCalls).toBe(1);
+		expect(result.checks[0]?.summary).toBe("no-cwd");
+		expect(result.validity?.codeState.workspace).toBeUndefined();
+	});
+
+	it("fails closed when a declared patch is missing instead of reusing a green", async () => {
+		let verifyCalls = 0;
+		const verifier: VerifierPort = {
+			workspaceCwd: () => dir,
+			async verify() {
+				verifyCalls += 1;
+				throw new Error("verifier should not run when patch evidence is missing");
+			},
+		};
+		const stage = new FinalVerifyStage(verifier);
+		await expect(
+			stage.execute({
+				workflowId: "wf1",
+				attemptId: "final-missing",
+				commands: ["bun check"],
+				implementation: { ...implementation, patchPath: path.join(dir, "missing.patch") },
+				priorVerification: null,
+				cwd: dir,
+			}),
+		).rejects.toThrow(/verification patch evidence missing: /);
+		expect(verifyCalls).toBe(0);
 	});
 });

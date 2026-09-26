@@ -139,6 +139,12 @@ describe("product-latency paired schedule", () => {
 		expect(requestsPairedQualification(["--mode", "smoke", "--output", "/tmp/out.json"])).toBe(false);
 	});
 
+	it("routes malformed experiment requests to validation instead of unpaired provider calls", () => {
+		expect(requestsPairedQualification(["--experiment", "advisory"])).toBe(true);
+		expect(requestsPairedQualification(["--experiment"])).toBe(true);
+		expect(requestsPairedQualification(["--experiment=advisories"])).toBe(true);
+	});
+
 	it("keeps arms adjacent and alternates the first arm by pair index", () => {
 		for (const experiment of ["advisories", "sonic-effort"] as const) {
 			const variants = EXPERIMENT_VARIANTS[experiment];

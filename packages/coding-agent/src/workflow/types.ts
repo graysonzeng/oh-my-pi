@@ -352,11 +352,29 @@ export interface VerificationScope {
 	paths?: string[];
 }
 
+export interface VerificationWorkspaceBinding {
+	/** realpath of the directory verification commands execute in. */
+	cwd: string;
+	/** VCS backend that proved the snapshot (`git` or `jj`). */
+	vcs: string;
+	/** realpath of the checkout or workspace root. */
+	root: string;
+	/** Working-copy commit id. Absent proof is not stored as an empty id. */
+	headId: string;
+	/** sha256 of proven HEAD plus dirty and untracked content. Not a guess. */
+	contentSha256: string;
+}
+
 export interface VerificationCodeState {
 	patchSha256: string;
 	changedFiles: string[];
 	implementationAttemptId?: string;
 	fingerprint: string;
+	/**
+	 * Proven execution workspace. Absent on legacy seals and when the tree
+	 * could not be proven — those seals are not reusable.
+	 */
+	workspace?: VerificationWorkspaceBinding;
 }
 
 export interface VerificationValidityV1 {
@@ -932,6 +950,11 @@ export interface VerifierPort {
 		forbiddenPaths?: string[],
 		options?: { signal?: AbortSignal; timeoutMs?: number; expectDirtyTree?: boolean },
 	): Promise<VerificationArtifactV1>;
+	/**
+	 * Directory `verify` actually runs commands in. Stages fingerprint this
+	 * tree, not a caller cwd that may have drifted.
+	 */
+	workspaceCwd?: () => string;
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
-import { WorkflowError } from "../../src/workflow/errors";
+import { WorkflowCancelledError, WorkflowError } from "../../src/workflow/errors";
 import type { ImplementStageResult } from "../../src/workflow/stages/implement";
 import type {
 	ImplementationArtifactV1,
@@ -17,6 +17,7 @@ import {
 	executeWorkPackagePlan,
 	WorkPackageExecutionError,
 	withWorkPackageMerge,
+	withWorkPackageMergePrepared,
 } from "../../src/workflow/work-packages";
 
 const WORKFLOW_ID = "wf-work-packages";
@@ -321,6 +322,58 @@ describe("work-package execution", () => {
 		expect(final.merge.status).toBe("pending");
 		expect(final.merge.patchPath).toBeUndefined();
 	});
+
+	it("reports an in-flight abort as an explainable cancel instead of an internal package failure", async () => {
+		const packages = [workPackage("alpha", "src/alpha.ts"), workPackage("beta", "src/beta.ts")];
+		const plan = requiredPlan(packages, 2);
+		const snapshots: WorkPackageStateArtifactV1[] = [];
+		const controller = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const aborted = Promise.withResolvers<void>();
+		controller.signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+		let thrown: unknown;
+
+		try {
+			const run = executeWorkPackagePlan({
+				workflowId: WORKFLOW_ID,
+				attemptId: "cancel-attempt",
+				cwd,
+				plan,
+				signal: controller.signal,
+				execute: async () => {
+					started.resolve();
+					await aborted.promise;
+					throw new Error("implement aborted");
+				},
+				persist: async state => {
+					snapshots.push(state);
+				},
+			});
+			await waitFor(started.promise, "in-flight work-package start");
+			controller.abort();
+			await run;
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(WorkflowCancelledError);
+		const cancelled = thrown as WorkflowCancelledError;
+		expect(cancelled.kind).toBe("cancelled");
+		expect(cancelled.details).toEqual(
+			expect.objectContaining({
+				recovery: expect.objectContaining({
+					kind: "cancelled_in_flight",
+					explainable: true,
+					verifyRerunGuaranteed: false,
+					isolationIsTransaction: false,
+				}),
+			}),
+		);
+		const failed = snapshots.at(-1)?.packages.filter(candidate => candidate.status === "failed") ?? [];
+		expect(failed.length).toBeGreaterThan(0);
+		expect(failed.every(candidate => candidate.errorKind === "cancelled")).toBe(true);
+		expect(failed.every(candidate => candidate.errorSummary?.includes("isolation is not a transaction"))).toBe(true);
+	});
 });
 
 describe("work-package aggregation", () => {
@@ -382,6 +435,14 @@ describe("work-package aggregation", () => {
 		});
 		expect(mergedState.merge.recovery?.detail).toContain("isolation is not a transaction");
 		expect(mergedState.merge.summary).toBe("combined changes applied");
+		const prepared = withWorkPackageMergePrepared(mergedState, "retry-attempt", {
+			patchPath: "patches/retry.patch",
+			patchSha256: "ab".repeat(32),
+			scopeStatus: "adhered",
+		});
+		expect(prepared.merge.status).toBe("prepared");
+		expect(prepared.merge.recovery).toBeUndefined();
+		expect(prepared.merge.summary).toBe("validated patch prepared before merge");
 
 		const aggregate = aggregateWorkPackageImplementations({
 			workflowId: WORKFLOW_ID,

@@ -266,10 +266,13 @@ export function qualificationIdentity(
 	modelsConfigSha256?: string,
 	options?: { variants?: readonly Variant[]; experiment?: PairedExperimentId },
 ): QualificationIdentity {
-	const variants = [...resolveVariants(options?.variants ?? (options?.experiment ? EXPERIMENT_VARIANTS[options.experiment] : undefined))];
+	const variants = [
+		...resolveVariants(
+			options?.variants ?? (options?.experiment ? EXPERIMENT_VARIANTS[options.experiment] : undefined),
+		),
+	];
 	const includeSonicEffort =
-		options?.experiment === "sonic-effort" ||
-		(options?.experiment !== "advisories" && variants.includes("sonic"));
+		options?.experiment === "sonic-effort" || (options?.experiment !== "advisories" && variants.includes("sonic"));
 	return {
 		rubricId: RUBRIC_ID,
 		mode,
@@ -810,7 +813,9 @@ export function compareQualificationReports(
 		treatmentView.qualityAcceptance,
 		treatmentView.e2eDelegateToAccepted,
 	]);
-	const experimentStamp = stampSonic ? { declaredExperiment: DECLARED_EXPERIMENT_ID as typeof DECLARED_EXPERIMENT_ID } : {};
+	const experimentStamp = stampSonic
+		? { declaredExperiment: DECLARED_EXPERIMENT_ID as typeof DECLARED_EXPERIMENT_ID }
+		: {};
 
 	const acceptanceRates: BenefitVerdict["acceptanceRates"] = {};
 	const p50AcceptanceMs: BenefitVerdict["p50AcceptanceMs"] = {};

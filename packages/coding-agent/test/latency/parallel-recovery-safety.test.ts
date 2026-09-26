@@ -17,6 +17,7 @@ import {
 	completeTaskContract,
 	explainCancelOutcome,
 	explainMergeRecoveryOutcome,
+	isBlockingSharedWrite,
 	resolveSharedWriteConflict,
 } from "../../src/latency/parallel-recovery-safety";
 
@@ -55,11 +56,10 @@ describe("P1-4 shared-write / read / isolation decisions", () => {
 	});
 
 	it("transfers shared-write ownership when requested instead of only blocking", () => {
-		const decision = resolveSharedWriteConflict(
-			unit("a", ["src/a.ts"], "write"),
-			unit("b", ["src/a.ts"], "write"),
-			{ transferOwnership: true, preferOwnerId: "b" },
-		);
+		const decision = resolveSharedWriteConflict(unit("a", ["src/a.ts"], "write"), unit("b", ["src/a.ts"], "write"), {
+			transferOwnership: true,
+			preferOwnerId: "b",
+		});
 		expect(decision.action).toBe("transfer_ownership");
 		expect(decision.ownership).toEqual({ from: "a", to: "b" });
 		expect(decision.code).toBe("ownership_transferred");
@@ -80,6 +80,55 @@ describe("P1-4 shared-write / read / isolation decisions", () => {
 		expect(decision.code).toBe("isolated_merge_risk");
 		expect(decision.detail).toContain("merge/conflict");
 		expect(decision.detail).not.toContain("shared-write overwrite between");
+	});
+	it("blocks a live shared writer overlapping an isolated worktree instead of calling it merge-only", () => {
+		const decision = resolveSharedWriteConflict(
+			unit("live", ["src/a.ts"], "write"),
+			unit("isolated", ["src/a.ts"], "write", "wt-alpha"),
+		);
+		expect(decision.action).toBe("block");
+		expect(decision.code).toBe("shared_write_overlap");
+		expect(decision.detail).toContain("not a merge-only risk");
+		expect(
+			resolveSharedWriteConflict(
+				unit("live", ["src/a.ts"], "write"),
+				unit("isolated", ["src/a.ts"], "write", "wt-alpha"),
+				{
+					transferOwnership: true,
+					preferOwnerId: "isolated",
+				},
+			).action,
+		).toBe("block");
+		expect(
+			isBlockingSharedWrite(
+				unit("live", ["src/a.ts"], "write"),
+				unit("isolated", ["src/a.ts"], "write", "wt-alpha"),
+			),
+		).toBe(true);
+		const mixed = buildConcurrencyDeclaration({
+			declarationId: "mixed-overlap",
+			ownerKind: "workflow",
+			ownerId: "wf",
+			scopeArtifactRef: "artifact://plan",
+			scopeArtifactSha256: "c".repeat(64),
+			revision: 0,
+			maxConcurrency: 2,
+			completionPolicy: { kind: "all_required", minSuccesses: null },
+			failurePolicy: "fail_closed",
+			cancelPolicy: "stop_new_work",
+			units: [unit("live", ["src/a.ts"], "write"), unit("isolated", ["src/a.ts"], "write", "wt-alpha")],
+		});
+		expect(validateConcurrencyDeclaration(mixed).errors.some(error => error.code === "path_overlap")).toBe(true);
+		expect(shouldAutoParallel(mixed.units)).toBe(false);
+	});
+
+	it("treats leading whitespace and dot-slash as the same shared-write path", () => {
+		const decision = resolveSharedWriteConflict(
+			unit("a", [" ./src/a.ts"], "write"),
+			unit("b", ["src/a.ts"], "write"),
+		);
+		expect(decision.action).toBe("block");
+		expect(decision.paths).toEqual(["src/a.ts"]);
 	});
 
 	it("validateConcurrencyDeclaration rejects shared write overlap but allows isolated same-path", () => {
@@ -109,10 +158,7 @@ describe("P1-4 shared-write / read / isolation decisions", () => {
 			completionPolicy: { kind: "all_required", minSuccesses: null },
 			failurePolicy: "fail_closed",
 			cancelPolicy: "stop_new_work",
-			units: [
-				unit("a", ["pkg/a"], "write", "wt-1"),
-				unit("b", ["pkg/a"], "write", "wt-2"),
-			],
+			units: [unit("a", ["pkg/a"], "write", "wt-1"), unit("b", ["pkg/a"], "write", "wt-2")],
 		});
 		const isolatedValidation = validateConcurrencyDeclaration(isolated);
 		expect(isolatedValidation.ok).toBe(true);
@@ -150,10 +196,7 @@ describe("P1-4 shared-write / read / isolation decisions", () => {
 			completionPolicy: { kind: "all_required", minSuccesses: null },
 			failurePolicy: "fail_closed",
 			cancelPolicy: "cascade_dependents",
-			units: [
-				unit("w1", ["src/a.ts"], "write", "wt-shared"),
-				unit("w2", ["src/b.ts"], "write", "wt-shared"),
-			],
+			units: [unit("w1", ["src/a.ts"], "write", "wt-shared"), unit("w2", ["src/b.ts"], "write", "wt-shared")],
 		});
 		const validation = validateConcurrencyDeclaration(sameWt);
 		expect(validation.ok).toBe(false);
@@ -174,9 +217,7 @@ describe("P1-4 task contract completion", () => {
 	});
 
 	it("keeps an existing Acceptance section without inventing refusal", () => {
-		const result = completeTaskContract(
-			["# Target", "- a.ts", "# Acceptance", "- tests pass for a.ts"].join("\n"),
-		);
+		const result = completeTaskContract(["# Target", "- a.ts", "# Acceptance", "- tests pass for a.ts"].join("\n"));
 		expect(result.refused).toBe(false);
 		expect(result.acceptanceCompleted).toBe(false);
 		expect(result.acceptance).toEqual(["- tests pass for a.ts"]);

@@ -423,9 +423,7 @@ describe("structured subagent primitive", () => {
 			"- packages/coding-agent/src/task/evidence-handoff.ts",
 			"- Wire ensureEvidenceHandoffContext into spawn",
 		]);
-		expect(extracted!.handoff.acceptance).toEqual([
-			"- Dispatched context includes an evidence-handoff fence",
-		]);
+		expect(extracted!.handoff.acceptance).toEqual(["- Dispatched context includes an evidence-handoff fence"]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 

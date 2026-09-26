@@ -166,7 +166,9 @@ function resultRowTrueIds(item: Record<string, unknown>): string[] {
 	return ids;
 }
 
-function taskToolCallIdFromJob(job: AsyncJob | undefined): string | undefined {
+export function taskToolCallIdFromJob(
+	job: Pick<AsyncJob, "taskToolCallId" | "latestDetails"> | undefined,
+): string | undefined {
 	if (!job) return undefined;
 	if (typeof job.taskToolCallId === "string" && job.taskToolCallId.trim()) return job.taskToolCallId.trim();
 	const details = job.latestDetails;

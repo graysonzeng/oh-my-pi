@@ -45,6 +45,7 @@ import {
 	type SchemeSpec,
 	sessionResolveContext,
 } from "../internal-urls";
+import { resolveWorkflowCatalogToolDocs } from "../internal-urls/xd-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
@@ -165,7 +166,6 @@ import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
-import type { WorkflowToolOptimization } from "./workflow-session-fields";
 
 import {
 	cfgFetchEnabled,
@@ -1014,38 +1014,23 @@ function appendPathRereadSoftCapHint(session: ToolSession, result: AgentToolResu
  * Directories return a formatted listing with modification times.
  */
 
-/**
- * Resolve a workflow-catalog `xd://tools/{name}` locator from the prepare-time
- * capture when the child session has no xd registry mounted.
- * - Non-allowlisted names are refused (catalog never elevates privileges).
- * - Allowlisted names with no captured schema fail observably (no fake recovery).
- */
-export function resolveWorkflowCatalogToolDocs(
-	name: string,
-	workflowOpt: Pick<WorkflowToolOptimization, "presentationToolSchemas" | "presentationAllowedTools">,
-): string {
-	const allowed = workflowOpt.presentationAllowedTools;
-	if (allowed && !allowed.includes(name)) {
-		throw new ToolError(`Tool "${name}" is outside the role allowlist; catalog expand refused.`);
-	}
-	const schema = workflowOpt.presentationToolSchemas?.get(name);
-	if (schema === undefined) {
-		throw new ToolError(`No full schema registered for allowlisted tool "${name}".`, {
-			path: `xd://tools/${name}`,
-		});
-	}
-	const schemaJson = typeof schema === "string" ? schema : JSON.stringify(schema, null, 2);
-	return [`# Tool: ${name}`, "", "```json", schemaJson, "```", ""].join("\n");
-}
 /** Structured children advertise `xd://tools/{name}` without an xd registry. */
 function workflowCatalogToolContent(url: string, session: ToolSession): string | undefined {
 	const match = /^xd:\/\/tools\/([^/?#]+)$/i.exec(url.trim());
-	const name = match?.[1];
-	if (!name) return undefined;
+	const captured = match?.[1];
+	if (!captured) return undefined;
+	let name = captured;
+	try {
+		name = decodeURIComponent(captured);
+	} catch {
+		name = captured;
+	}
 	const workflowOpt = session.workflowToolOptimization;
 	if (!workflowOpt?.presentationToolSchemas) return undefined;
 	return resolveWorkflowCatalogToolDocs(name, workflowOpt);
 }
+
+export { resolveWorkflowCatalogToolDocs };
 
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
@@ -2829,6 +2814,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				details: { contentType: "text/plain" },
 				sourceInternal: url,
 				entityLabel: "resource",
+				ignoreResultLimits: true,
 				immutable: true,
 			});
 		}
@@ -2856,7 +2842,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			sourcePath: resource.sourcePath,
 			sourceInternal: url,
 			entityLabel: "resource",
-			ignoreResultLimits: spec.unbounded === true,
+			ignoreResultLimits: spec.unbounded === true || /^xd:\/\/(?:tools|skills)\/[^/?#]+$/i.test(url.trim()),
 			immutable: resource.immutable,
 		});
 	}

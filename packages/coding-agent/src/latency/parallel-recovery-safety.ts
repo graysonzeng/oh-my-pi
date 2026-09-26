@@ -9,6 +9,9 @@
  * machine, and isolation is never treated as a transaction.
  */
 
+import { prompt } from "@oh-my-pi/pi-utils";
+import acceptanceTemplate from "../prompts/system/task-contract-acceptance.md" with { type: "text" };
+import completedContractTemplate from "../prompts/system/task-contract-completed.md" with { type: "text" };
 import type { ConcurrencyUnitMode, ConcurrencyUnitV1 } from "./concurrency-declaration";
 
 /** Workspace class for conflict decisions. */
@@ -96,10 +99,14 @@ export interface ParallelRecoveryOutcome {
 	unitIds?: string[];
 }
 
+export interface MergeRecoveryOutcome extends ParallelRecoveryOutcome {
+	kind: "merge_conflict" | "merge_applied" | "recovered_applied" | "needs_reconciliation";
+}
+
 const SHARED_SCOPE_ALIASES = new Set(["", "shared", "workspace", "main", "parent"]);
 
 export function normalizeParallelPath(path: string): string {
-	return path.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "").trim();
+	return path.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
 }
 
 export function pathSetsOverlap(left: readonly string[], right: readonly string[]): boolean {
@@ -151,10 +158,7 @@ export function sharedWorkspaceKey(isolationScope: string | undefined): string |
 	return isolationScope!.trim();
 }
 
-export function sameSharedWorkspace(
-	leftIsolation: string | undefined,
-	rightIsolation: string | undefined,
-): boolean {
+export function sameSharedWorkspace(leftIsolation: string | undefined, rightIsolation: string | undefined): boolean {
 	const left = sharedWorkspaceKey(leftIsolation);
 	const right = sharedWorkspaceKey(rightIsolation);
 	if (left === null || right === null) return false;
@@ -214,9 +218,11 @@ export function resolveSharedWriteConflict(
 		};
 	}
 
-	const shared = sameSharedWorkspace(left.isolationScope, right.isolationScope);
-	if (!shared) {
-		// Isolated worktrees: same path is a merge/conflict risk, not shared overwrite.
+	const leftIsolated = workspaceKind(left.isolationScope) === "isolated";
+	const rightIsolated = workspaceKind(right.isolationScope) === "isolated";
+	// Merge risk is only distinct isolated worktrees. A shared/live writer overlapping
+	// an isolated unit is still a shared-write hazard, not a merge-only classification.
+	if (leftIsolated && rightIsolated && !sameSharedWorkspace(left.isolationScope, right.isolationScope)) {
 		return {
 			action: "merge_risk",
 			code: "isolated_merge_risk",
@@ -240,7 +246,8 @@ export function resolveSharedWriteConflict(
 		};
 	}
 
-	if (options.transferOwnership) {
+	const mixedWithShared = leftIsolated !== rightIsolated;
+	if (options.transferOwnership && !mixedWithShared) {
 		const owner =
 			options.preferOwnerId === right.id ? right.id : options.preferOwnerId === left.id ? left.id : left.id;
 		const from = owner === left.id ? right.id : left.id;
@@ -258,7 +265,9 @@ export function resolveSharedWriteConflict(
 	return {
 		action: "block",
 		code: "shared_write_overlap",
-		detail: `shared-workspace concurrent writes on ${paths.join(", ")} between ${left.id} and ${right.id}`,
+		detail: mixedWithShared
+			? `shared-workspace write overlaps isolated worktree on ${paths.join(", ")} between ${left.id} and ${right.id}; not a merge-only risk`
+			: `shared-workspace concurrent writes on ${paths.join(", ")} between ${left.id} and ${right.id}`,
 		paths,
 		leftId: left.id,
 		rightId: right.id,
@@ -315,26 +324,19 @@ function nonEmptyLines(lines: readonly string[]): string[] {
 	return lines.map(line => line.trim()).filter(Boolean);
 }
 
-function synthesizeAcceptance(parts: {
-	preamble: string[];
-	target: string[];
-	change: string[];
-}): string[] {
+function synthesizeAcceptance(parts: { preamble: string[]; target: string[]; change: string[] }): string[] {
 	const fromTarget = nonEmptyLines(parts.target);
 	const fromChange = nonEmptyLines(parts.change);
-	const fromPreamble = nonEmptyLines(parts.preamble).filter(
-		line => !/^#{1,6}\s/.test(line) && line.length >= 8,
-	);
+	const fromPreamble = nonEmptyLines(parts.preamble).filter(line => !/^#{1,6}\s/.test(line) && line.length >= 8);
 
-	const candidates = [
-		...fromTarget.map(line => `Target satisfied: ${line.replace(/^[-*]\s+/, "")}`),
-		...fromChange.map(line => `Change observable: ${line.replace(/^[-*]\s+/, "")}`),
-		...fromPreamble.slice(0, 3).map(line => `Outcome: ${line}`),
-	];
-
-	const unique = [...new Set(candidates.map(c => c.trim()).filter(Boolean))];
-	if (unique.length > 0) return unique.slice(0, 6);
-	return ["Assigned work produces an observable result that can be checked against the task description."];
+	const outcomes = fromPreamble.slice(0, 3);
+	const candidates = prompt.render(acceptanceTemplate, {
+		targets: fromTarget.map(line => line.replace(/^[-*]\s+/, "")),
+		changes: fromChange.map(line => line.replace(/^[-*]\s+/, "")),
+		outcomes,
+		hasCandidates: fromTarget.length + fromChange.length + outcomes.length > 0,
+	});
+	return [...new Set(nonEmptyLines(candidates.split("\n")))].slice(0, 6);
 }
 
 /**
@@ -381,12 +383,7 @@ export function completeTaskContract(assignment: string): TaskContractCompletion
 		change: sections.change,
 	});
 
-	const completedAssignment = [
-		trimmed,
-		"",
-		"# Acceptance",
-		...acceptance.map(line => (line.startsWith("-") ? line : `- ${line}`)),
-	].join("\n");
+	const completedAssignment = prompt.render(completedContractTemplate, { assignment: trimmed, acceptance }).trimEnd();
 
 	return {
 		refused: false,
@@ -488,10 +485,10 @@ export function explainCancelOutcome(input: {
 
 /** Explainable merge / recovery outcome without treating isolation as a transaction. */
 export function explainMergeRecoveryOutcome(input: {
-	kind: "merge_conflict" | "merge_applied" | "recovered_applied" | "needs_reconciliation";
+	kind: MergeRecoveryOutcome["kind"];
 	detail: string;
 	unitIds?: readonly string[];
-}): ParallelRecoveryOutcome {
+}): MergeRecoveryOutcome {
 	return {
 		kind: input.kind,
 		explainable: true,

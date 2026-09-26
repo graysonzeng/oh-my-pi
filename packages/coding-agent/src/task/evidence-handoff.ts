@@ -113,8 +113,11 @@ export interface BuildEvidenceHandoffInput {
 }
 
 const FENCE_RE = new RegExp(`\`\`\`${EVIDENCE_HANDOFF_FENCE}\\s*\\n([\\s\\S]*?)\\n\`\`\``, "m");
-/** Matches an evidence-handoff fence even when the body is malformed. */
-const FENCE_STRIP_RE = new RegExp(`\`\`\`${EVIDENCE_HANDOFF_FENCE}\\b[\\s\\S]*?\`\`\``, "gm");
+/**
+ * Closed fence, or an opening tag through EOF when the closer was truncated.
+ * Do not use the `m` flag: `$` must mean end of input, not end of line.
+ */
+const FENCE_BLOCK_SOURCE = `\`\`\`${EVIDENCE_HANDOFF_FENCE}\\b[\\s\\S]*?(?:\`\`\`|$)`;
 
 function nonEmptyStrings(values: readonly string[] | undefined): string[] {
 	if (!values) return [];
@@ -308,17 +311,32 @@ export function extractEvidenceHandoffFromContext(context: string): {
 	};
 }
 
-/** True when context contains an evidence-handoff fence (valid or not). */
+/** True when context contains an evidence-handoff fence, including one truncated at EOF. */
 export function contextHasEvidenceHandoffFence(context: string): boolean {
-	return FENCE_STRIP_RE.test(context);
+	return new RegExp(FENCE_BLOCK_SOURCE).test(context);
 }
 
-/** Remove every evidence-handoff fence from context (used when parse fails for reviewers). */
+/** Remove every evidence-handoff fence, including an unterminated opener through EOF. */
 export function stripEvidenceHandoffFences(context: string): string {
 	return context
-		.replace(FENCE_STRIP_RE, "")
+		.replace(new RegExp(FENCE_BLOCK_SOURCE, "g"), "")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
+}
+
+/**
+ * Distinguish a missing handoff from a fence that did not parse.
+ * Callers must not treat an unparseable fence as "no handoff".
+ */
+export function inspectEvidenceHandoffContext(context: string | undefined): {
+	handoff: EvidenceHandoffV1 | null;
+	invalid: boolean;
+} {
+	const trimmed = context?.trim();
+	if (!trimmed) return { handoff: null, invalid: false };
+	const extracted = extractEvidenceHandoffFromContext(trimmed);
+	if (extracted) return { handoff: extracted.handoff, invalid: false };
+	return { handoff: null, invalid: contextHasEvidenceHandoffFence(trimmed) };
 }
 
 /** Serialize a handoff as a recoverable fenced JSON block. Rejects wrong kind/version. */
@@ -450,6 +468,8 @@ function scopesRelated(existing: ChangeScope, correction: ChangeScope | undefine
 export function decideWorkerReuse(input: {
 	candidate?: WorkerReuseCandidate | null;
 	handoff?: EvidenceHandoffV1 | null;
+	/** Context had an evidence-handoff fence that did not parse. Not the same as a missing handoff. */
+	invalidHandoff?: boolean;
 	correctionScope?: ChangeScope;
 }): WorkerReuseDecision {
 	const candidate = input.candidate;
@@ -457,6 +477,9 @@ export function decideWorkerReuse(input: {
 	if (candidate.isolated === true) return { action: "spawn_fresh", reason: "isolated", agentId: candidate.id };
 	if (candidate.status !== "idle" && candidate.status !== "parked") {
 		return { action: "spawn_fresh", reason: "not_resumable", agentId: candidate.id };
+	}
+	if (input.invalidHandoff === true) {
+		return { action: "spawn_fresh", reason: "invalid_handoff", agentId: candidate.id };
 	}
 	if (input.handoff == null) {
 		return { action: "continue", reason: "resumable_session", agentId: candidate.id };
@@ -532,8 +555,12 @@ export function prepareSubagentContext(
 		return trimmed;
 	}
 	const projected = projectEvidenceHandoff(extracted.handoff, audience);
+	// A second fence in the preamble/postamble is not re-projected. Reviewers must
+	// not keep it: it can still carry author conclusions or an unparseable body.
+	const preamble = audience === "reviewer" ? stripEvidenceHandoffFences(extracted.preamble) : extracted.preamble;
+	const postamble = audience === "reviewer" ? stripEvidenceHandoffFences(extracted.postamble) : extracted.postamble;
 	return renderEvidenceHandoffContext(projected, {
-		preamble: extracted.preamble,
-		postamble: extracted.postamble,
+		...(preamble ? { preamble } : {}),
+		...(postamble ? { postamble } : {}),
 	});
 }

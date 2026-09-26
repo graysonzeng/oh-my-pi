@@ -5,9 +5,11 @@ import type { ImplementationArtifactV1, ReviewFindingV1, VerificationArtifactV1,
 import {
 	assessVerificationReuse,
 	buildVerificationCodeState,
+	captureVerificationWorkspace,
 	projectReusedVerificationChecks,
 	resolveVerificationPatchEvidence,
 	sealWorkflowVerifierResult,
+	verificationExecutionCwd,
 } from "../verification-validity";
 
 export interface FinalVerifyInput {
@@ -21,11 +23,12 @@ export interface FinalVerifyInput {
 	scopeStatus?: ScopeStatus;
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	/** Fallback when the verifier does not expose its execution directory. */
 	cwd?: string;
 	/**
-	 * Prior sealed verification (typically implementation_verify). When still
-	 * valid for the same code state + commands, command checks are reused
-	 * instead of re-running; completion gates still always run.
+	 * Prior sealed verification (typically implementation_verify). Command checks
+	 * are reused only when patch identity and the executed workspace still match.
+	 * Completion gates still always run.
 	 */
 	priorVerification?: VerificationArtifactV1 | null;
 }
@@ -39,18 +42,21 @@ export class FinalVerifyStage {
 
 	async execute(input: FinalVerifyInput): Promise<VerificationArtifactV1> {
 		const impl = input.implementation;
-		const cwd = input.cwd ?? process.cwd();
-		const { patchContent, changedFiles } = await resolveVerificationPatchEvidence(impl, cwd);
+		const executedCwd = verificationExecutionCwd(this.#verifier);
+		const patchCwd = executedCwd ?? input.cwd ?? process.cwd();
+		const { patchContent, changedFiles } = await resolveVerificationPatchEvidence(impl, patchCwd);
+		const workspace = executedCwd
+			? ((await captureVerificationWorkspace(executedCwd, input.signal)) ?? undefined)
+			: undefined;
 
 		const codeState = buildVerificationCodeState({
 			implementation: impl,
 			patchContent,
 			changedFiles,
+			workspace,
 		});
 		const scope =
-			changedFiles.length > 0
-				? { kind: "paths" as const, paths: changedFiles }
-				: { kind: "repo" as const };
+			changedFiles.length > 0 ? { kind: "paths" as const, paths: changedFiles } : { kind: "repo" as const };
 
 		const reuse = assessVerificationReuse({
 			prior: input.priorVerification,

@@ -6,6 +6,7 @@ import { REPORT_ISSUE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-iss
 import { isResolutionDeviceName } from "@oh-my-pi/pi-tui/tools/resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { parseXdTopicUrl, parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
+import type { WorkflowToolOptimization } from "../tools/workflow-session-fields";
 import type { ToolSession } from "../tools";
 import { resolveToolTier } from "../tools/approval";
 import { dispatchReportIssueDevice, reportIssueDeviceUsage } from "../tools/report-tool-issue";
@@ -83,10 +84,12 @@ export class XdProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const skillBody = await this.#skillPresentation(url, context);
 		if (skillBody) return skillBody;
+		const toolBody = this.#toolPresentation(url, context);
+		if (toolBody) return toolBody;
 		const session = context?.session;
 		if (!session) throw new ToolError(NOT_MOUNTED);
-		const topic = parseXdTopicUrl(url.href);
-		const device = topic ? null : parseXdUrl(url.href);
+		const topic = parseXdTopicUrl(url.rawHref ?? url.href);
+		const device = topic ? null : parseXdUrl(url.rawHref ?? url.href);
 		let content: string;
 		if (topic) content = this.#topic(session, topic.name, topic.topic);
 		else if (device) content = this.#usage(session, device.name);
@@ -159,9 +162,14 @@ export class XdProtocolHandler implements ProtocolHandler {
 
 	/** `xd://skills/<name>`: one-hop skill body, same load as `skill://`. */
 	async #skillPresentation(url: InternalUrl, context?: ResolveContext): Promise<InternalResource | undefined> {
-		const match = /^xd:\/\/skills\/([^/?#]+)$/i.exec(url.href.trim());
-		const name = match?.[1];
+		const name = presentationLocatorName(url, "skills");
 		if (!name) return undefined;
+		// Prepared catalog snapshot wins over a later disk read so the advertised
+		// locator cannot return a body that changed after prepare.
+		const prepared = context?.session?.workflowToolOptimization?.presentationSkillBodies?.get(name);
+		if (typeof prepared === "string" && prepared.length > 0) {
+			return skillResource(url, prepared);
+		}
 		const skills = context?.skills;
 		if (!skills || skills.length === 0) {
 			throw new ToolError(`xd://skills/${name}: no skills loaded in this session.`);
@@ -174,18 +182,79 @@ export class XdProtocolHandler implements ProtocolHandler {
 					skills.map(item => item.name),
 				),
 			);
-		// Prefer the prepared in-memory body. Discovered skills fall back to SKILL.md.
 		const rawContent = "content" in skill ? skill.content : undefined;
-		const content =
-			typeof rawContent === "string" && rawContent.length > 0
-				? rawContent
-				: await fs.readFile(skill.filePath, "utf-8");
+		if (typeof rawContent === "string" && rawContent.length > 0) {
+			return skillResource(url, rawContent, skill.filePath);
+		}
+		if (typeof skill.filePath !== "string" || skill.filePath.length === 0) {
+			throw new ToolError(`xd://skills/${name}: skill body is unavailable (no prepared body or SKILL.md).`);
+		}
+		const content = await fs.readFile(skill.filePath, "utf-8");
+		return skillResource(url, content, skill.filePath);
+	}
+
+	/**
+	 * `xd://tools/<name>`: catalog schema captured before stubbing.
+	 * Must run before topic parsing — `parseXdTopicUrl` would otherwise treat
+	 * this as topic `<name>` of a device named `tools`.
+	 */
+	#toolPresentation(url: InternalUrl, context?: ResolveContext): InternalResource | undefined {
+		const name = presentationLocatorName(url, "tools");
+		if (!name) return undefined;
+		const opt = context?.session?.workflowToolOptimization;
+		if (!opt?.presentationToolSchemas) return undefined;
+		const content = resolveWorkflowCatalogToolDocs(name, opt);
 		return {
-			url: url.href,
+			url: url.rawHref ?? url.href,
 			content,
-			contentType: "text/markdown",
+			contentType: "text/plain",
 			size: Buffer.byteLength(content),
-			...(typeof skill.filePath === "string" && skill.filePath.length > 0 ? { sourcePath: skill.filePath } : {}),
 		};
 	}
+}
+
+/**
+ * Resolve a workflow-catalog `xd://tools/{name}` locator from the prepare-time
+ * capture when the child session has no xd registry mounted.
+ * - Non-allowlisted names are refused (catalog never elevates privileges).
+ * - Allowlisted names with no captured schema fail observably (no fake recovery).
+ */
+export function resolveWorkflowCatalogToolDocs(
+	name: string,
+	workflowOpt: Pick<WorkflowToolOptimization, "presentationToolSchemas" | "presentationAllowedTools">,
+): string {
+	const allowed = workflowOpt.presentationAllowedTools;
+	if (allowed && !allowed.includes(name)) {
+		throw new ToolError(`Tool "${name}" is outside the role allowlist; catalog expand refused.`);
+	}
+	const schema = workflowOpt.presentationToolSchemas?.get(name);
+	if (schema === undefined) {
+		throw new ToolError(`No full schema registered for allowlisted tool "${name}".`, {
+			path: `xd://tools/${name}`,
+		});
+	}
+	const schemaJson = typeof schema === "string" ? schema : JSON.stringify(schema, null, 2);
+	return [`# Tool: ${name}`, "", "```json", schemaJson, "```", ""].join("\n");
+}
+
+function presentationLocatorName(url: InternalUrl, namespace: "skills" | "tools"): string | undefined {
+	const raw = (url.rawHref ?? url.href).trim();
+	const match = new RegExp(`^xd://${namespace}/([^/?#]+)$`, "i").exec(raw);
+	const captured = match?.[1];
+	if (!captured) return undefined;
+	try {
+		return decodeURIComponent(captured);
+	} catch {
+		return captured;
+	}
+}
+
+function skillResource(url: InternalUrl, content: string, sourcePath?: string): InternalResource {
+	return {
+		url: url.rawHref ?? url.href,
+		content,
+		contentType: "text/markdown",
+		size: Buffer.byteLength(content),
+		...(typeof sourcePath === "string" && sourcePath.length > 0 ? { sourcePath } : {}),
+	};
 }

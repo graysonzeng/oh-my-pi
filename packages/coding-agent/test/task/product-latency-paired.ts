@@ -22,10 +22,12 @@ export { EXPERIMENT_VARIANTS };
 
 /** True when argv selects a paired experiment surface (not unpaired qualification). */
 export function requestsPairedQualification(argv: readonly string[]): boolean {
-	if (argv.some(argument => argument.startsWith("--paired-"))) return true;
-	const index = argv.indexOf("--experiment");
-	const experiment = index >= 0 ? argv[index + 1] : undefined;
-	return experiment === "advisories" || experiment === "sonic-effort";
+	// Route every experiment request to paired validation, including malformed
+	// values, so a typo cannot launch the unrelated unpaired provider suite.
+	return argv.some(
+		argument =>
+			argument.startsWith("--paired-") || argument === "--experiment" || argument.startsWith("--experiment="),
+	);
 }
 
 export interface PairedSlot {
@@ -190,7 +192,8 @@ function assemblePairedReport(args: {
 		modelsConfigSha256: args.modelsConfigSha256,
 		experiment: args.experiment,
 		variants: EXPERIMENT_VARIANTS[args.experiment],
-	});	const pairs = collectPairs(args.schedule, args.recorded);
+	});
+	const pairs = collectPairs(args.schedule, args.recorded);
 	const benefit = finalizeBenefit({
 		experiment: args.experiment,
 		phase: args.phase,

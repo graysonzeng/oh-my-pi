@@ -1157,14 +1157,13 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 			});
 			if (pathMs !== null) criticalPathSamples.push(pathMs);
 		}
-		// Active wall up to verification is task work when assistants were active;
-		// missing active timestamps stay unknown rather than zero-filled.
-		const assistantsThroughVerify =
-			verifyTs === null
-				? parent.assistantTimestamps
-				: parent.assistantTimestamps.filter(ts => ts <= verifyTs);
-		const completionActive = computeActiveWallMs(assistantsThroughVerify);
-		if (completionActive !== undefined) taskCompletionSamples.push(completionActive);
+		// Without a verification timestamp, there is no boundary separating
+		// accepted work from later activity. Keep its duration unknown.
+		if (verifyTs !== null) {
+			const assistantsThroughVerify = parent.assistantTimestamps.filter(ts => ts <= verifyTs);
+			const completionActive = computeActiveWallMs(assistantsThroughVerify);
+			if (completionActive !== undefined) taskCompletionSamples.push(completionActive);
+		}
 	}
 	for (const child of children) {
 		if (parentOf(child, byPath, byId)) continue;

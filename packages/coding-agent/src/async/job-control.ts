@@ -8,11 +8,11 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
 import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
 
-import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	renderStructuredJson,
 	settledTaskDeliveryFields,
 	structuredStatusLabel,
+	taskToolCallIdFromJob,
 } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
@@ -30,26 +30,6 @@ import type {
 
 import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-
-/** Originating parent task tool call id from the job row or nested progress details. */
-function taskToolCallIdFromTrackedJob(job: TrackedJobLike): string | undefined {
-	if (typeof job.taskToolCallId === "string" && job.taskToolCallId.trim()) return job.taskToolCallId.trim();
-	const details = job.latestDetails;
-	if (!isRecord(details)) return undefined;
-	if (
-		isRecord(details.async) &&
-		typeof details.async.taskToolCallId === "string" &&
-		details.async.taskToolCallId.trim()
-	) {
-		return details.async.taskToolCallId.trim();
-	}
-	if (!Array.isArray(details.progress)) return undefined;
-	for (const item of details.progress) {
-		if (!isRecord(item) || typeof item.taskToolCallId !== "string" || !item.taskToolCallId.trim()) continue;
-		return item.taskToolCallId.trim();
-	}
-	return undefined;
-}
 
 /**
  * Resolve a list of job ids to job records visible to the calling agent.
@@ -234,7 +214,7 @@ export function snapshotJobs(
 						latestDetails: latest.latestDetails,
 					})
 				: {};
-		const taskToolCallId = latest.type === "task" ? taskToolCallIdFromTrackedJob(latest) : undefined;
+		const taskToolCallId = latest.type === "task" ? taskToolCallIdFromJob(latest) : undefined;
 		return {
 			id: latest.id,
 			type: latest.type,

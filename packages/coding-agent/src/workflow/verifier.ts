@@ -68,6 +68,11 @@ export class Verifier implements VerifierPort {
 		}
 	}
 
+	/** Directory command checks execute in. Reuse must fingerprint this tree. */
+	workspaceCwd(): string {
+		return this.#cwd;
+	}
+
 	async verify(
 		artifact: VerificationSubject,
 		commands: string[],

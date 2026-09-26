@@ -65,9 +65,10 @@ export function buildParentFinalVerificationDetails(
 }
 
 /** Map an explicit receipt onto ordinary cohort verifier fields. Unknown stays unknown. */
-export function ordinaryVerifierFromParentFinal(
-	observation: ParentFinalVerificationObservation | null | undefined,
-): { source: OrdinaryVerifierSource; status: OrdinaryVerifierStatus } {
+export function ordinaryVerifierFromParentFinal(observation: ParentFinalVerificationObservation | null | undefined): {
+	source: OrdinaryVerifierSource;
+	status: OrdinaryVerifierStatus;
+} {
 	if (!observation) return { source: "unknown", status: "unknown" };
 	const source: OrdinaryVerifierSource =
 		observation.source === "session_stop" || observation.source === "extension" ? observation.source : "unknown";
@@ -108,8 +109,7 @@ export function sumChildIntervalMs(childIntervals: readonly { start: number; end
 export function unionChildIntervalMs(childIntervals: readonly { start: number; end: number }[]): number {
 	const valid = childIntervals
 		.filter(
-			interval =>
-				Number.isFinite(interval.start) && Number.isFinite(interval.end) && interval.end >= interval.start,
+			interval => Number.isFinite(interval.start) && Number.isFinite(interval.end) && interval.end >= interval.start,
 		)
 		.map(interval => ({ start: interval.start, end: interval.end }))
 		.sort((a, b) => a.start - b.start || a.end - b.end);

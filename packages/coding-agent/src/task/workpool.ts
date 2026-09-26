@@ -9,7 +9,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { runSubagentFollowUpTurn } from "./executor";
-import { decideWorkerReuse, extractEvidenceHandoffFromContext } from "./evidence-handoff";
+import { decideWorkerReuse, inspectEvidenceHandoffContext } from "./evidence-handoff";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
@@ -126,6 +126,8 @@ export class WorkPool {
 	#poolJobStarted = false;
 	readonly #drainWaiters: PromiseWithResolvers<void>[] = [];
 	readonly #freshQueue: WorkPoolItem[] = [];
+	/** Items waiting for a fresh slot because existing workers must not be continued. */
+	readonly #heldForFreshSpawn: WorkPoolItem[] = [];
 
 	constructor(session: ToolSession, options: WorkPoolCreateOptions) {
 		this.name = options.name;
@@ -244,19 +246,6 @@ export class WorkPool {
 		return window !== undefined && window > 0 ? tokens / window : tokens;
 	}
 
-	#leastLoadedIdle(): WorkPoolAgent | undefined {
-		let selected: WorkPoolAgent | undefined;
-		let selectedLoad = Infinity;
-		for (const agent of this.agents) {
-			if (agent.state !== "idle") continue;
-			const load = this.#contextLoad(agent);
-			if (load >= selectedLoad) continue;
-			selected = agent;
-			selectedLoad = load;
-		}
-		return selected;
-	}
-
 	async #dispatch(item: WorkPoolItem): Promise<void> {
 		if (this.closed || item.status !== "queued") return;
 		if (this.freshAgents) {
@@ -268,32 +257,23 @@ export class WorkPool {
 			}
 			return;
 		}
-		const idle = this.#leastLoadedIdle();
-		if (idle) {
-			// P1-1: prefer continuing idle workers only when the shared handoff is
-			// still valid; stale / invalid / isolated → spawn_fresh instead.
-			const handoff = this.context ? (extractEvidenceHandoffFromContext(this.context)?.handoff ?? null) : null;
-			const ref = AgentRegistry.global().get(idle.id);
-			const decision = decideWorkerReuse({
-				candidate: {
-					id: idle.id,
-					status: ref?.status === "parked" ? "parked" : "idle",
-					isolated: false,
-				},
-				handoff,
-			});
-			if (decision.action === "continue") {
-				item.agentId = idle.id;
-				idle.queue.push(item);
-				this.#card("dispatched", idle.id, `[${item.id}] ${item.text}`);
-				this.#drain(idle);
+		if (this.#blocksExistingAgents()) {
+			if (this.agents.length >= this.limit()) this.#evictIdleAgents();
+			if (this.agents.length < this.limit()) {
+				await this.#spawn(item);
 				return;
 			}
-			logger.debug("workpool: idle reuse rejected; preferring fresh spawn", {
-				pool: this.name,
-				idle: idle.id,
-				reason: decision.reason,
-			});
+			this.#heldForFreshSpawn.push(item);
+			this.#card("queued", this.name, `[${item.id}] ${item.text}`);
+			return;
+		}
+		const idle = this.#leastLoadedResumableIdle();
+		if (idle) {
+			item.agentId = idle.id;
+			idle.queue.push(item);
+			this.#card("dispatched", idle.id, `[${item.id}] ${item.text}`);
+			this.#drain(idle);
+			return;
 		}
 		if (this.agents.length < this.limit()) {
 			await this.#spawn(item);
@@ -301,12 +281,83 @@ export class WorkPool {
 		}
 		const busy = this.#nextBusy();
 		if (!busy) {
-			await this.#spawn(item);
+			// Pool-idle agents that the registry will not resume must not keep the slot.
+			this.#evictIdleAgents();
+			if (this.agents.length < this.limit()) {
+				await this.#spawn(item);
+				return;
+			}
+			this.#heldForFreshSpawn.push(item);
+			this.#card("queued", this.name, `[${item.id}] ${item.text}`);
 			return;
 		}
 		item.agentId = busy.id;
 		busy.queue.push(item);
 		this.#card("queued", busy.id, `[${item.id}] ${item.text}`);
+	}
+
+	#blocksExistingAgents(): boolean {
+		return this.#reuseDecision("pool", "idle").action !== "continue";
+	}
+
+	#reuseDecision(agentId: string, status: string) {
+		const inspected = inspectEvidenceHandoffContext(this.context);
+		return decideWorkerReuse({
+			candidate: {
+				id: agentId,
+				status,
+				isolated: this.policy.isIsolated === true,
+			},
+			handoff: inspected.handoff,
+			invalidHandoff: inspected.invalid,
+		});
+	}
+
+	#resumableStatus(agentId: string): "idle" | "parked" | undefined {
+		const status = AgentRegistry.global().get(agentId)?.status;
+		return status === "idle" || status === "parked" ? status : undefined;
+	}
+
+	#leastLoadedResumableIdle(): WorkPoolAgent | undefined {
+		let selected: WorkPoolAgent | undefined;
+		let selectedLoad = Infinity;
+		for (const agent of this.agents) {
+			if (agent.state !== "idle") continue;
+			if (!this.#resumableStatus(agent.id)) continue;
+			const load = this.#contextLoad(agent);
+			if (load >= selectedLoad) continue;
+			selected = agent;
+			selectedLoad = load;
+		}
+		return selected;
+	}
+
+	#evictIdleAgents(): void {
+		for (let index = this.agents.length - 1; index >= 0; index--) {
+			const agent = this.agents[index];
+			if (!agent || agent.state !== "idle") continue;
+			this.#detachAgent(agent, index);
+		}
+	}
+
+	#detachAgent(agent: WorkPoolAgent, index: number): void {
+		agent.state = "dead";
+		const stranded = agent.queue.splice(0);
+		this.agents.splice(index, 1);
+		for (const queued of stranded) {
+			queued.agentId = undefined;
+			queued.batchId = undefined;
+			if (queued.status === "queued") this.#heldForFreshSpawn.push(queued);
+		}
+	}
+
+	#releaseHeld(): void {
+		if (this.closed) return;
+		if (this.#blocksExistingAgents()) this.#evictIdleAgents();
+		const pending = this.#heldForFreshSpawn.splice(0);
+		for (const queued of pending) {
+			if (queued.status === "queued") this.#queueDispatch(queued);
+		}
 	}
 
 	async #spawn(item: WorkPoolItem): Promise<void> {
@@ -505,18 +556,34 @@ export class WorkPool {
 			this.#notifyDrained();
 			return;
 		}
-		if (yieldCleared && ref && (ref.status === "idle" || ref.status === "parked")) {
+		if (yieldCleared && ref && (ref.status === "idle" || ref.status === "parked") && !this.#blocksExistingAgents()) {
 			this.#drain(agent);
+		} else if (yieldCleared && ref && (ref.status === "idle" || ref.status === "parked")) {
+			const stranded = agent.queue.splice(0);
+			for (const queued of stranded) {
+				queued.agentId = undefined;
+				queued.batchId = undefined;
+				if (queued.status === "queued") this.#heldForFreshSpawn.push(queued);
+			}
+			if (this.#heldForFreshSpawn.length > 0) {
+				agent.state = "dead";
+				const index = this.agents.indexOf(agent);
+				if (index !== -1) this.agents.splice(index, 1);
+				this.#releaseHeld();
+			} else {
+				agent.state = "idle";
+			}
 		} else {
 			agent.state = "dead";
 			const stranded = agent.queue.splice(0);
 			const index = this.agents.indexOf(agent);
 			if (index !== -1) this.agents.splice(index, 1);
-			for (const item of stranded) {
-				item.agentId = undefined;
-				item.batchId = undefined;
-				this.#queueDispatch(item);
+			for (const queued of stranded) {
+				queued.agentId = undefined;
+				queued.batchId = undefined;
+				this.#queueDispatch(queued);
 			}
+			this.#releaseHeld();
 		}
 		this.#notifyDrained();
 	}
@@ -607,6 +674,7 @@ export class WorkPool {
 		}
 		for (const agent of this.agents) agent.queue.splice(0);
 		this.#freshQueue.splice(0);
+		this.#heldForFreshSpawn.splice(0);
 		this.#notifyDrained();
 		return { dropped };
 	}

@@ -11,10 +11,10 @@
  *   (not numeric; receipt records the preserve policy)
  */
 
-import { createHash } from "node:crypto";
 import { resolveBudgetReserveTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { ScopeLike } from "../config/registry";
+import { sha256Hex } from "../latency/stable-serialize";
 import {
 	cfgCompaction,
 	cfgCompactionExperiment,
@@ -35,12 +35,7 @@ export const CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS = 200_000 as const;
  */
 export const CONTEXT_STRATEGY_PRESERVE_KEEP_RECENT_FLOOR = 8_000 as const;
 
-export const CONTEXT_STRATEGY_FACTORS = [
-	"none",
-	"threshold_tokens",
-	"keep_recent_tokens",
-	"reserve_tokens",
-] as const;
+export const CONTEXT_STRATEGY_FACTORS = ["none", "threshold_tokens", "keep_recent_tokens", "reserve_tokens"] as const;
 
 export type ContextStrategyFactor = (typeof CONTEXT_STRATEGY_FACTORS)[number];
 
@@ -54,6 +49,7 @@ export type ContextStrategyFallbackReason =
 	| "invalid_treatment_value"
 	| "preserve_floor_violation"
 	| "context_window_required"
+	| "reserve_not_honored"
 	| "unknown_factor";
 
 export interface ContextStrategyPreservePolicy {
@@ -68,12 +64,12 @@ export interface ContextStrategyPreservePolicy {
 export interface ContextStrategyExperimentConfig {
 	enabled: boolean;
 	factor: ContextStrategyFactor;
-	/** Used only when factor === "threshold_tokens". */
-	thresholdTokens: number;
+	/** Used only when factor === "threshold_tokens". Absent is not a second factor. */
+	thresholdTokens?: number;
 	/** Used only when factor === "keep_recent_tokens". */
-	keepRecentTokens: number | undefined;
+	keepRecentTokens?: number;
 	/** Used only when factor === "reserve_tokens". */
-	reserveTokens: number | undefined;
+	reserveTokens?: number;
 }
 
 export interface ContextStrategyExperimentReceiptV1 {
@@ -148,17 +144,15 @@ function isFactor(value: unknown): value is ContextStrategyFactor {
 }
 
 function fingerprintConfig(config: ContextStrategyExperimentConfig): string {
-	return createHash("sha256")
-		.update(
-			JSON.stringify({
-				enabled: config.enabled,
-				factor: config.factor,
-				thresholdTokens: config.thresholdTokens,
-				keepRecentTokens: config.keepRecentTokens ?? null,
-				reserveTokens: config.reserveTokens ?? null,
-			}),
-		)
-		.digest("hex");
+	return sha256Hex(
+		JSON.stringify({
+			enabled: config.enabled,
+			factor: config.factor,
+			thresholdTokens: config.thresholdTokens,
+			keepRecentTokens: config.keepRecentTokens ?? null,
+			reserveTokens: config.reserveTokens ?? null,
+		}),
+	);
 }
 
 function controlReceipt(
@@ -189,6 +183,13 @@ export function assertSingleFactorDeclaration(
 ): void {
 	const factor = input.factor ?? "none";
 	const extras: string[] = [];
+	if (
+		factor !== "threshold_tokens" &&
+		typeof input.thresholdTokens === "number" &&
+		input.thresholdTokens !== CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS
+	) {
+		extras.push("thresholdTokens");
+	}
 	if (factor !== "keep_recent_tokens" && typeof input.keepRecentTokens === "number") {
 		extras.push("keepRecentTokens");
 	}
@@ -314,7 +315,7 @@ export function applyContextStrategyExperiment(input: {
 			};
 		}
 		const tier = experiment.thresholdTokens;
-		if (!Number.isFinite(tier) || tier <= 0) {
+		if (typeof tier !== "number" || !Number.isFinite(tier) || tier <= 0) {
 			return {
 				applied: false,
 				factor: "threshold_tokens",
@@ -332,7 +333,7 @@ export function applyContextStrategyExperiment(input: {
 			keepRecentTokens: base.keepRecentTokens,
 		});
 		const usable = contextWindow - reserve;
-		if (tier >= usable) {
+		if (tier > usable) {
 			return {
 				applied: false,
 				factor: "threshold_tokens",
@@ -423,11 +424,37 @@ export function applyContextStrategyExperiment(input: {
 				receipt: controlReceipt(experiment, "control", "invalid_treatment_value"),
 			};
 		}
-		const settings: CompactionSettings = { ...base, reserveTokens: value };
+		if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+			return {
+				applied: false,
+				factor: "reserve_tokens",
+				settings: base,
+				source: "control",
+				fallbackReason: "context_window_required",
+				receipt: controlReceipt(experiment, "control", "context_window_required"),
+			};
+		}
+		const treated: CompactionSettings = { ...base, reserveTokens: value };
+		const resolved = resolveBudgetReserveTokens(contextWindow, treated);
+		const controlResolved = resolveBudgetReserveTokens(contextWindow, base);
+		// Budget math uses max(15% of the window, explicit floor) and substitutes a
+		// proportional reserve when the floor exceeds the window. A declared floor
+		// that is not that resolved value, or that does not change control, is not
+		// a treatment.
+		if (resolved !== value || resolved === controlResolved) {
+			return {
+				applied: false,
+				factor: "reserve_tokens",
+				settings: base,
+				source: "control",
+				fallbackReason: "reserve_not_honored",
+				receipt: controlReceipt(experiment, "control", "reserve_not_honored"),
+			};
+		}
 		return {
 			applied: true,
 			factor: "reserve_tokens",
-			settings,
+			settings: treated,
 			source: "treatment",
 			receipt: {
 				kind: CONTEXT_STRATEGY_EXPERIMENT_KIND,
@@ -437,7 +464,7 @@ export function applyContextStrategyExperiment(input: {
 				applied: true,
 				source: "treatment",
 				globalFixedCap: false,
-				effectiveReserveTokens: value,
+				effectiveReserveTokens: resolved,
 				preserve: PRESERVE,
 				configFingerprint: fingerprintConfig(experiment),
 			},
@@ -480,6 +507,8 @@ export function buildContextStrategyExperimentRun(input: {
 	arm: "control" | "treatment";
 	factor: ContextStrategyFactor;
 	tierTokens?: number;
+	keepRecentTokens?: number;
+	reserveTokens?: number;
 	metrics: Partial<ContextStrategyExperimentMetrics> & {
 		totalTaskTimeMs?: number | null;
 		constraintRetention?: ConstraintRetentionMetric;
@@ -502,8 +531,8 @@ export function buildContextStrategyExperimentRun(input: {
 			enabled: input.arm === "treatment",
 			factor: input.factor,
 			thresholdTokens: input.tierTokens ?? CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS,
-			keepRecentTokens: undefined,
-			reserveTokens: undefined,
+			keepRecentTokens: input.keepRecentTokens,
+			reserveTokens: input.reserveTokens,
 		});
 	return {
 		kind: CONTEXT_STRATEGY_EXPERIMENT_RUN_KIND,
@@ -562,7 +591,7 @@ export function judgeContextStrategyExperiment(input: {
 	return {
 		status: "comparable",
 		taskTimeImproved: (t.totalTaskTimeMs as number) < (c.totalTaskTimeMs as number),
-		constraintsRetained: t.constraintRetention === "retained" && c.constraintRetention !== "lost",
+		constraintsRetained: t.constraintRetention === "retained",
 		recoveryOk: t.recoveryQuality === "recovered",
 		claimedLiveWin: false,
 		notes,

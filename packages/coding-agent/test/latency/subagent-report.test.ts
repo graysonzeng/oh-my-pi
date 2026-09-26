@@ -1380,6 +1380,36 @@ describe("buildSubagentBaselineReport", () => {
 		expect(report.childActiveWallByClass.unknown.n).toBe(0);
 	});
 
+	it("keeps acceptance timing unknown without a receipt timestamp and excludes post-verify activity", () => {
+		const records = [
+			sessionHeader("sess1"),
+			userMsg(0, "delegate"),
+			assistantMsg({ ts: 1000 }),
+			assistantMsg({ ts: 2000 }),
+			{
+				type: "custom",
+				customType: "parent_final_verification",
+				data: { status: "passed", source: "extension" },
+			},
+			assistantMsg({ ts: 4000 }),
+		];
+		const unknown = buildSubagentBaselineReport([parseSessionJsonl(records.map(line).join("\n"), PARENT)]);
+		expect(unknown.parentFinalVerification).toEqual({ passed: 1, failed: 0, unknown: 0 });
+		expect(unknown.taskCompletionMs).toBeNull();
+		expect(unknown.e2eMs).toBeNull();
+		expect(unknown.uncomputableFromHistory).toContain("taskCompletionMs");
+
+		records[4] = {
+			type: "custom",
+			customType: "parent_final_verification",
+			data: { status: "passed", source: "extension" },
+			timestamp: new Date(2500).toISOString(),
+		};
+		const timed = buildSubagentBaselineReport([parseSessionJsonl(records.map(line).join("\n"), PARENT)]);
+		expect(timed.taskCompletionMs).toEqual({ n: 1, p50: 1000, p90: 1000 });
+		expect(timed.e2eMs).toEqual({ n: 1, p50: 2500, p90: 2500 });
+	});
+
 	it("associates explicit parent-final verification with e2e and does not sum parallel children", () => {
 		const parent = parseSessionJsonl(
 			[

@@ -1,10 +1,11 @@
-import * as path from "node:path";
 import { parsePatchTouchedFiles } from "../../utils/parse-patch-touched-files";
 import type { ImplementationArtifactV1, VerificationArtifactV1, VerifierPort } from "../types";
 import {
 	buildVerificationCodeState,
+	captureVerificationWorkspace,
 	resolveVerificationPatchEvidence,
 	sealWorkflowVerifierResult,
+	verificationExecutionCwd,
 } from "../verification-validity";
 
 export interface ImplementationVerifyInput {
@@ -15,7 +16,7 @@ export interface ImplementationVerifyInput {
 	forbiddenPaths?: string[];
 	signal?: AbortSignal;
 	timeoutMs?: number;
-	/** Workspace root used to resolve relative patchPath. */
+	/** Fallback when the verifier does not expose its execution directory. */
 	cwd?: string;
 }
 
@@ -33,8 +34,12 @@ export class ImplementationVerifyStage {
 
 	async execute(input: ImplementationVerifyInput): Promise<VerificationArtifactV1> {
 		const impl = input.implementation;
-		const cwd = input.cwd ?? process.cwd();
-		const { patchContent, changedFiles } = await resolveVerificationPatchEvidence(impl, cwd);
+		const executedCwd = verificationExecutionCwd(this.#verifier);
+		const patchCwd = executedCwd ?? input.cwd ?? process.cwd();
+		const { patchContent, changedFiles } = await resolveVerificationPatchEvidence(impl, patchCwd);
+		const workspace = executedCwd
+			? ((await captureVerificationWorkspace(executedCwd, input.signal)) ?? undefined)
+			: undefined;
 
 		// Branch names and model-reported files are not diff evidence.
 		if (!patchContent) {
@@ -61,6 +66,7 @@ export class ImplementationVerifyStage {
 			const codeState = buildVerificationCodeState({
 				implementation: impl,
 				changedFiles,
+				workspace,
 			});
 			return sealWorkflowVerifierResult(failed, {
 				commands: input.commands,
@@ -93,6 +99,7 @@ export class ImplementationVerifyStage {
 			implementation: impl,
 			patchContent,
 			changedFiles,
+			workspace,
 		});
 		return sealWorkflowVerifierResult(result, {
 			commands: input.commands,

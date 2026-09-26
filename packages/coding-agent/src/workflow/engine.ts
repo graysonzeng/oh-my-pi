@@ -2422,11 +2422,7 @@ export class WorkflowEngine {
 		// Repair mutates code under test — prior greens are stale and must not be reused.
 		// Persist the invalidated seal so resume cannot reload a pre-repair green as valid.
 		if (this.#verification) {
-			this.#verification = invalidateVerificationResult(
-				this.#verification,
-				"repair_applied",
-				"repair_applied",
-			);
+			this.#verification = invalidateVerificationResult(this.#verification, "repair_applied", "repair_applied");
 			this.#verificationArtifactRef = await this.#persistArtifact(
 				workflowId,
 				attemptId,
@@ -2947,10 +2943,15 @@ export class WorkflowEngine {
 				{ patchPath: options.outputPatchPath, changesApplied: false, summary },
 			);
 			if (reconciled.merge.status !== "applied") {
-				if (error instanceof WorkflowCancelledError) throw error;
+				if (error instanceof WorkflowCancelledError) {
+					const details = error.details;
+					if (details && typeof details === "object" && "recovery" in details) throw error;
+					throw new WorkflowCancelledError(error.message, { recovery: reconciled.merge.recovery });
+				}
 				throw new WorkflowError("Validated workflow patch was not applied", "merge_conflict", {
 					patchPath: options.outputPatchPath,
 					summary,
+					recovery: reconciled.merge.recovery,
 				});
 			}
 			return {
@@ -2974,6 +2975,7 @@ export class WorkflowEngine {
 			throw new WorkflowError("Validated workflow patch was not applied", "merge_conflict", {
 				patchPath: reconciled.merge.patchPath,
 				summary: reconciled.merge.summary,
+				recovery: reconciled.merge.recovery,
 			});
 		}
 		return {
@@ -3082,11 +3084,7 @@ export class WorkflowEngine {
 			changesApplied = observed === "applied";
 		}
 		// P1-4: reconcile outcomes stay explainable; isolation is not a transaction.
-		const recoveryKind = !changesApplied
-			? "merge_conflict"
-			: trustMerger
-				? "merge_applied"
-				: "recovered_applied";
+		const recoveryKind = !changesApplied ? "merge_conflict" : trustMerger ? "merge_applied" : "recovered_applied";
 		const reconciled = withWorkPackageMerge(
 			state,
 			attemptId,

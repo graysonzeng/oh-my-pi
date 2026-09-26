@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { SessionManager } from "../../src/session/session-manager";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
 import { WorkflowEngine } from "../../src/workflow/engine";
@@ -54,21 +55,17 @@ describe("WorkflowEngine happy path", () => {
 	});
 
 	it("writes parent_final_verification receipt on final_verify for offline e2e association", async () => {
-		const customEntries: Array<{ customType: string; data: unknown }> = [];
-		const session = fakeSession({
-			sessionManager: {
-				appendCustomEntry: (customType: string, data?: unknown) => {
-					customEntries.push({ customType, data });
-					return "pfv-test";
-				},
-			},
-		});
+		const sessionManager = SessionManager.inMemory();
+		const session = fakeSession({ sessionManager });
 		const workflowId = await engine.startWorkflow({ request: "ship with receipt" });
 		const result = await engine.run(workflowId, session);
 		expect(result.state.status).toBe("completed");
-		const receipt = customEntries.find(entry => entry.customType === "parent_final_verification");
-		expect(receipt).toBeDefined();
-		expect(receipt?.data).toMatchObject({ status: "passed", source: "workflow" });
+		const receipt = sessionManager
+			.getBranch()
+			.find(entry => entry.type === "custom" && entry.customType === "parent_final_verification");
+		expect(receipt?.type).toBe("custom");
+		if (receipt?.type !== "custom") throw new Error("missing parent verification receipt");
+		expect(receipt.data).toMatchObject({ status: "passed", source: "workflow" });
 	});
 
 	it("reports available budget", async () => {

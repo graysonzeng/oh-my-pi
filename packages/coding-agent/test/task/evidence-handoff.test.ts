@@ -14,6 +14,7 @@ import {
 	decideWorkerReuse,
 	ensureEvidenceHandoffContext,
 	extractEvidenceHandoffFromContext,
+	inspectEvidenceHandoffContext,
 	invalidateFactIfVersionMismatch,
 	listStaleEvidence,
 	markEvidenceStale,
@@ -246,6 +247,13 @@ describe("worker reuse decision", () => {
 				handoff: { kind: "evidence_handoff", v: 2 } as never,
 			}),
 		).toEqual({ action: "spawn_fresh", reason: "invalid_handoff", agentId: "WorkerA" });
+
+		expect(
+			decideWorkerReuse({
+				candidate: { id: "WorkerA", status: "idle" },
+				invalidHandoff: true,
+			}),
+		).toEqual({ action: "spawn_fresh", reason: "invalid_handoff", agentId: "WorkerA" });
 	});
 });
 
@@ -274,5 +282,76 @@ describe("ensureEvidenceHandoffContext producer", () => {
 		expect(extractEvidenceHandoffFromContext(ensured ?? "")?.handoff.contentFingerprint).toBe(
 			handoff.contentFingerprint,
 		);
+	});
+});
+
+describe("reviewer fence safety", () => {
+	const broken = [
+		"Keep preamble",
+		"```evidence-handoff",
+		JSON.stringify({
+			kind: "evidence_handoff",
+			v: 2,
+			authorConclusions: ["Author thinks this is perfect"],
+		}),
+		"```",
+	].join("\n");
+
+	test("a prior fence check does not let the next reviewer prepare keep author conclusions", () => {
+		// Failure: shared /g lastIndex makes the second detection miss, so the reviewer receives the broken fence.
+		ensureEvidenceHandoffContext(broken, { acceptance: ["- do not wrap"] });
+		const review = prepareSubagentContext(broken, "review");
+		expect(review).toBe("Keep preamble");
+		expect(review).not.toContain("Author thinks this is perfect");
+		expect(review).not.toContain("evidence-handoff");
+	});
+
+	test("a second fence in the postamble does not leak author conclusions to reviewers", () => {
+		const handoff = buildEvidenceHandoff({
+			goals: ["Ship handoff"],
+			acceptance: ["Reviewer keeps acceptance"],
+			authorConclusions: ["primary conclusion"],
+		});
+		const extra = [
+			"```evidence-handoff",
+			JSON.stringify({
+				kind: "evidence_handoff",
+				v: 1,
+				goals: ["extra"],
+				acceptance: ["extra"],
+				authorConclusions: ["hidden conclusion"],
+			}),
+			"```",
+		].join("\n");
+		const review = prepareSubagentContext(renderEvidenceHandoffContext(handoff, { postamble: extra }), "review");
+		const extracted = extractEvidenceHandoffFromContext(review ?? "");
+		expect(extracted?.handoff.acceptance).toEqual(["Reviewer keeps acceptance"]);
+		expect(extracted?.handoff.authorConclusions).toBeUndefined();
+		expect(review).not.toContain("hidden conclusion");
+		expect(review).not.toContain("primary conclusion");
+	});
+
+	test("an unparseable fence is invalid handoff, not a missing one", () => {
+		const inspected = inspectEvidenceHandoffContext(broken);
+		expect(inspected).toEqual({ handoff: null, invalid: true });
+		expect(inspectEvidenceHandoffContext("freeform only")).toEqual({ handoff: null, invalid: false });
+	});
+
+	test("an unterminated fence fails closed for reviewers and is not a missing handoff", () => {
+		// Failure: a truncated opener used to miss detection, so reviewers kept author text and reuse continued.
+		const truncated = 'brief\n```evidence-handoff\n{broken authorConclusions: ["Author thinks this is perfect"]';
+		const inspected = inspectEvidenceHandoffContext(truncated);
+		expect(inspected).toEqual({ handoff: null, invalid: true });
+		expect(
+			decideWorkerReuse({
+				candidate: { id: "WorkerA", status: "idle" },
+				handoff: inspected.handoff,
+				invalidHandoff: inspected.invalid,
+			}),
+		).toEqual({ action: "spawn_fresh", reason: "invalid_handoff", agentId: "WorkerA" });
+		const review = prepareSubagentContext(truncated, "review");
+		expect(review).toBe("brief");
+		expect(review).not.toContain("Author thinks this is perfect");
+		expect(review).not.toContain("evidence-handoff");
 	});
 });

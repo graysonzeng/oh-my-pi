@@ -14,11 +14,7 @@ import { estimateInlineSavings } from "./snapcompact-inline";
 import { resolveSpeculationLeadTokens } from "./speculation-lead";
 
 import { cfgSkillful } from "./settings";
-import {
-	cfgSnapcompactShape,
-	cfgSnapcompactSystemPrompt,
-	cfgSnapcompactToolResults,
-} from "./context-settings";
+import { cfgSnapcompactShape, cfgSnapcompactSystemPrompt, cfgSnapcompactToolResults } from "./context-settings";
 import { effectiveCompactionSettings } from "./context-strategy-experiment";
 
 /** Resolve session policy before handing pure boundary arithmetic to the UI. */

@@ -5,11 +5,16 @@
  * - production defaults mutate when experiment is off
  * - multi-factor treatment silently applies (must fail closed to control)
  * - 200k tier forced onto windows that cannot host it (must baseline fallback)
+ * - a tier that exactly equals the usable budget is treated as unfit
  * - keep_recent treatment drops below preserve floor for recent edits
+ * - reserve treatment is recorded as applied when budget math will not honor it
  * - control/treatment arm recording loses factor identity or invents live wins
+ * - judge hides treatment constraint retention when the control arm lost constraints
  * - SessionMaintenance / UI boundaries bypass the overlay (arm contamination)
  */
 import { describe, expect, it, spyOn } from "bun:test";
+import { resolveBudgetReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { CompactionSettings } from "../../src/session/context-settings";
 import * as experimentModule from "../../src/session/context-strategy-experiment";
 import {
@@ -176,14 +181,59 @@ describe("context strategy experiment (P1-3)", () => {
 			experiment: {
 				enabled: true,
 				factor: "reserve_tokens",
-				reserveTokens: 24_576,
+				reserveTokens: 80_000,
 			},
 			contextWindow: 400_000,
 		});
 		expect(resolved.applied).toBe(true);
-		expect(resolved.settings.reserveTokens).toBe(24_576);
+		expect(resolved.settings.reserveTokens).toBe(80_000);
 		expect(resolved.settings.thresholdTokens).toBe(-1);
 		expect(resolved.settings.keepRecentTokens).toBe(20_000);
+		expect(resolveBudgetReserveTokens(400_000, resolved.settings)).toBe(80_000);
+		expect(resolveBudgetReserveTokens(400_000, base)).toBe(60_000);
+	});
+
+	it("does not record a reserve treatment the budget math will ignore", () => {
+		const base = baseSettings();
+		const belowFloor = applyContextStrategyExperiment({
+			base,
+			experiment: {
+				enabled: true,
+				factor: "reserve_tokens",
+				reserveTokens: 24_576,
+			},
+			contextWindow: 400_000,
+		});
+		expect(belowFloor.applied).toBe(false);
+		expect(belowFloor.source).toBe("control");
+		expect(belowFloor.fallbackReason).toBe("reserve_not_honored");
+		expect(belowFloor.settings).toEqual(base);
+		expect(resolveBudgetReserveTokens(400_000, belowFloor.settings)).toBe(resolveBudgetReserveTokens(400_000, base));
+
+		const exceedsWindow = applyContextStrategyExperiment({
+			base,
+			experiment: {
+				enabled: true,
+				factor: "reserve_tokens",
+				reserveTokens: 500_000,
+			},
+			contextWindow: 400_000,
+		});
+		expect(exceedsWindow.applied).toBe(false);
+		expect(exceedsWindow.fallbackReason).toBe("reserve_not_honored");
+		expect(exceedsWindow.settings.reserveTokens).toBeUndefined();
+
+		const missingWindow = applyContextStrategyExperiment({
+			base,
+			experiment: {
+				enabled: true,
+				factor: "reserve_tokens",
+				reserveTokens: 80_000,
+			},
+		});
+		expect(missingWindow.applied).toBe(false);
+		expect(missingWindow.fallbackReason).toBe("context_window_required");
+		expect(missingWindow.settings).toEqual(base);
 	});
 
 	it("reads experiment settings as off by default and parses only the declared factor", () => {
@@ -214,7 +264,9 @@ describe("context strategy experiment (P1-3)", () => {
 			keepRecentTokens: undefined,
 			reserveTokens: undefined,
 		});
-		expect(parseContextStrategyExperimentConfig({ enabled: true, factor: "threshold_tokens", keepRecentTokens: 1 })).toBeNull();
+		expect(
+			parseContextStrategyExperimentConfig({ enabled: true, factor: "threshold_tokens", keepRecentTokens: 1 }),
+		).toBeNull();
 	});
 
 	it("records paired runs and judges on task time, constraint retention, and recovery — without inventing wins", () => {
@@ -313,5 +365,148 @@ describe("context strategy experiment (P1-3)", () => {
 		expect(resolved.applied).toBe(true);
 		expect(resolved.settings.thresholdTokens).toBe(CONTEXT_STRATEGY_EXPERIMENT_TIER_TOKENS);
 		spy.mockRestore();
+	});
+	it("applies a threshold tier that exactly equals the usable budget", () => {
+		const base = baseSettings({ reserveTokens: 80_000, thresholdTokens: -1, thresholdPercent: 70 });
+		const contextWindow = 280_000;
+		const resolved = applyContextStrategyExperiment({
+			base,
+			experiment: {
+				enabled: true,
+				factor: "threshold_tokens",
+				thresholdTokens: 200_000,
+			},
+			contextWindow,
+		});
+		expect(contextWindow - resolveBudgetReserveTokens(contextWindow, base)).toBe(200_000);
+		expect(resolved.applied).toBe(true);
+		expect(resolved.source).toBe("treatment");
+		expect(resolved.settings.thresholdTokens).toBe(200_000);
+		expect(resolveThresholdTokens(contextWindow, resolved.settings)).toBe(200_000);
+	});
+
+	it("fails closed when a non-default threshold is declared beside another factor", () => {
+		expect(() =>
+			assertSingleFactorDeclaration({
+				factor: "keep_recent_tokens",
+				thresholdTokens: 150_000,
+				keepRecentTokens: 16_000,
+			}),
+		).toThrow(/single factor/i);
+		expect(
+			parseContextStrategyExperimentConfig({
+				enabled: true,
+				factor: "keep_recent_tokens",
+				keepRecentTokens: 16_000,
+				thresholdTokens: 150_000,
+			}),
+		).toBeNull();
+
+		const fromSettings = readContextStrategyExperimentConfig(
+			Settings.isolated({
+				"compaction.experiment.enabled": true,
+				"compaction.experiment.factor": "keep_recent_tokens",
+				"compaction.experiment.keepRecentTokens": 16_000,
+				"compaction.experiment.thresholdTokens": 150_000,
+			}),
+		);
+		const resolved = applyContextStrategyExperiment({
+			base: baseSettings(),
+			experiment: fromSettings,
+			contextWindow: 400_000,
+		});
+		expect(resolved.applied).toBe(false);
+		expect(resolved.fallbackReason).toBe("multi_factor_rejected");
+		expect(resolved.settings.keepRecentTokens).toBe(20_000);
+		expect(resolved.settings.thresholdTokens).toBe(-1);
+	});
+
+	it("does not hide treatment constraint retention when the control arm lost constraints", () => {
+		const retained = judgeContextStrategyExperiment({
+			control: buildContextStrategyExperimentRun({
+				arm: "control",
+				factor: "keep_recent_tokens",
+				keepRecentTokens: 8_000,
+				metrics: { totalTaskTimeMs: 100, constraintRetention: "lost", recoveryQuality: "failed" },
+			}),
+			treatment: buildContextStrategyExperimentRun({
+				arm: "treatment",
+				factor: "keep_recent_tokens",
+				keepRecentTokens: 16_000,
+				metrics: { totalTaskTimeMs: 90, constraintRetention: "retained", recoveryQuality: "recovered" },
+			}),
+		});
+		expect(retained.status).toBe("comparable");
+		expect(retained.constraintsRetained).toBe(true);
+		expect(retained.claimedLiveWin).toBe(false);
+
+		const lost = judgeContextStrategyExperiment({
+			control: buildContextStrategyExperimentRun({
+				arm: "control",
+				factor: "keep_recent_tokens",
+				keepRecentTokens: 8_000,
+				metrics: { totalTaskTimeMs: 100, constraintRetention: "retained", recoveryQuality: "recovered" },
+			}),
+			treatment: buildContextStrategyExperimentRun({
+				arm: "treatment",
+				factor: "keep_recent_tokens",
+				keepRecentTokens: 16_000,
+				metrics: { totalTaskTimeMs: 90, constraintRetention: "lost", recoveryQuality: "failed" },
+			}),
+		});
+		expect(lost.constraintsRetained).toBe(false);
+		expect(lost.recoveryOk).toBe(false);
+	});
+
+	it("keeps distinct keep-recent treatment values from sharing a run fingerprint", () => {
+		const low = buildContextStrategyExperimentRun({
+			arm: "treatment",
+			factor: "keep_recent_tokens",
+			keepRecentTokens: 8_000,
+			metrics: { totalTaskTimeMs: 1, constraintRetention: "retained", recoveryQuality: "recovered" },
+		});
+		const high = buildContextStrategyExperimentRun({
+			arm: "treatment",
+			factor: "keep_recent_tokens",
+			keepRecentTokens: 16_000,
+			metrics: { totalTaskTimeMs: 1, constraintRetention: "retained", recoveryQuality: "recovered" },
+		});
+		expect(low.factor).toBe(high.factor);
+		expect(low.configFingerprint).not.toBe(high.configFingerprint);
+	});
+
+	it("logs an unhonored reserve fallback once per reason and fingerprint", () => {
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const settings = Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": false,
+				"compaction.experiment.enabled": true,
+				"compaction.experiment.factor": "reserve_tokens",
+				"compaction.experiment.reserveTokens": 24_576,
+			});
+			const host = {
+				settings,
+				model: () => ({ contextWindow: 400_000 }) as never,
+				isDisposed: () => false,
+				isGeneratingHandoff: () => false,
+				hasExperimentalContextRolloverTools: () => false,
+				extensionRunner: undefined,
+			} as unknown as SessionMaintenanceHost;
+			const maintenance = new SessionMaintenance(host);
+			maintenance.maybeStartSpeculativeCompaction(100_000, 400_000);
+			maintenance.maybeStartSpeculativeCompaction(100_000, 400_000);
+			const fallbacks = warn.mock.calls.filter(
+				call => call[0] === "Context strategy experiment fell back to control",
+			);
+			expect(fallbacks).toHaveLength(1);
+			expect(fallbacks[0]?.[1]).toMatchObject({
+				factor: "reserve_tokens",
+				reason: "reserve_not_honored",
+				source: "control",
+			});
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });

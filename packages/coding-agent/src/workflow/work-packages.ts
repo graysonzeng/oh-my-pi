@@ -208,6 +208,32 @@ export function renderWorkPackageAssignment(workPackage: WorkPackageV1): string 
 			workPackage.dependsOn.length > 0 ? workPackage.dependsOn.map(value => `- ${value}`).join("\n") : "- (none)",
 	});
 }
+function hasExplainableRecovery(error: WorkflowCancelledError): boolean {
+	const details = error.details;
+	if (!details || typeof details !== "object" || !("recovery" in details)) return false;
+	const recovery = details.recovery;
+	return (
+		typeof recovery === "object" && recovery !== null && "explainable" in recovery && recovery.explainable === true
+	);
+}
+
+function explainAbortedWorkPackage(
+	error: unknown,
+	phase: "before_start" | "in_flight",
+	unitId: string,
+): WorkflowCancelledError {
+	if (error instanceof WorkflowCancelledError && hasExplainableRecovery(error)) return error;
+	const reason = error instanceof Error && error.message.trim() ? error.message : "cancelled during work-package";
+	const outcome = explainCancelOutcome({ phase, unitIds: [unitId], reason });
+	return new WorkflowCancelledError(outcome.detail, { recovery: outcome });
+}
+
+function omitMergeRecovery(merge: WorkPackageStateArtifactV1["merge"]): WorkPackageStateArtifactV1["merge"] {
+	if (!("recovery" in merge)) return merge;
+	const next = { ...merge };
+	delete next.recovery;
+	return next;
+}
 
 /** Execute stable dependency waves through the existing task semaphore/all-settled pattern. */
 export async function executeWorkPackagePlan(input: ExecuteWorkPackagePlanInput): Promise<WorkPackageStateArtifactV1> {
@@ -297,16 +323,24 @@ export async function executeWorkPackagePlan(input: ExecuteWorkPackagePlanInput)
 					await input.onSuccess?.(workPackage, result);
 					return result;
 				} catch (error) {
+					const aborted = workerSignal.aborted || input.signal?.aborted === true;
+					// Pre-launch abort is always cancel. In-flight non-cancel workflow errors stay visible.
+					const keepRealFailure =
+						requestLaunched && aborted && error instanceof WorkflowError && error.kind !== "cancelled";
+					const surfaced =
+						aborted && !keepRealFailure
+							? explainAbortedWorkPackage(error, requestLaunched ? "in_flight" : "before_start", workPackage.id)
+							: error;
 					await commit(() => {
 						Object.assign(packageState(state, workPackage.id), {
 							...workPackage,
 							status: "failed",
 							implementation: undefined,
-							errorKind: error instanceof WorkflowError ? error.kind : "internal",
-							errorSummary: errorSummary(error),
+							errorKind: surfaced instanceof WorkflowError ? surfaced.kind : "internal",
+							errorSummary: errorSummary(surfaced),
 						} satisfies WorkPackageExecutionV1);
 					});
-					throw { packageId: workPackage.id, error, requestLaunched } satisfies WorkPackageFailure;
+					throw { packageId: workPackage.id, error: surfaced, requestLaunched } satisfies WorkPackageFailure;
 				} finally {
 					if (acquired) semaphore.release();
 				}
@@ -336,7 +370,19 @@ export async function executeWorkPackagePlan(input: ExecuteWorkPackagePlanInput)
 				});
 			}
 		}
-		if (failures.length > 0) throw new WorkPackageExecutionError(failures);
+		if (failures.length > 0) {
+			const waveAborted = aborted || input.signal?.aborted === true;
+			if (waveAborted && failures.every(failure => failure.error instanceof WorkflowCancelledError)) {
+				const launched = failures.some(failure => failure.requestLaunched);
+				const outcome = explainCancelOutcome({
+					phase: launched ? "in_flight" : "before_start",
+					unitIds: failures.map(failure => failure.packageId),
+					reason: launched ? "cancelled during work-package execution" : "cancelled before work-package launch",
+				});
+				throw new WorkflowCancelledError(outcome.detail, { recovery: outcome });
+			}
+			throw new WorkPackageExecutionError(failures);
+		}
 		if (aborted) {
 			const outcome = explainCancelOutcome({
 				phase: "after_partial",
@@ -365,7 +411,7 @@ export function withWorkPackageMergePrepared(
 		revision: state.revision + 1,
 		scopeStatus: options.scopeStatus,
 		merge: {
-			...state.merge,
+			...omitMergeRecovery(state.merge),
 			status: "prepared",
 			patchPath: options.patchPath,
 			changesApplied: false,
@@ -384,8 +430,7 @@ export function withWorkPackageMerge(
 		recoveryKind?: "merge_conflict" | "merge_applied" | "recovered_applied" | "needs_reconciliation";
 	},
 ): WorkPackageStateArtifactV1 {
-	const recoveryKind =
-		options?.recoveryKind ?? (merge.changesApplied ? "merge_applied" : "merge_conflict");
+	const recoveryKind = options?.recoveryKind ?? (merge.changesApplied ? "merge_applied" : "merge_conflict");
 	const recovery = explainMergeRecoveryOutcome({
 		kind: recoveryKind,
 		detail: merge.summary,

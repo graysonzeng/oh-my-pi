@@ -640,8 +640,9 @@ export class SessionMaintenance {
 	/**
 	 * Compaction settings as seen by SessionMaintenance, including an opt-in
 	 * single-factor context-strategy experiment overlay (P1-3). Defaults match
-	 * {@link cfgCompaction} when the experiment is off. Threshold treatments need
-	 * a context window; when omitted, the active model window is used.
+	 * {@link cfgCompaction} when the experiment is off. Threshold and reserve
+	 * treatments need a context window to prove the overlay is honored; when
+	 * omitted, the active model window is used.
 	 * Fail-closed outcomes (multi-factor, unfit tier, …) stay on control and are
 	 * logged once per distinct reason/fingerprint so operators can tell treatment
 	 * was requested but not applied.

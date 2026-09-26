@@ -59,7 +59,11 @@ import {
 	QUALIFICATION_VARIANTS,
 	scoreAttempt,
 } from "./product-latency-qualification";
-import { runPairedQualification, requestsPairedQualification, type PairedQualificationReport } from "./product-latency-paired";
+import {
+	runPairedQualification,
+	requestsPairedQualification,
+	type PairedQualificationReport,
+} from "./product-latency-paired";
 import {
 	assertQualificationSourcePair,
 	captureQualificationSource,

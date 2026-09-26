@@ -7386,6 +7386,11 @@ export class AgentSession implements SettingsScope {
 		);
 	}
 
+	/**
+	 * Latest parent-final receipt on the active branch.
+	 * Abandoned-branch receipts remain in getEntries() and must not set the
+	 * ordinary cohort verifier.
+	 */
 	#latestParentFinalVerificationFromEntries(): {
 		source: ParentFinalVerificationSource;
 		status: ParentFinalVerificationStatus;
@@ -7396,13 +7401,12 @@ export class AgentSession implements SettingsScope {
 			status: ParentFinalVerificationStatus;
 			ts: number | null;
 		} | null = null;
-		for (const entry of this.sessionManager.getEntries()) {
+		for (const entry of this.sessionManager.getBranch()) {
 			if (entry.type === "custom" && entry.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) {
 				const parsed = parseParentFinalVerificationDetails(entry.data);
 				if (!parsed) continue;
 				const ts =
-					parsed.verifiedAtMs ??
-					(typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN);
+					parsed.verifiedAtMs ?? (typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN);
 				latest = {
 					status: parsed.status,
 					source: parsed.source,
@@ -7414,8 +7418,7 @@ export class AgentSession implements SettingsScope {
 				const parsed = parseParentFinalVerificationDetails(entry.details);
 				if (!parsed) continue;
 				const ts =
-					parsed.verifiedAtMs ??
-					(typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN);
+					parsed.verifiedAtMs ?? (typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN);
 				latest = {
 					status: parsed.status,
 					source: parsed.source,

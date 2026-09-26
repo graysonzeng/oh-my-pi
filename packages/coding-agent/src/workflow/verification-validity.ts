@@ -4,18 +4,22 @@
  *
  * Makes worker / parent / workflow_verifier responsibilities explicit on the
  * existing VerificationArtifactV1 path. Records command+scope, code state,
- * executor identity, and invalidation triggers so stale greens cannot be reused
- * as delivery evidence and identical still-valid command sets need not re-run.
+ * executor identity, and the verifier's executed workspace so stale greens
+ * cannot be reused as delivery evidence and identical still-valid command
+ * sets need not re-run.
  *
  * Not a new verification platform and not a generic anti-loop agent.
+ * Workspace identity reuses the native VCS snapshot; it does not spawn git.
  */
 
+import type { VcsRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import type { Stats } from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	assessVerificationSpawn,
-	type VerificationSpawnAssessment,
-} from "../latency/parallel-recovery-safety";
+import { assessVerificationSpawn, type VerificationSpawnAssessment } from "../latency/parallel-recovery-safety";
 import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
 import { sha256Hex } from "./optimization-receipt";
 import type {
@@ -27,6 +31,8 @@ import type {
 	VerificationOwnerRole,
 	VerificationScope,
 	VerificationValidityV1,
+	VerificationWorkspaceBinding,
+	VerifierPort,
 } from "./types";
 
 export type { VerificationSpawnAssessment };
@@ -51,6 +57,7 @@ export type VerificationReuseReason =
 	| "executor_not_trusted"
 	| "owner_not_delivery"
 	| "code_state_mismatch"
+	| "workspace_unproven"
 	| "commands_mismatch"
 	| "scope_mismatch";
 
@@ -173,39 +180,277 @@ function scopesEqual(left: VerificationScope, right: VerificationScope): boolean
 	return commandsEqual(left.paths ?? [], right.paths ?? []);
 }
 
+function workspacesEqual(
+	left: VerificationWorkspaceBinding | undefined,
+	right: VerificationWorkspaceBinding | undefined,
+): boolean {
+	if (!left || !right) return false;
+	return (
+		left.cwd === right.cwd &&
+		left.vcs === right.vcs &&
+		left.root === right.root &&
+		left.headId === right.headId &&
+		left.contentSha256 === right.contentSha256
+	);
+}
+
 function codeStatesEqual(left: VerificationCodeState, right: VerificationCodeState): boolean {
 	// Compare concrete fields — never trust fingerprint alone (could be copied forward).
 	if (left.patchSha256 !== right.patchSha256) return false;
 	if ((left.implementationAttemptId ?? null) !== (right.implementationAttemptId ?? null)) return false;
 	if (!commandsEqual(left.changedFiles, right.changedFiles)) return false;
+	if (!workspacesEqual(left.workspace, right.workspace)) return false;
 	if (left.fingerprint !== right.fingerprint) return false;
 	// Recompute fingerprint from sealed fields; mismatch means tampered / inconsistent seal.
-	const recomputed = fingerprintCodeState(left.patchSha256, left.changedFiles, left.implementationAttemptId);
+	const recomputed = fingerprintCodeState(
+		left.patchSha256,
+		left.changedFiles,
+		left.implementationAttemptId,
+		left.workspace,
+	);
 	return left.fingerprint === recomputed && right.fingerprint === recomputed;
+}
+
+function codeStateIsConsistent(state: VerificationCodeState): boolean {
+	return (
+		state.fingerprint ===
+		fingerprintCodeState(state.patchSha256, state.changedFiles, state.implementationAttemptId, state.workspace)
+	);
 }
 
 function fingerprintCodeState(
 	patchSha256: string,
 	changedFiles: readonly string[],
 	implementationAttemptId: string | undefined,
+	workspace?: VerificationWorkspaceBinding,
 ): string {
-	return sha256Hex(
-		JSON.stringify({
-			patchSha256,
-			changedFiles,
-			implementationAttemptId: implementationAttemptId ?? null,
-		}),
-	);
+	// Omit workspace when unproven so legacy patch-only seals stay consistent.
+	// A proven binding is part of the fingerprint, so copying an old hash over a
+	// new tree does not validate.
+	const payload: {
+		patchSha256: string;
+		changedFiles: readonly string[];
+		implementationAttemptId: string | null;
+		workspace?: VerificationWorkspaceBinding;
+	} = {
+		patchSha256,
+		changedFiles,
+		implementationAttemptId: implementationAttemptId ?? null,
+	};
+	if (workspace) {
+		payload.workspace = {
+			cwd: workspace.cwd,
+			vcs: workspace.vcs,
+			root: workspace.root,
+			headId: workspace.headId,
+			contentSha256: workspace.contentSha256,
+		};
+	}
+	return sha256Hex(JSON.stringify(payload));
 }
 
-function isMissingFile(err: unknown): boolean {
-	return typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code === "ENOENT";
+function abortCapture(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	throw signal.reason instanceof Error ? signal.reason : new Error("verification workspace capture aborted");
+}
+
+function diffOmitsCompleteIdentity(diff: string): boolean {
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("Binary files ") && line.endsWith(" differ")) return true;
+		if (line.startsWith("Subproject commit ")) return true;
+		if (
+			line === "new file mode 160000" ||
+			line === "deleted file mode 160000" ||
+			line === "old mode 160000" ||
+			line === "new mode 160000"
+		) {
+			return true;
+		}
+		if (/^index [0-9a-f.]+\.\.[0-9a-f.]+ 160000$/.test(line)) return true;
+	}
+	return false;
+}
+
+async function hashFileIdentity(root: string, rel: string): Promise<{ path: string; sha256: string } | null> {
+	if (!rel || path.isAbsolute(rel) || rel.split(/[/\\]/).includes("..")) return null;
+	const abs = path.join(root, rel);
+	let listed: Stats;
+	try {
+		listed = await fs.lstat(abs);
+	} catch {
+		return null;
+	}
+	if (listed.isSymbolicLink()) {
+		let target: string;
+		try {
+			target = await fs.readlink(abs);
+		} catch {
+			return null;
+		}
+		let followed = "dangling";
+		try {
+			const bytes = new Uint8Array(await Bun.file(abs).arrayBuffer());
+			followed = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+		} catch (err) {
+			if (!isEnoent(err)) return null;
+		}
+		return {
+			path: rel.replaceAll("\\", "/"),
+			sha256: sha256Hex(JSON.stringify({ link: target, followed })),
+		};
+	}
+	if (!listed.isFile()) return null;
+	try {
+		const bytes = new Uint8Array(await Bun.file(abs).arrayBuffer());
+		return {
+			path: rel.replaceAll("\\", "/"),
+			sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+		};
+	} catch {
+		return null;
+	}
+}
+
+async function hashUntrackedContent(
+	root: string,
+	paths: readonly string[],
+	signal?: AbortSignal,
+): Promise<string | null> {
+	const entries: Array<{ path: string; sha256: string }> = [];
+	for (const rel of [...paths].sort()) {
+		abortCapture(signal);
+		const identity = await hashFileIdentity(root, rel);
+		if (!identity) return null;
+		entries.push(identity);
+	}
+	return sha256Hex(JSON.stringify(entries));
+}
+
+async function hashTrackedSymlinks(
+	root: string,
+	paths: readonly string[],
+	signal?: AbortSignal,
+): Promise<string | null> {
+	const entries: Array<{ path: string; sha256: string }> = [];
+	for (const rel of [...paths].sort()) {
+		abortCapture(signal);
+		if (!rel || path.isAbsolute(rel) || rel.split(/[/\\]/).includes("..")) return null;
+		let listed: Stats;
+		try {
+			listed = await fs.lstat(path.join(root, rel));
+		} catch (err) {
+			if (isEnoent(err)) continue;
+			return null;
+		}
+		if (!listed.isSymbolicLink()) continue;
+		const identity = await hashFileIdentity(root, rel);
+		if (!identity) return null;
+		entries.push(identity);
+	}
+	return sha256Hex(JSON.stringify(entries));
+}
+
+/**
+ * Execution directory exposed by the verifier. Absent means the executed tree
+ * is unproven — do not substitute a caller cwd.
+ */
+export function verificationExecutionCwd(verifier: Pick<VerifierPort, "workspaceCwd">): string | undefined {
+	const fromVerifier = verifier.workspaceCwd?.();
+	if (typeof fromVerifier !== "string") return undefined;
+	const trimmed = fromVerifier.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Proven identity of the tree commands will run against.
+ * Returns null when cwd, HEAD, index, dirty content, symlink targets, or
+ * submodule state cannot be read completely. Null is not an empty tree.
+ */
+export async function captureVerificationWorkspace(
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<VerificationWorkspaceBinding | null> {
+	abortCapture(signal);
+	let resolved: string;
+	try {
+		resolved = await fs.realpath(cwd);
+	} catch {
+		return null;
+	}
+	let repository: VcsRepo | null;
+	try {
+		repository = vcs.repo(resolved);
+	} catch {
+		return null;
+	}
+	if (!repository) return null;
+	let root: string;
+	try {
+		root = await fs.realpath(repository.root());
+	} catch {
+		return null;
+	}
+	const git = repository.asGit();
+	if (git) {
+		try {
+			const submodules = await git.submodulePaths(signal);
+			if (submodules.length > 0) return null;
+		} catch (err) {
+			if (signal?.aborted) throw err;
+			return null;
+		}
+	}
+	let headId: string | undefined | null;
+	let worktreeDiff: string;
+	let stagedDiff: string | null;
+	let untracked: string[];
+	let tracked: string[];
+	try {
+		headId = await repository.headId(signal);
+		if (repository.supports("stagedDiff")) {
+			worktreeDiff = await repository.diffText({ binary: true }, signal);
+			stagedDiff = await repository.diffText({ cached: true, binary: true }, signal);
+		} else {
+			worktreeDiff = await repository.diffText({}, signal);
+			stagedDiff = null;
+		}
+		untracked = await repository.lsFiles(true, true, signal);
+		tracked = await repository.lsFiles(false, false, signal);
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		return null;
+	}
+	const provenHead = headId?.trim();
+	if (!provenHead) return null;
+	if (diffOmitsCompleteIdentity(worktreeDiff)) return null;
+	if (stagedDiff !== null && diffOmitsCompleteIdentity(stagedDiff)) return null;
+	const untrackedSha256 = await hashUntrackedContent(root, untracked, signal);
+	if (!untrackedSha256) return null;
+	const symlinkSha256 = await hashTrackedSymlinks(root, tracked, signal);
+	if (!symlinkSha256) return null;
+	return {
+		cwd: resolved,
+		vcs: repository.kind(),
+		root,
+		headId: provenHead,
+		contentSha256: sha256Hex(
+			JSON.stringify({
+				headId: provenHead,
+				worktreeDiffSha256: sha256Hex(worktreeDiff),
+				stagedDiffSha256: stagedDiff === null ? null : sha256Hex(stagedDiff),
+				untrackedSha256,
+				symlinkSha256,
+			}),
+		),
+	};
 }
 
 /**
  * Shared patch evidence for both implementation_verify and final_verify.
- * Always hashes current + priorPatch:* bytes and derives changed files from
- * the patch parse — never trusts model-reported changedFiles for validity.
+ * Every declared patch path is hashed. A missing path errors — it is not
+ * skipped, and must not become an empty-tree seal or a reusable green.
+ * Model-reported changedFiles are not validity evidence. No declared path
+ * returns no content; that is not a hash of a missing file.
  */
 export async function resolveVerificationPatchEvidence(
 	implementation: Pick<ImplementationArtifactV1, "patchPath" | "unresolved"> | null | undefined,
@@ -218,48 +463,69 @@ export async function resolveVerificationPatchEvidence(
 			.filter(u => u.startsWith("priorPatch:"))
 			.map(u => u.slice("priorPatch:".length)),
 	].filter((p): p is string => Boolean(p));
+	if (patchPaths.length === 0) return { changedFiles: [] };
 
 	const chunks: string[] = [];
 	const changedFiles: string[] = [];
 	for (const patchPath of patchPaths) {
 		const resolved = path.isAbsolute(patchPath) ? patchPath : path.join(cwd, patchPath);
+		let text: string;
 		try {
-			const text = await Bun.file(resolved).text();
-			chunks.push(text);
-			for (const file of parsePatchTouchedFiles(text)) {
-				if (!changedFiles.includes(file)) changedFiles.push(file);
-			}
+			text = await Bun.file(resolved).text();
 		} catch (err) {
-			if (!isMissingFile(err)) throw err;
+			if (isEnoent(err)) {
+				throw new Error(`verification patch evidence missing: ${patchPath}`, { cause: err });
+			}
+			throw err;
+		}
+		chunks.push(text);
+		for (const file of parsePatchTouchedFiles(text)) {
+			if (!changedFiles.includes(file)) changedFiles.push(file);
 		}
 	}
 	return {
-		...(chunks.length > 0 ? { patchContent: chunks.join("\n") } : {}),
+		patchContent: chunks.join("\n"),
 		changedFiles,
 	};
 }
 
-/** Build the code-state identity under test from implementation + patch bytes. */
+/** Build the code-state identity under test from patch bytes plus a proven workspace. */
 export function buildVerificationCodeState(input: {
 	implementation?: Pick<ImplementationArtifactV1, "attemptId"> | null;
 	patchContent?: string;
 	changedFiles?: readonly string[];
+	/** Omit when the execution tree could not be proven. That seal is not reusable. */
+	workspace?: VerificationWorkspaceBinding;
 }): VerificationCodeState {
 	const changedFiles = normalizePaths(input.changedFiles ?? []);
-	const patchSha256 =
-		input.patchContent !== undefined ? sha256Hex(input.patchContent) : EMPTY_TREE_PATCH_SHA;
+	const patchSha256 = input.patchContent !== undefined ? sha256Hex(input.patchContent) : EMPTY_TREE_PATCH_SHA;
 	const implementationAttemptId = input.implementation?.attemptId?.trim() || undefined;
-	const fingerprint = fingerprintCodeState(patchSha256, changedFiles, implementationAttemptId);
+	const fingerprint = fingerprintCodeState(patchSha256, changedFiles, implementationAttemptId, input.workspace);
 	const state: VerificationCodeState = {
 		patchSha256,
 		changedFiles,
 		fingerprint,
 	};
 	if (implementationAttemptId) state.implementationAttemptId = implementationAttemptId;
+	if (input.workspace) state.workspace = input.workspace;
 	return state;
 }
 
-/** Parse / normalize a validity block; returns null when shape is wrong. */
+/**
+ * undefined: legacy seal, no proof. null: a workspace key was present but not proven.
+ */
+function parseWorkspaceBinding(value: unknown): VerificationWorkspaceBinding | undefined | null {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) return null;
+	const cwd = typeof value.cwd === "string" ? value.cwd.trim() : "";
+	const vcsKind = typeof value.vcs === "string" ? value.vcs.trim() : "";
+	const root = typeof value.root === "string" ? value.root.trim() : "";
+	const headId = typeof value.headId === "string" ? value.headId.trim() : "";
+	const contentSha256 = typeof value.contentSha256 === "string" ? value.contentSha256.trim() : "";
+	if (!cwd || !vcsKind || !root || !headId || !contentSha256) return null;
+	return { cwd, vcs: vcsKind, root, headId, contentSha256 };
+}
+
 export function parseVerificationValidity(value: unknown): VerificationValidityV1 | null {
 	if (!isRecord(value)) return null;
 	if (value.schemaVersion !== 1 || value.kind !== "verification_validity") return null;
@@ -273,11 +539,11 @@ export function parseVerificationValidity(value: unknown): VerificationValidityV
 	const changedFiles = Array.isArray(value.codeState.changedFiles)
 		? normalizePaths(value.codeState.changedFiles.filter((p): p is string => typeof p === "string"))
 		: [];
+	const workspace = parseWorkspaceBinding(value.codeState.workspace);
+	if (workspace === null) return null;
 	const codeState: VerificationCodeState = { patchSha256, changedFiles, fingerprint };
-	if (
-		typeof value.codeState.implementationAttemptId === "string" &&
-		value.codeState.implementationAttemptId.trim()
-	) {
+	if (workspace) codeState.workspace = workspace;
+	if (typeof value.codeState.implementationAttemptId === "string" && value.codeState.implementationAttemptId.trim()) {
 		codeState.implementationAttemptId = value.codeState.implementationAttemptId.trim();
 	}
 	if (!isRecord(value.scope)) return null;
@@ -379,18 +645,21 @@ export function invalidateVerificationResult(
  */
 export function isValidDeliveryEvidence(artifact: VerificationArtifactV1 | null | undefined): boolean {
 	if (!artifact || artifact.passed !== true) return false;
+	if (artifact.checks.some(check => check.status === "failed")) return false;
 	const validity = parseVerificationValidity(artifact.validity);
 	if (!validity || validity.invalid === true) return false;
 	if (validity.owner === "worker" || validity.executor === "worker") return false;
 	if (validity.owner !== "workflow_verifier" && validity.owner !== "parent") return false;
 	if (validity.executor !== "workflow_verifier" && validity.executor !== "parent") return false;
-	return Boolean(validity.codeState.fingerprint);
+	// A copied fingerprint over rewritten patch identity is not a seal.
+	if (!codeStateIsConsistent(validity.codeState)) return false;
+	return true;
 }
 
 /**
  * Decide whether prior command checks can be reused instead of re-running.
- * Failed, worker-owned, invalidated, or code/command/scope-mismatched results
- * are never reusable.
+ * Failed, worker-owned, invalidated, unproven-workspace, or
+ * code/command/scope-mismatched results are never reusable.
  */
 export function assessVerificationReuse(input: {
 	prior: VerificationArtifactV1 | null | undefined;
@@ -403,10 +672,15 @@ export function assessVerificationReuse(input: {
 	const validity = parseVerificationValidity(prior.validity);
 	if (!validity) return { reusable: false, reason: "missing_validity" };
 	if (validity.invalid === true) return { reusable: false, reason: "invalidated" };
-	if (prior.passed !== true) return { reusable: false, reason: "failed_result" };
+	if (prior.passed !== true || prior.checks.some(check => check.status === "failed")) {
+		return { reusable: false, reason: "failed_result" };
+	}
 	if (validity.owner === "worker") return { reusable: false, reason: "owner_not_delivery" };
 	if (validity.executor !== "workflow_verifier" && validity.executor !== "parent") {
 		return { reusable: false, reason: "executor_not_trusted" };
+	}
+	if (!validity.codeState.workspace || !input.codeState.workspace) {
+		return { reusable: false, reason: "workspace_unproven" };
 	}
 	if (!codeStatesEqual(validity.codeState, input.codeState)) {
 		return { reusable: false, reason: "code_state_mismatch" };

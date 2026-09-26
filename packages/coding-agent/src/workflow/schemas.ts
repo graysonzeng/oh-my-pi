@@ -409,6 +409,16 @@ const VerificationValiditySchema = z
 				changedFiles: z.array(z.string()),
 				implementationAttemptId: z.string().optional(),
 				fingerprint: z.string().min(1),
+				workspace: z
+					.object({
+						cwd: z.string().min(1),
+						vcs: z.string().min(1),
+						root: z.string().min(1),
+						headId: z.string().min(1),
+						contentSha256: z.string().min(1),
+					})
+					.strict()
+					.optional(),
 			})
 			.strict(),
 		invalidatedBy: z.array(
