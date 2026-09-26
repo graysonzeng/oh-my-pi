@@ -39,10 +39,14 @@ deliveryExperiment:
 ## Programmatic harness
 
 Settings under `deliveryExperiment.phaseHandoff.*` register the opt-in gate
-(same shape as Package 4 read-dedupe). **Enabling the setting alone does not
-mutate live session context** — call `applyPhaseHandoffExperiment` from a
-harness or an explicit phase-boundary call site. Live compaction remains
-unchanged until that apply path is wired.
+(same shape as Package 4 read-dedupe). **Batch 2 wiring:** when enabled,
+`SessionMaintenance.checkCompaction` / `observePhaseHandoffBoundary` shadow-
+detect phase boundaries and may apply carry-slim through the existing
+compaction owner when retained state is complete. When the flag is **off**,
+the production context path is unchanged. Treatment still requires a detected
+boundary + semantic retained state (constraints, mods, acceptance, and
+recovery locators when declared) — not merely “three arrays non-empty”.
+`claimedLiveWin` stays false; paired evidence is insufficient.
 
 ```ts
 import {

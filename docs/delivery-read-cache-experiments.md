@@ -20,14 +20,25 @@ Do **not**: globally lower all output caps; add forced “don’t re-read” pro
 rules; reopen Track C; change permissions / instruction priority / tool
 capability; flip P2 model/effort/concurrency defaults.
 
-**Enablement note:** settings keys below are experiment **entries** (defaults
-off). They do not yet mutate the production read/prompt assembly path by
-themselves — flipping a flag without a wired consumer is a no-op. Enabling
-**both** A and B in one session fails closed (`multi_factor_rejected`).
+**Enablement note (Batch 2):** settings keys below remain **opt-in** (defaults
+off). Wired consumers:
+
+- Experiment A → controlled selection layer over ordinary
+  `latency.arms.readDedupe` (`selectReadDedupeReuse` in AgentSession); no
+  second cache table.
+- Experiment B → `prepareWorkflowInvocation` observes (and optionally
+  reorders) at the prompt-assembly boundary via
+  `observeStablePrefixAtAssembly`. Fingerprints only by default; no auto
+  warmup / paid traffic. `claimedLiveWin` stays false.
+
+Enabling **both** A and B in one session fails closed (`multi_factor_rejected`).
+Paired live evidence is still insufficient — do not treat mechanism receipts
+as cost wins.
 
 **Naming note:** ordinary-session `latency.arms.readDedupe` (default on under
 `modelOptimization`) is a **separate** production arm from Experiment A
-(`deliveryExperiment.readDedupe`). Do not attribute them together.
+(`deliveryExperiment.readDedupe`). Ordinary arm owns the artifact map +
+rewrite; Experiment A only gates selection. Do not attribute them together.
 
 ---
 

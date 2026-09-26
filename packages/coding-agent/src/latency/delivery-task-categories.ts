@@ -63,15 +63,15 @@ export const DELIVERY_TASK_CATEGORIES: readonly DeliveryTaskCategorySpec[] = [
 		id: "long_session_cross_phase",
 		purpose: "Early constraints, artifact recovery, context/cache tradeoffs",
 		l0Contract: "fail→repair→pass is one accepted episode retaining all attempt costs",
-		// Cross-phase compaction/artifact recovery L0 not shipped in Batch 1 W8 file.
-		l0FixtureReady: false,
+		// Batch 2 W6: phase-handoff shadow/apply + retain semantics L0 fixtures.
+		l0FixtureReady: true,
 	},
 	{
 		id: "auth_transport_recovery",
 		purpose: "Recovery fidelity after auth/transport/thinking-loop + completed writes",
 		l0Contract: "fork/dup receipts idempotent by eventId; write failure never mints green",
-		// Auth/transport recovery L0 belongs to W4 fixtures — not claimed ready here.
-		l0FixtureReady: false,
+		// Batch 2 W4: selectedRoute + stream-stall/thinking-loop replay fixtures (L0 only).
+		l0FixtureReady: true,
 	},
 	{
 		id: "multi_episode_receipt_metrics",
@@ -90,3 +90,5 @@ export function deliveryTaskCategory(id: DeliveryTaskCategoryId): DeliveryTaskCa
 /** Batch 1 explicitly cannot claim live paired cost wins. */
 export { BATCH1_PAIRED_EVIDENCE_READY, BATCH1_STATUS, batch1Status } from "./batch1-status";
 export type { Batch1WorkPackageId, Batch1WorkPackageStatus } from "./batch1-status";
+export { BATCH2_PAIRED_EVIDENCE_READY, BATCH2_STATUS, batch2Status } from "./batch2-status";
+export type { Batch2WorkPackageId, Batch2WorkPackageStatus } from "./batch2-status";

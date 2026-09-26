@@ -36,7 +36,13 @@ import {
 	toolSchemaLocator,
 	type WorkflowPresentationPolicy,
 } from "./presentation-policy";
-import { assemblePrompt, type PromptAssemblyReceiptV1 } from "./prompt-assembly";
+import {
+	observeStablePrefixAtAssembly,
+	STABLE_PREFIX_OBSERVE_CUSTOM_TYPE,
+	type StablePrefixAssemblyObserveV1,
+} from "../latency/stable-prefix-assembly-bridge";
+import { parseStablePrefixCacheExperimentConfig } from "../latency/stable-prefix-cache-experiment";
+import { assemblePrompt, type PromptAssemblyReceiptV1, type PromptSection } from "./prompt-assembly";
 import { applyPromptStrategy, buildStablePromptSections } from "./prompt-strategy";
 import { enhanceSchemaForProfile, type ToolDescriptor, transformToolsForProfile } from "./schema-enhancer";
 import { processToolOutputDetailed } from "./tool-output-manager";
@@ -352,6 +358,12 @@ export interface PreparedWorkflowInvocation {
 	transformTools: (tools: ToolDescriptor[]) => ToolDescriptor[];
 	/** Prompt assembly receipt for this invocation (always produced). */
 	promptAssemblyReceipt: PromptAssemblyReceiptV1;
+	/**
+	 * W5 Experiment B observe receipt at the assembly boundary (fingerprints only).
+	 * Present when deliveryExperiment.stablePrefixCache is consulted; claimedLiveWin
+	 * is always false. Does not prove server cache hits.
+	 */
+	stablePrefixObserve?: StablePrefixAssemblyObserveV1;
 	/** Versioned per-request context bucket ledger; provider facts merge after response. */
 	contextLedger: ContextLedgerV1;
 	/**
@@ -649,70 +661,94 @@ export function prepareWorkflowInvocation(
 		.filter(Boolean)
 		.join("\n\n");
 	const historyWithExplicitEntries = [history, explicitContextText].filter(Boolean).join("\n\n");
+	const baseSections: PromptSection[] = [
+		{
+			id: "system_static",
+			// Full style template body (stable vars only) — not a tiny marker.
+			content: stableParts.systemStatic,
+			source: `workflow-style:${stableParts.styleMarker || "default"}`,
+			authority: "system",
+			stable: true,
+		},
+		{
+			id: "role_policy",
+			content: rolePolicyWithPrefix,
+			stable: true,
+			source: `workflow-role:${request.role}`,
+			authority: "developer",
+		},
+		{
+			id: "tool_presentation",
+			content: toolPresentationText,
+			stable: true,
+			source: "workflow-tool-presentation",
+			authority: "tool",
+		},
+		{
+			id: "skill_catalog",
+			content: presentedSkillsText,
+			stable: true,
+			source: "workflow-skill-catalog",
+			authority: "developer",
+		},
+		{
+			id: "assignment",
+			content: request.assignment,
+			stable: false,
+			source: "workflow-request.assignment",
+			authority: "user",
+		},
+		{
+			id: "repo_map",
+			content: repoMap,
+			stable: false,
+			source: "dynamic-context.repo_map",
+			authority: "tool",
+		},
+		{
+			id: "handoff",
+			content: handoff,
+			stable: false,
+			source: "dynamic-context.handoff",
+			authority: "developer",
+		},
+		{
+			id: "history",
+			content: historyWithExplicitEntries,
+			stable: false,
+			source: "dynamic-context.history",
+			authority: "tool",
+		},
+	];
+	// W5: observe (and optionally reorder) at the assembly boundary. Default off.
+	const settingsGet = request.session.settings?.get?.bind(request.session.settings);
+	const stablePrefixConfig = parseStablePrefixCacheExperimentConfig({
+		enabled: settingsGet?.("deliveryExperiment.stablePrefixCache.enabled" as never) === true,
+		factor: settingsGet?.("deliveryExperiment.stablePrefixCache.factor" as never) ?? "none",
+	});
+	const readDedupeExperimentOn = settingsGet?.("deliveryExperiment.readDedupe.enabled" as never) === true;
+	const prefixBridge = observeStablePrefixAtAssembly({
+		sections: baseSections,
+		config: stablePrefixConfig,
+		peer: { readDedupeEnabled: readDedupeExperimentOn },
+		providerIdentity: {
+			provider: adaptedPolicy.modelFacts.identity.provider,
+			api: adaptedPolicy.modelFacts.identity.api,
+			model: adaptedPolicy.modelFacts.identity.model,
+			toolSchemaFingerprint: sha256Hex(toolPresentationText),
+		},
+		scope: "unknown",
+	});
 	const assembled = assemblePrompt({
-		sections: [
-			{
-				id: "system_static",
-				// Full style template body (stable vars only) — not a tiny marker.
-				content: stableParts.systemStatic,
-				source: `workflow-style:${stableParts.styleMarker || "default"}`,
-				authority: "system",
-				stable: true,
-			},
-			{
-				id: "role_policy",
-				content: rolePolicyWithPrefix,
-				stable: true,
-				source: `workflow-role:${request.role}`,
-				authority: "developer",
-			},
-			{
-				id: "tool_presentation",
-				content: toolPresentationText,
-				stable: true,
-				source: "workflow-tool-presentation",
-				authority: "tool",
-			},
-			{
-				id: "skill_catalog",
-				content: presentedSkillsText,
-				stable: true,
-				source: "workflow-skill-catalog",
-				authority: "developer",
-			},
-			{
-				id: "assignment",
-				content: request.assignment,
-				stable: false,
-				source: "workflow-request.assignment",
-				authority: "user",
-			},
-			{
-				id: "repo_map",
-				content: repoMap,
-				stable: false,
-				source: "dynamic-context.repo_map",
-				authority: "tool",
-			},
-			{
-				id: "handoff",
-				content: handoff,
-				stable: false,
-				source: "dynamic-context.handoff",
-				authority: "developer",
-			},
-			{
-				id: "history",
-				content: historyWithExplicitEntries,
-				stable: false,
-				source: "dynamic-context.history",
-				authority: "tool",
-			},
-		],
+		sections: prefixBridge.sections,
 		// Provider cache counters not available at prepare time — never invent zeros.
 		// RuntimeAdapter merges usage.cacheRead/cacheWrite after the model responds.
 		cacheObservable: false,
 	});
+	const stablePrefixObserve: StablePrefixAssemblyObserveV1 = {
+		...prefixBridge.observe,
+		kind: STABLE_PREFIX_OBSERVE_CUSTOM_TYPE,
+	};
 	const ledgerEntries: ContextEntry[] = [
 		{ id: "system_static", bucket: "system_static", kind: "other", content: stableParts.systemStatic },
 		{ id: "role_policy", bucket: "role_policy", kind: "other", content: rolePolicyWithPrefix },
@@ -785,6 +821,7 @@ export function prepareWorkflowInvocation(
 		workflowAttemptEvidence: {
 			promptAssemblyReceipt: assembled.receipt,
 			contextLedger,
+			...(stablePrefixConfig.enabled ? { stablePrefixObserve } : {}),
 		},
 	};
 
@@ -803,6 +840,7 @@ export function prepareWorkflowInvocation(
 		processToolResultDetailed,
 		transformTools,
 		promptAssemblyReceipt: assembled.receipt,
+		stablePrefixObserve,
 		contextLedger,
 		assembledPromptText: assembledContext,
 		presentationPolicy,

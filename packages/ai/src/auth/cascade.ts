@@ -8,7 +8,29 @@ import { getEnvApiKey, getEnvApiKeyName } from "../stream";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { CredentialSelector } from "./select";
-import type { AuthApiKeyOptions, AuthCredential, AuthSource, AuthSourceOptions, KeysApi, LimitsApi } from "./types";
+import { resolveCredentialIdentityKey } from "./sqlite-credential-store";
+import type {
+	AuthApiKeyOptions,
+	AuthCredential,
+	AuthSource,
+	AuthSourceOptions,
+	KeysApi,
+	LimitsApi,
+	SelectedCredentialRoute,
+} from "./types";
+
+/**
+ * True when a models.yml / config apiKey value is an observable reference
+ * (env var name or !command), not a literal secret. Literals must fail open —
+ * we never fingerprint secret material for negative-cache identity.
+ */
+export function isObservableConfigKeyReference(config: string): boolean {
+	const trimmed = config.trim();
+	if (!trimmed) return false;
+	if (trimmed.startsWith("!")) return true;
+	if (trimmed.startsWith("$") && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) return true;
+	return /^[A-Z][A-Z0-9_]{2,}$/.test(trimmed);
+}
 
 /**
  * Default config value resolver that checks env vars and treats as literal.
@@ -486,6 +508,64 @@ export class KeyCascade implements KeysApi {
 	/** Non-secret generation of runtime/config overrides. See {@link KeyOverrides.epoch}. */
 	get overrideEpoch(): number {
 		return this.#deps.overrides.epoch;
+	}
+
+	/**
+	 * Non-secret selected credential/route identity + revision for negative caches.
+	 * Fail-open (undefined) when the selected account cannot be proven — never
+	 * invents “first account”. Does not read or hash token material.
+	 */
+	selectedRoute(provider: string, options?: { sessionId?: string | null }): SelectedCredentialRoute | undefined {
+		const epoch = this.#deps.overrides.epoch;
+		const generation = this.#deps.pool.generation;
+		const revision = `g${generation}:e${epoch}`;
+
+		if (this.#deps.overrides.runtimeKey(provider) !== undefined) {
+			return { kind: "runtime", identityKey: "runtime", revision: `e${epoch}` };
+		}
+
+		const configKey = this.#deps.overrides.configKey(provider);
+		if (configKey !== undefined) {
+			if (!isObservableConfigKeyReference(configKey)) return undefined;
+			return {
+				kind: "config",
+				identityKey: `config:${configKey.trim()}`,
+				revision: `e${epoch}`,
+			};
+		}
+
+		const sessionId = options?.sessionId?.trim() || undefined;
+		const sticky = this.#deps.affinity.get(provider, sessionId);
+		if (!sticky) {
+			// Env / unpinned stored keys: value changes are not synchronously
+			// observable without reading secrets — fail open.
+			return undefined;
+		}
+
+		const entries = this.#deps.pool.entries(provider);
+		const entry =
+			sticky.credentialId !== undefined
+				? (entries.find(row => row.id === sticky.credentialId) ?? entries[sticky.index])
+				: entries[sticky.index];
+		if (!entry || entry.credential.type !== sticky.type) return undefined;
+
+		if (entry.credential.type === "oauth") {
+			const identityKey = resolveCredentialIdentityKey(provider, entry.credential) ?? `cred:${entry.id}`;
+			return {
+				kind: "oauth",
+				identityKey,
+				credentialId: entry.id,
+				revision,
+			};
+		}
+
+		// Stored api_key (login or broker copy) with a proven sticky pin.
+		return {
+			kind: "api_key",
+			identityKey: `cred:${entry.id}`,
+			credentialId: entry.id,
+			revision,
+		};
 	}
 
 	setRuntime(provider: string, apiKey: string): void {
