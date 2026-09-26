@@ -495,6 +495,10 @@ export function reclassifyParentIntegrateAgainstWorkspace(input: {
 	const delivery = input.delivery ? parseChildDeliveryEvidence(input.delivery) : null;
 	const current = input.currentCodeVersion.trim();
 	const codeVersionStale = !delivery || !current || delivery.codeVersion.version !== current;
+	// Parent must explicitly confirm release. Omitting the flag must not let a
+	// child-claimed writeOwnershipReleased:true win.
+	const parentReleased = input.writeOwnershipReleased === true;
+	const sharedHeld = delivery !== null && delivery.sharedInterfaces.length > 0 && !parentReleased;
 
 	const decision = classifyParentIntegrate({
 		delivery,
@@ -502,19 +506,12 @@ export function reclassifyParentIntegrateAgainstWorkspace(input: {
 		codeVersionStale,
 		requiredAcceptance: input.requiredAcceptance,
 		outOfScopeEdits: input.outOfScopeEdits,
-		crossModule:
-			input.crossModule === true ||
-			(delivery !== null && delivery.sharedInterfaces.length > 0 && input.writeOwnershipReleased === false),
+		crossModule: input.crossModule === true,
 	});
 
 	// Packet-only freshness already handled by codeVersionStale. Unreleased
 	// write ownership cannot integrate even if the child claimed release.
-	if (
-		decision.action === "integrate" &&
-		delivery &&
-		delivery.sharedInterfaces.length > 0 &&
-		input.writeOwnershipReleased === false
-	) {
+	if (decision.action === "integrate" && delivery && sharedHeld) {
 		return {
 			classification: "cross_module",
 			action: "parent_coordinate",

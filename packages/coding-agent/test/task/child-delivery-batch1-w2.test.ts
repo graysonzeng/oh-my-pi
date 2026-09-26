@@ -79,6 +79,18 @@ describe("W2 executor producer", () => {
 		});
 		expect(owned.action).toBe("parent_coordinate");
 		expect(owned.reasons.some(r => r.includes("write_ownership"))).toBe(true);
+
+		// Omitting parent writeOwnershipReleased must not inherit child release claim.
+		const omitted = reclassifyParentIntegrateAgainstWorkspace({
+			delivery: {
+				...delivery,
+				writeOwnershipReleased: true,
+			},
+			currentCodeVersion: "v1",
+			requiredAcceptance: ["shared contract"],
+		});
+		expect(omitted.action).toBe("parent_coordinate");
+		expect(omitted.reasons.some(r => r.includes("write_ownership"))).toBe(true);
 	});
 
 	test("done_valid bind entry is not final acceptance", () => {

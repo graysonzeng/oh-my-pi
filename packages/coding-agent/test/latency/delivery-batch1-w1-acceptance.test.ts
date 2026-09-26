@@ -115,7 +115,7 @@ describe("W1 ordinary acceptance gate", () => {
 			});
 			expect(ok.recorded).toBe(true);
 			if (!ok.recorded) throw new Error("expected record");
-			expect(ok.details.attempt?.episode.rootUserEntryId).toBe(userId);
+			expect(ok.details.attempt?.episode?.rootUserEntryId).toBe(userId);
 			expect(ok.details.acceptanceContract?.items).toEqual(["regression covered"]);
 			expect(ok.details.authority).toBe("trusted_verifier");
 			expect(ok.details.buildIdentityRef).toBe(runtimeBuildIdentityRef(identity));
@@ -390,9 +390,13 @@ describe("W1 episode cost attribution", () => {
 		expect(cost.ordinary.acceptedTaskCount).toBe(1);
 		expect(cost.workflow.acceptedTaskCount).toBe(1);
 		expect(cost.ordinary.taskCount + cost.workflow.taskCount).toBe(2);
-		// Cost attributed once (first episode group); second incomplete — ratio null.
-		expect(cost.ordinary.totalAttemptCost).toBe(1.5);
+		// Without per-request episode tags, do not dump all spend onto epA —
+		// every unsplit group is cost-incomplete so ratios stay null.
+		expect(cost.ordinary.totalAttemptCost).toBeNull();
+		expect(cost.ordinary.costPerAcceptedTask).toBeNull();
 		expect(cost.workflow.costPerAcceptedTask).toBeNull();
+		expect(cost.tasks.every(t => t.attemptCostComplete === false)).toBe(true);
+		expect(cost.tasks.every(t => t.usage.costTotal === null)).toBe(true);
 	});
 
 	it("dedupes fork/dup receipts by eventId and keeps partial sum when price missing", () => {
@@ -490,5 +494,28 @@ describe("W1 episode cost attribution", () => {
 		expect(cost.tasks[0]?.zeroCostErrorRequests).toBe(1);
 		expect(cost.ordinary.costPerAcceptedTask).toBeNull();
 		expect(cost.ordinary.totalAttemptCost).toBe(0.5);
+	});
+
+	it("does not count v1 passed receipts without authority as accepted", () => {
+		// buildParentFinalVerificationDetails always stamps v:1 — without authority
+		// this must not mint accepted (forged / session_stop shaped payloads).
+		const details = buildParentFinalVerificationDetails("passed", "session_stop", 5_000);
+		expect(details.v).toBe(1);
+		expect(details.authority).toBeUndefined();
+		const jsonl = [
+			line({ type: "session", version: 3, id: "s-ungated", timestamp: "2026-09-26T10:00:00.000Z", cwd: "/tmp" }),
+			line({
+				type: "custom",
+				id: "v1",
+				parentId: null,
+				timestamp: "2026-09-26T10:00:01.000Z",
+				customType: PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+				data: details,
+			}),
+		].join("\n");
+		const cost = buildDeliveryCostBaselineReport([parseSessionJsonl(jsonl, PARENT)]);
+		expect(cost.ordinary.acceptedTaskCount).toBe(0);
+		expect(cost.tasks[0]?.accepted).toBe(false);
+		expect(cost.tasks[0]?.firstDeliveryAccepted).toBe("unknown");
 	});
 });

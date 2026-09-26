@@ -105,11 +105,16 @@ function applyPhaseToSnapshot(
 			snapshot.generate += 1;
 			break;
 		case "inspect":
+			if (meta?.reason === "valid") snapshot.consumeValid += 1;
+			else if (meta?.reason === "missing") snapshot.consumeMissing += 1;
+			else if (meta?.reason === "invalid") snapshot.rejectInvalid += 1;
 			break;
 		case "reject_stale":
 			snapshot.rejectStale += 1;
 			break;
 		case "reuse":
+			if (meta?.reason === "continue") snapshot.reuseContinue += 1;
+			else snapshot.reuseSpawnFresh += 1;
 			break;
 		case "child_settled":
 			snapshot.childSettled += 1;

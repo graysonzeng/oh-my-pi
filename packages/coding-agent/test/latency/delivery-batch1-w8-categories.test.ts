@@ -42,9 +42,19 @@ function line(value: unknown): string {
 describe("W8 offline task categories (L0)", () => {
 	it("registers all eight categories and marks paired evidence insufficient", () => {
 		expect(DELIVERY_TASK_CATEGORY_IDS).toHaveLength(8);
-		expect(DELIVERY_TASK_CATEGORIES.every(c => c.l0FixtureReady)).toBe(true);
 		expect(BATCH1_PAIRED_EVIDENCE_READY).toBe(false);
 		expect(deliveryTaskCategory("small_scope_query").id).toBe("small_scope_query");
+		const ready = DELIVERY_TASK_CATEGORIES.filter(c => c.l0FixtureReady).map(c => c.id);
+		expect(ready).toEqual([
+			"small_scope_query",
+			"diagnosed_local_fix",
+			"shared_interface",
+			"independent_review_known_defect",
+			"multi_episode_receipt_metrics",
+		]);
+		expect(deliveryTaskCategory("two_independent_modules").l0FixtureReady).toBe(false);
+		expect(deliveryTaskCategory("long_session_cross_phase").l0FixtureReady).toBe(false);
+		expect(deliveryTaskCategory("auth_transport_recovery").l0FixtureReady).toBe(false);
 	});
 
 	it("small_scope_query: stop alone is not accepted", () => {
@@ -256,7 +266,9 @@ describe("W8 offline task categories (L0)", () => {
 		const cost = buildDeliveryCostBaselineReport([parseSessionJsonl(jsonl, PARENT)]);
 		expect(cost.ordinary.taskCount).toBe(2);
 		expect(cost.ordinary.acceptedTaskCount).toBe(2);
+		// Multi-episode without per-request tags + missing price ⇒ incomplete, ratio null.
 		expect(cost.ordinary.costPerAcceptedTask).toBeNull();
-		expect(cost.ordinary.totalAttemptCost).toBe(1);
+		expect(cost.ordinary.totalAttemptCost).toBeNull();
+		expect(cost.tasks.every(t => t.attemptCostComplete === false)).toBe(true);
 	});
 });

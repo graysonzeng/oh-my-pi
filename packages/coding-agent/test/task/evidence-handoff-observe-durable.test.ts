@@ -83,6 +83,8 @@ describe("W3 durable evidence-handoff observe", () => {
 
 		const live = getEvidenceHandoffObserveSnapshot();
 		expect(live.generate).toBe(1);
+		expect(live.consumeValid).toBe(1);
+		expect(live.reuseContinue).toBe(1);
 
 		const records = manager
 			.getBranch()

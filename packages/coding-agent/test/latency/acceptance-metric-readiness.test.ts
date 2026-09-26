@@ -67,7 +67,9 @@ describe("acceptance metric readiness (S1)", () => {
 
 	it("emits costPerAcceptedTask when a workflow receipt with verifiedAtMs exists", () => {
 		const verifiedAtMs = 5_000;
-		const details = buildParentFinalVerificationDetails("passed", "workflow", verifiedAtMs);
+		const details = buildParentFinalVerificationDetails("passed", "workflow", verifiedAtMs, {
+			authority: "workflow",
+		});
 		expect(details.verifiedAtMs).toBe(verifiedAtMs);
 		const jsonl = [
 			line({

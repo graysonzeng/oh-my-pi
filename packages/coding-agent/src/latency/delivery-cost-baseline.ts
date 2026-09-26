@@ -301,6 +301,8 @@ function firstDeliveryAccepted(verifications: readonly ParentFinalVerificationOb
 	const sorted = sortedVerifications(verifications);
 	const first = sorted[0];
 	if (!first) return "unknown";
+	// v1+ without authority cannot be treated as a known first-delivery verdict.
+	if (first.v !== undefined && first.authority === undefined) return "unknown";
 	return first.status === "passed";
 }
 
@@ -673,7 +675,10 @@ export function observeDeliveryCostTask(args: {
 	const quality = qualityFromSession(parent);
 	const sorted = sortedVerifications(verifications);
 	const last = sorted.length > 0 ? sorted[sorted.length - 1]! : undefined;
-	const accepted = last?.status === "passed";
+	// Trusted acceptance: v1+ receipts require authority (forged status:"passed"
+	// alone does not mint). Legacy pre-v1 receipts keep status-only backcompat.
+	// Missing receipts stay not-accepted — never invent passed.
+	const accepted = last?.status === "passed" && (last.authority !== undefined || last.v === undefined);
 	const verifyTs = last?.ts ?? null;
 	const e2eMs =
 		parent.firstTs !== null && verifyTs !== null && verifyTs >= parent.firstTs ? verifyTs - parent.firstTs : null;
@@ -780,17 +785,19 @@ export function buildDeliveryCostBaselineReport(sessions: readonly ParsedSession
 		const groups = groupVerificationsByEpisode(parent.parentFinalVerifications);
 		// Multi-episode same session: emit one observation per episode so
 		// acceptance denominators stay isolated. Without per-request episode
-		// tags we cannot split usage — attribute priced usage only once (first
-		// group) and mark later groups incomplete so costPerAccepted stays null
-		// rather than double-billing.
-		for (const [index, group] of groups.entries()) {
+		// tags we cannot split usage — do NOT dump all session spend onto the
+		// first episode (that over-bills epA and under-bills epB). Mark every
+		// unsplit group cost-incomplete with empty usage so costPerAccepted
+		// stays null rather than misattributing or double-billing.
+		const cannotSplitUsage = groups.length > 1;
+		for (const group of groups) {
 			const observation = observeDeliveryCostTask({
 				parent,
 				children: kids,
 				verifications: group.verifications,
 				episodeKey: group.episodeKey,
 			});
-			if (groups.length > 1 && index > 0) {
+			if (cannotSplitUsage) {
 				tasks.push({
 					...observation,
 					usage: emptyUsage(),

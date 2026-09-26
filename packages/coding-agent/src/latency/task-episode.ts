@@ -23,7 +23,11 @@ export interface TaskEpisodeAnchor {
 }
 
 export interface TaskAttemptIdentity {
-	episode: TaskEpisodeAnchor;
+	/**
+	 * Episode anchor when a real root user entry is known.
+	 * Null when attribution is intentionally unattributed (do not invent ids).
+	 */
+	episode: TaskEpisodeAnchor | null;
 	/**
 	 * Attempt id within the episode. Prefer persisted workflow attemptId or a
 	 * stable receipt event id; null when unattributed.
@@ -69,12 +73,23 @@ export function parseTaskEpisodeAnchor(value: unknown): TaskEpisodeAnchor | null
 
 export function parseTaskAttemptIdentity(value: unknown): TaskAttemptIdentity | null {
 	if (!isRecord(value)) return null;
-	const episode = parseTaskEpisodeAnchor(value.episode);
-	if (!episode) return null;
+	// Episode may be explicitly null (unattributed) or a valid anchor. Missing /
+	// invalid episode objects without an explicit null fail closed only when no
+	// other attempt linkage exists — prefer preserving workflow/attempt ids.
+	const hasExplicitNullEpisode = value.episode === null;
+	const episode = hasExplicitNullEpisode ? null : parseTaskEpisodeAnchor(value.episode);
+	if (!hasExplicitNullEpisode && !episode) {
+		// Legacy / partial: require a parseable episode when one was supplied as an object.
+		if (value.episode !== undefined) return null;
+		return null;
+	}
+	const attemptId = typeof value.attemptId === "string" && value.attemptId.trim() ? value.attemptId.trim() : null;
+	const workflowId = typeof value.workflowId === "string" && value.workflowId.trim() ? value.workflowId.trim() : null;
+	if (!episode && !attemptId && !workflowId) return null;
 	return {
-		episode,
-		attemptId: typeof value.attemptId === "string" && value.attemptId.trim() ? value.attemptId.trim() : null,
-		workflowId: typeof value.workflowId === "string" && value.workflowId.trim() ? value.workflowId.trim() : null,
+		episode: episode ?? null,
+		attemptId,
+		workflowId,
 		branchLeafId:
 			typeof value.branchLeafId === "string" && value.branchLeafId.trim() ? value.branchLeafId.trim() : null,
 		taskToolCallId:

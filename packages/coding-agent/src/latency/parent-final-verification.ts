@@ -67,6 +67,8 @@ export interface ParentFinalVerificationObservation {
 	acceptanceContract?: AcceptanceContractRef;
 	codeState?: ParentFinalCodeStateRef;
 	authority?: AcceptanceAuthority;
+	/** Schema version when present — v1+ requires authority to count as accepted. */
+	v?: typeof PARENT_FINAL_VERIFICATION_DETAILS_VERSION;
 	buildIdentityRef?: string;
 	evidenceRefs?: string[];
 }

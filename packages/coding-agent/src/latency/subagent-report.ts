@@ -660,6 +660,7 @@ function collectParentFinalVerification(
 		...(parsed.acceptanceContract ? { acceptanceContract: parsed.acceptanceContract } : {}),
 		...(parsed.codeState ? { codeState: parsed.codeState } : {}),
 		...(parsed.authority ? { authority: parsed.authority } : {}),
+		...(parsed.v ? { v: parsed.v } : {}),
 		...(parsed.buildIdentityRef ? { buildIdentityRef: parsed.buildIdentityRef } : {}),
 		...(parsed.evidenceRefs ? { evidenceRefs: parsed.evidenceRefs } : {}),
 	};

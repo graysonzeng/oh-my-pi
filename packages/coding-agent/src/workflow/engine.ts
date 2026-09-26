@@ -2340,10 +2340,11 @@ export class WorkflowEngine {
 				}
 				try {
 					const sessionId = session.sessionManager?.getSessionId?.() ?? workflowId;
-					const rootUserEntryId =
-						(session.sessionManager
-							? resolveRootUserEntryIdFromBranch(session.sessionManager.getBranch())
-							: null) ?? workflowId;
+					const resolvedRoot = session.sessionManager
+						? resolveRootUserEntryIdFromBranch(session.sessionManager.getBranch())
+						: null;
+					// Never invent a user-entry id from workflowId — leave episode
+					// null (unattributed) when the branch has no user message root.
 					const acceptanceContract = buildAcceptanceContractRef(this.#plan?.acceptanceCriteria ?? []);
 					const validityCode = effectiveVerification.validity?.codeState;
 					session.sessionManager?.appendCustomEntry(
@@ -2351,7 +2352,7 @@ export class WorkflowEngine {
 						buildParentFinalVerificationDetails(deliveryOk ? "passed" : "failed", "workflow", Date.now(), {
 							eventId: `wf:${workflowId}:${attemptId}:final_verify`,
 							attempt: {
-								episode: { sessionId, rootUserEntryId },
+								episode: resolvedRoot ? { sessionId, rootUserEntryId: resolvedRoot } : null,
 								attemptId,
 								workflowId,
 								branchLeafId: session.sessionManager?.getLeafId?.() ?? null,

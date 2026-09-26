@@ -44,7 +44,8 @@ export const DELIVERY_TASK_CATEGORIES: readonly DeliveryTaskCategorySpec[] = [
 		id: "two_independent_modules",
 		purpose: "True parallel gain vs integrate cost",
 		l0Contract: "two episodes/jobs isolate costs; parallel child walls use union not sum",
-		l0FixtureReady: true,
+		// No dedicated W8 L0 fixture yet — parallel union-not-sum lives in parent-final tests.
+		l0FixtureReady: false,
 	},
 	{
 		id: "shared_interface",
@@ -62,13 +63,15 @@ export const DELIVERY_TASK_CATEGORIES: readonly DeliveryTaskCategorySpec[] = [
 		id: "long_session_cross_phase",
 		purpose: "Early constraints, artifact recovery, context/cache tradeoffs",
 		l0Contract: "fail→repair→pass is one accepted episode retaining all attempt costs",
-		l0FixtureReady: true,
+		// Cross-phase compaction/artifact recovery L0 not shipped in Batch 1 W8 file.
+		l0FixtureReady: false,
 	},
 	{
 		id: "auth_transport_recovery",
 		purpose: "Recovery fidelity after auth/transport/thinking-loop + completed writes",
 		l0Contract: "fork/dup receipts idempotent by eventId; write failure never mints green",
-		l0FixtureReady: true,
+		// Auth/transport recovery L0 belongs to W4 fixtures — not claimed ready here.
+		l0FixtureReady: false,
 	},
 	{
 		id: "multi_episode_receipt_metrics",
