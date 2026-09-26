@@ -57,8 +57,9 @@ declare module "@oh-my-pi/pi-tui/tools/task" {
 		deliveryEvidence?: ChildDeliveryEvidenceV1;
 		/**
 		 * Parent integrate classifier decision for this child result. Set by
-		 * `runStructuredSubagent` so workpool/task paths that only keep
-		 * `execution.result` still receive the classification.
+		 * `runStructuredSubagent` from the packet alone (freshness unchecked —
+		 * settle never stamps `integrate`). Callers with contract/workspace
+		 * inputs should re-classify via `classifyChildResultForParentIntegrate`.
 		 */
 		parentIntegrateDecision?: ParentIntegrateDecision;
 	}

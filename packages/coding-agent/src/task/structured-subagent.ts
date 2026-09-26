@@ -214,8 +214,11 @@ export interface StructuredSubagentResult {
 	 */
 	deliveryEvidence?: ChildDeliveryEvidenceV1;
 	/**
-	 * Parent integrate classification over {@link deliveryEvidence}. Always set
-	 * after a settled run so callers do not re-derive; missing packets fail closed.
+	 * Parent integrate classification over {@link deliveryEvidence}.
+	 * Always set after a settled run. Missing packets fail closed.
+	 * Settle only sees the packet — without workspace/contract freshness inputs —
+	 * so `action: "integrate"` is never stamped here; callers that have those
+	 * inputs should call {@link classifyChildResultForParentIntegrate} themselves.
 	 */
 	parentIntegrateDecision: ParentIntegrateDecision;
 }
@@ -871,9 +874,20 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			extractChildDeliveryEvidence(result.structuredOutput?.data) ??
 			extractChildDeliveryEvidence(result.output) ??
 			undefined;
-		const parentIntegrateDecision = classifyChildResultForParentIntegrate({
+		const packetDecision = classifyChildResultForParentIntegrate({
 			deliveryEvidence: deliveryEvidence ?? null,
 		});
+		// Packet-only at settle: never advertise integrate as decision-of-record
+		// without freshness/contract inputs (stale/codeVersion/requiredAcceptance).
+		const parentIntegrateDecision =
+			packetDecision.action === "integrate"
+				? {
+						classification: "stale_context" as const,
+						action: "reread_then_decide" as const,
+						reasons: ["packet_only_freshness_unchecked", ...packetDecision.reasons],
+						usedAuthorSelfAssessment: false as const,
+					}
+				: packetDecision;
 		// Attach onto SingleResult so workpool / task-tool consumers that only
 		// keep `execution.result` still see the delivery packet + classification.
 		if (deliveryEvidence) result.deliveryEvidence = deliveryEvidence;

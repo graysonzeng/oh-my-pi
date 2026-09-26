@@ -588,6 +588,22 @@ describe("M17: secret redaction has no gaps", () => {
 		expect(redactSecretsInText('{"password":"hunter2secret!"}')).toContain('"password":"[REDACTED]"');
 		expect(redactSecretsInText("Authorization: Bearer abcdefgh12345678")).toContain("Bearer [REDACTED]");
 	});
+
+	it("redacts ghp_/github_pat_/raw JWT and home paths in stored summaries", () => {
+		const ghp = `ghp_${"a".repeat(36)}`;
+		const pat = `github_pat_${"f".repeat(36)}`;
+		const jwt = `eyJ${"k".repeat(12)}.eyJ${"l".repeat(12)}.${"m".repeat(16)}`;
+		expect(containsSecret(ghp)).toBe(true);
+		expect(containsSecret(pat)).toBe(true);
+		expect(containsSecret(jwt)).toBe(true);
+		expect(redactSecretsInText(`leak ${ghp}`)).toContain("gh*_[REDACTED]");
+		expect(redactSecretsInText(`leak ${ghp}`)).not.toContain(ghp);
+		expect(redactSecretsInText(`leak ${pat}`)).toContain("github_pat_[REDACTED]");
+		expect(redactSecretsInText(`leak ${jwt}`)).toContain("eyJ[REDACTED_JWT]");
+		expect(redactSecretsInText("failed under /Users/alice/.omp/logs")).toContain("[HOME]");
+		expect(redactSecretsInText("failed under /Users/alice/.omp/logs")).not.toContain("/Users/alice");
+		expect(redactSecretsInText("failed under /home/bob/.config")).toContain("[HOME]");
+	});
 });
 
 describe("M18: incomplete profiles fail closed", () => {

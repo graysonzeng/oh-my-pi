@@ -7,6 +7,12 @@
  * same probe/route key skip futile identical requests. Unknown stays
  * conservative (no registry write). Does not global-enable
  * `provider_health_breaker` and does not invent account-permission guesses.
+ *
+ * Key namespaces: availability preflight writes `availabilityProbeDedupeKey`
+ * strings; session turn-recovery writes `buildCredentialRouteKey` strings.
+ * Both use this process-local registry, but keys are not interchangeable —
+ * cross-surface sharing is same-namespace only (fail-open re-probe across
+ * mismatched key shapes, never false-block).
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { redactSecretsInText } from "../workflow/secret-redact";
@@ -156,7 +162,7 @@ export class CredentialRouteUnavailableRegistry {
 
 let sharedRegistry: CredentialRouteUnavailableRegistry | undefined;
 
-/** Process-local shared registry for cross-sibling / cross-engine early fail. */
+/** Process-local shared registry for same-namespace sibling early fail. */
 export function sharedCredentialRouteUnavailableRegistry(): CredentialRouteUnavailableRegistry {
 	sharedRegistry ??= new CredentialRouteUnavailableRegistry();
 	return sharedRegistry;

@@ -7,6 +7,7 @@ import {
 	ProviderIdentityCollector,
 } from "./identity-receipt";
 import type { StructuredRunnerResult } from "./runtime-adapter";
+import { redactSecretsInText } from "./secret-redact";
 import type {
 	WorkflowAvailabilityPort,
 	WorkflowAvailabilityProbeRequest,
@@ -58,7 +59,7 @@ export class EmbeddedWorkflowAvailabilityPort implements WorkflowAvailabilityPor
 				status: "unavailable",
 				latencyMs,
 				errorKind: kind,
-				errorSummary: message.slice(0, 500),
+				errorSummary: redactSecretsInText(message).slice(0, 500),
 			};
 		} finally {
 			clearTimeout(timer);
