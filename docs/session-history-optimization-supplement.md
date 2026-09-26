@@ -16,6 +16,7 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
 | S2 | P1 | Opt-in main-session context / phase-handoff experiment | `phase-handoff-experiment.ts`, `docs/phase-handoff-experiment.md` |
 | S3 | P1 | Pagination / continue-read contract fidelity | `composeReadPaginationArgs`, read tool selectors |
 | S4 | P1 | thinking-loop / stream-interrupt replayable fixtures | `test/session/thinking-loop-stream-interrupt-fixtures.test.ts` |
+| review | — | Tip fixes after independent review (#20) | S0 UsageLimit vs auth kind, redact, S1 observe, S3 plain-path compose |
 
 ## S0 contract
 
