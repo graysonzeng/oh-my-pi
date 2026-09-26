@@ -743,3 +743,51 @@ export const cfgStablePrefixCacheExperiment = combine({
 });
 
 export type StablePrefixCacheExperimentSettings = SettingValueOf<typeof cfgStablePrefixCacheExperiment>;
+
+// ────────────────────────────────────────────────────────────────────────
+// History supplement S2 — phase-handoff / carry-slim (opt-in; default off)
+// ────────────────────────────────────────────────────────────────────────
+
+export const PHASE_HANDOFF_EXPERIMENT_FACTOR_VALUES = ["none", "phase_boundary_carry_slim"] as const;
+
+/** Master gate for phase-handoff experiment. Default off — production unchanged. */
+export const cfgPhaseHandoffExperimentEnabled = register({
+	id: "deliveryExperiment.phaseHandoff.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Phase-handoff experiment",
+		description:
+			"Opt-in S2: at natural phase boundaries, reduce bulky carried context while retaining open constraints, modification state, and acceptance basis. Off preserves production. Does not change model/concurrency or force a global 200k cap.",
+	},
+});
+
+export const cfgPhaseHandoffExperimentFactor = register({
+	id: "deliveryExperiment.phaseHandoff.factor",
+	type: "enum",
+	values: PHASE_HANDOFF_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Phase-handoff factor",
+		description: "One factor per run. Do not change model or concurrency in the same experiment.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "phase_boundary_carry_slim",
+				label: "Phase-boundary carry slim",
+				description: "Drop bulky carry at phase boundaries; keep constraints / mods / acceptance",
+			},
+		],
+	},
+});
+
+export const cfgPhaseHandoffExperiment = combine({
+	enabled: cfgPhaseHandoffExperimentEnabled,
+	factor: cfgPhaseHandoffExperimentFactor,
+});
+
+export type PhaseHandoffExperimentSettings = SettingValueOf<typeof cfgPhaseHandoffExperiment>;

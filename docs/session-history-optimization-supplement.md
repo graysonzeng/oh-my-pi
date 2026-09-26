@@ -13,7 +13,7 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
 |---|---|---|---|
 | S0 | P0 | Credential/route unavailable early-fail + bounded recovery | `credential-route-unavailable.ts`, availability preflight, turn-recovery |
 | S1 | P0 | Acceptance metric readiness + observe handoff (no schema expand) | delivery-cost / parent_final / evidence-handoff observe |
-| S2 | P1 | Opt-in main-session context / phase-handoff experiment | context-strategy experiment patterns |
+| S2 | P1 | Opt-in main-session context / phase-handoff experiment | `phase-handoff-experiment.ts`, `docs/phase-handoff-experiment.md` |
 | S3 | P1 | Pagination / continue-read contract fidelity | `read` tool selectors / artifact locators |
 | S4 | P1 | thinking-loop / stream-interrupt replayable fixtures | turn-recovery fixtures |
 
@@ -31,6 +31,14 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
 - When a receipt exists (workflow `final_verify` or `AgentSession.recordParentFinalVerification`), Package 1 producers already emit what `stats:subagents` / `deliveryCost` need — including `verifiedAtMs` from `buildParentFinalVerificationDetails`.
 - Evidence-handoff observe path (`evidence-handoff-observe.ts`): generate → consume/inspect → reject-stale → reuse decision, via metrics/logging/tests only. **No schema expansion** this round.
 - Normal session stop / tool success never invent acceptance.
+
+## S2 contract
+
+- Opt-in only (`deliveryExperiment.phaseHandoff.enabled`, default `false`).
+- Single factor `phase_boundary_carry_slim`: drop bulky carry at phase boundaries;
+  retain open constraints, modification state, and acceptance basis.
+- No model/concurrency change in the same experiment; no global 200k forced cap;
+  `claimedLiveWin` always false on harness receipts.
 
 ## Out of scope
 
