@@ -469,19 +469,6 @@ export function prepareWorkflowInvocation(
 		// Named readonly policy on a write role must still force readonly wrap.
 		session = wrapSessionForWorkflowRole(session, "planner");
 	}
-	if (!policy.readonly) {
-		session = {
-			...session,
-			workflowWritePolicy: {
-				repoRoot: request.session.cwd,
-				forbiddenPaths: [...policy.forbiddenPaths],
-			},
-			workflowCommandPolicy: { allowedCommands: [...policy.allowedCommands] },
-		};
-	} else if (namedPolicyId && namedPolicyId !== rolePolicy.policyId) {
-		// Named readonly policy on a write role must still force readonly wrap.
-		session = wrapSessionForWorkflowRole(session, "planner");
-	}
 	const allowedTools: readonly string[] | undefined = policy.readonly
 		? policyFactory.allowedToolsForRole("planner")
 		: policy.allowedTools.length === 1 && policy.allowedTools[0] === "*"

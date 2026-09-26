@@ -1,6 +1,11 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { DEFAULT_MODEL_OPTIMIZATION_PROFILES } from "../model-optimization/default-profiles";
-import { DEFAULT_TRUNCATION_RULES } from "./tool-output-manager";
+import {
+	buildConservativeOutputTruncation,
+	buildOutputTruncation,
+	DEFAULT_TRUNCATION_RULES,
+	ORDINARY_TRUNCATION_BYTE_LINE_OPTS,
+} from "./tool-output-manager";
 import type {
 	ContextStrategy,
 	ModelProfile,
@@ -59,60 +64,13 @@ const explicitGrokPrompt: PromptStrategy = {
 	instructionFormat: "numbered",
 };
 
-const BASH_ERROR_PRESERVE = ["ERROR", "FAIL", "Exception", "Traceback"] as const;
-
-function truncationRules(opts: {
-	bashBytes: number;
-	bashLines: number;
-	readBytes: number;
-	readLines: number;
-	grepBytes: number;
-	grepLines: number;
-	starBytes: number;
-	starLines: number;
-}): NonNullable<ToolStrategy["outputTruncation"]> {
-	return {
-		enabled: true,
-		rules: [
-			{
-				toolName: "bash",
-				strategy: "smart",
-				maxBytes: opts.bashBytes,
-				maxLines: opts.bashLines,
-				preservePatterns: [...BASH_ERROR_PRESERVE],
-			},
-			{ toolName: "read", strategy: "smart", maxBytes: opts.readBytes, maxLines: opts.readLines },
-			{ toolName: "grep", strategy: "head", maxBytes: opts.grepBytes, maxLines: opts.grepLines },
-			{ toolName: "*", strategy: "head", maxBytes: opts.starBytes, maxLines: opts.starLines },
-		],
-	};
-}
-
-const ORDINARY_TRUNCATION = truncationRules({
-	bashBytes: 4000,
-	bashLines: 80,
-	readBytes: 8000,
-	readLines: 160,
-	grepBytes: 8000,
-	grepLines: 120,
-	starBytes: 4000,
-	starLines: 80,
-});
+const ORDINARY_TRUNCATION = buildOutputTruncation(ORDINARY_TRUNCATION_BYTE_LINE_OPTS);
 
 function conservativeTruncation(opts: {
 	maxBytes: number;
 	maxLines: number;
 }): NonNullable<ToolStrategy["outputTruncation"]> {
-	return truncationRules({
-		bashBytes: opts.maxBytes,
-		bashLines: opts.maxLines,
-		readBytes: opts.maxBytes + 2000,
-		readLines: opts.maxLines + 20,
-		grepBytes: 3000,
-		grepLines: 40,
-		starBytes: Math.min(2000, opts.maxBytes),
-		starLines: 50,
-	});
+	return buildConservativeOutputTruncation(opts);
 }
 
 function toolStrategy(opts?: {

@@ -88,6 +88,15 @@ export interface SubagentBaselineReport {
 	thinkingLevels: Record<string, number>;
 	completionKinds: Record<string, number>;
 	parentFinalVerification: { passed: number; failed: number; unknown: number };
+	/**
+	 * Post-hoc delivery quality labels when present in session custom entries.
+	 * Never inferred from parentFinalVerification alone — missing outcomes stay unknown.
+	 */
+	deliveryQualityOutcomes: {
+		falseAccept: { true: number; false: number; unknown: number };
+		missedDefect: { true: number; false: number; unknown: number };
+		coverage: CoverageCount;
+	};
 	overlappingChildIntervals: number;
 	unmatchedToolResults: number;
 	repeatedReads: { key: string; count: number }[];
@@ -1254,6 +1263,9 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 	let parentFinalPassed = 0;
 	let parentFinalFailed = 0;
 	let parentFinalUnknown = 0;
+	const qualityFalse = { true: 0, false: 0, unknown: 0 };
+	const qualityMissed = { true: 0, false: 0, unknown: 0 };
+	const qualityCoverage = emptyCoverage();
 
 	for (const parent of parents) {
 		const fileWall = fileWallMs(parent);
@@ -1359,6 +1371,25 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 		}
 	}
 
+	for (const session of sessions) {
+		const outcomes = session.qualityOutcomes;
+		if (!outcomes || outcomes.length === 0) {
+			cover(qualityCoverage, false);
+			qualityFalse.unknown++;
+			qualityMissed.unknown++;
+			continue;
+		}
+		cover(qualityCoverage, true);
+		// Latest labeled outcome wins per session — never invent from final_verify alone.
+		const latest = outcomes[outcomes.length - 1]!;
+		if (latest.falseAccept === true) qualityFalse.true++;
+		else if (latest.falseAccept === false) qualityFalse.false++;
+		else qualityFalse.unknown++;
+		if (latest.missedDefect === true) qualityMissed.true++;
+		else if (latest.missedDefect === false) qualityMissed.false++;
+		else qualityMissed.unknown++;
+	}
+
 	const repeatedReads: { key: string; count: number }[] = [];
 	for (const [scope, counts] of readCountsByScope) {
 		for (const [normPath, count] of counts) {
@@ -1377,6 +1408,9 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 	const uncomputableFromHistory: string[] = [];
 	if (parents.length === 0 || parentFinalUnknown === parents.length) {
 		uncomputableFromHistory.push("parentFinalVerification");
+	}
+	if (qualityCoverage.present === 0) {
+		uncomputableFromHistory.push("deliveryQualityOutcomes");
 	}
 	if (e2eMs === null || criticalPathMs === null) uncomputableFromHistory.push("e2eCriticalPathMs");
 	if (taskCompletionMs === null) uncomputableFromHistory.push("taskCompletionMs");
@@ -1423,6 +1457,11 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 			passed: parentFinalPassed,
 			failed: parentFinalFailed,
 			unknown: parentFinalUnknown,
+		},
+		deliveryQualityOutcomes: {
+			falseAccept: qualityFalse,
+			missedDefect: qualityMissed,
+			coverage: qualityCoverage,
 		},
 		overlappingChildIntervals,
 		unmatchedToolResults,
@@ -1477,6 +1516,7 @@ export function formatSubagentBaselineReport(report: SubagentBaselineReport): st
 		`  taskCompletionMs         ${report.taskCompletionMs ? fmtPct(report.taskCompletionMs) : "null"}`,
 		`completionKind: ${JSON.stringify(report.completionKinds)}`,
 		`parentFinalVerification: ${JSON.stringify(report.parentFinalVerification)}`,
+		`deliveryQualityOutcomes: ${JSON.stringify(report.deliveryQualityOutcomes)} (never inferred from final_verify alone)`,
 		`models: ${JSON.stringify(report.models)}`,
 		`spawnEfforts: ${JSON.stringify(report.spawnEfforts)}`,
 		`overlappingChildIntervals: ${report.overlappingChildIntervals}`,

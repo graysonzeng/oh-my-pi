@@ -151,9 +151,19 @@ export class ArtifactManager {
 	 * @returns Artifact ID (numeric string)
 	 */
 	async save(content: string, toolType: string): Promise<string> {
-		const { id, path } = await this.allocatePath(toolType);
-		await writeArtifact(path, content);
-		return id;
+		const saved = await this.saveWithIdentity(content, toolType);
+		return saved.id;
+	}
+
+	/**
+	 * Save content and return a reusable content identity so callers need not
+	 * re-read + re-hash immediately after a successful write.
+	 */
+	async saveWithIdentity(content: string, toolType: string): Promise<{ id: string; contentSha256: string }> {
+		const { id, path: filePath } = await this.allocatePath(toolType);
+		const contentSha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+		await writeArtifact(filePath, content);
+		return { id, contentSha256 };
 	}
 
 	/**

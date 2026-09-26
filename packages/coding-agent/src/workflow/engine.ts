@@ -74,6 +74,7 @@ import {
 import { FindingTracker } from "./finding-tracker";
 import { gateAdapter } from "./gate-adapter";
 import { derivePlanReviewArtifactV2, deriveReviewArtifact, stampGateResultArtifact } from "./gate-derive";
+import { isNonRetryableGateError } from "./gate-retry";
 import { assertStrictRuntimeIdentity } from "./identity-receipt";
 import { GateResultJsonSchema } from "./json-schemas";
 import {
@@ -607,6 +608,18 @@ export class WorkflowEngine {
 					}
 				: createOpts;
 		const workflowId = await this.#store.createWorkflow(persistedRequest, policy, resolvedCreateOpts);
+		// Fresh workflow on this engine — do not carry prior routing audit / persist cursor.
+		this.#routingAudit.length = 0;
+		this.#routingAuditPersistedThrough = 0;
+		this.#activeWorkflowId = workflowId;
+		this.#workPackageState = undefined;
+		this.#planArtifactRef = undefined;
+		this.#implementationArtifactRef = undefined;
+		this.#verificationArtifactRef = undefined;
+		this.#codeReviewArtifactRef = undefined;
+		this.#patchArtifactRef = undefined;
+		this.#requirementsSnapshot = undefined;
+		this.#requirementsSnapshotRef = undefined;
 		await this.#store.saveBudgetTotals(
 			workflowId,
 			this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
@@ -943,20 +956,45 @@ export class WorkflowEngine {
 			this.#planCycles = fresh.transitions.filter(
 				t => t.fromStatus === "plan_review" && t.toStatus === "planning",
 			).length;
-			// Reset mutable stage caches then hydrate from the post-claim snapshot.
+			// Reset mutable stage caches / observe state then hydrate from the
+			// post-claim snapshot. Artifact refs + work-package state must not
+			// leak across resumes (G1); hydrate reloads what this snapshot stores.
+			// Routing audit is cleared only when switching workflows on the same
+			// engine — same-workflow singleStep resumes keep cumulative audit.
+			if (this.#activeWorkflowId !== undefined && this.#activeWorkflowId !== workflowId) {
+				this.#routingAudit.length = 0;
+				this.#routingAuditPersistedThrough = 0;
+			}
+			this.#activeWorkflowId = workflowId;
 			this.#plan = undefined;
 			this.#planReview = undefined;
 			this.#planReviewControl = undefined;
+			this.#planArtifactRef = undefined;
 			this.#planArtifactSha256 = undefined;
+			this.#planReviewArtifactRef = undefined;
 			this.#planReviewerIdentity = undefined;
 			this.#planReviewerRouteSelectionRef = undefined;
+			this.#requirementsSnapshot = undefined;
+			this.#requirementsSnapshotRef = undefined;
 			this.#authorResponses = undefined;
 			this.#authorResponsesPriorFindings = undefined;
 			this.#authorResponsesArtifactRef = undefined;
 			this.#implementation = undefined;
+			this.#implementationArtifactRef = undefined;
 			this.#verification = undefined;
+			this.#verificationArtifactRef = undefined;
 			this.#finalVerification = undefined;
 			this.#codeReview = undefined;
+			this.#codeReviewArtifactRef = undefined;
+			this.#patchArtifactRef = undefined;
+			this.#workPackageState = undefined;
+			this.#plannerProfileId = undefined;
+			this.#plannerVendor = undefined;
+			this.#implementerVendor = undefined;
+			this.#plannerModelFamily = undefined;
+			this.#implementerModelFamily = undefined;
+			this.#lastRouteProfileId = undefined;
+			this.#lastScopeMetrics = undefined;
 			this.#findingTracker = new FindingTracker();
 			await this.#hydrateArtifacts(fresh);
 			const hydratedPlanReviewControl = this.#planReviewControl as PlanReviewControlStateV1 | undefined;
@@ -4016,6 +4054,11 @@ export class WorkflowEngine {
 								cause: error,
 							});
 				}
+				// Gate retry is only for recoverable parse/schema failures — do not
+				// re-run the whole gate for budget, identity, policy, or config errors.
+				if (isNonRetryableGateError(error)) {
+					throw error;
+				}
 				lastError = error;
 			}
 		}
@@ -4373,6 +4416,9 @@ export class WorkflowEngine {
 			return 0;
 		});
 		for (const meta of artifacts) {
+			// Observe-only history is not decision state — skip loading bodies on
+			// resume hydrate (G4). Status / offline paths load routing-audit on demand.
+			if (meta.kind === "routing-audit") continue;
 			const loaded = await this.#artifactStore.load(meta.relativePath, meta.sha256);
 			if (!loaded?.content) continue;
 			// Raw patch body (not JSON) — restore handoff sizing/recovery ref for implement→review.
@@ -4570,15 +4616,27 @@ export class WorkflowEngine {
 		this.#routingAudit.push({ ...route, at: new Date().toISOString() });
 	}
 
+	/** Index of last routing-audit entry already persisted for the current attempt. */
+	#routingAuditPersistedThrough = 0;
+
 	async #persistRoutingAudit(workflowId: string, attemptId: string): Promise<void> {
 		if (this.#routingAudit.length === 0) return;
+		const from = this.#routingAuditPersistedThrough;
+		if (from >= this.#routingAudit.length) return;
+		const delta = this.#routingAudit.slice(from);
 		await this.#persistArtifact(workflowId, attemptId, "routing-audit", {
 			kind: "routing-audit",
 			schemaVersion: 1,
 			workflowId,
 			attemptId,
-			entries: this.#routingAudit,
+			// Incremental append: only entries not yet written for this attempt.
+			entries: delta,
+			persistedFrom: from,
+			persistedThrough: this.#routingAudit.length,
+			// Full in-memory snapshot length for recovery/debug — not re-written as body.
+			totalEntriesInMemory: this.#routingAudit.length,
 		});
+		this.#routingAuditPersistedThrough = this.#routingAudit.length;
 	}
 
 	async #persistAbortCompletionKind(workflowId: string, error: unknown): Promise<void> {

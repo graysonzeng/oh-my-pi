@@ -408,6 +408,22 @@ export function classifyParentIntegrate(input: {
 
 	const acceptance = acceptanceSatisfied(delivery, input.requiredAcceptance);
 	if (!acceptance.ok) {
+		const parentOwnsVerify = delivery.checksNotRun.some(
+			check =>
+				check.id === "parent_acceptance" ||
+				/parent owns/i.test(check.reason) ||
+				/parent_owns_verify/i.test(check.reason),
+		);
+		// Parent-owns-verify checklists are not worker failures — parent must run
+		// the missing checks instead of bouncing back to the worker.
+		if (parentOwnsVerify) {
+			return {
+				classification: "cross_module",
+				action: "parent_coordinate",
+				reasons: ["parent_owns_verify", ...acceptance.missing.map(id => `acceptance_unproven:${id}`)],
+				usedAuthorSelfAssessment: false,
+			};
+		}
 		return {
 			classification: "missing_local_evidence",
 			action: "return_to_worker",
@@ -470,6 +486,33 @@ export function classifyChildResultForParentIntegrate(input: {
 		outOfScopeEdits: input.outOfScopeEdits,
 		crossModule: input.crossModule,
 	});
+}
+
+/**
+ * Host-attested terminal checks from executor-extracted tool data only.
+ * Never reads free-form model JSON acceptanceProven — that stays untrusted.
+ * Shape: extractedToolData.host_verification[] entries with { id, evidenceLocation }.
+ */
+export function extractHostTerminalChecksFromExecutorResult(result: {
+	extractedToolData?: Record<string, unknown[]>;
+}): { id: string; evidenceLocation?: string }[] {
+	const rows = result.extractedToolData?.host_verification;
+	if (!Array.isArray(rows) || rows.length === 0) return [];
+	const out: { id: string; evidenceLocation?: string }[] = [];
+	for (const row of rows) {
+		if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+		const rec = row as Record<string, unknown>;
+		const id = typeof rec.id === "string" ? rec.id.trim() : "";
+		if (!id) continue;
+		const evidenceLocation =
+			typeof rec.evidenceLocation === "string" && rec.evidenceLocation.trim().length > 0
+				? rec.evidenceLocation.trim()
+				: undefined;
+		// Require a durable evidence location (log/artifact/path) — bare ids cannot seal.
+		if (!evidenceLocation) continue;
+		out.push({ id, evidenceLocation });
+	}
+	return out;
 }
 
 /**

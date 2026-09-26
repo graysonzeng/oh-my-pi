@@ -121,6 +121,21 @@ describe("evaluateGoalHostGate", () => {
 		});
 		expect(evaluateGoalHostGate(snapshot).decision).toBe("pass");
 	});
+
+	it("does not treat eval code that only mentions bun test as verification execution", () => {
+		const call = toolCall("c1", "eval", { code: 'const hint = "run bun test before shipping";' });
+		const msg = assistant("shipped", [call]);
+		const snapshot = buildGoalCompletionSettleSnapshot({
+			turnId: "turn-1",
+			generation: 1,
+			assistant: msg,
+			messages: [msg, toolResult("c1", "eval", "ok")],
+			todos: [],
+			goal,
+			nominationOutcome: "nominated",
+		});
+		expect(evaluateGoalHostGate(snapshot).reasons).toContain("missing_verification");
+	});
 });
 
 describe("looksLikeFalseCompletion", () => {

@@ -470,8 +470,10 @@ export function evaluateWorkflowFinalCompletion(input: WorkflowFinalCompletionIn
 	if (!input.verification.passed && !verificationEvidence.some(v => v.status === "failed")) {
 		verificationEvidence.push({ commandOrCheck: "final_verify", status: "failed" });
 	}
+	// Empty checks are missing evidence / invalid configuration — never auto-pass.
+	// Skipped-only checklists also leave no passed evidence (verification_incomplete).
 	if (input.verification.passed && verificationEvidence.length === 0) {
-		verificationEvidence.push({ commandOrCheck: "final_verify", status: "passed" });
+		verificationEvidence.push({ commandOrCheck: "final_verify", status: "unknown" });
 	}
 
 	const evaluation = evaluateCompletion({

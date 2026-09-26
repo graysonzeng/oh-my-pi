@@ -2953,14 +2953,27 @@ export class SessionManager {
 	}
 
 	async saveArtifact(content: string, toolType: string): Promise<string | undefined> {
+		const saved = await this.saveArtifactWithIdentity(content, toolType);
+		return saved?.id;
+	}
+
+	/**
+	 * Persist artifact bytes and return content identity for reuse (read dedupe).
+	 * Callers that just wrote known bytes can skip an immediate re-read verify.
+	 */
+	async saveArtifactWithIdentity(
+		content: string,
+		toolType: string,
+	): Promise<{ id: string; contentSha256: string } | undefined> {
 		const manager = this.#artifactManagerForSession();
-		if (manager) return manager.save(content, toolType);
+		if (manager) return manager.saveWithIdentity(content, toolType);
 
 		// Non-persistent session: keep an in-memory copy so spill truncation works.
 		this.#inMemoryArtifacts ??= new Map();
 		const id = String(this.#inMemoryArtifactCounter++);
+		const contentSha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
 		this.#inMemoryArtifacts.set(id, content);
-		return id;
+		return { id, contentSha256 };
 	}
 
 	async getArtifactPath(id: string): Promise<string | null> {

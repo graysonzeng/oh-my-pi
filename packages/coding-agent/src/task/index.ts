@@ -56,13 +56,7 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
-import {
-	acceptanceAndFreshnessFromContext,
-	consumeChildDeliveryForParent,
-	noteChildSettledObserve,
-	resolveParentConsumeEpisode,
-} from "./parent-delivery-consume";
-import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
+import { settleChildDeliveryForParent } from "./parent-delivery-consume";
 
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
@@ -1795,43 +1789,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	): Promise<void> {
 		const sink = this.session.sessionManager;
 		if (!sink?.appendCustomEntry) return;
-		if (result.exitCode === 0 && !result.error && !result.aborted) {
-			try {
-				noteChildSettledObserve({
-					sink,
-					eventId: `task:${toolCallId}:${result.id}:child_settled`,
-					agentId: result.id,
-					jobId: toolCallId,
-					reason: "completed",
-				});
-			} catch (error) {
-				logger.warn("task: child_settled observe failed", {
-					toolCallId,
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-		}
-		if (!result.deliveryEvidence) return;
+		const completed = result.exitCode === 0 && !result.error && !result.aborted;
 		try {
-			const episode = resolveParentConsumeEpisode(sink);
-			if (!episode) return;
-			// Never fall back to the child's package version — empty stays fail-closed stale.
-			const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(this.session.cwd);
-			const fromContext = acceptanceAndFreshnessFromContext(spawnContext);
-			const consumed = consumeChildDeliveryForParent({
-				delivery: result.deliveryEvidence,
-				currentCodeVersion,
-				requiredAcceptance: fromContext.requiredAcceptance,
-				staleEvidence: fromContext.staleEvidence,
-				writeOwnershipReleased: false,
-				episodeSessionId: episode.sessionId,
-				rootUserEntryId: episode.rootUserEntryId,
-				taskToolCallId: toolCallId,
-				agentId: result.id,
+			const consumed = await settleChildDeliveryForParent({
 				sink,
+				cwd: this.session.cwd,
+				delivery: result.deliveryEvidence,
+				spawnContext,
 				eventIdPrefix: `task:${toolCallId}:${result.id}`,
+				jobId: toolCallId,
+				agentId: result.id,
+				taskToolCallId: toolCallId,
+				noteSettled: completed,
 			});
-			result.parentIntegrateDecision = consumed.decision;
+			if (consumed) result.parentIntegrateDecision = consumed.decision;
 		} catch (error) {
 			logger.warn("task: parent consume reclassify failed", {
 				toolCallId,

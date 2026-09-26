@@ -444,7 +444,7 @@ export interface StageHandoffV1 {
 	recoveryUris: string[];
 	/** Total UTF-8 bytes of candidate source artifacts before extract. */
 	bytesBeforeHandoff: number;
-	/** Total UTF-8 bytes of preserved item summaries after extract. */
+	/** Total UTF-8 bytes of preserved item summaries after extract (not wire/request tokens). */
 	bytesAfterHandoff: number;
 	/** sha256 of canonical payload (stable key order; excludes timestamps). */
 	contentFingerprint: string;
