@@ -12,6 +12,7 @@
  * composed onto the path only when no range selector is already present.
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import artifactDoc from "../prompts/internal-urls/artifact.md" with { type: "text" };
@@ -56,6 +57,38 @@ class MissingArtifactError extends Error {}
 function preferSessionArtifactContent(context?: ResolveContext): boolean {
 	const sessionFile = context?.sessionFile ?? context?.session?.getSessionFile?.() ?? null;
 	return !sessionFile && typeof context?.session?.getArtifactContent === "function";
+}
+
+/** Spill oversized in-memory artifacts once so line-range recover can use file reads. */
+const spilledSessionArtifacts = new Map<string, { path: string; size: number }>();
+
+async function spillSessionArtifactToTemp(
+	id: string,
+	content: string,
+	sessionKey: string,
+): Promise<{ path: string; size: number }> {
+	const cacheKey = `${sessionKey}:${id}`;
+	const existing = spilledSessionArtifacts.get(cacheKey);
+	const size = Buffer.byteLength(content, "utf-8");
+	if (existing && existing.size === size) {
+		try {
+			if (await Bun.file(existing.path).exists()) return existing;
+		} catch {
+			// rewrite below
+		}
+	}
+	const dir = path.join(os.tmpdir(), "omp-artifact-spill", sessionKey.replace(/[^a-zA-Z0-9_.-]/g, "_") || "session");
+	await fs.mkdir(dir, { recursive: true });
+	const filePath = path.join(dir, `${id}.spill.txt`);
+	await Bun.write(filePath, content);
+	const spilled = { path: filePath, size };
+	spilledSessionArtifacts.set(cacheKey, spilled);
+	return spilled;
+}
+
+/** Test hook: drop spilled temp-file cache. */
+export function resetSpilledSessionArtifactsForTests(): void {
+	spilledSessionArtifacts.clear();
 }
 
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
@@ -135,8 +168,19 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 	/** Backing artifact file; null for unknown ids, throws the resolve errors for malformed ones. */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		// Force the resource path so resolve can bind the caller's in-memory body
-		// instead of a colliding on-disk id from another registered session.
-		if (preferSessionArtifactContent(context)) return null;
+		// instead of a colliding on-disk id from another registered session — except
+		// when the in-memory body exceeds the inline cap: spill to a real file so
+		// line-range recover (`artifact://0:raw:1-2`) can use bounded filesystem reads.
+		if (preferSessionArtifactContent(context)) {
+			const id = parseArtifactId(url);
+			const content = await context!.session!.getArtifactContent!(id);
+			if (content === null) return null;
+			const size = Buffer.byteLength(content, "utf-8");
+			if (size <= MAX_INLINE_ARTIFACT_BYTES) return null;
+			const sessionKey = context?.sessionId ?? context?.localProtocolOptions?.getSessionId?.() ?? "in-memory";
+			const spilled = await spillSessionArtifactToTemp(id, content, sessionKey);
+			return spilled.path;
+		}
 		try {
 			return (await resolveArtifactFile(url, context)).path;
 		} catch (error) {
@@ -154,8 +198,11 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 			}
 			const size = Buffer.byteLength(content, "utf-8");
 			if (size > MAX_INLINE_ARTIFACT_BYTES) {
+				// Prefer file-backed range reads via locate(); full inline resolve stays blocked.
+				const sessionKey = context?.sessionId ?? context?.localProtocolOptions?.getSessionId?.() ?? "in-memory";
+				const spilled = await spillSessionArtifactToTemp(id, content, sessionKey);
 				throw new Error(
-					`Artifact ${id} is ${size} bytes; full internal resolution is blocked. Use read selectors such as artifact://${id}:1-3000 or artifact://${id}:raw:1-3000.`,
+					`Artifact ${id} is ${size} bytes; full internal resolution is blocked. Use read selectors such as artifact://${id}:1-3000 or artifact://${id}:raw:1-3000, and use the artifact file path for search/copy workflows: ${spilled.path}`,
 				);
 			}
 			return {

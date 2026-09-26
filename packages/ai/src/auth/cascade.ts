@@ -52,6 +52,13 @@ export class KeyOverrides {
 	 * reading key material. Identical rewrites do not bump.
 	 */
 	#epoch = 0;
+	/**
+	 * Non-secret parse-owner revisions for observable config references.
+	 * Tracks the last observed resolved secret privately so same-ref rotation
+	 * (env / !command) bumps revision without exposing hash-of-secret on the
+	 * SelectedCredentialRoute surface. Missing observation → fail open.
+	 */
+	#configParseObserved = new Map<string, { value: string; rev: number }>();
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
 		this.#configValueResolver = resolver ?? defaultConfigValueResolver;
@@ -73,9 +80,53 @@ export class KeyOverrides {
 		return this.#configOverrides.get(provider);
 	}
 
+	/**
+	 * Record a resolved config secret for non-secret revision tracking.
+	 * Returns the parse revision; never exposes the secret or a hash of it.
+	 */
+	noteConfigParse(config: string, resolved: string): number {
+		const key = config.trim();
+		const prev = this.#configParseObserved.get(key);
+		if (prev && prev.value === resolved) return prev.rev;
+		const rev = (prev?.rev ?? 0) + 1;
+		this.#configParseObserved.set(key, { value: resolved, rev });
+		return rev;
+	}
+
+	/** Drop parse observation for one config reference (rotation becomes unobservable). */
+	forgetConfigParse(config: string): void {
+		this.#configParseObserved.delete(config.trim());
+	}
+
+	/**
+	 * Non-secret parse revision for an observable config reference, or undefined
+	 * when the current credential cannot be observed (callers must fail open —
+	 * do not reuse a negative-cache mark across unobservable rotation).
+	 *
+	 * Env-style refs are peeked live via `$envExact`. `!command` refs are only
+	 * observable after a successful {@link resolve} noted the result.
+	 */
+	configParseRevision(config: string): number | undefined {
+		const trimmed = config.trim();
+		if (!isObservableConfigKeyReference(trimmed)) return undefined;
+		if (trimmed.startsWith("!")) {
+			return this.#configParseObserved.get(trimmed)?.rev;
+		}
+		const envName = trimmed.startsWith("$") ? trimmed.slice(1) : trimmed;
+		const value = $envExact(envName);
+		if (!value) return undefined;
+		return this.noteConfigParse(trimmed, value);
+	}
+
 	/** Resolve a config value (env var name, "!command", literal) to the secret. */
-	resolve(config: string): Promise<string | undefined> {
-		return this.#configValueResolver(config);
+	async resolve(config: string): Promise<string | undefined> {
+		const value = await this.#configValueResolver(config);
+		if (value !== undefined && isObservableConfigKeyReference(config)) {
+			this.noteConfigParse(config, value);
+		} else if (isObservableConfigKeyReference(config)) {
+			this.forgetConfigParse(config);
+		}
+		return value;
 	}
 
 	/**
@@ -107,7 +158,9 @@ export class KeyOverrides {
 	 * still wins for the duration of a single invocation.
 	 */
 	setConfig(provider: string, apiKeyConfig: string): void {
-		if (this.#configOverrides.get(provider) === apiKeyConfig) return;
+		const previous = this.#configOverrides.get(provider);
+		if (previous === apiKeyConfig) return;
+		if (previous !== undefined) this.forgetConfigParse(previous);
 		this.#configOverrides.set(provider, apiKeyConfig);
 		this.#epoch += 1;
 	}
@@ -116,7 +169,9 @@ export class KeyOverrides {
 	 * Remove a single config-sourced API key override.
 	 */
 	removeConfig(provider: string): void {
+		const previous = this.#configOverrides.get(provider);
 		if (!this.#configOverrides.delete(provider)) return;
+		if (previous !== undefined) this.forgetConfigParse(previous);
 		this.#epoch += 1;
 	}
 
@@ -126,6 +181,7 @@ export class KeyOverrides {
 	 */
 	clearConfig(): void {
 		if (this.#configOverrides.size === 0) return;
+		for (const config of this.#configOverrides.values()) this.forgetConfigParse(config);
 		this.#configOverrides.clear();
 		this.#epoch += 1;
 	}
@@ -527,10 +583,15 @@ export class KeyCascade implements KeysApi {
 		const configKey = this.#deps.overrides.configKey(provider);
 		if (configKey !== undefined) {
 			if (!isObservableConfigKeyReference(configKey)) return undefined;
+			// Same config ref can rotate under an unchanged string (env / !command).
+			// Revision must come from the parse owner; if rotation is unobservable,
+			// fail open so negative caches do not inherit a stale failure mark.
+			const parseRev = this.#deps.overrides.configParseRevision(configKey);
+			if (parseRev === undefined) return undefined;
 			return {
 				kind: "config",
 				identityKey: `config:${configKey.trim()}`,
-				revision: `e${epoch}`,
+				revision: `e${epoch}:p${parseRev}`,
 			};
 		}
 

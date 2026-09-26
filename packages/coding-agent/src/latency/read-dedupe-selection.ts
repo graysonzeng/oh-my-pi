@@ -62,6 +62,7 @@ export interface ReadDedupeSelectionInput {
 	current: ReadViewKeyV1;
 	prior: ReadViewKeyV1 | null | undefined;
 	peerStablePrefixCacheEnabled?: boolean;
+	peerPhaseHandoffEnabled?: boolean;
 	/** Force reread: permission/source change, missing page, independent review. */
 	forceReread?: boolean;
 }
@@ -100,6 +101,7 @@ export function selectReadDedupeReuse(input: ReadDedupeSelectionInput): ReadDedu
 		current: input.current,
 		prior: input.prior,
 		peerStablePrefixCacheEnabled: input.peerStablePrefixCacheEnabled,
+		peerPhaseHandoffEnabled: input.peerPhaseHandoffEnabled,
 	});
 
 	// Experiment off / control → ordinary arm may reuse on its own (same eligible key).

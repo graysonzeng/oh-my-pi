@@ -215,7 +215,7 @@ describe("phase-handoff carry builders", () => {
 		const boundary = resolvePhaseHandoffBoundaryObservation(branch);
 		expect(boundary.fromPhase).toBe("research");
 		expect(boundary.toPhase).toBe("implement");
-		expect(boundary.boundaryKey).toBe("research->implement");
+		expect(boundary.boundaryKey).toMatch(/^research->implement#/);
 
 		const carried = buildPhaseHandoffCarriedFromBranch(branch);
 		expect(carried.retained.openConstraints.some(s => s.includes("keep API stable"))).toBe(true);
@@ -322,8 +322,8 @@ describe("applyPhaseHandoffAtMaintenanceBoundary production wire", () => {
 		expect(data.rewriteApplied).toBe(true);
 		expect(data.rewriteTokensFreed).toBe(4_200);
 		expect(data.claimedLiveWin).toBe(false);
-		expect(data.boundaryKey).toBe("research->implement");
-		expect(phaseHandoffRewriteAlreadyApplied(manager.getBranch(), "research->implement")).toBe(true);
+		expect(data.boundaryKey).toMatch(/^research->implement#/);
+		expect(phaseHandoffRewriteAlreadyApplied(manager.getBranch(), data.boundaryKey)).toBe(true);
 	});
 
 	it("missing required retain → fail open, no shake", async () => {
@@ -444,5 +444,192 @@ describe("applyPhaseHandoffAtMaintenanceBoundary production wire", () => {
 		expect(result.shouldRewriteContext).toBe(true);
 		expect(result.rewritten).toBe(false);
 		expect(result.rewriteSkippedReason).toBe("shake_failed_open");
+	});
+
+	it("P1: artifact save failure keeps original tool body (requireArtifact)", async () => {
+		const manager = SessionManager.inMemory();
+		appendResearchThenImplement(manager);
+		seedRetainedExtras(manager);
+		const bulky = "BULKY_ORIGINAL_BODY_" + "x".repeat(8_000);
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tc_bulky", name: "read", arguments: { path: "big.ts" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 20,
+		});
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "tc_bulky",
+			toolName: "read",
+			content: [{ type: "text", text: bulky }],
+			isError: false,
+			timestamp: 21,
+		});
+
+		const maintenance = createMaintenance(
+			Settings.isolated({
+				"compaction.enabled": false,
+				"deliveryExperiment.phaseHandoff.enabled": true,
+				"deliveryExperiment.phaseHandoff.factor": "phase_boundary_carry_slim",
+			}),
+			manager,
+		);
+
+		// Production apply path must demand a recover artifact (not silent elide).
+		const applySpy = vi.spyOn(maintenance, "shake");
+		applySpy.mockRejectedValueOnce(new Error("shake could not save a recovery artifact"));
+		const applyResult = await maintenance.applyPhaseHandoffAtMaintenanceBoundary();
+		expect(applyResult.rewritten).toBe(false);
+		expect(applyResult.rewriteSkippedReason).toBe("shake_failed_open");
+		expect(applySpy.mock.calls[0]?.[1]).toMatchObject({ requireArtifact: true, toolResultsOnly: true });
+		applySpy.mockRestore();
+
+		// Real shake path: inject allocate/save failure with protectTokens:0 so regions exist.
+		vi.spyOn(manager, "allocateArtifactPath").mockResolvedValue({});
+		vi.spyOn(manager, "saveArtifact").mockResolvedValue(undefined);
+		await expect(
+			maintenance.shake("elide", {
+				config: { protectTokens: 0, minSavings: 0, protectedTools: [], fenceMinTokens: 50 },
+				toolResultsOnly: true,
+				requireArtifact: true,
+			}),
+		).rejects.toThrow(/recovery artifact/);
+
+		const bulkyEntry = manager
+			.getBranch()
+			.filter(e => e.type === "message" && e.message.role === "toolResult")
+			.find(e => e.type === "message" && e.message.role === "toolResult" && e.message.toolCallId === "tc_bulky");
+		if (!bulkyEntry || bulkyEntry.type !== "message" || bulkyEntry.message.role !== "toolResult") {
+			throw new Error("expected bulky toolResult");
+		}
+		const afterText = bulkyEntry.message.content.find(b => b.type === "text")?.text;
+		expect(afterText).toBe(bulky);
+		expect(afterText).not.toMatch(/artifact:\/\//);
+	});
+
+	it("P2: failed rewrite leaves boundary pending so next pass still sees research→implement", async () => {
+		const manager = SessionManager.inMemory();
+		appendResearchThenImplement(manager);
+		seedRetainedExtras(manager);
+		const maintenance = createMaintenance(
+			Settings.isolated({
+				"compaction.enabled": false,
+				"deliveryExperiment.phaseHandoff.enabled": true,
+				"deliveryExperiment.phaseHandoff.factor": "phase_boundary_carry_slim",
+			}),
+			manager,
+		);
+		const shakeSpy = vi.spyOn(maintenance, "shake");
+		shakeSpy.mockRejectedValueOnce(new Error("persist boom"));
+
+		await maintenance.applyPhaseHandoffAtMaintenanceBoundary();
+		const mid = resolvePhaseHandoffBoundaryObservation(manager.getBranch());
+		expect(mid.fromPhase).toBe("research");
+		expect(mid.toPhase).toBe("implement");
+		expect(mid.boundaryKey).toContain("research->implement#");
+
+		shakeSpy.mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 1,
+			blocksDropped: 0,
+			tokensFreed: 500,
+			artifactId: "recovered",
+		});
+		const retry = await maintenance.applyPhaseHandoffAtMaintenanceBoundary();
+		expect(retry.rewritten).toBe(true);
+	});
+
+	it("P2: boundaryKey distinguishes same-named phases via durable entry id", () => {
+		const manager = SessionManager.inMemory();
+		appendResearchThenImplement(manager);
+		const first = resolvePhaseHandoffBoundaryObservation(manager.getBranch());
+		expect(first.boundaryKey).toMatch(/^research->implement#/);
+
+		// Second task instance: another research→implement cycle with a new edit entry.
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tc_read2", name: "read", arguments: { path: "src/b.ts" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 10,
+		});
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "tc_read2",
+			toolName: "read",
+			content: [{ type: "text", text: "y".repeat(3_000) }],
+			isError: false,
+			timestamp: 11,
+		});
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tc_edit2", name: "edit", arguments: { path: "src/b.ts" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 12,
+		});
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "tc_edit2",
+			toolName: "edit",
+			content: [{ type: "text", text: "edited-b" }],
+			isError: false,
+			timestamp: 13,
+		});
+		const second = resolvePhaseHandoffBoundaryObservation(manager.getBranch());
+		expect(second.boundaryKey).toMatch(/^research->implement#/);
+		expect(second.boundaryKey).not.toBe(first.boundaryKey);
+	});
+
+	it("P2: refuses phase-handoff when A/B delivery experiments are also enabled", async () => {
+		const manager = SessionManager.inMemory();
+		appendResearchThenImplement(manager);
+		seedRetainedExtras(manager);
+		const maintenance = createMaintenance(
+			Settings.isolated({
+				"compaction.enabled": false,
+				"deliveryExperiment.phaseHandoff.enabled": true,
+				"deliveryExperiment.phaseHandoff.factor": "phase_boundary_carry_slim",
+				"deliveryExperiment.readDedupe.enabled": true,
+				"deliveryExperiment.readDedupe.factor": "same_version_view_reuse",
+			}),
+			manager,
+		);
+		const shakeSpy = vi.spyOn(maintenance, "shake");
+		const result = await maintenance.applyPhaseHandoffAtMaintenanceBoundary();
+		expect(result.rewriteSkippedReason).toBe("multi_factor_rejected");
+		expect(result.rewritten).toBe(false);
+		expect(shakeSpy).not.toHaveBeenCalled();
 	});
 });

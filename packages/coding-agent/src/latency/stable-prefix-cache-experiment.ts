@@ -100,10 +100,10 @@ export function defaultStablePrefixCacheExperimentConfig(): StablePrefixCacheExp
 
 export function assertSingleStablePrefixFactor(
 	config: StablePrefixCacheExperimentConfig,
-	peer?: { readDedupeEnabled?: boolean },
+	peer?: { readDedupeEnabled?: boolean; phaseHandoffEnabled?: boolean },
 ): StablePrefixCacheFallbackReason | null {
 	if (!config.enabled) return "disabled";
-	if (peer?.readDedupeEnabled === true) return "multi_factor_rejected";
+	if (peer?.readDedupeEnabled === true || peer?.phaseHandoffEnabled === true) return "multi_factor_rejected";
 	if (config.factor === "none") return "factor_none";
 	if (!isFactor(config.factor)) return "unknown_factor";
 	return null;
@@ -111,7 +111,7 @@ export function assertSingleStablePrefixFactor(
 
 export function resolveStablePrefixCacheExperiment(
 	config: StablePrefixCacheExperimentConfig,
-	peer?: { readDedupeEnabled?: boolean },
+	peer?: { readDedupeEnabled?: boolean; phaseHandoffEnabled?: boolean },
 ): {
 	applied: boolean;
 	receipt: StablePrefixCacheExperimentReceiptV1;
@@ -185,7 +185,7 @@ export function inspectProviderRequestPrefix(segments: readonly ProviderRequestS
 export function planStablePrefixOrder(
 	segments: readonly ProviderRequestSegment[],
 	config: StablePrefixCacheExperimentConfig,
-	peer?: { readDedupeEnabled?: boolean },
+	peer?: { readDedupeEnabled?: boolean; phaseHandoffEnabled?: boolean },
 ): ProviderRequestSegment[] {
 	const { applied, receipt } = resolveStablePrefixCacheExperiment(config, peer);
 	if (!applied || receipt.factor !== "reorder_static_prefix") {
