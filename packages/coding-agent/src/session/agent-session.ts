@@ -7490,8 +7490,7 @@ export class AgentSession implements SettingsScope {
 		const branch = this.sessionManager.getBranch();
 		// Explicit episode wins; otherwise open after the previous accepted
 		// boundary so task B does not rebind to task A's first user message.
-		const rootUserEntryId =
-			input.attempt?.episode?.rootUserEntryId ?? resolveEpisodeRootFromBranch(branch);
+		const rootUserEntryId = input.attempt?.episode?.rootUserEntryId ?? resolveEpisodeRootFromBranch(branch);
 		if (!rootUserEntryId) {
 			return { recorded: false, reason: "missing_root_user_entry" };
 		}
@@ -7501,7 +7500,7 @@ export class AgentSession implements SettingsScope {
 		if (
 			input.status === "passed" &&
 			(input.authority === "user_explicit" || input.authority === "extension") &&
-			!(input.codeState?.fingerprint?.trim())
+			!input.codeState?.fingerprint?.trim()
 		) {
 			return { recorded: false, reason: "missing_code_state" };
 		}

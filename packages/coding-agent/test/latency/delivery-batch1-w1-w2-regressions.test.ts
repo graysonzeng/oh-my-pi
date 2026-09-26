@@ -183,10 +183,7 @@ describe("W1 production entrypoints — episode boundary + costs", () => {
 		].join("\n");
 
 		const session = parseSessionJsonl(jsonl, PARENT);
-		expect(session.usageRequests.map(r => r.episodeKey)).toEqual([
-			episodeKey(epA),
-			episodeKey(epB),
-		]);
+		expect(session.usageRequests.map(r => r.episodeKey)).toEqual([episodeKey(epA), episodeKey(epB)]);
 		const cost = buildDeliveryCostBaselineReport([session]);
 		expect(cost.ordinary.acceptedTaskCount).toBe(2);
 		expect(cost.tasks).toHaveLength(2);

@@ -180,4 +180,24 @@ describe("W3 durable evidence-handoff observe", () => {
 		expect(rejectEvents.some(e => e.disposition === "reject")).toBe(true);
 		expect(rejectEvents.find(e => e.disposition === "reject")?.reason).toBeTruthy();
 	});
+
+	it("plan observe emits plan/start not verify_run before execute", () => {
+		const codeState = buildVerificationCodeState({
+			implementation: { attemptId: "impl-1" },
+			patchContent: "diff --git a/a.ts b/a.ts\n+x\n",
+			changedFiles: ["a.ts"],
+			workspace: provenWorkspace,
+		});
+		const plan = buildLayeredVerificationPlan({
+			layer: "slice_local",
+			commands: ["bun check"],
+			codeState,
+			scope: { kind: "paths", paths: ["a.ts"] },
+		});
+		expect(plan.toRun).toContain("bun check");
+		const events = layeredVerificationObserveEvents(plan, { eventIdPrefix: "iv" });
+		expect(events.map(e => e.disposition)).toEqual(["plan"]);
+		expect(events[0]?.reason).toBe("start");
+		expect(events[0]?.eventId).toContain(":plan:");
+	});
 });

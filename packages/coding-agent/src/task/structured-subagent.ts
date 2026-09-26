@@ -39,7 +39,11 @@ import {
 	extractChildDeliveryEvidence,
 	type ParentIntegrateDecision,
 } from "./child-delivery-evidence";
-import { ensureEvidenceHandoffContext, inspectEvidenceHandoffContext, prepareSubagentContext } from "./evidence-handoff";
+import {
+	ensureEvidenceHandoffContext,
+	inspectEvidenceHandoffContext,
+	prepareSubagentContext,
+} from "./evidence-handoff";
 import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
 import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
 import { type ExecutorOptions, runSubprocess } from "./executor";

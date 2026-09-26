@@ -206,7 +206,10 @@ export function resolveEpisodeRootFromBranch(entries: readonly BranchEntryForEpi
  * Prefer an explicit attempt id; otherwise reuse a durable receipt event id so
  * fail→repair→pass keeps distinct attempts under one episode.
  */
-export function resolveAttemptId(explicit: string | null | undefined, eventId: string | null | undefined): string | null {
+export function resolveAttemptId(
+	explicit: string | null | undefined,
+	eventId: string | null | undefined,
+): string | null {
 	const fromExplicit = typeof explicit === "string" && explicit.trim() ? explicit.trim() : null;
 	if (fromExplicit) return fromExplicit;
 	const fromEvent = typeof eventId === "string" && eventId.trim() ? eventId.trim() : null;

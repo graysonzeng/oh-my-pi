@@ -743,7 +743,11 @@ function activeBranchEntryIds(records: readonly unknown[]): Set<string> | null {
 		const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : "";
 		if (!id) continue;
 		const parentId =
-			typeof raw.parentId === "string" && raw.parentId.trim() ? raw.parentId.trim() : raw.parentId === null ? null : null;
+			typeof raw.parentId === "string" && raw.parentId.trim()
+				? raw.parentId.trim()
+				: raw.parentId === null
+					? null
+					: null;
 		if (typeof raw.parentId === "string" && raw.parentId.trim()) sawNonNullParent = true;
 		nodes.push({ id, parentId });
 	}
@@ -873,9 +877,7 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 		}
 		if (msg.role === "assistant") {
 			if (ts !== null) session.assistantTimestamps.push(ts);
-			session.usageRequests.push(
-				parseUsageRequest(msg, { ts, entryId, episodeKey: episodeFor() }),
-			);
+			session.usageRequests.push(parseUsageRequest(msg, { ts, entryId, episodeKey: episodeFor() }));
 			if (Array.isArray(msg.content)) {
 				for (const block of msg.content) {
 					if (!isRecord(block)) continue;

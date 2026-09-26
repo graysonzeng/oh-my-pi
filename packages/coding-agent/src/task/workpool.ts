@@ -325,11 +325,7 @@ export class WorkPool {
 		return this.#reuseDecision("pool", "idle", { observe: false }).action !== "continue";
 	}
 
-	#reuseDecision(
-		agentId: string,
-		status: string,
-		options?: { observe?: boolean; itemId?: string; round?: number },
-	) {
+	#reuseDecision(agentId: string, status: string, options?: { observe?: boolean; itemId?: string; round?: number }) {
 		const observe = options?.observe !== false;
 		const inspected = inspectEvidenceHandoffContext(this.context);
 		if (observe) {

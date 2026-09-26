@@ -523,9 +523,7 @@ export function buildChildDeliveryEvidenceFromExecutorFacts(input: {
 		finishOwnerReason: input.finishOwnerReason,
 		sharedInterfaces: nonEmptyStrings(input.sharedInterfaces ? [...input.sharedInterfaces] : undefined),
 		writeOwnershipReleased: input.writeOwnershipReleased === true,
-		authorConclusions: input.authorConclusions
-			? nonEmptyStrings([...input.authorConclusions])
-			: undefined,
+		authorConclusions: input.authorConclusions ? nonEmptyStrings([...input.authorConclusions]) : undefined,
 	});
 }
 

@@ -146,9 +146,7 @@ describe("parent integrate classifier", () => {
 					evidenceLocations: ["artifact://1"],
 				},
 			],
-			terminalChecksPassed: [
-				{ id: "Reviewer omits author conclusions", evidenceLocation: "artifact://1" },
-			],
+			terminalChecksPassed: [{ id: "Reviewer omits author conclusions", evidenceLocation: "artifact://1" }],
 			writeOwnershipReleased: true,
 		});
 		const decision = classifyParentIntegrate({

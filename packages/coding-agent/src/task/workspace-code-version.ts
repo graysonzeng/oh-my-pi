@@ -17,9 +17,15 @@ export async function resolveCurrentWorkspaceCodeVersion(cwd: string): Promise<s
 		if (!head) return "";
 		let dirty = false;
 		try {
-			dirty = (await repo.isDirty()) === true;
+			const git = repo.asGit();
+			if (git) {
+				dirty = (await git.isDirty()) === true;
+			} else {
+				const summary = await repo.statusSummary();
+				dirty = summary.staged + summary.unstaged + summary.untracked > 0;
+			}
 		} catch {
-			// isDirty unavailable — keep HEAD-only rather than inventing dirty.
+			// Dirty probe unavailable — keep HEAD-only rather than inventing dirty.
 			dirty = false;
 		}
 		return dirty ? `${head}:dirty` : head;
