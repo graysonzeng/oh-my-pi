@@ -14,11 +14,7 @@ import { redactSecretsInText } from "../workflow/secret-redact";
 export const CREDENTIAL_ROUTE_CONFIG_UNAVAILABLE_TTL_MS = 10 * 60_000;
 export const CREDENTIAL_ROUTE_UNAVAILABLE_SUMMARY = "credential/route unavailable (known config failure)";
 
-export type CredentialRouteFailureClass =
-	| "config_unavailable"
-	| "short_cooldown"
-	| "transport_blip"
-	| "unknown";
+export type CredentialRouteFailureClass = "config_unavailable" | "short_cooldown" | "transport_blip" | "unknown";
 
 export interface CredentialRouteFailureInput {
 	/** Workflow probe / runtime error kind when already classified. */

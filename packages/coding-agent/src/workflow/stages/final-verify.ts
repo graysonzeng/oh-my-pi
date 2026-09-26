@@ -73,8 +73,7 @@ export class FinalVerifyStage {
 			priorVerification: input.priorVerification,
 			alreadyGreenLocalCommands: input.alreadyGreenLocalCommands,
 		});
-		const canReuse =
-			plan.toReuse.length > 0 && plan.toRun.length === 0 && Boolean(input.priorVerification);
+		const canReuse = plan.toReuse.length > 0 && plan.toRun.length === 0 && Boolean(input.priorVerification);
 
 		let base: VerificationArtifactV1;
 		if (canReuse && input.priorVerification) {

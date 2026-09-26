@@ -10,10 +10,7 @@ import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { runSubagentFollowUpTurn } from "./executor";
 import { decideWorkerReuse, inspectEvidenceHandoffContext } from "./evidence-handoff";
-import {
-	noteEvidenceHandoffInspect,
-	noteEvidenceHandoffReuseDecision,
-} from "./evidence-handoff-observe";
+import { noteEvidenceHandoffInspect, noteEvidenceHandoffReuseDecision } from "./evidence-handoff-observe";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,

@@ -25,9 +25,7 @@ describe("stable-prefix cache experiment defaults", () => {
 	});
 
 	test("disabled resolve does not apply and leaves safety flags false", () => {
-		const { applied, receipt } = resolveStablePrefixCacheExperiment(
-			defaultStablePrefixCacheExperimentConfig(),
-		);
+		const { applied, receipt } = resolveStablePrefixCacheExperiment(defaultStablePrefixCacheExperimentConfig());
 		expect(applied).toBe(false);
 		expect(receipt.permissionsChanged).toBe(false);
 		expect(receipt.instructionPriorityChanged).toBe(false);
@@ -92,12 +90,7 @@ describe("reorder opt-in", () => {
 			enabled: true,
 			factor: "reorder_static_prefix",
 		});
-		expect(planned.map(s => s.kind)).toEqual([
-			"static_rules",
-			"tools",
-			"assignment",
-			"dynamic_context",
-		]);
+		expect(planned.map(s => s.kind)).toEqual(["static_rules", "tools", "assignment", "dynamic_context"]);
 		const { receipt } = resolveStablePrefixCacheExperiment({
 			enabled: true,
 			factor: "reorder_static_prefix",

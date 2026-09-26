@@ -18,11 +18,7 @@ import {
 	type VerificationReuseDecision,
 	type VerificationReuseReason,
 } from "./verification-validity";
-import type {
-	VerificationArtifactV1,
-	VerificationCodeState,
-	VerificationScope,
-} from "./types";
+import type { VerificationArtifactV1, VerificationCodeState, VerificationScope } from "./types";
 
 export type VerificationLayer = "slice_local" | "parent_integrate" | "final_repo";
 
@@ -184,9 +180,7 @@ export function buildLayeredVerificationPlan(input: BuildLayeredVerificationPlan
 		}
 	}
 
-	const greenLocal = new Set(
-		(input.alreadyGreenLocalCommands ?? []).map(c => c.trim()).filter(Boolean),
-	);
+	const greenLocal = new Set((input.alreadyGreenLocalCommands ?? []).map(c => c.trim()).filter(Boolean));
 
 	for (const [index, command] of commands.entries()) {
 		const id = commandId(command, index);
@@ -239,7 +233,8 @@ export function buildLayeredVerificationPlan(input: BuildLayeredVerificationPlan
 			command,
 			layer: input.layer,
 			disposition: "run",
-			reason: reuseDecision && !reuseDecision.reusable ? `cannot_reuse:${reuseDecision.reason}` : "layer_requires_run",
+			reason:
+				reuseDecision && !reuseDecision.reusable ? `cannot_reuse:${reuseDecision.reason}` : "layer_requires_run",
 		};
 		checks.push(item);
 		toRun.push(command);

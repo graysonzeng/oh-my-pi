@@ -58,11 +58,7 @@ function toolResult(toolCallId: string): ToolResultMessage {
 	};
 }
 
-function createHost(
-	model: Model,
-	modelRegistry: ModelRegistry,
-	messages: readonly AgentMessage[],
-): TurnRecoveryHost {
+function createHost(model: Model, modelRegistry: ModelRegistry, messages: readonly AgentMessage[]): TurnRecoveryHost {
 	const settings = Settings.isolated({ "retry.enabled": true });
 	const agentState = { messages: [...messages] };
 	return {

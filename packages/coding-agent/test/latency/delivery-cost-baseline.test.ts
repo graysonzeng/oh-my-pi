@@ -54,11 +54,7 @@ function assistantMsg(opts: {
 	};
 }
 
-function toolResult(opts: {
-	callId: string;
-	ts: number;
-	details?: unknown;
-}): unknown {
+function toolResult(opts: { callId: string; ts: number; details?: unknown }): unknown {
 	return {
 		type: "message",
 		id: `r-${opts.ts}`,
@@ -76,11 +72,7 @@ function toolResult(opts: {
 	};
 }
 
-function taskCall(opts: {
-	callId: string;
-	ts: number;
-	tasks: Record<string, unknown>[];
-}): unknown {
+function taskCall(opts: { callId: string; ts: number; tasks: Record<string, unknown>[] }): unknown {
 	return assistantMsg({
 		ts: opts.ts,
 		usage: { input: 10, output: 4, cacheRead: 2, cacheWrite: 1, cost: { total: 0.05 } },
@@ -109,11 +101,7 @@ function sessionInit(opts: { agent?: string; performanceClass?: "review" | "expl
 	};
 }
 
-function parentFinal(opts: {
-	status: "passed" | "failed";
-	source: string;
-	verifiedAtMs: number;
-}): unknown {
+function parentFinal(opts: { status: "passed" | "failed"; source: string; verifiedAtMs: number }): unknown {
 	return {
 		type: "custom",
 		id: `pfv-${opts.verifiedAtMs}`,
@@ -201,12 +189,7 @@ describe("delivery cost baseline", () => {
 			"/tmp/sessions/demo/sess2/Worker.jsonl",
 		);
 
-		const report = buildDeliveryCostBaselineReport([
-			ordinaryParent,
-			ordinaryChild,
-			workflowParent,
-			workflowChild,
-		]);
+		const report = buildDeliveryCostBaselineReport([ordinaryParent, ordinaryChild, workflowParent, workflowChild]);
 
 		expect(report.ordinary.taskCount).toBe(1);
 		expect(report.workflow.taskCount).toBe(1);
@@ -458,7 +441,12 @@ describe("delivery cost baseline", () => {
 				line(sessionHeader("w1", { parentSession: PARENT })),
 				line(sessionInit({ performanceClass: "worker" })),
 				line(userMsg(1100, "a")),
-				line(assistantMsg({ ts: 1800, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } })),
+				line(
+					assistantMsg({
+						ts: 1800,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+					}),
+				),
 			].join("\n"),
 			CHILD_A,
 		);
@@ -467,7 +455,12 @@ describe("delivery cost baseline", () => {
 				line(sessionHeader("s1", { parentSession: PARENT })),
 				line(sessionInit({ performanceClass: "explore" })),
 				line(userMsg(3100, "b")),
-				line(assistantMsg({ ts: 4000, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } })),
+				line(
+					assistantMsg({
+						ts: 4000,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+					}),
+				),
 			].join("\n"),
 			CHILD_B,
 		);
@@ -476,7 +469,12 @@ describe("delivery cost baseline", () => {
 				line(sessionHeader("w2", { parentSession: PARENT })),
 				line(sessionInit({ performanceClass: "worker" })),
 				line(userMsg(3200, "c")),
-				line(assistantMsg({ ts: 5000, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } })),
+				line(
+					assistantMsg({
+						ts: 5000,
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+					}),
+				),
 			].join("\n"),
 			"/tmp/sessions/demo/sess1/Worker2.jsonl",
 		);

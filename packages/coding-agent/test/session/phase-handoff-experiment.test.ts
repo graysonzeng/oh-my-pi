@@ -11,10 +11,7 @@ import {
 	defaultPhaseHandoffExperimentConfig,
 	resolvePhaseHandoffExperiment,
 } from "../../src/session/phase-handoff-experiment";
-import {
-	cfgPhaseHandoffExperimentEnabled,
-	cfgPhaseHandoffExperimentFactor,
-} from "../../src/session/context-settings";
+import { cfgPhaseHandoffExperimentEnabled, cfgPhaseHandoffExperimentFactor } from "../../src/session/context-settings";
 
 const retained = {
 	openConstraints: ["keep public API stable"],

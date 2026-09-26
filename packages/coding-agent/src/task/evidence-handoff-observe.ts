@@ -61,10 +61,7 @@ export function noteEvidenceHandoffInspect(kind: "valid" | "missing" | "invalid"
  * {@link noteEvidenceHandoffInspect} so the live workpool path does not
  * double-count `rejectInvalid`.
  */
-export function noteEvidenceHandoffReuseDecision(
-	decision: WorkerReuseDecision,
-	meta?: { agentId?: string },
-): void {
+export function noteEvidenceHandoffReuseDecision(decision: WorkerReuseDecision, meta?: { agentId?: string }): void {
 	if (decision.action === "continue") snapshot.reuseContinue += 1;
 	else snapshot.reuseSpawnFresh += 1;
 	if (decision.reason === "stale_evidence") snapshot.rejectStale += 1;

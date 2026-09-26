@@ -2266,10 +2266,7 @@ export class TurnRecovery {
 		// Auth failures also mark the provider scope so sibling models on the same
 		// dead credential stop walking an identical chain.
 		if (providerScoped) {
-			registry.noteFailure(
-				buildCredentialRouteKey({ provider: model.provider, providerScoped: true }),
-				input,
-			);
+			registry.noteFailure(buildCredentialRouteKey({ provider: model.provider, providerScoped: true }), input);
 		}
 	}
 

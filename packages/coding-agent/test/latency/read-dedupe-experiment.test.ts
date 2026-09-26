@@ -14,10 +14,7 @@ import {
 	truncationRecoveryNotIncreased,
 } from "../../src/latency/read-dedupe-experiment";
 import { buildReadViewKeyV1 } from "../../src/latency/read-view-key";
-import {
-	cfgReadDedupeExperimentEnabled,
-	cfgReadDedupeExperimentFactor,
-} from "../../src/session/context-settings";
+import { cfgReadDedupeExperimentEnabled, cfgReadDedupeExperimentFactor } from "../../src/session/context-settings";
 
 function eligibleKey(source: string, rev: string) {
 	return buildReadViewKeyV1({
@@ -95,18 +92,24 @@ describe("truncation recovery", () => {
 			{ tool: "read", recoveredTruncation: true },
 		]);
 		expect(control).toBe(1);
-		expect(truncationRecoveryNotIncreased({
-			controlRecoveryCalls: control,
-			treatmentRecoveryCalls: treatmentOk,
-		})).toBe(true);
-		expect(truncationRecoveryNotIncreased({
-			controlRecoveryCalls: control,
-			treatmentRecoveryCalls: treatmentWorse,
-		})).toBe(false);
-		expect(truncationRecoveryNotIncreased({
-			controlRecoveryCalls: null,
-			treatmentRecoveryCalls: 0,
-		})).toBeNull();
+		expect(
+			truncationRecoveryNotIncreased({
+				controlRecoveryCalls: control,
+				treatmentRecoveryCalls: treatmentOk,
+			}),
+		).toBe(true);
+		expect(
+			truncationRecoveryNotIncreased({
+				controlRecoveryCalls: control,
+				treatmentRecoveryCalls: treatmentWorse,
+			}),
+		).toBe(false);
+		expect(
+			truncationRecoveryNotIncreased({
+				controlRecoveryCalls: null,
+				treatmentRecoveryCalls: 0,
+			}),
+		).toBeNull();
 	});
 
 	test("run receipt never claims a live win", () => {

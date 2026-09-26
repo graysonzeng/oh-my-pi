@@ -100,7 +100,9 @@ export function defaultPhaseHandoffExperimentConfig(): PhaseHandoffExperimentCon
 	return { enabled: false, factor: "none" };
 }
 
-export function assertSinglePhaseHandoffFactor(config: PhaseHandoffExperimentConfig): PhaseHandoffFallbackReason | null {
+export function assertSinglePhaseHandoffFactor(
+	config: PhaseHandoffExperimentConfig,
+): PhaseHandoffFallbackReason | null {
 	if (!config.enabled) return "disabled";
 	if (config.factor === "none") return "factor_none";
 	if (!isFactor(config.factor)) return "unknown_factor";

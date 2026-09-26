@@ -60,9 +60,9 @@ describe("composeReadPaginationArgs", () => {
 	});
 
 	it("rejects stale offset kwargs when a range selector is already present", () => {
-		expect(() =>
-			composeReadPaginationArgs({ path: "artifact://0:raw:1-300", offset: 301, limit: 300 }),
-		).toThrow(ToolError);
+		expect(() => composeReadPaginationArgs({ path: "artifact://0:raw:1-300", offset: 301, limit: 300 })).toThrow(
+			ToolError,
+		);
 		try {
 			composeReadPaginationArgs({ path: "artifact://0:raw:1-300", offset: 301 });
 			expect.unreachable();

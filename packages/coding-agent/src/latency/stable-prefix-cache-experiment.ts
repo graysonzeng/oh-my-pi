@@ -17,11 +17,7 @@ export const STABLE_PREFIX_CACHE_EXPERIMENT_RUN_KIND = "stable_prefix_cache_expe
 export const STABLE_PREFIX_CACHE_FACTORS = ["none", "inspect_provider_prefix", "reorder_static_prefix"] as const;
 export type StablePrefixCacheFactor = (typeof STABLE_PREFIX_CACHE_FACTORS)[number];
 
-export type StablePrefixCacheFallbackReason =
-	| "disabled"
-	| "factor_none"
-	| "multi_factor_rejected"
-	| "unknown_factor";
+export type StablePrefixCacheFallbackReason = "disabled" | "factor_none" | "multi_factor_rejected" | "unknown_factor";
 
 export type ProviderRequestSegmentKind = "static_rules" | "tools" | "dynamic_context" | "assignment" | "other";
 
@@ -218,7 +214,10 @@ export function buildStablePrefixCacheExperimentRun(input: {
 }
 
 /** Build a segment fingerprint without retaining raw prompt text. */
-export function fingerprintProviderSegment(kind: ProviderRequestSegmentKind, bytes: string | Uint8Array): ProviderRequestSegment {
+export function fingerprintProviderSegment(
+	kind: ProviderRequestSegmentKind,
+	bytes: string | Uint8Array,
+): ProviderRequestSegment {
 	const data = typeof bytes === "string" ? bytes : Buffer.from(bytes).toString("utf8");
 	return {
 		kind,

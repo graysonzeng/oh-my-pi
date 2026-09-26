@@ -13,10 +13,7 @@ import {
 	countFullRepoRunsAvoided,
 	observeFingerprintOverhead,
 } from "../../src/workflow/layered-verification";
-import {
-	buildVerificationCodeState,
-	sealWorkflowVerifierResult,
-} from "../../src/workflow/verification-validity";
+import { buildVerificationCodeState, sealWorkflowVerifierResult } from "../../src/workflow/verification-validity";
 import type { VerificationArtifactV1 } from "../../src/workflow/types";
 
 const provenWorkspace = {

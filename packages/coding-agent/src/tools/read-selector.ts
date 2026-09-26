@@ -148,11 +148,7 @@ export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; l
  * pages the verbatim body (history E2/E3). Plain filesystem paths compose as
  * `path:301` / `path:301+K` — never force `:raw` onto hashline/preview reads.
  */
-export function composeReadPaginationArgs(input: {
-	path: string;
-	offset?: number;
-	limit?: number;
-}): { path: string } {
+export function composeReadPaginationArgs(input: { path: string; offset?: number; limit?: number }): { path: string } {
 	const hasOffset = input.offset !== undefined;
 	const hasLimit = input.limit !== undefined;
 	if (!hasOffset && !hasLimit) return { path: input.path };
@@ -168,12 +164,7 @@ export function composeReadPaginationArgs(input: {
 
 	const parsed = parseReadPathSelector(input.path);
 	if (parsed.kind === "lines" || parsed.kind === "tail") {
-		const next =
-			offset !== undefined
-				? limit !== undefined
-					? `:${offset}+${limit}`
-					: `:${offset}-`
-				: `:1+${limit}`;
+		const next = offset !== undefined ? (limit !== undefined ? `:${offset}+${limit}` : `:${offset}-`) : `:1+${limit}`;
 		const example = input.path.includes("artifact://") ? "artifact://…:raw:301-" : "path:301";
 		throw new ToolError(
 			`Stale pagination kwargs: path already declares a line selector (${input.path}). ` +
@@ -185,11 +176,7 @@ export function composeReadPaginationArgs(input: {
 
 	const rangeSuffix =
 		offset === undefined ? `:1+${limit}` : limit === undefined ? `:${offset}-` : `:${offset}+${limit}`;
-	const hasRaw =
-		parsed.kind === "raw" ||
-		input.path
-			.split(":")
-			.some(chunk => chunk.toLowerCase() === "raw");
+	const hasRaw = parsed.kind === "raw" || input.path.split(":").some(chunk => chunk.toLowerCase() === "raw");
 	if (hasRaw) return { path: `${input.path}${rangeSuffix}` };
 	// Verbatim artifact continue-read needs :raw; ordinary files keep hashline selectors.
 	if (/^artifact:\/\//i.test(input.path)) return { path: `${input.path}:raw${rangeSuffix}` };

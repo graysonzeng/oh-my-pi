@@ -242,19 +242,14 @@ function sortedVerifications(
 	});
 }
 
-function firstDeliveryAccepted(
-	verifications: readonly ParentFinalVerificationObservation[],
-): FirstDeliveryAccepted {
+function firstDeliveryAccepted(verifications: readonly ParentFinalVerificationObservation[]): FirstDeliveryAccepted {
 	const sorted = sortedVerifications(verifications);
 	const first = sorted[0];
 	if (!first) return "unknown";
 	return first.status === "passed";
 }
 
-function firstDeliveryBoundaryTs(
-	parent: ParsedSession,
-	kids: readonly ParsedSession[],
-): number | null {
+function firstDeliveryBoundaryTs(parent: ParsedSession, kids: readonly ParsedSession[]): number | null {
 	const sorted = sortedVerifications(parent.parentFinalVerifications);
 	for (const v of sorted) {
 		if (v.ts !== null) return v.ts;
@@ -343,10 +338,7 @@ function spawnIdentityFromParent(
  * Align with live {@link resolveSubagentPerformanceClass} — do not use
  * includes()-heuristics that diverge (e.g. sonic → explore live, unknown here).
  */
-function resolveChildClass(
-	parent: ParsedSession,
-	child: ParsedSession,
-): "review" | "explore" | "worker" | "unknown" {
+function resolveChildClass(parent: ParsedSession, child: ParsedSession): "review" | "explore" | "worker" | "unknown" {
 	if (child.performanceClass) return child.performanceClass;
 	if (child.agent) return resolveSubagentPerformanceClass({ agentName: child.agent });
 	const ident = spawnIdentityFromParent(parent, child);
@@ -415,19 +407,14 @@ function mapCompletionBucket(kind: string | null): keyof AttemptCostByCompletion
  * "completed" does not erase timed-out / cancelled attempt cost.
  */
 function pickAttemptKind(kinds: readonly (string | null)[]): string | null {
-	const failure = kinds.find(
-		kind => kind === "timeout" || kind === "hard_abort" || kind === "budget_stop",
-	);
+	const failure = kinds.find(kind => kind === "timeout" || kind === "hard_abort" || kind === "budget_stop");
 	if (failure !== undefined) return failure;
 	const completed = kinds.find(kind => kind === "completed");
 	if (completed !== undefined) return completed;
 	return kinds.find(kind => kind !== null) ?? null;
 }
 
-function attributeAttemptCosts(
-	parent: ParsedSession,
-	kids: readonly ParsedSession[],
-): AttemptCostByCompletionKind {
+function attributeAttemptCosts(parent: ParsedSession, kids: readonly ParsedSession[]): AttemptCostByCompletionKind {
 	const costs = emptyAttemptCost();
 	const kindsByStem = new Map<string, Array<string | null>>();
 	const pushKind = (id: string, kind: string | null): void => {
@@ -447,10 +434,7 @@ function attributeAttemptCosts(
 		}
 	}
 	for (const child of kids) {
-		const kinds =
-			kindsByStem.get(child.stem) ??
-			(child.agent ? kindsByStem.get(child.agent) : undefined) ??
-			[];
+		const kinds = kindsByStem.get(child.stem) ?? (child.agent ? kindsByStem.get(child.agent) : undefined) ?? [];
 		const kind = pickAttemptKind(kinds);
 		const bucket = mapCompletionBucket(kind);
 		costs[bucket] = addPresent(costs[bucket], sessionCost(child));

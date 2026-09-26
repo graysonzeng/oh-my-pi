@@ -213,9 +213,7 @@ describe("reviewer independence", () => {
 		const projected = projectChildDeliveryForReviewer(delivery);
 		expect(projected.authorConclusions).toBeUndefined();
 		expect(projected.acceptanceProven.every(item => item.proven === false)).toBe(true);
-		expect(projected.acceptanceProven.map(item => item.id)).toEqual(
-			delivery.acceptanceProven.map(item => item.id),
-		);
+		expect(projected.acceptanceProven.map(item => item.id)).toEqual(delivery.acceptanceProven.map(item => item.id));
 		expect(projected.acceptanceProven.map(item => item.evidenceLocations)).toEqual(
 			delivery.acceptanceProven.map(item => item.evidenceLocations),
 		);

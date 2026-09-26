@@ -272,9 +272,7 @@ function acceptanceSatisfied(
 		// No contract list: require at least one proven item with evidence, or
 		// an explicit empty acceptanceProven when the child claims nothing to prove.
 		if (delivery.acceptanceProven.length === 0) return { ok: false, missing: ["<acceptance>"] };
-		const unproven = delivery.acceptanceProven.filter(
-			item => !item.proven || item.evidenceLocations.length === 0,
-		);
+		const unproven = delivery.acceptanceProven.filter(item => !item.proven || item.evidenceLocations.length === 0);
 		return {
 			ok: unproven.length === 0,
 			missing: unproven.map(item => item.id),
