@@ -94,8 +94,9 @@ export class ImplementationVerifyStage {
 		}
 
 		if (input.parentOwnsVerify === true && plan.toRun.length === 0) {
-			// Checklist-only (parent owns verify) — seal a passed-local artifact
-			// with skipped reasons, without auto-running the full suite.
+			// Checklist-only (parent owns verify) — record skipped reasons without
+			// sealing a trusted green. Stage may still advance on `passed: true`
+			// (checklist delivered); delivery/reuse gates reject skipped-only.
 			const checklist: VerificationArtifactV1 = {
 				kind: "verification",
 				passed: true,
@@ -114,11 +115,9 @@ export class ImplementationVerifyStage {
 				model: impl.model,
 				promptVersion: impl.promptVersion,
 			};
-			return sealWorkflowVerifierResult(checklist, {
-				commands: input.commands,
-				codeState,
-				scope,
-			});
+			// Intentionally unsealed — sealWorkflowVerifierResult would mint a
+			// trusted owner that final_verify could treat as reusable green.
+			return checklist;
 		}
 
 		const result = await this.#verifier.verify(

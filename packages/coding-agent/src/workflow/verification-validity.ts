@@ -54,6 +54,7 @@ export type VerificationReuseReason =
 	| "missing_validity"
 	| "invalidated"
 	| "failed_result"
+	| "no_passed_checks"
 	| "executor_not_trusted"
 	| "owner_not_delivery"
 	| "code_state_mismatch"
@@ -642,10 +643,14 @@ export function invalidateVerificationResult(
 /**
  * Delivery evidence requires a sealed, non-invalid, passed result whose owner
  * and executor are workflow_verifier or parent — never worker alone.
+ * Skipped-only / empty checklists are never delivery greens (Package 3
+ * parent-owns-verify checklists must not false-accept).
  */
 export function isValidDeliveryEvidence(artifact: VerificationArtifactV1 | null | undefined): boolean {
 	if (!artifact || artifact.passed !== true) return false;
 	if (artifact.checks.some(check => check.status === "failed")) return false;
+	// At least one executed check must have passed — all-skipped is checklist-only.
+	if (!artifact.checks.some(check => check.status === "passed")) return false;
 	const validity = parseVerificationValidity(artifact.validity);
 	if (!validity || validity.invalid === true) return false;
 	if (validity.owner === "worker" || validity.executor === "worker") return false;
@@ -674,6 +679,10 @@ export function assessVerificationReuse(input: {
 	if (validity.invalid === true) return { reusable: false, reason: "invalidated" };
 	if (prior.passed !== true || prior.checks.some(check => check.status === "failed")) {
 		return { reusable: false, reason: "failed_result" };
+	}
+	// Skipped-only checklists (parent-owns-verify) must not suppress re-runs.
+	if (!prior.checks.some(check => check.status === "passed")) {
+		return { reusable: false, reason: "no_passed_checks" };
 	}
 	if (validity.owner === "worker") return { reusable: false, reason: "owner_not_delivery" };
 	if (validity.executor !== "workflow_verifier" && validity.executor !== "parent") {

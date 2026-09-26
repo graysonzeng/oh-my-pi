@@ -106,7 +106,7 @@ describe("CredentialRouteUnavailableRegistry", () => {
 		expect(registry.isUnavailable(key)).toBe(false);
 	});
 
-	it("bounds stored summaries and redacts raw sk- keys", () => {
+	it("bounds stored summaries and redacts sk-/ghp/JWT/home paths", () => {
 		const registry = new CredentialRouteUnavailableRegistry({ nowMs: () => 0 });
 		const key = buildCredentialRouteKey({ provider: "test", modelId: "m" });
 		const long = `invalid api key ${"x".repeat(600)}`;
@@ -119,6 +119,23 @@ describe("CredentialRouteUnavailableRegistry", () => {
 		});
 		expect(secretEntry?.errorSummary).toContain("sk-[REDACTED]");
 		expect(secretEntry?.errorSummary).not.toContain("sk-proj-abcdefghijklmnopqrstuvwxyz012345");
+
+		const ghpEntry = registry.noteFailure(key, {
+			errorKind: "authentication",
+			errorMessage: `auth failed ghp_${"a".repeat(36)} under /Users/alice/.config`,
+		});
+		expect(ghpEntry?.errorSummary).toContain("gh*_[REDACTED]");
+		expect(ghpEntry?.errorSummary).not.toMatch(/ghp_a{20,}/);
+		expect(ghpEntry?.errorSummary).toContain("[HOME]");
+		expect(ghpEntry?.errorSummary).not.toContain("/Users/alice");
+
+		const jwt = `eyJ${"k".repeat(12)}.eyJ${"l".repeat(12)}.${"m".repeat(16)}`;
+		const jwtEntry = registry.noteFailure(key, {
+			errorKind: "authentication",
+			errorMessage: `token rejected ${jwt}`,
+		});
+		expect(jwtEntry?.errorSummary).toContain("eyJ[REDACTED_JWT]");
+		expect(jwtEntry?.errorSummary).not.toContain(jwt);
 	});
 
 	it("shares the process-local singleton across callers", () => {

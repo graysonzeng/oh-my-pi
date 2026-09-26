@@ -159,6 +159,37 @@ describe("verification ownership & result validity", () => {
 		});
 	});
 
+	it("rejects skipped-only checklists as delivery evidence and reuse (parent-owns-verify)", () => {
+		const checklist = sealWorkflowVerifierResult(
+			baseArtifact({
+				checks: [
+					{
+						id: "command-1",
+						command: "bun check",
+						status: "skipped",
+						summary: "parent_owns_verify_checklist_only",
+					},
+					{
+						id: "command-2",
+						command: "bun test",
+						status: "skipped",
+						summary: "parent_owns_verify_checklist_only",
+					},
+				],
+			}),
+			{ commands: ["bun check", "bun test"], codeState },
+		);
+		expect(checklist.passed).toBe(true);
+		expect(isValidDeliveryEvidence(checklist)).toBe(false);
+		expect(
+			assessVerificationReuse({
+				prior: checklist,
+				codeState,
+				commands: ["bun check", "bun test"],
+			}),
+		).toEqual({ reusable: false, reason: "no_passed_checks" });
+	});
+
 	it("reuses sealed workflow greens only when code state, commands, and scope still match", () => {
 		const sealed = sealWorkflowVerifierResult(baseArtifact(), {
 			commands: ["bun check"],
