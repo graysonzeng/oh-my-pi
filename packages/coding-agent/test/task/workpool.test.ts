@@ -105,6 +105,12 @@ function execution(id: string, output?: string): StructuredSubagentResult {
 		changesApplied: null,
 		artifactsDir: "/tmp",
 		temporaryArtifacts: true,
+		parentIntegrateDecision: {
+			classification: "missing_local_evidence",
+			action: "return_to_worker",
+			reasons: ["No delivery evidence in this workpool fixture"],
+			usedAuthorSelfAssessment: false,
+		},
 	};
 }
 

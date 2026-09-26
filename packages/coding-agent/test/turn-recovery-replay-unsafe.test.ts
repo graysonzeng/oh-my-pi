@@ -718,18 +718,17 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
 		});
 
-		it("does not retry when the tool call produced a real result", () => {
+		it("forbids discard-and-replay when the tool call produced a real result", () => {
 			const message = transportError([toolCall("call-1")]);
 			const recovery = recoveryForTransport(message, [realResult("call-1")]);
 			expect(recovery.isRetryableError(message)).toBe(false);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			// Preserved-turn continuation is separate; S4 exercises its artifact-retention contract.
 		});
 
-		it("does not retry when a synthetic result is followed by a real result for the same call", () => {
+		it("forbids discard-and-replay when a real result supersedes a synthetic result", () => {
 			const message = transportError([toolCall("call-1")]);
 			const recovery = recoveryForTransport(message, [syntheticResult("call-1"), realResult("call-1")]);
 			expect(recovery.isRetryableError(message)).toBe(false);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
 		});
 
 		it("does not retry when only some tool calls went unexecuted", () => {

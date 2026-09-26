@@ -24,9 +24,19 @@ export class KeyOverrides {
 	#runtimeOverrides: Map<string, string> = new Map();
 	#configOverrides: Map<string, string> = new Map();
 	#configValueResolver: (config: string) => Promise<string | undefined>;
+	/**
+	 * Bumps when a runtime or config override is added, replaced, or removed.
+	 * Not a secret — credential-route caches use it to drop stale marks without
+	 * reading key material. Identical rewrites do not bump.
+	 */
+	#epoch = 0;
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
 		this.#configValueResolver = resolver ?? defaultConfigValueResolver;
+	}
+
+	get epoch(): number {
+		return this.#epoch;
 	}
 
 	has(provider: string): boolean {
@@ -51,14 +61,17 @@ export class KeyOverrides {
 	 * Used for CLI --api-key flag.
 	 */
 	setRuntime(provider: string, apiKey: string): void {
+		if (this.#runtimeOverrides.get(provider) === apiKey) return;
 		this.#runtimeOverrides.set(provider, apiKey);
+		this.#epoch += 1;
 	}
 
 	/**
 	 * Remove a runtime API key override.
 	 */
 	removeRuntime(provider: string): void {
-		this.#runtimeOverrides.delete(provider);
+		if (!this.#runtimeOverrides.delete(provider)) return;
+		this.#epoch += 1;
 	}
 
 	/**
@@ -72,14 +85,17 @@ export class KeyOverrides {
 	 * still wins for the duration of a single invocation.
 	 */
 	setConfig(provider: string, apiKeyConfig: string): void {
+		if (this.#configOverrides.get(provider) === apiKeyConfig) return;
 		this.#configOverrides.set(provider, apiKeyConfig);
+		this.#epoch += 1;
 	}
 
 	/**
 	 * Remove a single config-sourced API key override.
 	 */
 	removeConfig(provider: string): void {
-		this.#configOverrides.delete(provider);
+		if (!this.#configOverrides.delete(provider)) return;
+		this.#epoch += 1;
 	}
 
 	/**
@@ -87,7 +103,9 @@ export class KeyOverrides {
 	 * re-parsing `models.yml` so removed entries actually disappear.
 	 */
 	clearConfig(): void {
+		if (this.#configOverrides.size === 0) return;
 		this.#configOverrides.clear();
+		this.#epoch += 1;
 	}
 
 	/**
@@ -463,6 +481,11 @@ export class KeyCascade implements KeysApi {
 		);
 		if (apiKeySource) return apiKeySource;
 		return undefined;
+	}
+
+	/** Non-secret generation of runtime/config overrides. See {@link KeyOverrides.epoch}. */
+	get overrideEpoch(): number {
+		return this.#deps.overrides.epoch;
 	}
 
 	setRuntime(provider: string, apiKey: string): void {

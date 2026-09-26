@@ -25,6 +25,8 @@ export interface AvailabilityCandidate {
 /**
  * Single-flight key for physical probes within one preflight invocation.
  * Same embedded runtime + model pattern + auth-scope collapses to one live call.
+ * The `"default"` fallback only compares profile shape. Shared negative-cache
+ * lookups must pass a derived credential-route auth scope.
  */
 export function availabilityProbeDedupeKey(profile: ModelProfile, authScope = "default"): string {
 	const model = Array.isArray(profile.modelPattern) ? profile.modelPattern.join(",") : String(profile.modelPattern);

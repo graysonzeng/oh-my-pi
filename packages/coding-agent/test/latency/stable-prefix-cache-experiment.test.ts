@@ -46,6 +46,17 @@ describe("provider prefix inspection", () => {
 		expect(inspection.firstStaticIndex).toBe(1);
 	});
 
+	test("detects dynamic content between static rules and later tools", () => {
+		const segments = [
+			fingerprintProviderSegment("static_rules", "rules"),
+			fingerprintProviderSegment("dynamic_context", "task"),
+			fingerprintProviderSegment("tools", "tools"),
+		];
+		expect(inspectProviderRequestPrefix(segments).staticCutByDynamic).toBe(true);
+		const planned = planStablePrefixOrder(segments, { enabled: true, factor: "reorder_static_prefix" });
+		expect(inspectProviderRequestPrefix(planned).staticCutByDynamic).toBe(false);
+	});
+
 	test("stable-first order is not cut", () => {
 		const segments = [
 			fingerprintProviderSegment("static_rules", "rules"),

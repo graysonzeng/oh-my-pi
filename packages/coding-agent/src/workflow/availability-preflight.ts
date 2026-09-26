@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import { resolveModelOverride } from "../config/model-resolver";
 import {
 	type CredentialRouteUnavailableRegistry,
+	credentialRouteAuthScope,
 	isConfigCredentialRouteUnavailable,
 	sharedCredentialRouteUnavailableRegistry,
 } from "../latency/credential-route-unavailable";
@@ -57,7 +59,11 @@ export interface RunAvailabilityPreflightOptions {
 	maxConcurrency?: number;
 	perTargetTimeoutMs?: number;
 	overallTimeoutMs?: number;
-	/** Override auth-scope segment of the dedupe key (default "default"). */
+	/**
+	 * Explicit auth-scope override. When omitted, the scope is derived from the
+	 * session auth owner, session id, and resolved model route. Missing identity
+	 * fails open instead of a shared `"default"`.
+	 */
 	authScope?: string;
 	/** Optional fixed invocation id for tests. */
 	invocationId?: string;
@@ -71,6 +77,39 @@ export interface RunAvailabilityPreflightOptions {
 	 * Pass a fresh registry in tests for isolation.
 	 */
 	credentialRouteUnavailable?: CredentialRouteUnavailableRegistry;
+}
+
+/**
+ * Auth scope for one profile probe. Explicit override wins. Otherwise derive a
+ * non-secret owner/session/route scope. Undefined means identity could not be
+ * established — the caller must not consult the shared negative cache.
+ */
+export function availabilityCredentialRouteScope(
+	session: ToolSession,
+	profile: ModelProfile,
+	explicitAuthScope?: string,
+): string | undefined {
+	const override = explicitAuthScope?.trim();
+	if (override) return override;
+	const registry = session.modelRegistry;
+	let provider: string | undefined;
+	let baseUrl: string | undefined;
+	let accountIds: string[] | undefined;
+	if (registry && typeof registry.getAvailable === "function") {
+		const patterns = Array.isArray(profile.modelPattern) ? [...profile.modelPattern] : [profile.modelPattern];
+		const model = resolveModelOverride(patterns, registry, session.settings).model;
+		provider = model?.provider;
+		baseUrl = model?.baseUrl;
+		accountIds = model?.accountAccess ? Object.keys(model.accountAccess) : undefined;
+	}
+	return credentialRouteAuthScope({
+		authStorage: registry?.authStorage,
+		owner: session,
+		sessionId: session.getSessionId?.() ?? undefined,
+		provider,
+		baseUrl,
+		accountIds,
+	});
 }
 
 /**
@@ -113,7 +152,7 @@ export async function runAvailabilityPreflight(
 	const candidates = sortAvailabilityCandidates(rawCandidates, registrationOrder);
 	const missing = rolesMissingProfiles(roleSpecs, candidates);
 
-	const authScope = options.authScope ?? "default";
+	const explicitAuthScope = options.authScope?.trim();
 	const perTargetTimeoutMs = options.perTargetTimeoutMs ?? DEFAULT_AVAILABILITY_PER_TARGET_TIMEOUT_MS;
 	const overallTimeoutMs = options.overallTimeoutMs ?? DEFAULT_AVAILABILITY_OVERALL_TIMEOUT_MS;
 	const maxConcurrency = options.maxConcurrency ?? DEFAULT_AVAILABILITY_MAX_CONCURRENCY;
@@ -121,20 +160,26 @@ export async function runAvailabilityPreflight(
 	// Group candidates by physical probe key (first member is the live probe representative).
 	// Open breaker profiles skip the physical probe and emit a stable unavailable row.
 	// Known config-unavailable routes (shared registry) skip without re-probing.
+	// Keys without an established auth scope stay invocation-local (fail open).
 	const breaker = options.providerHealthBreaker;
 	const routeUnavailable = options.credentialRouteUnavailable ?? sharedCredentialRouteUnavailableRegistry();
 	const skippedProfiles: WorkflowAvailabilityProfileResult[] = [];
 	const groups = new Map<string, typeof candidates>();
+	const sharedKeys = new Set<string>();
 	for (const candidate of candidates) {
 		if (breaker?.isOpen(candidate.profile.id)) {
 			skippedProfiles.push(openBreakerRow(candidate));
 			continue;
 		}
-		const key = availabilityProbeDedupeKey(candidate.profile, authScope);
-		const known = routeUnavailable.get(key);
-		if (known) {
-			skippedProfiles.push(knownConfigUnavailableRow(candidate, known.errorKind, known.errorSummary));
-			continue;
+		const authScope = availabilityCredentialRouteScope(options.session, candidate.profile, explicitAuthScope);
+		const key = availabilityProbeDedupeKey(candidate.profile, authScope ?? `local:${invocationId}`);
+		if (authScope) {
+			const known = routeUnavailable.get(key);
+			if (known) {
+				skippedProfiles.push(knownConfigUnavailableRow(candidate, known.errorKind, known.errorSummary));
+				continue;
+			}
+			sharedKeys.add(key);
 		}
 		const group = groups.get(key);
 		if (group) group.push(candidate);
@@ -255,7 +300,7 @@ export async function runAvailabilityPreflight(
 	const usage = aggregateUsage(physicalResults.map(result => result.usage));
 	const reportedCostUsd = aggregateReportedCost(physicalResults);
 	if (breaker) breaker.observeProfiles(profiles);
-	observeCredentialRouteUnavailable(routeUnavailable, groupEntries, profiles);
+	observeCredentialRouteUnavailable(routeUnavailable, groupEntries, profiles, sharedKeys);
 
 	return {
 		workflowId: options.workflowId,
@@ -458,11 +503,13 @@ function observeCredentialRouteUnavailable(
 	registry: CredentialRouteUnavailableRegistry,
 	groupEntries: ReadonlyArray<readonly [string, AvailabilityCandidate[]]>,
 	profiles: readonly WorkflowAvailabilityProfileResult[],
+	sharedKeys: ReadonlySet<string>,
 ): void {
 	const liveByProfile = new Map(
 		profiles.filter(row => row.source === "live").map(row => [row.profileId, row] as const),
 	);
 	for (const [key, group] of groupEntries) {
+		if (!sharedKeys.has(key)) continue;
 		const head = group[0];
 		if (!head) continue;
 		const live = liveByProfile.get(head.profile.id);

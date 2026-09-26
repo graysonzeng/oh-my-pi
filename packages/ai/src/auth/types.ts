@@ -888,6 +888,13 @@ export interface KeysApi {
 	 */
 	describe(provider: string, sessionId?: string): string | undefined;
 	/**
+	 * Monotonic counter for runtime and config key overrides. Not a secret.
+	 * Bumps when an override is added, replaced, or removed so caches can
+	 * invalidate without reading key material. Identical rewrites do not bump.
+	 * Stored-credential changes use {@link CredentialsApi.generation} instead.
+	 */
+	readonly overrideEpoch: number;
+	/**
 	 * Set a runtime API key override (not persisted to disk).
 	 * Used for CLI --api-key flag.
 	 */

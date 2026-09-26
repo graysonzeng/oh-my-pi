@@ -59,7 +59,7 @@ function toolResult(toolCallId: string): ToolResultMessage {
 }
 
 function createHost(model: Model, modelRegistry: ModelRegistry, messages: readonly AgentMessage[]): TurnRecoveryHost {
-	const settings = Settings.isolated({ "retry.enabled": true });
+	const settings = Settings.isolated({ "retry.enabled": true, "retry.baseDelayMs": 0, "retry.maxRetries": 1 });
 	const agentState = { messages: [...messages] };
 	return {
 		agent: {
@@ -67,8 +67,15 @@ function createHost(model: Model, modelRegistry: ModelRegistry, messages: readon
 			replaceMessages(next: AgentMessage[]) {
 				agentState.messages = next;
 			},
+			appendMessage(message: AgentMessage) {
+				agentState.messages.push(message);
+			},
 		} as never,
-		sessionManager: { getLastModelChangeRole: () => undefined } as never,
+		sessionManager: {
+			getLastModelChangeRole: () => undefined,
+			getBranch: () => [],
+			appendCustomMessageEntry: () => {},
+		} as never,
 		persistedAssistantEntryId: () => undefined,
 		settings,
 		modelRegistry,
@@ -127,19 +134,25 @@ describe("S4 thinking-loop / stream-interrupt replayable fixtures", () => {
 		tempDir.removeSync();
 	});
 
-	it("keeps thinking-loop detection on and routes to same-model resample (not fallback)", () => {
-		expect(process.env.PI_NO_THINKING_LOOP_GUARD).not.toBe("1");
+	it("redirects a thinking loop and stops when the retry budget is exhausted", async () => {
 		const message = makeMessage([], model, THINKING_LOOP_ERROR_MARKER);
 		message.errorId = AIError.create(AIError.Flag.ThinkingLoop);
-		expect(AIError.is(message.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
-		const recovery = new TurnRecovery(createHost(model, modelRegistry, [message]));
-		// Empty thinking-loop turns are retryable on the same model.
-		expect(recovery.isRetryableError(message)).toBe(true);
-		// Must not walk Fireworks-style degrade for loop guards.
-		expect(recovery.isFireworksFastFallbackEligible(message)).toBe(false);
+		const host = createHost(model, modelRegistry, [message]);
+		const scheduled: string[] = [];
+		host.scheduleAgentContinue = options => scheduled.push(options.source);
+		const recovery = new TurnRecovery(host);
+		try {
+			expect(await recovery.handleRetryableError(message, { allowModelFallback: false })).toBe(true);
+			expect(host.agent.state.messages.some(m => m.role === "assistant")).toBe(false);
+			expect(host.agent.state.messages.some(m => m.role === "custom" && !m.display)).toBe(true);
+			expect(await recovery.handleRetryableError(message, { allowModelFallback: false })).toBe(false);
+			expect(scheduled).toEqual(["automatic-retry"]);
+		} finally {
+			recovery.resolveRetry();
+		}
 	});
 
-	it("stream-stall after completed tools continues while preserving tool artifacts", () => {
+	it("stream-stall recovery preserves completed tool artifacts for continuation", async () => {
 		const message = makeMessage(
 			[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo done" } }],
 			model,
@@ -147,15 +160,20 @@ describe("S4 thinking-loop / stream-interrupt replayable fixtures", () => {
 		);
 		const result = toolResult("call-1");
 		const host = createHost(model, modelRegistry, [message, result]);
+		const scheduled: string[] = [];
+		host.scheduleAgentContinue = options => scheduled.push(options.source);
 		const recovery = new TurnRecovery(host);
-		expect(recovery.isRetryableError(message)).toBe(false);
-		expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
-		// Completed work stays in agent state — recovery must not drop the result.
-		const kept = host.agent.state.messages.filter(
-			(m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "call-1",
-		);
-		expect(kept).toHaveLength(1);
-		expect(kept[0]?.content[0]).toMatchObject({ type: "text", text: "artifact://0 written; tests green" });
+		try {
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+			expect(
+				await recovery.handleRetryableError(message, { preserveFailedTurn: true, allowModelFallback: false }),
+			).toBe(true);
+			expect(scheduled).toEqual(["automatic-retry"]);
+			expect(host.agent.state.messages).toEqual([message, result]);
+		} finally {
+			recovery.resolveRetry();
+		}
 	});
 
 	it("does not continue stream-stall when tool calls are unresolved (no artifact to preserve)", () => {
@@ -168,7 +186,7 @@ describe("S4 thinking-loop / stream-interrupt replayable fixtures", () => {
 		expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
 	});
 
-	it("keeps completed tool artifacts when stream-stall follows committed text (replay-unsafe discard veto)", () => {
+	it("preserves committed text and tool artifacts when continuing after stream-stall", async () => {
 		const message = makeMessage(
 			[
 				{ type: "text", text: "Partial visible answer" },
@@ -179,15 +197,19 @@ describe("S4 thinking-loop / stream-interrupt replayable fixtures", () => {
 		);
 		const result = toolResult("call-1");
 		const host = createHost(model, modelRegistry, [message, result]);
+		const scheduled: string[] = [];
+		host.scheduleAgentContinue = options => scheduled.push(options.source);
 		const recovery = new TurnRecovery(host);
-		// Committed text makes same-turn discard+replay unsafe.
-		expect(recovery.isRetryableError(message)).toBe(false);
-		// Resolved tools may still classify as stream-stall for preserve-turn
-		// continuation; either way the completed artifact must remain.
-		const kept = host.agent.state.messages.filter(
-			(m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "call-1",
-		);
-		expect(kept).toHaveLength(1);
-		expect(kept[0]?.content[0]).toMatchObject({ type: "text", text: "artifact://0 written; tests green" });
+		try {
+			// Committed text forbids discard/replay, but not a preserved-turn continuation.
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(
+				await recovery.handleRetryableError(message, { preserveFailedTurn: true, allowModelFallback: false }),
+			).toBe(true);
+			expect(scheduled).toEqual(["automatic-retry"]);
+			expect(host.agent.state.messages).toEqual([message, result]);
+		} finally {
+			recovery.resolveRetry();
+		}
 	});
 });

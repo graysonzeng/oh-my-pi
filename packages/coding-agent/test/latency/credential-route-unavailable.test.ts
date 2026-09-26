@@ -4,6 +4,7 @@ import {
 	CredentialRouteUnavailableRegistry,
 	buildCredentialRouteKey,
 	classifyCredentialRouteFailure,
+	credentialRouteAuthScope,
 	isConfigCredentialRouteUnavailable,
 	resetSharedCredentialRouteUnavailableRegistryForTests,
 	sharedCredentialRouteUnavailableRegistry,
@@ -145,5 +146,61 @@ describe("CredentialRouteUnavailableRegistry", () => {
 		const key = buildCredentialRouteKey({ provider: "shared", providerScoped: true });
 		a.noteFailure(key, { errorKind: "authentication", errorMessage: "no credentials" });
 		expect(b.isUnavailable(key)).toBe(true);
+	});
+});
+
+describe("credentialRouteAuthScope", () => {
+	it("does not cache an externally resolved key without a credential revision", () => {
+		const authStorage = {
+			credentials: { generation: 1 },
+			keys: { overrideEpoch: 1, source: () => ({ kind: "env", envVar: "TEST_KEY" }) },
+		};
+		expect(credentialRouteAuthScope({ authStorage, provider: "test", sessionId: "session" })).toBeUndefined();
+	});
+
+	it("isolates owners, sessions, and config versions without embedding secrets", () => {
+		const secret = "sk-live-secret";
+		const baseUrl = `https://gateway.example/v1?api_key=${secret}`;
+		let generation = 1;
+		let epoch = 1;
+		const ownerA = {
+			credentials: {
+				get generation() {
+					return generation;
+				},
+			},
+			keys: {
+				get overrideEpoch() {
+					return epoch;
+				},
+				source: () => ({ kind: "runtime" as const }),
+			},
+		};
+		const ownerB = {
+			credentials: { generation: 1 },
+			keys: { overrideEpoch: 1, source: () => ({ kind: "runtime" as const }) },
+		};
+		const shared = {
+			authStorage: ownerA,
+			owner: ownerA,
+			sessionId: "session-a",
+			provider: "anthropic",
+			baseUrl,
+			accountIds: ["acct-b", "acct-a"],
+		};
+		const first = credentialRouteAuthScope(shared);
+		const again = credentialRouteAuthScope({ ...shared, accountIds: ["acct-a", "acct-b"] });
+		expect(again).toBe(first);
+		expect(first).not.toContain(secret);
+		expect(first).not.toContain("api_key");
+		expect(first).not.toBe("default");
+		expect(credentialRouteAuthScope({ ...shared, authStorage: ownerB, owner: ownerB })).not.toBe(first);
+		expect(credentialRouteAuthScope({ ...shared, sessionId: "session-b" })).not.toBe(first);
+		generation += 1;
+		expect(credentialRouteAuthScope(shared)).not.toBe(first);
+		generation = 1;
+		epoch += 1;
+		expect(credentialRouteAuthScope(shared)).not.toBe(first);
+		expect(credentialRouteAuthScope({})).toBeUndefined();
 	});
 });

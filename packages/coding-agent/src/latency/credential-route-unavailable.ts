@@ -13,6 +13,13 @@
  * Both use this process-local registry, but keys are not interchangeable —
  * cross-surface sharing is same-namespace only (fail-open re-probe across
  * mismatched key shapes, never false-block).
+ *
+ * Auth scope is not a process-wide `"default"`. Callers pass
+ * {@link credentialRouteAuthScope}: auth-owner identity, session, base URL,
+ * account-access constraint, source kind, credential generation, and override
+ * epoch. Missing owner identity returns undefined so callers fail open instead
+ * of reusing another owner's mark. Same established route still early-fails
+ * until TTL, success, or a generation/epoch change.
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { redactSecretsInText } from "../workflow/secret-redact";
@@ -51,6 +58,88 @@ export function buildCredentialRouteKey(parts: {
 	if (parts.providerScoped) return `provider|${provider}|${scope}`;
 	const model = (parts.modelId ?? "").trim().toLowerCase() || "*";
 	return `route|${provider}|${model}|${scope}`;
+}
+
+/**
+ * Non-secret inputs that change which credential a route resolves.
+ * Does not accept tokens, API keys, or a guessed account.
+ */
+export interface CredentialRouteAuthScopeInput {
+	/** Auth owner. Distinct instances must not share negative marks. */
+	authStorage?: {
+		credentials: { readonly generation: number };
+		keys?: {
+			readonly overrideEpoch?: number;
+			source?: (provider: string) => { kind: string; envVar?: string } | undefined;
+		};
+	};
+	/**
+	 * Caller object used when auth storage is absent, and when session id is
+	 * missing so two session objects on one store do not share marks.
+	 */
+	owner?: object;
+	sessionId?: string | null;
+	provider?: string;
+	baseUrl?: string;
+	/** Account ids the model may use. A constraint, not a selected account. */
+	accountIds?: readonly string[];
+}
+
+let nextOwnerToken = 1;
+const ownerTokens = new WeakMap<object, string>();
+
+function ownerToken(owner: object): string {
+	let token = ownerTokens.get(owner);
+	if (!token) {
+		token = `o${nextOwnerToken++}`;
+		ownerTokens.set(owner, token);
+	}
+	return token;
+}
+
+/**
+ * Stable non-secret scope for one credential route.
+ *
+ * Returns undefined when no auth owner or caller object is available — callers
+ * must then skip the shared registry (fail open) rather than use `"default"`.
+ * Does not call OAuth identity lookup: the first stored account is not the
+ * account a later resolve will select.
+ * Rotating stored accounts and externally resolved env/config keys have no
+ * synchronous selected-credential revision here, so they are not cached.
+ *
+ * Same inputs early-fail together. A different owner, session, base URL,
+ * account-access set, source kind, credential generation, or override epoch
+ * does not reuse the mark.
+ */
+export function credentialRouteAuthScope(input: CredentialRouteAuthScopeInput): string | undefined {
+	const storage = input.authStorage;
+	const caller = input.owner;
+	const owner = storage ?? caller;
+	if (!owner) return undefined;
+	const sessionId = input.sessionId?.trim() ?? "";
+	const provider = (input.provider ?? "").trim().toLowerCase();
+	const source = provider ? storage?.keys?.source?.(provider) : undefined;
+	if (source && (source.kind !== "runtime" || storage?.keys?.overrideEpoch === undefined)) return undefined;
+	const accountIds = (input.accountIds ?? [])
+		.map(id => id.trim())
+		.filter(id => id.length > 0)
+		.sort();
+	return new Bun.CryptoHasher("sha256")
+		.update(
+			[
+				ownerToken(owner),
+				!sessionId && caller && caller !== owner ? ownerToken(caller) : "",
+				`g${storage?.credentials.generation ?? "-"}`,
+				`e${storage?.keys?.overrideEpoch ?? "-"}`,
+				sessionId,
+				provider,
+				(input.baseUrl ?? "").trim(),
+				accountIds.join(","),
+				source?.kind ?? "",
+				source?.envVar ?? "",
+			].join("\0"),
+		)
+		.digest("hex");
 }
 
 /**

@@ -30,6 +30,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 import {
 	buildCredentialRouteKey,
+	credentialRouteAuthScope,
 	isConfigCredentialRouteUnavailable,
 	sharedCredentialRouteUnavailableRegistry,
 } from "../latency/credential-route-unavailable";
@@ -2242,7 +2243,9 @@ export class TurnRecovery {
 	/**
 	 * Record a config-unavailable failure for the active model route (process-local)
 	 * so sibling fallback candidates sharing the dead credential are skipped.
-	 * Cooldown/transport/unknown do not write the registry.
+	 * Cooldown/transport/unknown do not write the registry. Model-policy denials
+	 * stay on the denied model — they are not a revoked provider credential.
+	 * Missing auth identity does not write a shared mark.
 	 */
 	noteConfigCredentialRouteFailure(message: AssistantMessage): void {
 		const model = this.#host.model();
@@ -2253,30 +2256,34 @@ export class TurnRecovery {
 			errorId: message.errorId,
 		};
 		if (!isConfigCredentialRouteUnavailable(input)) return;
+		const scope = this.#credentialRouteScope(model.provider, model);
+		if (!scope) return;
 		const registry = sharedCredentialRouteUnavailableRegistry();
-		const providerScoped = AIError.is(this.#classifyRetryMessage(message), AIError.Flag.AuthFailed);
+		const providerScoped =
+			AIError.is(this.#classifyRetryMessage(message), AIError.Flag.AuthFailed) &&
+			!AIError.isGitHubCopilotPolicyDenial(model.provider, message.errorStatus, message.errorMessage) &&
+			!AIError.isClinePassSurfaceGateMessage(message.errorMessage) &&
+			message.errorStatus !== 403;
 		registry.noteFailure(
 			buildCredentialRouteKey({
 				provider: model.provider,
 				modelId: model.id,
 				providerScoped,
+				authScope: scope,
 			}),
 			input,
 		);
-		// Auth failures also mark the provider scope so sibling models on the same
-		// dead credential stop walking an identical chain.
-		if (providerScoped) {
-			registry.noteFailure(buildCredentialRouteKey({ provider: model.provider, providerScoped: true }), input);
-		}
 	}
 
 	/** Clear known-unavailable marks for the active model after a successful turn. */
 	clearConfigCredentialRouteFailure(): void {
 		const model = this.#host.model();
 		if (!model) return;
+		const scope = this.#credentialRouteScope(model.provider, model);
+		if (!scope) return;
 		const registry = sharedCredentialRouteUnavailableRegistry();
-		registry.clear(buildCredentialRouteKey({ provider: model.provider, modelId: model.id }));
-		registry.clear(buildCredentialRouteKey({ provider: model.provider, providerScoped: true }));
+		registry.clear(buildCredentialRouteKey({ provider: model.provider, modelId: model.id, authScope: scope }));
+		registry.clear(buildCredentialRouteKey({ provider: model.provider, providerScoped: true, authScope: scope }));
 	}
 
 	/** False when the candidate's provider/model route is already known config-unavailable. */
@@ -2286,13 +2293,31 @@ export class TurnRecovery {
 		const model = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
 		const provider = model?.provider ?? candidate.provider;
 		const modelId = model?.id ?? candidate.id;
-		if (registry.isUnavailable(buildCredentialRouteKey({ provider, providerScoped: true }))) {
+		const scope = this.#credentialRouteScope(provider, model);
+		// Unknown identity must not inherit another owner's negative mark.
+		if (!scope) return true;
+		if (registry.isUnavailable(buildCredentialRouteKey({ provider, providerScoped: true, authScope: scope }))) {
 			return false;
 		}
-		if (registry.isUnavailable(buildCredentialRouteKey({ provider, modelId }))) {
+		if (registry.isUnavailable(buildCredentialRouteKey({ provider, modelId, authScope: scope }))) {
 			return false;
 		}
 		return true;
+	}
+
+	#credentialRouteScope(
+		provider: string,
+		model: { baseUrl?: string; accountAccess?: Model["accountAccess"] } | undefined,
+	): string | undefined {
+		const authStorage = this.#host.modelRegistry.authStorage;
+		return credentialRouteAuthScope({
+			authStorage,
+			owner: authStorage,
+			sessionId: this.#host.sessionId(),
+			provider,
+			baseUrl: model?.baseUrl,
+			accountIds: model?.accountAccess ? Object.keys(model.accountAccess) : undefined,
+		});
 	}
 
 	/**

@@ -59,6 +59,8 @@ export interface DeliveryCostTaskObservation {
 	/** Union of child file intervals (parallel work counted once). */
 	childTaskMs: number | null;
 	usage: DeliveryUsageSlice;
+	/** Whether every parent/child transcript has fully priced usage. */
+	attemptCostComplete: boolean;
 	attemptCostByKind: AttemptCostByCompletionKind;
 	e2eMs: number | null;
 	falseAccept: boolean | "unknown";
@@ -178,13 +180,16 @@ function emptyAttemptCost(): AttemptCostByCompletionKind {
 	};
 }
 
-function sumUsage(into: DeliveryUsageSlice, session: ParsedSession): void {
+function sumUsage(into: DeliveryUsageSlice, session: ParsedSession): boolean {
+	let costComplete = session.usageRequests.length > 0;
 	for (const request of session.usageRequests) {
 		into.input = addPresent(into.input, request.input);
 		into.output = addPresent(into.output, request.output);
 		into.cacheRead = addPresent(into.cacheRead, request.cacheRead);
 		into.costTotal = addPresent(into.costTotal, request.costTotal);
+		if (request.costTotal === null) costComplete = false;
 	}
+	return costComplete;
 }
 
 function sessionCost(session: ParsedSession): number | null {
@@ -545,7 +550,7 @@ function summarizeCohort(tasks: readonly DeliveryCostTaskObservation[]): Deliver
 		cover(summary.coverage.childTaskMs, task.childTaskMs !== null);
 		if (task.childTaskMs !== null) childTasks.push(task.childTaskMs);
 
-		cover(summary.coverage.attemptCost, task.usage.costTotal !== null);
+		cover(summary.coverage.attemptCost, task.attemptCostComplete);
 		summary.usage.input = addPresent(summary.usage.input, task.usage.input);
 		summary.usage.output = addPresent(summary.usage.output, task.usage.output);
 		summary.usage.cacheRead = addPresent(summary.usage.cacheRead, task.usage.cacheRead);
@@ -598,8 +603,10 @@ export function observeDeliveryCostTask(args: {
 	const cohort = classifyCohort(verifications);
 	const boundaryTs = firstDeliveryBoundaryTs(parent, children);
 	const usage = emptyUsage();
-	sumUsage(usage, parent);
-	for (const child of children) sumUsage(usage, child);
+	let costComplete = sumUsage(usage, parent);
+	for (const child of children) {
+		if (!sumUsage(usage, child)) costComplete = false;
+	}
 	const quality = qualityFromSession(parent);
 	const sorted = sortedVerifications(verifications);
 	const last = sorted.length > 0 ? sorted[sorted.length - 1]! : undefined;
@@ -618,6 +625,7 @@ export function observeDeliveryCostTask(args: {
 		parentIntegrateMs: parentIntegrateMs(parent, children),
 		childTaskMs: childTaskUnionMs(children),
 		usage,
+		attemptCostComplete: costComplete,
 		attemptCostByKind: attributeAttemptCosts(parent, children),
 		e2eMs,
 		falseAccept: quality.falseAccept,

@@ -154,17 +154,17 @@ export function resolveStablePrefixCacheExperiment(
 export function inspectProviderRequestPrefix(segments: readonly ProviderRequestSegment[]): StablePrefixInspection {
 	let firstDynamicIndex: number | null = null;
 	let firstStaticIndex: number | null = null;
+	let staticCutByDynamic = false;
 	for (let i = 0; i < segments.length; i++) {
 		const kind = segments[i]!.kind;
 		if ((kind === "dynamic_context" || kind === "assignment") && firstDynamicIndex === null) {
 			firstDynamicIndex = i;
 		}
-		if ((kind === "static_rules" || kind === "tools") && firstStaticIndex === null) {
-			firstStaticIndex = i;
+		if (kind === "static_rules" || kind === "tools") {
+			if (firstStaticIndex === null) firstStaticIndex = i;
+			if (firstDynamicIndex !== null) staticCutByDynamic = true;
 		}
 	}
-	const staticCutByDynamic =
-		firstDynamicIndex !== null && firstStaticIndex !== null && firstDynamicIndex < firstStaticIndex;
 	const prefixFingerprint = sha256Hex(
 		JSON.stringify(segments.map(s => ({ kind: s.kind, fingerprint: s.fingerprint, byteLength: s.byteLength }))),
 	);

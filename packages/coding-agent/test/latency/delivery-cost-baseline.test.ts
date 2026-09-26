@@ -278,6 +278,43 @@ describe("delivery cost baseline", () => {
 		expect(report.workflow.costPerAcceptedTask).toBeNull();
 	});
 
+	it("withholds accepted-task cost when a request within a priced session is unpriced", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("partial-request")),
+				line(assistantMsg({ ts: 1000, usage: { input: 10, cost: { total: 1 } } })),
+				line(assistantMsg({ ts: 1500, usage: { input: 20 } })),
+				line(parentFinal({ status: "passed", source: "workflow", verifiedAtMs: 2000 })),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildDeliveryCostBaselineReport([parent]);
+		expect(report.workflow.totalAttemptCost).toBe(1);
+		expect(report.tasks[0]?.usage.costTotal).toBe(1);
+		expect(report.workflow.costPerAcceptedTask).toBeNull();
+		expect(report.workflow.coverage.attemptCost).toEqual({ present: 0, unknown: 1 });
+	});
+
+	it("withholds accepted-task cost when a child has no priced usage", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("partial-child")),
+				line(assistantMsg({ ts: 1000, usage: { cost: { total: 1 } } })),
+				line(parentFinal({ status: "passed", source: "workflow", verifiedAtMs: 2000 })),
+			].join("\n"),
+			PARENT,
+		);
+		const child = parseSessionJsonl(
+			[line(sessionHeader("child", { parentSession: PARENT })), line(userMsg(1100, "work"))].join("\n"),
+			CHILD_A,
+		);
+		const report = buildDeliveryCostBaselineReport([parent, child]);
+		expect(report.workflow.totalAttemptCost).toBe(1);
+		expect(report.tasks[0]?.usage.costTotal).toBe(1);
+		expect(report.workflow.costPerAcceptedTask).toBeNull();
+		expect(report.workflow.coverage.attemptCost).toEqual({ present: 0, unknown: 1 });
+	});
+
 	it("classifies mixed ordinary+workflow receipts as unknown cohort", () => {
 		const parent = parseSessionJsonl(
 			[
