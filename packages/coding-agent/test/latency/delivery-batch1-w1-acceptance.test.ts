@@ -363,6 +363,20 @@ describe("W1 episode cost attribution", () => {
 				message: { role: "user", content: [{ type: "text", text: "task B" }], timestamp: 4_000 },
 			}),
 			line({
+				type: "message",
+				id: "a-b",
+				parentId: null,
+				timestamp: "2026-09-26T10:00:03.500Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "B" }],
+					timestamp: 4_500,
+					model: "test/m",
+					stopReason: "stop",
+					usage: usage(2.5),
+				},
+			}),
+			line({
 				type: "custom",
 				id: "v-b",
 				parentId: null,
@@ -390,13 +404,15 @@ describe("W1 episode cost attribution", () => {
 		expect(cost.ordinary.acceptedTaskCount).toBe(1);
 		expect(cost.workflow.acceptedTaskCount).toBe(1);
 		expect(cost.ordinary.taskCount + cost.workflow.taskCount).toBe(2);
-		// Without per-request episode tags, do not dump all spend onto epA —
-		// every unsplit group is cost-incomplete so ratios stay null.
-		expect(cost.ordinary.totalAttemptCost).toBeNull();
-		expect(cost.ordinary.costPerAcceptedTask).toBeNull();
-		expect(cost.workflow.costPerAcceptedTask).toBeNull();
-		expect(cost.tasks.every(t => t.attemptCostComplete === false)).toBe(true);
-		expect(cost.tasks.every(t => t.usage.costTotal === null)).toBe(true);
+		// Episode-tagged usage keeps costs attributed (not wiped) while denominators stay isolated.
+		const ordinaryTask = cost.tasks.find(t => t.episodeKey === episodeKey(epA));
+		const workflowTask = cost.tasks.find(t => t.episodeKey === episodeKey(epB));
+		expect(ordinaryTask?.usage.costTotal).toBe(1.5);
+		expect(workflowTask?.usage.costTotal).toBe(2.5);
+		expect(cost.ordinary.totalAttemptCost).toBe(1.5);
+		expect(cost.ordinary.costPerAcceptedTask).toBe(1.5);
+		expect(cost.workflow.totalAttemptCost).toBe(2.5);
+		expect(cost.workflow.costPerAcceptedTask).toBe(2.5);
 	});
 
 	it("dedupes fork/dup receipts by eventId and keeps partial sum when price missing", () => {

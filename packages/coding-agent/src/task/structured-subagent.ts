@@ -39,7 +39,9 @@ import {
 	extractChildDeliveryEvidence,
 	type ParentIntegrateDecision,
 } from "./child-delivery-evidence";
-import { ensureEvidenceHandoffContext, prepareSubagentContext } from "./evidence-handoff";
+import { ensureEvidenceHandoffContext, inspectEvidenceHandoffContext, prepareSubagentContext } from "./evidence-handoff";
+import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
+import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
 	applyEligibleNestedPatches,
@@ -876,27 +878,48 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			extractChildDeliveryEvidence(result.output) ??
 			undefined;
 		// Stable producer from executor facts when the child did not emit a packet.
-		// Worker cannot seal parent acceptance — synthesised items stay unproven
-		// unless terminal evidence locations exist (none here → claimedProven false).
-		const deliveryEvidence =
-			extractedDelivery ??
-			(result.patchPath || (result.nestedPatchPaths?.length ?? 0) > 0
-				? buildChildDeliveryEvidenceFromExecutorFacts({
-						codeVersion: {
-							version: result.branchName?.trim() || `artifact:${result.id}`,
-							changedFiles: [
-								...(result.patchPath ? [result.patchPath] : []),
-								...(result.nestedPatchPaths ?? []),
-							],
-						},
-						acceptanceItems: [],
-						// Executor has not proven ownership release — leave false so
-						// parent reclassify cannot inherit a forged release claim.
-						writeOwnershipReleased: false,
-						finishOwner: "original_worker",
-						checksNotRun: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
-					})
-				: undefined);
+		// Prefer real workspace version + patch-touched source files; never seal
+		// proven without terminal receipts. Acceptance ids come from the dispatch
+		// handoff / caller outputSchema priority (user outputSchema wins upstream).
+		let deliveryEvidence = extractedDelivery;
+		if (!deliveryEvidence) {
+			const hasPatch = Boolean(result.patchPath) || (result.nestedPatchPaths?.length ?? 0) > 0;
+			const hasStructured =
+				hasValidStructuredOutput ||
+				(result.structuredOutput?.data !== undefined && result.structuredOutput.data !== null);
+			if (hasPatch || (completedRun && hasStructured)) {
+				const workspaceVersion = await resolveCurrentWorkspaceCodeVersion(request.session.cwd);
+				const changedFiles = new Set<string>();
+				for (const patchPath of [
+					...(result.patchPath ? [result.patchPath] : []),
+					...(result.nestedPatchPaths ?? []),
+				]) {
+					try {
+						const patchText = await Bun.file(patchPath).text();
+						for (const file of parsePatchTouchedFiles(patchText)) changedFiles.add(file);
+					} catch {
+						// Fall back to the artifact path only when patch bytes are unreadable.
+						changedFiles.add(patchPath);
+					}
+				}
+				const fromHandoff = inspectEvidenceHandoffContext(request.context);
+				const acceptanceItems = (fromHandoff.handoff?.acceptance ?? []).map(id => ({
+					id,
+					claimedProven: false as const,
+					evidenceLocations: [] as string[],
+				}));
+				deliveryEvidence = buildChildDeliveryEvidenceFromExecutorFacts({
+					codeVersion: {
+						version: workspaceVersion || `unresolved:${result.id}`,
+						changedFiles: [...changedFiles],
+					},
+					acceptanceItems,
+					writeOwnershipReleased: false,
+					finishOwner: "original_worker",
+					checksNotRun: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
+				});
+			}
+		}
 		const packetDecision = classifyChildResultForParentIntegrate({
 			deliveryEvidence: deliveryEvidence ?? null,
 		});

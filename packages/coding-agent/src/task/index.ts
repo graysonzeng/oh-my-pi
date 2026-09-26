@@ -1762,7 +1762,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					});
 				},
 			});
-			await this.#consumeParentDeliveryAfterSpawn(toolCallId, execution.result);
+			await this.#consumeParentDeliveryAfterSpawn(toolCallId, execution.result, context);
 			return this.#buildResultPayload(
 				execution.result,
 				execution.policy.discovery.projectAgentsDir,
@@ -1788,7 +1788,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * current workspace and bind a parent_integrate_decision custom entry.
 	 * Packet-only settle decisions are never integrate-of-record.
 	 */
-	async #consumeParentDeliveryAfterSpawn(toolCallId: string, result: SingleResult): Promise<void> {
+	async #consumeParentDeliveryAfterSpawn(
+		toolCallId: string,
+		result: SingleResult,
+		spawnContext: string | undefined,
+	): Promise<void> {
 		const sink = this.session.sessionManager;
 		if (!sink?.appendCustomEntry) return;
 		if (result.exitCode === 0 && !result.error && !result.aborted) {
@@ -1811,13 +1815,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		try {
 			const episode = resolveParentConsumeEpisode(sink);
 			if (!episode) return;
-			const currentCodeVersion =
-				(await resolveCurrentWorkspaceCodeVersion(this.session.cwd)) || result.deliveryEvidence.codeVersion.version;
+			// Never fall back to the child's package version — empty stays fail-closed stale.
+			const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(this.session.cwd);
+			const fromContext = acceptanceAndFreshnessFromContext(spawnContext);
 			const consumed = consumeChildDeliveryForParent({
 				delivery: result.deliveryEvidence,
 				currentCodeVersion,
-				requiredAcceptance: acceptanceAndFreshnessFromContext(undefined).requiredAcceptance,
-				staleEvidence: false,
+				requiredAcceptance: fromContext.requiredAcceptance,
+				staleEvidence: fromContext.staleEvidence,
 				writeOwnershipReleased: false,
 				episodeSessionId: episode.sessionId,
 				rootUserEntryId: episode.rootUserEntryId,

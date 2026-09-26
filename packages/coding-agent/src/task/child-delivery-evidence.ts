@@ -93,9 +93,8 @@ function nonEmptyStrings(values: readonly string[] | undefined): string[] {
 }
 
 /**
- * Strong evidence locations for sealing `proven` (Batch 1 forge tighten).
- * Accepts path-like, file-with-extension, or URI/scheme refs — rejects bare
- * prose ("done", "looks good") that previously forged proven via any non-empty string.
+ * Strong evidence locations for reviewer navigation (paths / URIs).
+ * Path shape alone never seals `proven` — that requires a terminal receipt.
  */
 export function isStrongEvidenceLocation(location: string): boolean {
 	const trimmed = location.trim();
@@ -132,9 +131,62 @@ function normalizeAcceptanceItem(raw: unknown): AcceptanceItemEvidence | null {
 	const evidenceLocations = Array.isArray(raw.evidenceLocations)
 		? strongEvidenceLocations(raw.evidenceLocations.filter((p): p is string => typeof p === "string"))
 		: [];
-	// Never advertise proven without strong evidence locations (forge surface).
-	const proven = raw.proven === true && evidenceLocations.length > 0;
-	return { id, proven, evidenceLocations };
+	// Parsed / author-built packets never keep proven:true. Terminal seal lives
+	// only in buildChildDeliveryEvidenceFromExecutorFacts.
+	return { id, proven: false, evidenceLocations };
+}
+
+function assembleChildDeliveryEvidence(input: {
+	codeVersion: CodeVersionIdentity;
+	acceptanceProven: AcceptanceItemEvidence[];
+	checksNotRun: CheckNotRun[];
+	finishOwner: FinishOwner;
+	finishOwnerReason?: string;
+	sharedInterfaces: string[];
+	writeOwnershipReleased: boolean;
+	authorConclusions?: string[];
+}): ChildDeliveryEvidenceV1 {
+	const base: Omit<ChildDeliveryEvidenceV1, "contentFingerprint"> = {
+		kind: CHILD_DELIVERY_EVIDENCE_KIND,
+		v: CHILD_DELIVERY_EVIDENCE_VERSION,
+		codeVersion: input.codeVersion,
+		acceptanceProven: input.acceptanceProven,
+		checksNotRun: input.checksNotRun,
+		finishOwner: input.finishOwner,
+		sharedInterfaces: input.sharedInterfaces,
+		writeOwnershipReleased: input.writeOwnershipReleased,
+		...(input.finishOwnerReason?.trim() ? { finishOwnerReason: input.finishOwnerReason.trim() } : {}),
+		...(input.authorConclusions && input.authorConclusions.length
+			? { authorConclusions: input.authorConclusions }
+			: {}),
+	};
+	return { ...base, contentFingerprint: fingerprintPayload(base) };
+}
+
+/** Build a versioned child delivery evidence packet (author-safe: proven always false). */
+export function buildChildDeliveryEvidence(input: BuildChildDeliveryEvidenceInput): ChildDeliveryEvidenceV1 {
+	const codeVersion = normalizeCodeVersion(input.codeVersion);
+	if (!codeVersion) throw new Error("child_delivery_evidence_missing_code_version");
+	const acceptanceProven = (input.acceptanceProven ?? [])
+		.map(normalizeAcceptanceItem)
+		.filter((item): item is AcceptanceItemEvidence => item !== null);
+	const checksNotRun = (input.checksNotRun ?? [])
+		.map(normalizeCheckNotRun)
+		.filter((item): item is CheckNotRun => item !== null);
+	const finishOwner: FinishOwner = input.finishOwner === "parent" ? "parent" : "original_worker";
+	return assembleChildDeliveryEvidence({
+		codeVersion,
+		acceptanceProven,
+		checksNotRun,
+		finishOwner,
+		finishOwnerReason: input.finishOwnerReason,
+		sharedInterfaces: nonEmptyStrings(input.sharedInterfaces),
+		writeOwnershipReleased: input.writeOwnershipReleased === true,
+		authorConclusions:
+			input.authorConclusions && nonEmptyStrings(input.authorConclusions).length
+				? nonEmptyStrings(input.authorConclusions)
+				: undefined,
+	});
 }
 
 function normalizeCheckNotRun(raw: unknown): CheckNotRun | null {
@@ -160,34 +212,6 @@ function fingerprintPayload(delivery: Omit<ChildDeliveryEvidenceV1, "contentFing
 		writeOwnershipReleased: delivery.writeOwnershipReleased,
 		authorConclusions: delivery.authorConclusions ?? [],
 	});
-}
-
-/** Build a versioned child delivery evidence packet. */
-export function buildChildDeliveryEvidence(input: BuildChildDeliveryEvidenceInput): ChildDeliveryEvidenceV1 {
-	const codeVersion = normalizeCodeVersion(input.codeVersion);
-	if (!codeVersion) throw new Error("child_delivery_evidence_missing_code_version");
-	const acceptanceProven = (input.acceptanceProven ?? [])
-		.map(normalizeAcceptanceItem)
-		.filter((item): item is AcceptanceItemEvidence => item !== null);
-	const checksNotRun = (input.checksNotRun ?? [])
-		.map(normalizeCheckNotRun)
-		.filter((item): item is CheckNotRun => item !== null);
-	const finishOwner: FinishOwner = input.finishOwner === "parent" ? "parent" : "original_worker";
-	const base: Omit<ChildDeliveryEvidenceV1, "contentFingerprint"> = {
-		kind: CHILD_DELIVERY_EVIDENCE_KIND,
-		v: CHILD_DELIVERY_EVIDENCE_VERSION,
-		codeVersion,
-		acceptanceProven,
-		checksNotRun,
-		finishOwner,
-		sharedInterfaces: nonEmptyStrings(input.sharedInterfaces),
-		writeOwnershipReleased: input.writeOwnershipReleased === true,
-		...(input.finishOwnerReason?.trim() ? { finishOwnerReason: input.finishOwnerReason.trim() } : {}),
-		...(input.authorConclusions && nonEmptyStrings(input.authorConclusions).length
-			? { authorConclusions: nonEmptyStrings(input.authorConclusions) }
-			: {}),
-	};
-	return { ...base, contentFingerprint: fingerprintPayload(base) };
 }
 
 /** Parse a delivery evidence object; null when shape/version is wrong. */
@@ -290,14 +314,9 @@ function acceptanceSatisfied(
 	);
 	const required = nonEmptyStrings(requiredAcceptance);
 	if (required.length === 0) {
-		// No contract list: require at least one proven item with evidence, or
-		// an explicit empty acceptanceProven when the child claims nothing to prove.
-		if (delivery.acceptanceProven.length === 0) return { ok: false, missing: ["<acceptance>"] };
-		const unproven = delivery.acceptanceProven.filter(item => !item.proven || item.evidenceLocations.length === 0);
-		return {
-			ok: unproven.length === 0,
-			missing: unproven.map(item => item.id),
-		};
+		// Parent must supply a dispatch contract. Empty requiredAcceptance must
+		// not let child-authored acceptanceProven invent the integrate gate.
+		return { ok: false, missing: ["<acceptance_contract>"] };
 	}
 	const missing = required.filter(item => !provenIds.has(item));
 	return { ok: missing.length === 0, missing };
@@ -329,7 +348,15 @@ export function classifyParentIntegrate(input: {
 	crossModule?: boolean;
 }): ParentIntegrateDecision {
 	const reasons: string[] = [];
-	const delivery = input.delivery ? parseChildDeliveryEvidence(input.delivery) : null;
+	// Prefer in-process executor seals; untrusted packets must arrive via parse/extract.
+	const delivery =
+		input.delivery &&
+		input.delivery.kind === CHILD_DELIVERY_EVIDENCE_KIND &&
+		input.delivery.v === CHILD_DELIVERY_EVIDENCE_VERSION
+			? input.delivery
+			: input.delivery
+				? parseChildDeliveryEvidence(input.delivery)
+				: null;
 
 	if (input.staleEvidence === true || input.codeVersionStale === true) {
 		if (input.staleEvidence === true) reasons.push("stale_evidence");
@@ -478,19 +505,27 @@ export function buildChildDeliveryEvidenceFromExecutorFacts(input: {
 			...(item.evidenceLocations ?? []),
 			...(terminal?.evidenceLocation ? [terminal.evidenceLocation] : []),
 		]);
-		// Strong locations only (path/URI/terminal). Bare prose cannot forge proven.
-		const proven = locations.length > 0 && item.claimedProven !== false;
+		// Proven only when a terminal receipt matches this acceptance id.
+		// Path-looking filenames alone cannot forge proven:true.
+		const proven = terminal !== undefined && locations.length > 0 && item.claimedProven !== false;
 		return { id: item.id.trim(), proven, evidenceLocations: locations };
 	});
-	return buildChildDeliveryEvidence({
-		codeVersion: input.codeVersion,
+	const checksNotRun = (input.checksNotRun ?? [])
+		.map(normalizeCheckNotRun)
+		.filter((item): item is CheckNotRun => item !== null);
+	const codeVersion = normalizeCodeVersion(input.codeVersion);
+	if (!codeVersion) throw new Error("child_delivery_evidence_missing_code_version");
+	return assembleChildDeliveryEvidence({
+		codeVersion,
 		acceptanceProven,
-		checksNotRun: input.checksNotRun ? [...input.checksNotRun] : undefined,
-		finishOwner: input.finishOwner,
+		checksNotRun,
+		finishOwner: input.finishOwner === "parent" ? "parent" : "original_worker",
 		finishOwnerReason: input.finishOwnerReason,
-		sharedInterfaces: input.sharedInterfaces ? [...input.sharedInterfaces] : undefined,
-		writeOwnershipReleased: input.writeOwnershipReleased,
-		authorConclusions: input.authorConclusions ? [...input.authorConclusions] : undefined,
+		sharedInterfaces: nonEmptyStrings(input.sharedInterfaces ? [...input.sharedInterfaces] : undefined),
+		writeOwnershipReleased: input.writeOwnershipReleased === true,
+		authorConclusions: input.authorConclusions
+			? nonEmptyStrings([...input.authorConclusions])
+			: undefined,
 	});
 }
 
@@ -513,7 +548,15 @@ export function reclassifyParentIntegrateAgainstWorkspace(input: {
 	/** When false/undefined, write ownership still held blocks integrate. */
 	writeOwnershipReleased?: boolean;
 }): ParentIntegrateDecision & { boundToWorkspaceVersion: string } {
-	const delivery = input.delivery ? parseChildDeliveryEvidence(input.delivery) : null;
+	// Prefer in-process executor seals; untrusted packets must arrive via parse/extract.
+	const delivery =
+		input.delivery &&
+		input.delivery.kind === CHILD_DELIVERY_EVIDENCE_KIND &&
+		input.delivery.v === CHILD_DELIVERY_EVIDENCE_VERSION
+			? input.delivery
+			: input.delivery
+				? parseChildDeliveryEvidence(input.delivery)
+				: null;
 	const current = input.currentCodeVersion.trim();
 	const codeVersionStale = !delivery || !current || delivery.codeVersion.version !== current;
 	// Parent must explicitly confirm release. Omitting the flag must not let a
@@ -558,22 +601,7 @@ export function bindParentIntegrateDecisionEntry(input: {
 	agentId?: string | null;
 	workspaceVersion: string;
 	recordedAtMs?: number;
-}): {
-	kind: "parent_integrate_decision";
-	v: 1;
-	classification: ParentIntegrateClass;
-	action: ParentIntegrateAction;
-	reasons: string[];
-	usedAuthorSelfAssessment: false;
-	episode: { sessionId: string; rootUserEntryId: string };
-	taskToolCallId: string | null;
-	jobId: string | null;
-	agentId: string | null;
-	workspaceVersion: string;
-	recordedAtMs: number;
-	/** Explicit: integrate-eligible is not final acceptance. */
-	finalAccepted: false;
-} {
+}): ParentIntegrateDecisionEntry {
 	return {
 		kind: "parent_integrate_decision",
 		v: 1,
@@ -592,6 +620,23 @@ export function bindParentIntegrateDecisionEntry(input: {
 		recordedAtMs: input.recordedAtMs ?? Date.now(),
 		finalAccepted: false,
 	};
+}
+
+export interface ParentIntegrateDecisionEntry {
+	kind: "parent_integrate_decision";
+	v: 1;
+	classification: ParentIntegrateClass;
+	action: ParentIntegrateAction;
+	reasons: string[];
+	usedAuthorSelfAssessment: false;
+	episode: { sessionId: string; rootUserEntryId: string };
+	taskToolCallId: string | null;
+	jobId: string | null;
+	agentId: string | null;
+	workspaceVersion: string;
+	recordedAtMs: number;
+	/** Explicit: integrate-eligible is not final acceptance. */
+	finalAccepted: false;
 }
 
 export const PARENT_INTEGRATE_DECISION_CUSTOM_TYPE = "parent_integrate_decision";

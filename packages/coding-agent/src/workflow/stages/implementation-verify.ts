@@ -1,5 +1,9 @@
 import { parsePatchTouchedFiles } from "../../utils/parse-patch-touched-files";
-import { buildLayeredVerificationPlan, layeredVerificationObserveEvents } from "../layered-verification";
+import {
+	buildLayeredVerificationPlan,
+	layeredVerificationObserveEvents,
+	layeredVerificationRunEndObserveEvents,
+} from "../layered-verification";
 import type { ImplementationArtifactV1, VerificationArtifactV1, VerifierPort } from "../types";
 import {
 	buildVerificationCodeState,
@@ -66,10 +70,12 @@ export class ImplementationVerifyStage {
 			scope,
 			parentOwnsVerify: input.parentOwnsVerify === true,
 		});
+		const observeMeta = {
+			eventIdPrefix: `wf:${input.workflowId}:${input.attemptId}:implementation_verify`,
+		};
 		if (input.observeSink) {
-			for (const event of layeredVerificationObserveEvents(plan, {
-				eventIdPrefix: `wf:${input.workflowId}:${input.attemptId}:implementation_verify`,
-			})) {
+			// Plan/start only — never mint verify_run before commands execute.
+			for (const event of layeredVerificationObserveEvents(plan, observeMeta)) {
 				noteVerificationObserve({ ...event, sink: input.observeSink });
 			}
 		}
@@ -150,6 +156,12 @@ export class ImplementationVerifyStage {
 				expectDirtyTree: changedFiles.length > 0 || Boolean(impl.patchPath) || Boolean(impl.branchName),
 			},
 		);
+
+		if (input.observeSink && plan.toRun.length > 0) {
+			for (const event of layeredVerificationRunEndObserveEvents(plan, observeMeta)) {
+				noteVerificationObserve({ ...event, sink: input.observeSink });
+			}
+		}
 
 		return sealWorkflowVerifierResult(result, {
 			commands: input.commands,

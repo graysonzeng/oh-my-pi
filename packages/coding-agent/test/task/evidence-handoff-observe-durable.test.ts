@@ -100,6 +100,28 @@ describe("W3 durable evidence-handoff observe", () => {
 		expect(recomputed.reuseContinue).toBe(1);
 	});
 
+	it("persist observe is fail-open on sink write errors (does not throw)", () => {
+		const manager = SessionManager.inMemory();
+		const original = manager.appendCustomEntry.bind(manager);
+		manager.appendCustomEntry = (() => {
+			throw new Error("disk full");
+		}) as SessionManager["appendCustomEntry"];
+		const result = persistEvidenceHandoffObserve(
+			manager,
+			buildEvidenceHandoffObserveRecord({
+				eventId: "fail-open-1",
+				phase: "verify_plan",
+				ts: 1,
+				reason: "start",
+			}),
+		);
+		expect(result.persisted).toBe(false);
+		expect(result.error).toMatch(/disk full/);
+		// In-process snapshot still advanced; durable restart would miss this boundary.
+		expect(getEvidenceHandoffObserveSnapshot().verifyPlan).toBe(1);
+		manager.appendCustomEntry = original;
+	});
+
 	it("never treats async.running as verify reuse/pass and exposes reject reasons", () => {
 		const manager = SessionManager.inMemory();
 		noteVerificationObserve({

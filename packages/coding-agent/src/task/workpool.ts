@@ -276,7 +276,7 @@ export class WorkPool {
 		// Pool probe stays observe:false; durable observe fires once on the real
 		// continue vs spawn_fresh boundary below.
 		if (this.#blocksExistingAgents()) {
-			this.#reuseDecision("pool", "idle", { observe: true });
+			this.#reuseDecision("pool", "idle", { observe: true, itemId: item.id, round: item.seq });
 			if (this.agents.length >= this.limit()) this.#evictIdleAgents();
 			if (this.agents.length < this.limit()) {
 				await this.#spawn(item);
@@ -288,7 +288,11 @@ export class WorkPool {
 		}
 		const idle = this.#leastLoadedResumableIdle();
 		if (idle) {
-			this.#reuseDecision(idle.id, "idle", { observe: true });
+			this.#reuseDecision(idle.id, "idle", {
+				observe: true,
+				itemId: item.id,
+				round: idle.turns + 1,
+			});
 			item.agentId = idle.id;
 			idle.queue.push(item);
 			this.#card("dispatched", idle.id, `[${item.id}] ${item.text}`);
@@ -321,7 +325,11 @@ export class WorkPool {
 		return this.#reuseDecision("pool", "idle", { observe: false }).action !== "continue";
 	}
 
-	#reuseDecision(agentId: string, status: string, options?: { observe?: boolean }) {
+	#reuseDecision(
+		agentId: string,
+		status: string,
+		options?: { observe?: boolean; itemId?: string; round?: number },
+	) {
 		const observe = options?.observe !== false;
 		const inspected = inspectEvidenceHandoffContext(this.context);
 		if (observe) {
@@ -349,43 +357,55 @@ export class WorkPool {
 							? "continue"
 							: "spawn_fresh";
 				const inspectReason = inspected.invalid ? "invalid" : inspected.handoff ? "valid" : "missing";
+				// Unique per item/round so multi-round agent reuse does not merge.
+				const itemKey = options?.itemId?.trim() || "noitem";
+				const roundKey =
+					typeof options?.round === "number" && Number.isFinite(options.round)
+						? `r${Math.trunc(options.round)}`
+						: "r0";
+				const scope = `${itemKey}:${roundKey}`;
 				try {
 					persistEvidenceHandoffObserve(
 						sink,
 						buildEvidenceHandoffObserveRecord({
-							eventId: `wp:${this.name}:${agentId}:inspect:${inspectReason}`,
+							eventId: `wp:${this.name}:${agentId}:${scope}:inspect:${inspectReason}`,
 							phase: "inspect",
 							ts: Date.now(),
 							reason: inspectReason,
 							agentId,
+							details: { itemId: options?.itemId, round: options?.round },
 						}),
 					);
 					if (decision.reason === "stale_evidence") {
 						persistEvidenceHandoffObserve(
 							sink,
 							buildEvidenceHandoffObserveRecord({
-								eventId: `wp:${this.name}:${agentId}:reject_stale`,
+								eventId: `wp:${this.name}:${agentId}:${scope}:reject_stale`,
 								phase: "reject_stale",
 								ts: Date.now(),
 								reason: decision.reason,
 								agentId,
+								details: { itemId: options?.itemId, round: options?.round },
 							}),
 						);
 					}
 					persistEvidenceHandoffObserve(
 						sink,
 						buildEvidenceHandoffObserveRecord({
-							eventId: `wp:${this.name}:${agentId}:reuse:${phaseReason}`,
+							eventId: `wp:${this.name}:${agentId}:${scope}:reuse:${phaseReason}`,
 							phase: "reuse",
 							ts: Date.now(),
 							reason: decision.action === "continue" ? "continue" : "spawn_fresh",
 							agentId,
+							details: { itemId: options?.itemId, round: options?.round },
 						}),
 					);
 				} catch (error) {
 					logger.warn("workpool: durable observe persist failed", {
 						pool: this.name,
 						agent: agentId,
+						itemId: options?.itemId,
+						round: options?.round,
 						error: error instanceof Error ? error.message : String(error),
 					});
 				}
@@ -613,9 +633,8 @@ export class WorkPool {
 				try {
 					const episode = resolveParentConsumeEpisode(sink);
 					if (episode) {
-						const currentCodeVersion =
-							(await resolveCurrentWorkspaceCodeVersion(this.session.cwd)) ||
-							result.deliveryEvidence.codeVersion.version;
+						// Never fall back to the child's package version — empty stays fail-closed stale.
+						const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(this.session.cwd);
 						const fromContext = acceptanceAndFreshnessFromContext(this.context);
 						const consumed = consumeChildDeliveryForParent({
 							delivery: result.deliveryEvidence,
@@ -756,6 +775,22 @@ export class WorkPool {
 			items: batch.items.map(item => ({ id: item.id, status: item.status, text: oneLineLabel(item.text) })),
 			output: renderedOutput,
 			remaining,
+			...(result.parentIntegrateDecision
+				? {
+						parentIntegrateDecision: {
+							classification: result.parentIntegrateDecision.classification,
+							action: result.parentIntegrateDecision.action,
+							reasons: result.parentIntegrateDecision.reasons.join(", "),
+							boundToWorkspaceVersion:
+								"boundToWorkspaceVersion" in result.parentIntegrateDecision
+									? String(
+											(result.parentIntegrateDecision as { boundToWorkspaceVersion?: string })
+												.boundToWorkspaceVersion ?? "",
+										)
+									: "",
+						},
+					}
+				: {}),
 		});
 	}
 

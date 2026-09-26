@@ -302,14 +302,16 @@ export function countFullRepoRunsAvoided(plans: readonly LayeredVerificationPlan
 }
 
 /**
- * Observable reuse/reject reasons for durable observe (Batch 1 W3).
- * Callers persist via evidence-handoff-observe; this does not invent acceptance.
+ * Observable plan/start + reuse/reject reasons for durable observe (Batch 1 W3).
+ * `toRun` emits disposition `plan` (start) — never `verify_run` before commands
+ * execute. Callers emit run/end via {@link layeredVerificationRunEndObserveEvents}
+ * after verify completes. Does not invent acceptance.
  */
 export function layeredVerificationObserveEvents(
 	plan: LayeredVerificationPlan,
 	meta: { eventIdPrefix: string; episodeKey?: string; jobId?: string; overheadMs?: number },
 ): Array<{
-	disposition: "run" | "reuse" | "reject";
+	disposition: "plan" | "reuse" | "reject";
 	reason: string;
 	eventId: string;
 	episodeKey?: string;
@@ -317,7 +319,7 @@ export function layeredVerificationObserveEvents(
 	overheadMs?: number;
 }> {
 	const events: Array<{
-		disposition: "run" | "reuse" | "reject";
+		disposition: "plan" | "reuse" | "reject";
 		reason: string;
 		eventId: string;
 		episodeKey?: string;
@@ -346,14 +348,40 @@ export function layeredVerificationObserveEvents(
 	}
 	for (const command of plan.toRun) {
 		events.push({
-			disposition: "run",
-			reason: "execute",
-			eventId: `${prefix}:run:${command}`,
+			disposition: "plan",
+			reason: "start",
+			eventId: `${prefix}:plan:${command}`,
 			episodeKey: meta.episodeKey,
 			jobId: meta.jobId,
 		});
 	}
 	return events;
+}
+
+/**
+ * Run/end observe events after verify completes for commands that were planned.
+ * Distinct from plan/start so `verify_run` is never minted before execution.
+ */
+export function layeredVerificationRunEndObserveEvents(
+	plan: LayeredVerificationPlan,
+	meta: { eventIdPrefix: string; episodeKey?: string; jobId?: string; overheadMs?: number },
+): Array<{
+	disposition: "run";
+	reason: string;
+	eventId: string;
+	episodeKey?: string;
+	jobId?: string;
+	overheadMs?: number;
+}> {
+	const prefix = meta.eventIdPrefix.trim() || "layered";
+	return plan.toRun.map(command => ({
+		disposition: "run" as const,
+		reason: "end",
+		eventId: `${prefix}:run:${command}`,
+		episodeKey: meta.episodeKey,
+		jobId: meta.jobId,
+		overheadMs: meta.overheadMs,
+	}));
 }
 
 export type { VerificationReuseReason };

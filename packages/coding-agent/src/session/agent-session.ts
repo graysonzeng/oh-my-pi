@@ -242,10 +242,12 @@ import {
 } from "../latency/parent-final-verification";
 import {
 	buildAcceptanceContractRef,
-	resolveRootUserEntryIdFromBranch,
+	resolveAttemptId,
+	resolveEpisodeRootFromBranch,
 	type AcceptanceAuthority,
 	type TaskAttemptIdentity,
 } from "../latency/task-episode";
+import { resolveCurrentWorkspaceCodeVersion } from "../task/workspace-code-version";
 import {
 	RUNTIME_BUILD_IDENTITY_CUSTOM_TYPE,
 	runtimeBuildIdentityRef,
@@ -1310,6 +1312,11 @@ export class AgentSession implements SettingsScope {
 	#latencyArmSnapshot: LatencyArmSnapshotV1 | undefined;
 	/** Arms that actually engaged during this run (treatment receipts for causal rollback). */
 	#firedLatencyArms = new Set<LatencyArmId>();
+	/**
+	 * Live workspace code fingerprint for ordinary acceptance invalidation.
+	 * When set and different from a receipt's codeState, that pass is treated failed.
+	 */
+	#workspaceCodeFingerprint: string | null = null;
 	#goalContextHash: string | undefined;
 	#goalHashResetReason: GoalHashResetReason = "none";
 	#lastGoalHashShadow: GoalHashShadowV1 | undefined;
@@ -7480,18 +7487,32 @@ export class AgentSession implements SettingsScope {
 		if (!acceptanceContract) return { recorded: false, reason: "missing_acceptance_criteria" };
 
 		const sessionId = this.sessionManager.getSessionId();
+		const branch = this.sessionManager.getBranch();
+		// Explicit episode wins; otherwise open after the previous accepted
+		// boundary so task B does not rebind to task A's first user message.
 		const rootUserEntryId =
-			input.attempt?.episode?.rootUserEntryId ?? resolveRootUserEntryIdFromBranch(this.sessionManager.getBranch());
+			input.attempt?.episode?.rootUserEntryId ?? resolveEpisodeRootFromBranch(branch);
 		if (!rootUserEntryId) {
 			return { recorded: false, reason: "missing_root_user_entry" };
 		}
 
+		// Ordinary user/extension green receipts must bind a real code snapshot.
+		// Workflow/fixture/trusted_verifier may carry their own validity path.
+		if (
+			input.status === "passed" &&
+			(input.authority === "user_explicit" || input.authority === "extension") &&
+			!(input.codeState?.fingerprint?.trim())
+		) {
+			return { recorded: false, reason: "missing_code_state" };
+		}
+
+		const attemptId = resolveAttemptId(input.attempt?.attemptId, input.eventId);
 		const attempt: TaskAttemptIdentity = {
 			episode: {
 				sessionId: input.attempt?.episode?.sessionId ?? sessionId,
 				rootUserEntryId,
 			},
-			attemptId: input.attempt?.attemptId ?? null,
+			attemptId,
 			workflowId: input.attempt?.workflowId ?? null,
 			branchLeafId: input.attempt?.branchLeafId ?? this.sessionManager.getLeafId(),
 			taskToolCallId: input.attempt?.taskToolCallId ?? null,
@@ -7528,13 +7549,17 @@ export class AgentSession implements SettingsScope {
 			evidenceRefs: input.evidenceRefs,
 		});
 		const entryId = this.sessionManager.appendCustomEntry(PARENT_FINAL_VERIFICATION_MESSAGE_TYPE, details);
+		if (input.codeState?.fingerprint?.trim()) {
+			this.#workspaceCodeFingerprint = input.codeState.fingerprint.trim();
+		}
 		return { recorded: true, entryId, details };
 	}
 
 	/**
 	 * Latest parent-final receipt on the active branch.
 	 * Abandoned-branch receipts remain in getEntries() and must not set the
-	 * ordinary cohort verifier.
+	 * ordinary cohort verifier. Passed ordinary receipts without a bound
+	 * codeState (or drifted from the live workspace fingerprint) count as failed.
 	 */
 	#latestParentFinalVerificationFromEntries(): {
 		source: ParentFinalVerificationSource;
@@ -7553,7 +7578,7 @@ export class AgentSession implements SettingsScope {
 				const ts =
 					parsed.verifiedAtMs ?? (typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN);
 				latest = {
-					status: parsed.status,
+					status: this.#effectiveParentFinalStatus(parsed),
 					source: parsed.source,
 					ts: Number.isFinite(ts) ? ts : null,
 				};
@@ -7565,13 +7590,41 @@ export class AgentSession implements SettingsScope {
 				const ts =
 					parsed.verifiedAtMs ?? (typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN);
 				latest = {
-					status: parsed.status,
+					status: this.#effectiveParentFinalStatus(parsed),
 					source: parsed.source,
 					ts: Number.isFinite(ts) ? ts : null,
 				};
 			}
 		}
 		return latest;
+	}
+
+	/**
+	 * Invalidate passed ordinary receipts that lack / drift from a bound
+	 * codeState. Workflow/fixture keep status as recorded.
+	 */
+	#effectiveParentFinalStatus(parsed: ParentFinalVerificationDetails): ParentFinalVerificationStatus {
+		if (parsed.status !== "passed") return parsed.status;
+		const ordinary =
+			parsed.authority === "user_explicit" ||
+			parsed.authority === "extension" ||
+			(parsed.authority === undefined && parsed.source === "extension");
+		if (!ordinary) return parsed.status;
+		const fingerprint = parsed.codeState?.fingerprint?.trim() ?? "";
+		if (!fingerprint) return "failed";
+		if (this.#workspaceCodeFingerprint && this.#workspaceCodeFingerprint !== fingerprint) {
+			return "failed";
+		}
+		return parsed.status;
+	}
+
+	/**
+	 * Update the live workspace fingerprint used to invalidate ordinary accepts
+	 * when code/task state drifts after a receipt was recorded.
+	 */
+	setWorkspaceCodeFingerprint(fingerprint: string | null | undefined): void {
+		const trimmed = typeof fingerprint === "string" ? fingerprint.trim() : "";
+		this.#workspaceCodeFingerprint = trimmed || null;
 	}
 
 	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
@@ -8190,6 +8243,14 @@ export class AgentSession implements SettingsScope {
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
 		const submittedAt = Date.now();
+		// Refresh workspace fingerprint so ordinary acceptance receipts invalidate
+		// when code/task state drifts after a prior /goal complete.
+		try {
+			const fingerprint = await resolveCurrentWorkspaceCodeVersion(this.sessionManager.getCwd());
+			if (fingerprint) this.setWorkspaceCodeFingerprint(fingerprint);
+		} catch {
+			// VCS unavailable — leave prior fingerprint; missing stay unbound.
+		}
 		// Restore a retry-fallback primary BEFORE the model-optimization reconcile
 		// below: the reconcile keys off the current model, so a fallback still in
 		// cooldown would otherwise pin the old fallback's profile (e.g.
