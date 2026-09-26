@@ -15,7 +15,7 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
 | S1 | P0 | Acceptance metric readiness + observe handoff (no schema expand) | delivery-cost / parent_final / evidence-handoff observe |
 | S2 | P1 | Opt-in main-session context / phase-handoff experiment | `phase-handoff-experiment.ts`, `docs/phase-handoff-experiment.md` |
 | S3 | P1 | Pagination / continue-read contract fidelity | `composeReadPaginationArgs`, read tool selectors |
-| S4 | P1 | thinking-loop / stream-interrupt replayable fixtures | turn-recovery fixtures |
+| S4 | P1 | thinking-loop / stream-interrupt replayable fixtures | `test/session/thinking-loop-stream-interrupt-fixtures.test.ts` |
 
 ## S0 contract
 
@@ -48,6 +48,13 @@ delivery-first Packages 1–5, and it does **not** merge to `workflow`.
   silent page-1 re-read.
 - No global “don’t re-read” prompt rules (strict identical-text re-read was only
   0.94% of successful reads).
+
+## S4 contract
+
+- Replayable fixtures for thinking-loop and stream/transport interrupts.
+- Recovery preserves completed tool artifacts; detection remains on
+  (`PI_NO_THINKING_LOOP_GUARD` must not be required).
+- Do not disable loop detection or blindly shorten timeouts to “save time”.
 
 ## Out of scope
 
