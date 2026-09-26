@@ -7399,7 +7399,8 @@ export class AgentSession implements SettingsScope {
 	 * association and ordinary cohort verifier joins.
 	 *
 	 * Write failures propagate to the caller; they must not be swallowed into a
-	 * green acceptance signal.
+	 * green acceptance signal. `passed` additionally requires the trusted gate
+	 * (acceptance criteria + authority) so ungated callers cannot mint green.
 	 */
 	recordParentFinalVerification(
 		status: ParentFinalVerificationStatus,
@@ -7407,6 +7408,16 @@ export class AgentSession implements SettingsScope {
 		verifiedAtMs: number = Date.now(),
 		extended?: Omit<BuildParentFinalVerificationDetailsInput, "status" | "source" | "verifiedAtMs">,
 	): string {
+		if (status === "passed") {
+			const gate = canRecordTrustedParentFinal({
+				acceptanceItems: extended?.acceptanceContract?.items,
+				authority: extended?.authority,
+				status,
+			});
+			if (!gate.ok) {
+				throw new Error(`parent_final_verification_ungated:${gate.reason}`);
+			}
+		}
 		const details = buildParentFinalVerificationDetails(status, source, verifiedAtMs, extended);
 		return this.sessionManager.appendCustomEntry(PARENT_FINAL_VERIFICATION_MESSAGE_TYPE, details);
 	}

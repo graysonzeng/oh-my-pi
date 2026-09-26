@@ -890,7 +890,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 							],
 						},
 						acceptanceItems: [],
-						writeOwnershipReleased: true,
+						// Executor has not proven ownership release — leave false so
+						// parent reclassify cannot inherit a forged release claim.
+						writeOwnershipReleased: false,
 						finishOwner: "original_worker",
 						checksNotRun: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
 					})
