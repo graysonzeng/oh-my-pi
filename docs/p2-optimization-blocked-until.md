@@ -48,9 +48,10 @@ prioritize raising concurrency or globally lowering model tier in that round.
 | 5 | P2 | **This board** — model/effort docs + gates only | No production default flips |
 
 **Model / effort calibration waits for Packages 1–4 data** (cost per accepted
-task, first-pass / rework, delivery evidence quality, verify-layer reuse, and
-single-factor read/cache screens). Concurrency tuning still waits for queueing
-/ remote-contention evidence — not a global cap raise.
+task with complete pricing coverage, first-pass / rework, delivery evidence
+quality, verify-layer reuse, and single-factor read/cache **paired screens** —
+scaffolding alone does not satisfy B-M0). Concurrency tuning still waits for
+queueing / remote-contention evidence — not a global cap raise.
 
 Stack prerequisites (measurement + safety before tuning): prior P0 #2, P1-1 #3,
 P1-2 #4, P1-3 #5, P1-4 #6 on `workflow`, **plus** delivery-first Packages 1–4
@@ -85,7 +86,7 @@ child durations as serial e2e.
 
 | Item | Shipped in this tip | Production default change | Blocked until | Experiment entry |
 |---|---|---|---|---|
-| Model / effort calibration | Status + entry points only | **No** | Packages 1–4 data + B-M1–B-M4 | [§ Model](#1-model--effort-calibration) |
+| Model / effort calibration | Status + entry points only | **No** | Packages 1–4 **paired data** + B-M0 + B-M1–B-M4 + B-M5 | [§ Model](#1-model--effort-calibration) |
 | Concurrency caps | Status + entry points only | **No** | Live 1/2/4 concurrency corpus with 429/retry/parent-wait | [§ Concurrency](#2-concurrency-tuning) |
 | Code-intel productization | Status + entry points only | **No** | Corpus proving scout/read thrash with code_intel as the fix | [§ Code-intel](#3-code-intel-productization) |
 | Output optimization | Status + entry points only | **No** | Paired proof that output trunc/dedupe cuts e2e without quality drop | [§ Output](#4-output-optimization) |
@@ -115,7 +116,7 @@ class. Cheap mechanical wins must not hide review misses.
 
 | Gate | Evidence required |
 |---|---|
-| B-M0 | Delivery-first Packages 1–4 available: cost-per-accepted, first-pass/rework, delivery evidence, layered verify, and Package 4 single-factor screens (A and B separate) |
+| B-M0 | Delivery-first Packages 1–4 **data collected** (not scaffolding alone): cost-per-accepted with complete attempt-cost coverage, first-pass/rework, delivery evidence quality, layered verify reuse, and Package 4 single-factor **paired screens** (A and B separate) |
 | B-M1 | New-version traces showing **repeated** mechanical vs complex vs review failures (not historical P4 whole-pack %) |
 | B-M2 | Paired runs per role with **one** model or effort delta; `roleVerdicts` and cost reported (include failed/timeout attempts) |
 | B-M3 | Provider request dump proves effort labels are actually honored (fixed effort models do not count) |
@@ -251,8 +252,9 @@ bun test packages/coding-agent/test/tools/code-intel-envelope.test.ts \
 
 ### What already exists
 
-- Ordinary-session `modelOptimization` seam (default **off** /
-  inactive until explicitly enabled in settings)
+- Ordinary-session `modelOptimization` seam (registry default **on** with
+  quality-stop attribution; behavior-changing profile thresholds stay off
+  until their paired matrix). Package 5 does **not** flip this default.
 - Workflow `tool-output-manager` + `context-ledger`
 - Read dedupe / advisory soft-caps as separate P4 **advisories** experiment
 - Context strategy experiment (P1-3) — compaction factors only; default off
@@ -290,7 +292,8 @@ and a rollout receipt exist.
 
 ### Explicitly not doing now
 
-- Enabling `modelOptimization` by default in shipped settings
+- Flipping behavior-changing `modelOptimization` profile thresholds on by
+  default (registry master gate may already be on; thresholds stay gated)
 - Uniformly lowering all tool output caps (“shorter is faster”)
 - Bundling output changes with concurrency or model default flips
 

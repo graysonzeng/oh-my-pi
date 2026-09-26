@@ -264,6 +264,54 @@ describe("delivery cost baseline", () => {
 		expect(task.attemptCostByKind.cancelled).toBeNull();
 	});
 
+	it("leaves costPerAcceptedTask null when any accepted task lacks priced cost", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("sess-partial")),
+				line(userMsg(0, "go")),
+				line(parentFinal({ status: "passed", source: "workflow", verifiedAtMs: 2000 })),
+				line(
+					assistantMsg({
+						ts: 1500,
+						usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, cost: { total: 1.0 } },
+					}),
+				),
+			].join("\n"),
+			PARENT,
+		);
+		const sibling = parseSessionJsonl(
+			[
+				line(sessionHeader("sess-partial-2")),
+				line(userMsg(0, "go")),
+				line(parentFinal({ status: "passed", source: "workflow", verifiedAtMs: 2000 })),
+				// No priced usage — missing cost must not understate the cohort ratio.
+			].join("\n"),
+			"/tmp/sessions/demo/sess-partial-2.jsonl",
+		);
+		const report = buildDeliveryCostBaselineReport([parent, sibling]);
+		expect(report.workflow.acceptedTaskCount).toBe(2);
+		expect(report.workflow.totalAttemptCost).toBe(1.0);
+		expect(report.workflow.coverage.attemptCost.unknown).toBeGreaterThan(0);
+		expect(report.workflow.costPerAcceptedTask).toBeNull();
+	});
+
+	it("classifies mixed ordinary+workflow receipts as unknown cohort", () => {
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("mixed")),
+				line(userMsg(0, "go")),
+				line(parentFinal({ status: "passed", source: "extension", verifiedAtMs: 1000 })),
+				line(parentFinal({ status: "passed", source: "workflow", verifiedAtMs: 2000 })),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildDeliveryCostBaselineReport([parent]);
+		expect(report.tasks[0]?.cohort).toBe("unknown");
+		expect(report.unknownCohort.taskCount).toBe(1);
+		expect(report.ordinary.taskCount).toBe(0);
+		expect(report.workflow.taskCount).toBe(0);
+	});
+
 	it("attributes timeout/cancelled attempt cost and reports parent wait vs child union time", () => {
 		const parent = parseSessionJsonl(
 			[

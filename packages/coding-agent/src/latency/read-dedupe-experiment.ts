@@ -50,7 +50,9 @@ export interface ReadReuseDecision {
 		| "experiment_same_version_view"
 		| "ineligible_key"
 		| "version_or_view_mismatch"
-		| "disabled";
+		| "disabled"
+		| "factor_none"
+		| "multi_factor_rejected";
 }
 
 export interface TruncationRecoveryEvent {
@@ -100,20 +102,27 @@ export function defaultReadDedupeExperimentConfig(): ReadDedupeExperimentConfig 
 
 /**
  * Multi-factor declarations are not supported on this surface.
- * (Reserved: if extra keys appear alongside a non-none factor, fail closed.)
+ * Also reject when Experiment B is enabled in the same session (A/B entanglement).
  */
-export function assertSingleReadDedupeFactor(config: ReadDedupeExperimentConfig): ReadDedupeFallbackReason | null {
+export function assertSingleReadDedupeFactor(
+	config: ReadDedupeExperimentConfig,
+	peer?: { stablePrefixCacheEnabled?: boolean },
+): ReadDedupeFallbackReason | null {
 	if (!config.enabled) return "disabled";
+	if (peer?.stablePrefixCacheEnabled === true) return "multi_factor_rejected";
 	if (config.factor === "none") return "factor_none";
 	if (!isFactor(config.factor)) return "unknown_factor";
 	return null;
 }
 
-export function resolveReadDedupeExperiment(config: ReadDedupeExperimentConfig): {
+export function resolveReadDedupeExperiment(
+	config: ReadDedupeExperimentConfig,
+	peer?: { stablePrefixCacheEnabled?: boolean },
+): {
 	applied: boolean;
 	receipt: ReadDedupeExperimentReceiptV1;
 } {
-	const fallback = assertSingleReadDedupeFactor(config);
+	const fallback = assertSingleReadDedupeFactor(config, peer);
 	if (fallback) {
 		return {
 			applied: false,
@@ -153,12 +162,23 @@ export function decideReadViewReuse(input: {
 	config: ReadDedupeExperimentConfig;
 	current: ReadViewKeyV1;
 	prior: ReadViewKeyV1 | null | undefined;
+	/** When Experiment B is also enabled, fail closed (A/B must stay separate). */
+	peerStablePrefixCacheEnabled?: boolean;
 }): ReadReuseDecision {
-	const { applied } = resolveReadDedupeExperiment(input.config);
+	const { applied, receipt } = resolveReadDedupeExperiment(input.config, {
+		stablePrefixCacheEnabled: input.peerStablePrefixCacheEnabled,
+	});
 	if (!applied) {
 		return {
 			reuse: false,
-			reason: input.config.enabled ? "disabled" : "control_no_reuse",
+			reason:
+				receipt.fallbackReason === "multi_factor_rejected"
+					? "multi_factor_rejected"
+					: input.config.enabled && input.config.factor === "none"
+						? "factor_none"
+						: input.config.enabled
+							? "disabled"
+							: "control_no_reuse",
 		};
 	}
 	if (!input.current.eligible || !input.prior?.eligible) {

@@ -16,6 +16,7 @@ import { $env } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { SubagentCompletionKind } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { ChildDeliveryEvidenceV1, ParentIntegrateDecision } from "./child-delivery-evidence";
 import type { SubagentReviewMetrics } from "./review-performance";
 
 export type { SubagentCompletionKind };
@@ -49,6 +50,17 @@ declare module "@oh-my-pi/pi-tui/tools/task" {
 		 */
 		completionKind?: SubagentCompletionKind;
 		reviewMetrics?: SubagentReviewMetrics;
+		/**
+		 * Child→parent delivery evidence packet when extracted from structured
+		 * yield / fence. Undefined when the child did not produce one.
+		 */
+		deliveryEvidence?: ChildDeliveryEvidenceV1;
+		/**
+		 * Parent integrate classifier decision for this child result. Set by
+		 * `runStructuredSubagent` so workpool/task paths that only keep
+		 * `execution.result` still receive the classification.
+		 */
+		parentIntegrateDecision?: ParentIntegrateDecision;
 	}
 }
 

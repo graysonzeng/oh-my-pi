@@ -5,6 +5,7 @@
  * second telemetry platform. Missing signals stay null / "unknown"; never
  * zero-fill. Ordinary vs workflow cohorts stay separated.
  */
+import { resolveSubagentPerformanceClass } from "../task/review-performance";
 import { unionChildIntervalMs, type ParentFinalVerificationObservation } from "./parent-final-verification";
 import type { CoverageCount, ParsedSession, PercentileSummary } from "./subagent-report";
 
@@ -27,7 +28,11 @@ export interface DeliveryCycleCounts {
 	investigate: number | null;
 	/** Worker-class re-spawns after first delivery boundary; null when unknown. */
 	fix: number | null;
-	/** Parent-final verification attempts after the first; null when unknown. */
+	/**
+	 * Parent-final re-verifications after the first, plus review-class re-spawns
+	 * after the boundary. Null when the boundary or any post-boundary child class
+	 * is unknown (never zero-fill unclassified kids into "no verify cycles").
+	 */
 	verify: number | null;
 }
 
@@ -65,10 +70,16 @@ export interface DeliveryCostCohortSummary {
 	acceptedTaskCount: number;
 	/**
 	 * totalAttemptCost ÷ acceptedTaskCount.
-	 * Null when acceptedTaskCount is 0 or attempt cost is unknown.
+	 * Null when acceptedTaskCount is 0, any task lacks priced attempt cost, or
+	 * attempt-cost coverage is incomplete — never understate by treating missing
+	 * costs as $0 in the numerator.
 	 */
 	costPerAcceptedTask: number | null;
-	/** Total priced attempt cost across tasks in this cohort (null if none priced). */
+	/**
+	 * Sum of priced attempt costs across tasks in this cohort.
+	 * Null when no task has priced usage; partial sums are still reported here
+	 * but {@link costPerAcceptedTask} stays null until coverage is complete.
+	 */
 	totalAttemptCost: number | null;
 	/**
 	 * Share of tasks whose first parent-final was passed among tasks with a
@@ -213,6 +224,9 @@ function classifyCohort(verifications: readonly ParentFinalVerificationObservati
 		if (v.source === "workflow") sawWorkflow = true;
 		else if (v.source === "session_stop" || v.source === "extension") sawOrdinary = true;
 	}
+	// Mixed ordinary+workflow receipts are not collapsed into workflow — that
+	// would violate ordinary ≠ workflow. Prefer unknown over absorption.
+	if (sawWorkflow && sawOrdinary) return "unknown";
 	if (sawWorkflow) return "workflow";
 	if (sawOrdinary) return "ordinary";
 	return "unknown";
@@ -300,13 +314,47 @@ function childTaskUnionMs(kids: readonly ParsedSession[]): number | null {
 	return unionChildIntervalMs(intervals);
 }
 
-function resolveChildClass(child: ParsedSession): "review" | "explore" | "worker" | "unknown" {
+function spawnIdentityFromParent(
+	parent: ParsedSession,
+	child: ParsedSession,
+): { agent: string | null; shadowReview: "code" | "off" | null } | undefined {
+	const keys = [child.id, child.stem].filter((value): value is string => Boolean(value));
+	if (keys.length === 0) return undefined;
+	const matches: Array<{ agent: string | null; shadowReview: "code" | "off" | null }> = [];
+	for (const call of parent.toolCalls) {
+		if (!call.spawn) continue;
+		for (const member of call.spawn.members) {
+			if (!member.id || !keys.includes(member.id)) continue;
+			matches.push({
+				agent: member.agent ?? call.spawn.agent,
+				shadowReview: member.shadowReview ?? call.spawn.shadowReview,
+			});
+		}
+	}
+	const first = matches[0];
+	if (!first) return undefined;
+	for (const match of matches) {
+		if (match.agent !== first.agent || match.shadowReview !== first.shadowReview) return undefined;
+	}
+	return first;
+}
+
+/**
+ * Align with live {@link resolveSubagentPerformanceClass} — do not use
+ * includes()-heuristics that diverge (e.g. sonic → explore live, unknown here).
+ */
+function resolveChildClass(
+	parent: ParsedSession,
+	child: ParsedSession,
+): "review" | "explore" | "worker" | "unknown" {
 	if (child.performanceClass) return child.performanceClass;
-	const agent = (child.agent ?? child.stem).toLowerCase();
-	if (agent.includes("review")) return "review";
-	if (agent.includes("explore") || agent.includes("scout")) return "explore";
-	if (agent.includes("worker") || agent.includes("task") || agent.includes("implement")) return "worker";
-	return "unknown";
+	if (child.agent) return resolveSubagentPerformanceClass({ agentName: child.agent });
+	const ident = spawnIdentityFromParent(parent, child);
+	if (!ident?.agent) return "unknown";
+	return resolveSubagentPerformanceClass({
+		agentName: ident.agent,
+		spawnShadowReview: ident.shadowReview === "code" || ident.shadowReview === "off" ? ident.shadowReview : undefined,
+	});
 }
 
 function cyclesAfterFirstDelivery(
@@ -332,7 +380,11 @@ function cyclesAfterFirstDelivery(
 	for (const child of kids) {
 		const start = child.firstTs;
 		if (start === null || start <= boundaryTs) continue;
-		const cls = resolveChildClass(child);
+		const cls = resolveChildClass(parent, child);
+		// Unclassified post-boundary kids must not look like "zero cycles known".
+		if (cls === "unknown") {
+			return { investigate: null, fix: null, verify: null };
+		}
 		if (cls === "explore") investigate++;
 		else if (cls === "worker") fix++;
 		else if (cls === "review") verify++;
@@ -541,8 +593,12 @@ function summarizeCohort(tasks: readonly DeliveryCostTaskObservation[]): Deliver
 		fix: summarizeMs(fix),
 		verify: summarizeMs(verify),
 	};
-	if (summary.acceptedTaskCount > 0 && summary.totalAttemptCost !== null) {
-		summary.costPerAcceptedTask = summary.totalAttemptCost / summary.acceptedTaskCount;
+	// Gate the headline ratio on complete attempt-cost coverage. A partial sum
+	// over acceptedTaskCount would understate cost by treating missing prices as $0.
+	const attemptCostComplete =
+		summary.taskCount > 0 && summary.coverage.attemptCost.unknown === 0 && summary.totalAttemptCost !== null;
+	if (summary.acceptedTaskCount > 0 && attemptCostComplete) {
+		summary.costPerAcceptedTask = summary.totalAttemptCost! / summary.acceptedTaskCount;
 	} else {
 		summary.costPerAcceptedTask = null;
 	}

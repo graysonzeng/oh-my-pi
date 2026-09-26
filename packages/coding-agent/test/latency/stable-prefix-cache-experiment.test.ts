@@ -118,4 +118,24 @@ describe("reorder opt-in", () => {
 		expect(run.claimedLiveWin).toBe(false);
 		expect(run.metrics.cacheRead).toBe(100);
 	});
+
+	test("rejects A/B entanglement when peer Experiment A is enabled", () => {
+		const { applied, receipt } = resolveStablePrefixCacheExperiment(
+			{ enabled: true, factor: "reorder_static_prefix" },
+			{ readDedupeEnabled: true },
+		);
+		expect(applied).toBe(false);
+		expect(receipt.fallbackReason).toBe("multi_factor_rejected");
+		const segments = [
+			fingerprintProviderSegment("assignment", "do x"),
+			fingerprintProviderSegment("static_rules", "rules"),
+		];
+		const planned = planStablePrefixOrder(
+			segments,
+			{ enabled: true, factor: "reorder_static_prefix" },
+			{ readDedupeEnabled: true },
+		);
+		// Fail closed → control order unchanged.
+		expect(planned.map(s => s.kind)).toEqual(["assignment", "static_rules"]);
+	});
 });

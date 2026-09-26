@@ -121,4 +121,22 @@ describe("truncation recovery", () => {
 		});
 		expect(run.claimedLiveWin).toBe(false);
 	});
+
+	test("rejects A/B entanglement when peer Experiment B is enabled", () => {
+		const { applied, receipt } = resolveReadDedupeExperiment(
+			{ enabled: true, factor: "same_version_view_reuse" },
+			{ stablePrefixCacheEnabled: true },
+		);
+		expect(applied).toBe(false);
+		expect(receipt.fallbackReason).toBe("multi_factor_rejected");
+		const key = eligibleKey("/a.ts", "sha:1");
+		const decision = decideReadViewReuse({
+			config: { enabled: true, factor: "same_version_view_reuse" },
+			current: key,
+			prior: key,
+			peerStablePrefixCacheEnabled: true,
+		});
+		expect(decision.reuse).toBe(false);
+		expect(decision.reason).toBe("multi_factor_rejected");
+	});
 });

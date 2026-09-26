@@ -205,15 +205,34 @@ describe("parent integrate classifier", () => {
 });
 
 describe("reviewer independence", () => {
-	test("reviewer projection strips author conclusions but keeps evidence", () => {
+	test("reviewer projection strips author conclusions and proven claims", () => {
 		const delivery = sampleDelivery({
 			codeVersion: { version: "v1", changedFiles: ["x.ts"] },
 			authorConclusions: ["Ship it"],
 		});
 		const projected = projectChildDeliveryForReviewer(delivery);
 		expect(projected.authorConclusions).toBeUndefined();
-		expect(projected.acceptanceProven).toEqual(delivery.acceptanceProven);
+		expect(projected.acceptanceProven.every(item => item.proven === false)).toBe(true);
+		expect(projected.acceptanceProven.map(item => item.id)).toEqual(
+			delivery.acceptanceProven.map(item => item.id),
+		);
+		expect(projected.acceptanceProven.map(item => item.evidenceLocations)).toEqual(
+			delivery.acceptanceProven.map(item => item.evidenceLocations),
+		);
 		expect(projected.codeVersion).toEqual(delivery.codeVersion);
 		expect(projected.checksNotRun).toEqual(delivery.checksNotRun);
+	});
+
+	test("empty changedFiles cannot integrate even with proven acceptance", () => {
+		const delivery = sampleDelivery({
+			codeVersion: { version: "v1", changedFiles: [] },
+		});
+		const decision = classifyParentIntegrate({
+			delivery,
+			requiredAcceptance: ["Types compile", "Reviewer omits author conclusions"],
+		});
+		expect(decision.classification).toBe("missing_local_evidence");
+		expect(decision.action).toBe("return_to_worker");
+		expect(decision.reasons).toContain("missing_changed_files");
 	});
 });

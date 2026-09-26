@@ -13,11 +13,21 @@ Aligns with `docs/research/2026-09-09-subagent-harness-next-optimizations.md`
 2. **One** primary factor per paired run (and one experiment surface)
 3. Success / first-pass / rework / wall / cost reported together when claiming
 4. Failures retained; unknown stays unknown
-5. `claimedLiveWin` on harness receipts is always `false` until paired live evidence
+5. `claimedLiveWin` on harness receipts is always `false` in this scaffolding;
+   live wins require a separate paired-receipt surface — never set true here
 
 Do **not**: globally lower all output caps; add forced “don’t re-read” prompt
 rules; reopen Track C; change permissions / instruction priority / tool
 capability; flip P2 model/effort/concurrency defaults.
+
+**Enablement note:** settings keys below are experiment **entries** (defaults
+off). They do not yet mutate the production read/prompt assembly path by
+themselves — flipping a flag without a wired consumer is a no-op. Enabling
+**both** A and B in one session fails closed (`multi_factor_rejected`).
+
+**Naming note:** ordinary-session `latency.arms.readDedupe` (default on under
+`modelOptimization`) is a **separate** production arm from Experiment A
+(`deliveryExperiment.readDedupe`). Do not attribute them together.
 
 ---
 
@@ -110,4 +120,5 @@ must not schedule provider traffic by itself.
 ## Attribution
 
 Run A and B as distinct paired studies. A report that mixes both factors in one
-delta is invalid for merge decisions.
+delta is invalid for merge decisions. Resolvers reject concurrent enablement
+(`multi_factor_rejected`) so a single session cannot apply both treatments.

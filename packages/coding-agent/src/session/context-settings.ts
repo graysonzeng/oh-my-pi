@@ -659,7 +659,7 @@ export const cfgReadDedupeExperimentEnabled = register({
 		group: "Delivery experiments",
 		label: "Read dedupe experiment",
 		description:
-			"Opt-in Experiment A: reuse same version+view reads only. Off preserves production. Does not lower output caps or add don’t-re-read prompts.",
+			"Opt-in Experiment A: reuse same version+view reads only. Off preserves production. Does not lower output caps or add don’t-re-read prompts. Separate from stable-prefix cache and from latency.arms.readDedupe. Enabling together with Experiment B fails closed.",
 	},
 });
 
@@ -707,7 +707,7 @@ export const cfgStablePrefixCacheExperimentEnabled = register({
 		group: "Delivery experiments",
 		label: "Stable-prefix cache experiment",
 		description:
-			"Opt-in Experiment B: inspect/reorder provider request prefixes for cache study. Off preserves production assembly. Does not auto-run paid traffic.",
+			"Opt-in Experiment B: inspect/reorder provider request prefixes for cache study. Off preserves production assembly. Does not auto-run paid traffic. Enabling together with Experiment A fails closed.",
 	},
 });
 

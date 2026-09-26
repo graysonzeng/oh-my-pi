@@ -238,13 +238,19 @@ export function serializeChildDeliveryEvidence(delivery: ChildDeliveryEvidenceV1
 	return `\`\`\`${CHILD_DELIVERY_EVIDENCE_FENCE}\n${JSON.stringify(normalized, null, "\t")}\n\`\`\``;
 }
 
-/** Reviewers share raw evidence without author conclusions. */
+/** Reviewers share raw evidence without author conclusions or proven claims. */
 export function projectChildDeliveryForReviewer(delivery: ChildDeliveryEvidenceV1): ChildDeliveryEvidenceV1 {
 	const base = parseChildDeliveryEvidence(delivery);
 	if (!base) throw new Error("child_delivery_evidence_project_invalid");
 	return buildChildDeliveryEvidence({
 		codeVersion: base.codeVersion,
-		acceptanceProven: base.acceptanceProven,
+		// Keep ids + locations for where to look, but force proven:false so the
+		// reviewer does not inherit author self-assessment of acceptance.
+		acceptanceProven: base.acceptanceProven.map(item => ({
+			id: item.id,
+			proven: false,
+			evidenceLocations: item.evidenceLocations,
+		})),
 		checksNotRun: base.checksNotRun,
 		finishOwner: base.finishOwner,
 		finishOwnerReason: base.finishOwnerReason,
@@ -364,11 +370,14 @@ export function classifyParentIntegrate(input: {
 		};
 	}
 
-	if (delivery.codeVersion.changedFiles.length === 0 && delivery.codeVersion.version.trim() === "") {
+	// Integrate requires an explicit code version *and* declared changed files —
+	// empty changedFiles with a non-empty version previously slipped through
+	// because normalizeCodeVersion already rejects empty version.
+	if (delivery.codeVersion.changedFiles.length === 0) {
 		return {
 			classification: "missing_local_evidence",
 			action: "return_to_worker",
-			reasons: ["missing_code_version"],
+			reasons: ["missing_changed_files"],
 			usedAuthorSelfAssessment: false,
 		};
 	}
@@ -393,4 +402,26 @@ export function parentFollowUpNeeds(decision: ParentIntegrateDecision): string[]
 /** True when the delivery packet alone is enough for integrate (no parent re-read). */
 export function deliveryEvidenceSufficientForIntegrate(decision: ParentIntegrateDecision): boolean {
 	return decision.classification === "done_valid" && decision.action === "integrate";
+}
+
+/**
+ * Classify a settled child result for the parent integrate path.
+ * Always returns a decision — missing/absent packets fail closed to return_to_worker.
+ */
+export function classifyChildResultForParentIntegrate(input: {
+	deliveryEvidence?: ChildDeliveryEvidenceV1 | null;
+	staleEvidence?: boolean;
+	codeVersionStale?: boolean;
+	requiredAcceptance?: readonly string[];
+	outOfScopeEdits?: boolean;
+	crossModule?: boolean;
+}): ParentIntegrateDecision {
+	return classifyParentIntegrate({
+		delivery: input.deliveryEvidence ?? null,
+		staleEvidence: input.staleEvidence,
+		codeVersionStale: input.codeVersionStale,
+		requiredAcceptance: input.requiredAcceptance,
+		outOfScopeEdits: input.outOfScopeEdits,
+		crossModule: input.crossModule,
+	});
 }
