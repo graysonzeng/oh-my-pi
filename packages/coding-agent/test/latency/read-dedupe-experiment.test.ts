@@ -142,4 +142,22 @@ describe("truncation recovery", () => {
 		expect(decision.reuse).toBe(false);
 		expect(decision.reason).toBe("multi_factor_rejected");
 	});
+
+	test("rejects A/S2 entanglement when peer phase-handoff is enabled", () => {
+		const { applied, receipt } = resolveReadDedupeExperiment(
+			{ enabled: true, factor: "same_version_view_reuse" },
+			{ phaseHandoffEnabled: true },
+		);
+		expect(applied).toBe(false);
+		expect(receipt.fallbackReason).toBe("multi_factor_rejected");
+		const key = eligibleKey("/a.ts", "sha:1");
+		const decision = decideReadViewReuse({
+			config: { enabled: true, factor: "same_version_view_reuse" },
+			current: key,
+			prior: key,
+			peerPhaseHandoffEnabled: true,
+		});
+		expect(decision.reuse).toBe(false);
+		expect(decision.reason).toBe("multi_factor_rejected");
+	});
 });

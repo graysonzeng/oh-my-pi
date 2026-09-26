@@ -595,6 +595,7 @@ import { cfgTaskBatch, cfgTaskDisabledAgents } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
 	cfgExtendedContext,
+	cfgPhaseHandoffExperimentEnabled,
 	cfgReadDedupeExperiment,
 	cfgStablePrefixCacheExperimentEnabled,
 	cfgWorkspaceAdditionalDirectories,
@@ -5276,6 +5277,8 @@ export class AgentSession implements SettingsScope {
 				current: readViewKey,
 				prior: retained ? readViewKey : null,
 				peerStablePrefixCacheEnabled: cfgStablePrefixCacheExperimentEnabled.get(this.settings) === true,
+				// A/B/S2 single-factor: refuse Experiment A when phase-handoff is also on.
+				peerPhaseHandoffEnabled: cfgPhaseHandoffExperimentEnabled.get(this.settings) === true,
 			});
 			if (retained) {
 				if (

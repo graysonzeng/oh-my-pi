@@ -160,6 +160,37 @@ describe("ordinary session read dedupe", () => {
 		}
 	});
 
+	it("Experiment A apply entry refuses reuse when phase-handoff peer is also enabled", async () => {
+		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "mutex-"));
+		const filePath = path.join(workDir, "module.ts");
+		await Bun.write(filePath, makeFileBody());
+
+		const { session, sessionManager } = await createSession({
+			sessionManager: SessionManager.create(workDir, workDir),
+			settings: {
+				"deliveryExperiment.readDedupe.enabled": true,
+				"deliveryExperiment.readDedupe.factor": "same_version_view_reuse",
+				"deliveryExperiment.phaseHandoff.enabled": true,
+				"deliveryExperiment.phaseHandoff.factor": "phase_boundary_carry_slim",
+			},
+		});
+		try {
+			const readTool = new ReadTool(makeToolSession(workDir, sessionManager));
+			const args = { path: filePath };
+
+			const firstExec = await readTool.execute("read-1", args);
+			await session.agent.afterToolCall!(readCtx("read-1", firstExec, args));
+
+			const secondExec = await readTool.execute("read-2", args);
+			const secondAfter = await session.agent.afterToolCall!(readCtx("read-2", secondExec, args));
+			const secondVisible = textFromResult(secondAfter);
+			// Without peerPhaseHandoffEnabled at AgentSession, Experiment A would still rewrite.
+			expect(secondVisible).not.toMatch(/\[context ref: artifact:\/\//);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("rewrites on no-session in-memory artifact storage and recovers the saved body", async () => {
 		const workDir = await fs.mkdtemp(path.join(tempDir.path(), "nosess-"));
 		const filePath = path.join(workDir, "module.ts");

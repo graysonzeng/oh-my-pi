@@ -65,7 +65,7 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 		runtime_wired: true,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "requireArtifact on phase rewrite (save failure keeps original); failed rewrite leaves boundary pending; boundaryKey includes durable entry id; refuses A/B cross-experiment; claimedLiveWin false; no paired cost wins",
+		note: "requireArtifact on phase rewrite (save failure keeps original); failed rewrite leaves boundary pending; boundaryKey includes durable entry id; A/B/S2 single-factor mutex at apply entrypoints (S2 refuses A/B; A refuses S2 via peerPhaseHandoffEnabled); claimedLiveWin false; no paired cost wins",
 		call_sites: [
 			"packages/coding-agent/src/session/phase-handoff-carry.ts#buildPhaseHandoffCarriedFromBranch",
 			"packages/coding-agent/src/session/phase-handoff-carry.ts#resolvePhaseHandoffBoundaryObservation",
@@ -80,7 +80,7 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 		runtime_wired: true,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "Experiment A selection layer over ordinary read-dedupe arm; >8MiB in-memory artifacts spill to temp file so line-range recover works; S3 pagination replay fixtures retained; reuse≠toolCall drop claim; no second cache table",
+		note: "Experiment A selection layer over ordinary read-dedupe arm; >8MiB in-memory artifacts spill to temp file so line-range recover works; S3 pagination replay fixtures retained; reuse≠toolCall drop claim; peerPhaseHandoffEnabled wired at AgentSession apply entry; no second cache table",
 		call_sites: [
 			"packages/coding-agent/src/latency/read-dedupe-selection.ts#selectReadDedupeReuse",
 			"packages/coding-agent/src/session/agent-session.ts#dedupeOrdinaryReadResult",
