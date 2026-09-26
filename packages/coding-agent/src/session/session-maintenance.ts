@@ -136,6 +136,13 @@ import {
 	resolveSessionCompactionSettings,
 } from "./context-strategy-experiment";
 import {
+	buildPhaseHandoffCarriedFromBranch,
+	phaseHandoffHasIncompleteToolPairs,
+	phaseHandoffRewriteAlreadyApplied,
+	readLastObservedPhaseHandoff,
+	resolvePhaseHandoffBoundaryObservation,
+} from "./phase-handoff-carry";
+import {
 	type PhaseHandoffCarriedContext,
 	type PhaseHandoffPhase,
 	parsePhaseHandoffExperimentConfig,
@@ -660,6 +667,13 @@ export class SessionMaintenance {
 		toPhase: PhaseHandoffPhase;
 		explicitStageComplete?: boolean;
 		carried?: PhaseHandoffCarriedContext;
+		boundaryKey?: string;
+		rewriteApplied?: boolean;
+		rewriteSkippedReason?: string;
+		rewriteTokensFreed?: number;
+		rewriteToolResultsDropped?: number;
+		rewriteBlocksDropped?: number;
+		rewriteArtifactId?: string;
 	}): PhaseHandoffMaintenanceResult | undefined {
 		const raw = cfgPhaseHandoffExperiment.get(this.#host.settings);
 		const config = parsePhaseHandoffExperimentConfig(raw);
@@ -687,6 +701,15 @@ export class SessionMaintenance {
 				droppedBulkyCount: result.apply.droppedBulkyCount,
 				fallbackReason: result.apply.receipt.fallbackReason,
 				shouldRewriteContext: result.shouldRewriteContext,
+				boundaryKey: input.boundaryKey ?? `${input.fromPhase}->${input.toPhase}`,
+				rewriteApplied: input.rewriteApplied === true,
+				...(input.rewriteSkippedReason ? { rewriteSkippedReason: input.rewriteSkippedReason } : {}),
+				...(input.rewriteTokensFreed !== undefined ? { rewriteTokensFreed: input.rewriteTokensFreed } : {}),
+				...(input.rewriteToolResultsDropped !== undefined
+					? { rewriteToolResultsDropped: input.rewriteToolResultsDropped }
+					: {}),
+				...(input.rewriteBlocksDropped !== undefined ? { rewriteBlocksDropped: input.rewriteBlocksDropped } : {}),
+				...(input.rewriteArtifactId ? { rewriteArtifactId: input.rewriteArtifactId } : {}),
 				claimedLiveWin: false,
 				recordedAt: result.shadow.recordedAt,
 			});
@@ -694,6 +717,145 @@ export class SessionMaintenance {
 			logger.debug("phase_handoff_maintenance persist failed open", { error: String(error) });
 		}
 		return result;
+	}
+
+	/**
+	 * W6 production path: observe natural phase boundaries from the live branch,
+	 * build semantic retain state, and when treatment says `shouldRewriteContext`,
+	 * consume it via the existing `shake("elide")` owner (idempotent, fail-open).
+	 * Flag off → identical to pre-Batch2 (no observe, no rewrite). Never claims
+	 * live cost wins; records shake tokens/drops into the observe custom entry.
+	 */
+	async applyPhaseHandoffAtMaintenanceBoundary(): Promise<{
+		observed: boolean;
+		rewritten: boolean;
+		shouldRewriteContext: boolean;
+		rewriteSkippedReason?: string;
+	}> {
+		const raw = cfgPhaseHandoffExperiment.get(this.#host.settings);
+		const config = parsePhaseHandoffExperimentConfig(raw);
+		if (!config.enabled) {
+			return { observed: false, rewritten: false, shouldRewriteContext: false };
+		}
+
+		const branch = this.#host.sessionManager.getBranch();
+		const boundary = resolvePhaseHandoffBoundaryObservation(branch);
+		const carried = buildPhaseHandoffCarriedFromBranch(branch);
+		const preview = runPhaseHandoffMaintenance({
+			config,
+			fromPhase: boundary.fromPhase,
+			toPhase: boundary.toPhase,
+			explicitStageComplete: boundary.explicitStageComplete,
+			carried,
+		});
+
+		// No natural boundary and no actionable phase movement → stay silent
+		// (avoids unknown→unknown theater on every checkCompaction).
+		const last = readLastObservedPhaseHandoff(branch);
+		const phaseMoved = !last || last.toPhase !== boundary.toPhase;
+		const actionablePhase = boundary.toPhase !== "unknown";
+		if (!preview.shadow.boundaryDetected && !preview.shouldRewriteContext && !(phaseMoved && actionablePhase)) {
+			return { observed: true, rewritten: false, shouldRewriteContext: false };
+		}
+
+		// Incomplete tool-call pairs must not be silently dropped — fail open.
+		if (phaseHandoffHasIncompleteToolPairs(carried.retained)) {
+			this.observePhaseHandoffBoundary({
+				fromPhase: boundary.fromPhase,
+				toPhase: boundary.toPhase,
+				explicitStageComplete: boundary.explicitStageComplete,
+				carried,
+				boundaryKey: boundary.boundaryKey,
+				rewriteApplied: false,
+				rewriteSkippedReason: "incomplete_tool_pairs",
+			});
+			return {
+				observed: true,
+				rewritten: false,
+				shouldRewriteContext: false,
+				rewriteSkippedReason: "incomplete_tool_pairs",
+			};
+		}
+
+		// Idempotent: same boundary already rewritten → record skip, no second shake.
+		if (preview.shouldRewriteContext && phaseHandoffRewriteAlreadyApplied(branch, boundary.boundaryKey)) {
+			this.observePhaseHandoffBoundary({
+				fromPhase: boundary.fromPhase,
+				toPhase: boundary.toPhase,
+				explicitStageComplete: boundary.explicitStageComplete,
+				carried,
+				boundaryKey: boundary.boundaryKey,
+				rewriteApplied: false,
+				rewriteSkippedReason: "already_rewritten",
+			});
+			return {
+				observed: true,
+				rewritten: false,
+				shouldRewriteContext: false,
+				rewriteSkippedReason: "already_rewritten",
+			};
+		}
+
+		if (!preview.shouldRewriteContext) {
+			this.observePhaseHandoffBoundary({
+				fromPhase: boundary.fromPhase,
+				toPhase: boundary.toPhase,
+				explicitStageComplete: boundary.explicitStageComplete,
+				carried,
+				boundaryKey: boundary.boundaryKey,
+				rewriteApplied: false,
+			});
+			return { observed: true, rewritten: false, shouldRewriteContext: false };
+		}
+
+		try {
+			const shakeResult = await this.shake("elide", {
+				config: DEFAULT_SHAKE_CONFIG,
+				toolResultsOnly: true,
+			});
+			const rewritten =
+				shakeResult.toolResultsDropped + shakeResult.blocksDropped > 0 || shakeResult.tokensFreed > 0;
+			this.observePhaseHandoffBoundary({
+				fromPhase: boundary.fromPhase,
+				toPhase: boundary.toPhase,
+				explicitStageComplete: boundary.explicitStageComplete,
+				carried: {
+					bulkyCarry: rewritten ? [] : carried.bulkyCarry,
+					retained: carried.retained,
+				},
+				boundaryKey: boundary.boundaryKey,
+				rewriteApplied: rewritten,
+				rewriteSkippedReason: rewritten ? undefined : "shake_noop",
+				rewriteTokensFreed: shakeResult.tokensFreed,
+				rewriteToolResultsDropped: shakeResult.toolResultsDropped,
+				rewriteBlocksDropped: shakeResult.blocksDropped,
+				rewriteArtifactId: shakeResult.artifactId,
+			});
+			return {
+				observed: true,
+				rewritten,
+				shouldRewriteContext: true,
+				rewriteSkippedReason: rewritten ? undefined : "shake_noop",
+			};
+		} catch (error) {
+			// shake rolls back entry mutations on persist failure; fail open here.
+			logger.debug("phase_handoff rewrite via shake failed open", { error: String(error) });
+			this.observePhaseHandoffBoundary({
+				fromPhase: boundary.fromPhase,
+				toPhase: boundary.toPhase,
+				explicitStageComplete: boundary.explicitStageComplete,
+				carried,
+				boundaryKey: boundary.boundaryKey,
+				rewriteApplied: false,
+				rewriteSkippedReason: "shake_failed_open",
+			});
+			return {
+				observed: true,
+				rewritten: false,
+				shouldRewriteContext: true,
+				rewriteSkippedReason: "shake_failed_open",
+			};
+		}
 	}
 
 	/**
@@ -3808,11 +3970,9 @@ export class SessionMaintenance {
 		allowDefer = true,
 		autoContinue = true,
 	): Promise<CompactionCheckResult> {
-		// W6 phase-handoff: do NOT stub unknown→unknown here. That path never
-		// detects a boundary, never supplies retained carry, and previously
-		// discarded shouldRewriteContext — theater, not runtime wiring.
-		// Call observePhaseHandoffBoundary from a real phase-boundary owner with
-		// carried retain state, then feed shouldRewriteContext into compaction.
+		// W6: natural phase-boundary observe + consume shouldRewriteContext via
+		// existing shake("elide") owner. Flag off → no-op (pre-Batch2 path).
+		await this.applyPhaseHandoffAtMaintenanceBoundary();
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;

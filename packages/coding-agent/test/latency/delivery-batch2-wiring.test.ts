@@ -26,8 +26,8 @@ import { detectPhaseBoundaryShadow, hasRequiredRetainedState } from "../../src/s
 import { runPhaseHandoffMaintenance } from "../../src/session/phase-handoff-maintenance";
 
 describe("Batch2 status honesty", () => {
-	it("marks W4/W5/W7 runtime_wired; W6 stays unwired until treatment feeds compaction", () => {
-		for (const id of ["W4", "W5", "W7"] as const) {
+	it("marks W4–W7 runtime_wired; paired_evidence_ready stays false", () => {
+		for (const id of ["W4", "W5", "W6", "W7"] as const) {
 			const row = batch2Status(id);
 			expect(row.code_complete).toBe(true);
 			expect(row.runtime_wired).toBe(true);
@@ -36,11 +36,10 @@ describe("Batch2 status honesty", () => {
 			expect(row.call_sites.length).toBeGreaterThan(0);
 		}
 		const w6 = batch2Status("W6");
-		expect(w6.code_complete).toBe(true);
-		expect(w6.runtime_wired).toBe(false);
-		expect(w6.mechanism_verified).toBe(true);
-		expect(w6.paired_evidence_ready).toBe(false);
-		expect(w6.call_sites.some(s => s.includes("checkCompaction"))).toBe(false);
+		expect(w6.call_sites.some(s => s.includes("checkCompaction"))).toBe(true);
+		expect(w6.call_sites.some(s => s.includes("applyPhaseHandoffAtMaintenanceBoundary"))).toBe(true);
+		expect(w6.call_sites.some(s => s.includes("shake"))).toBe(true);
+		expect(w6.note.toLowerCase()).not.toContain("theater");
 		expect(BATCH2_STATUS.every(row => row.paired_evidence_ready === false)).toBe(true);
 		expect(BATCH2_PAIRED_EVIDENCE_READY).toBe(false);
 	});
