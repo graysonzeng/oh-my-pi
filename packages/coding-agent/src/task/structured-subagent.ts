@@ -32,6 +32,10 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
 import { pickWorkflowToolSessionFields } from "../tools/workflow-session-fields";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
+import {
+	type ChildDeliveryEvidenceV1,
+	extractChildDeliveryEvidence,
+} from "./child-delivery-evidence";
 import { ensureEvidenceHandoffContext, prepareSubagentContext } from "./evidence-handoff";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
@@ -201,6 +205,12 @@ export interface StructuredSubagentResult {
 	changesApplied: boolean | null;
 	artifactsDir: string;
 	temporaryArtifacts: boolean;
+	/**
+	 * Machine-readable child→parent delivery packet when the child yielded one
+	 * (or embedded a fence). Absent when the child did not produce evidence —
+	 * never inferred from exit code or prose.
+	 */
+	deliveryEvidence?: ChildDeliveryEvidenceV1;
 }
 
 /** Machine-readable failure category so adapters can retain their native errors. */
@@ -850,6 +860,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		}
 
 		completedSuccessfully = completedRun;
+		const deliveryEvidence =
+			extractChildDeliveryEvidence(result.structuredOutput?.data) ??
+			extractChildDeliveryEvidence(result.output) ??
+			undefined;
 		return {
 			result,
 			policy,
@@ -857,6 +871,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			changesApplied,
 			artifactsDir: lease.artifactsDir,
 			temporaryArtifacts: lease.temporary,
+			...(deliveryEvidence ? { deliveryEvidence } : {}),
 		};
 	} catch (error) {
 		if (error instanceof StructuredSubagentError) throw error;
