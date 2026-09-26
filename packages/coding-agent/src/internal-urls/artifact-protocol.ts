@@ -48,6 +48,16 @@ function parseArtifactId(url: InternalUrl): string {
 /** An artifact id no session artifacts dir backs; `locate` maps it to null, `resolve` surfaces it. */
 class MissingArtifactError extends Error {}
 
+/**
+ * No-session callers with `getArtifactContent` (in-memory SessionManager spill)
+ * must prefer that store over any colliding id in the process-wide artifacts
+ * registry — same contract as the pre-router `#readArtifactFile` path.
+ */
+function preferSessionArtifactContent(context?: ResolveContext): boolean {
+	const sessionFile = context?.sessionFile ?? context?.session?.getSessionFile?.() ?? null;
+	return !sessionFile && typeof context?.session?.getArtifactContent === "function";
+}
+
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
 export async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
@@ -124,6 +134,9 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 
 	/** Backing artifact file; null for unknown ids, throws the resolve errors for malformed ones. */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
+		// Force the resource path so resolve can bind the caller's in-memory body
+		// instead of a colliding on-disk id from another registered session.
+		if (preferSessionArtifactContent(context)) return null;
 		try {
 			return (await resolveArtifactFile(url, context)).path;
 		} catch (error) {
@@ -133,6 +146,27 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		if (preferSessionArtifactContent(context)) {
+			const id = parseArtifactId(url);
+			const content = await context!.session!.getArtifactContent!(id);
+			if (content === null) {
+				throw new MissingArtifactError(`Artifact ${id} not found in the current session.`);
+			}
+			const size = Buffer.byteLength(content, "utf-8");
+			if (size > MAX_INLINE_ARTIFACT_BYTES) {
+				throw new Error(
+					`Artifact ${id} is ${size} bytes; full internal resolution is blocked. Use read selectors such as artifact://${id}:1-3000 or artifact://${id}:raw:1-3000.`,
+				);
+			}
+			return {
+				url: url.href,
+				content,
+				contentType: "text/plain",
+				size,
+				immutable: true,
+			};
+		}
+
 		const artifact = await resolveArtifactFile(url, context);
 
 		// Path consumers (search, the shell filesystem) use `locate`, which never
