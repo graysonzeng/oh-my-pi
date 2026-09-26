@@ -576,6 +576,78 @@ export const DEFAULT_TRUNCATION_RULES: ToolOutputTruncationRule[] = [
 	{ toolName: "*", strategy: "head", maxBytes: 4000, maxLines: 80 },
 ];
 
+/** Shared failure-signal preserve list for bash smart truncation. */
+export const BASH_ERROR_PRESERVE_PATTERNS = ["ERROR", "FAIL", "Exception", "Traceback"] as const;
+
+export type TruncationByteLineOpts = {
+	bashBytes: number;
+	bashLines: number;
+	readBytes: number;
+	readLines: number;
+	grepBytes: number;
+	grepLines: number;
+	starBytes: number;
+	starLines: number;
+};
+
+/**
+ * Shared truncation rule constructor for ordinary + workflow profile builders.
+ * Callers supply the numeric matrix; this only builds the rule objects once.
+ */
+export function buildTruncationRules(opts: TruncationByteLineOpts): ToolOutputTruncationRule[] {
+	return [
+		{
+			toolName: "bash",
+			strategy: "smart",
+			maxBytes: opts.bashBytes,
+			maxLines: opts.bashLines,
+			preservePatterns: [...BASH_ERROR_PRESERVE_PATTERNS],
+		},
+		{ toolName: "read", strategy: "smart", maxBytes: opts.readBytes, maxLines: opts.readLines },
+		{ toolName: "grep", strategy: "head", maxBytes: opts.grepBytes, maxLines: opts.grepLines },
+		{ toolName: "*", strategy: "head", maxBytes: opts.starBytes, maxLines: opts.starLines },
+	];
+}
+
+/** Ordinary coding-session byte/line matrix (historical hit-rate simulation). */
+export const ORDINARY_TRUNCATION_BYTE_LINE_OPTS: TruncationByteLineOpts = {
+	bashBytes: 4000,
+	bashLines: 80,
+	readBytes: 8000,
+	readLines: 160,
+	grepBytes: 8000,
+	grepLines: 120,
+	starBytes: 4000,
+	starLines: 80,
+};
+
+/** Enabled truncation config from a byte/line matrix. */
+export function buildOutputTruncation(opts: TruncationByteLineOpts): {
+	enabled: true;
+	rules: ToolOutputTruncationRule[];
+} {
+	return { enabled: true, rules: buildTruncationRules(opts) };
+}
+
+/**
+ * Conservative family clamps (DeepSeek / Sol / small-context).
+ * Shared by ordinary and workflow profile tables — numeric args stay at call sites.
+ */
+export function buildConservativeOutputTruncation(opts: { maxBytes: number; maxLines: number }): {
+	enabled: true;
+	rules: ToolOutputTruncationRule[];
+} {
+	return buildOutputTruncation({
+		bashBytes: opts.maxBytes,
+		bashLines: opts.maxLines,
+		readBytes: opts.maxBytes + 2000,
+		readLines: opts.maxLines + 20,
+		grepBytes: 3000,
+		grepLines: 40,
+		starBytes: Math.min(2000, opts.maxBytes),
+		starLines: 50,
+	});
+}
 /** Subagent read clamp: keep explore/worker visible reads tighter than the parent. */
 export const SUBAGENT_READ_TRUNCATION_RULE: ToolOutputTruncationRule = {
 	toolName: "read",

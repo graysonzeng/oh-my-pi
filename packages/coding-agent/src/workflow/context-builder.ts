@@ -19,6 +19,13 @@ import type {
 } from "./types";
 
 const OMITTED = "(omitted by profile context inclusion)";
+/** See plan JSON — used when full plan is already inlined so fields are not duplicated. */
+const SEE_PLAN = "(see Approved plan above)";
+/**
+ * Soft size for "small plan" full inline. Larger plans use a deterministic
+ * field projection + recovery hint. Not a per-model token guess.
+ */
+const SMALL_PLAN_JSON_BYTES = 8_192;
 
 /**
  * Minimal Handlebars-subset renderer for static workflow context templates.
@@ -35,6 +42,47 @@ export function renderContextTemplate(template: string, vars: Record<string, str
 	// {{name}}
 	out = out.replace(/\{\{(\w+)\}\}/g, (_m, name: string) => vars[name] ?? "");
 	return `${out.replace(/\n{3,}/g, "\n\n").trim()}\n`;
+}
+
+function utf8Bytes(text: string): number {
+	return Buffer.byteLength(text, "utf-8");
+}
+
+/**
+ * Deterministic plan representation for prompts.
+ * Small plans: full JSON. Large plans: hard constraints + steps + recovery hint.
+ * Acceptance / verification / blocking constraints are never 500-char truncated alone.
+ */
+export function projectPlanForPrompt(
+	plan: PlanArtifactV1,
+	inclusion?: ResolvedArtifactInclusion,
+): { planJson: string; mode: "full" | "projected" | "omitted" } {
+	if (inclusion?.includePlan === false) {
+		return { planJson: OMITTED, mode: "omitted" };
+	}
+	const full = JSON.stringify(plan, null, 2);
+	const maxBytes = inclusion?.maxArtifactBytes ?? SMALL_PLAN_JSON_BYTES;
+	const budget = Math.min(maxBytes, SMALL_PLAN_JSON_BYTES);
+	if (utf8Bytes(full) <= budget) {
+		return { planJson: full, mode: "full" };
+	}
+	const projected = {
+		summary: plan.summary,
+		acceptanceCriteria: plan.acceptanceCriteria,
+		verificationCommands: plan.verificationCommands,
+		assumptions: plan.assumptions,
+		nonGoals: plan.nonGoals,
+		affectedFiles: plan.affectedFiles,
+		implementationSteps: plan.implementationSteps,
+		risks: plan.risks,
+		rollback: plan.rollback,
+		schemaVersion: plan.schemaVersion,
+		workflowId: plan.workflowId,
+		attemptId: plan.attemptId,
+		_projection: "large_plan_fields",
+		_recoveryHint: "Full plan artifact remains recoverable from workflow store / stage handoff sources.",
+	};
+	return { planJson: JSON.stringify(projected, null, 2), mode: "projected" };
 }
 
 /**
@@ -63,7 +111,7 @@ export class ContextBuilder {
 		inclusion?: ResolvedArtifactInclusion,
 		requirementsSnapshot?: RequirementsSnapshotV1 | null,
 	): string {
-		const includePlan = inclusion?.includePlan !== false;
+		const projected = projectPlanForPrompt(plan, inclusion);
 		const requirementsJson =
 			requirementsSnapshot != null
 				? JSON.stringify(
@@ -77,7 +125,7 @@ export class ContextBuilder {
 					)
 				: "";
 		return renderContextTemplate(planReviewContextTemplate, {
-			planJson: includePlan ? JSON.stringify(this.#truncatePlan(plan), null, 2) : OMITTED,
+			planJson: projected.planJson,
 			requirementsJson,
 		});
 	}
@@ -89,16 +137,31 @@ export class ContextBuilder {
 	): string {
 		const includePlan = inclusion?.includePlan !== false;
 		const includeReview = inclusion?.includeReviewFindings !== false;
+		const projected = projectPlanForPrompt(plan, inclusion);
 		const reviewNotes =
 			includeReview && review?.findings?.length
 				? this.#findingsBlock(review.findings)
 				: includeReview
 					? ""
 					: OMITTED;
+		// Full / projected plan already carries acceptance + verification — do not
+		// expand the same lists again beside the plan JSON.
+		const acceptanceCriteria =
+			!includePlan || projected.mode === "omitted"
+				? OMITTED
+				: projected.mode === "full"
+					? SEE_PLAN
+					: plan.acceptanceCriteria.map(c => `- ${c}`).join("\n") || "(none)";
+		const verificationCommands =
+			!includePlan || projected.mode === "omitted"
+				? OMITTED
+				: projected.mode === "full"
+					? SEE_PLAN
+					: plan.verificationCommands.map(c => `- ${c}`).join("\n") || "(none)";
 		return renderContextTemplate(implementContextTemplate, {
-			planJson: includePlan ? JSON.stringify(this.#truncatePlan(plan), null, 2) : OMITTED,
-			acceptanceCriteria: includePlan ? plan.acceptanceCriteria.map(c => `- ${c}`).join("\n") : OMITTED,
-			verificationCommands: includePlan ? plan.verificationCommands.map(c => `- ${c}`).join("\n") : OMITTED,
+			planJson: projected.planJson,
+			acceptanceCriteria,
+			verificationCommands,
 			reviewNotes,
 		});
 	}
@@ -109,10 +172,10 @@ export class ContextBuilder {
 		verification?: VerificationArtifactV1 | null;
 		inclusion?: ResolvedArtifactInclusion;
 	}): string {
-		const includePlan = input.inclusion?.includePlan !== false;
 		const includeVerification = input.inclusion?.includeVerification !== false;
+		const projected = projectPlanForPrompt(input.plan, input.inclusion);
 		return renderContextTemplate(codeReviewContextTemplate, {
-			planJson: includePlan ? JSON.stringify(this.#truncatePlan(input.plan), null, 2) : OMITTED,
+			planJson: projected.planJson,
 			implementationSummary: input.implementation.summary,
 			changedFiles: JSON.stringify(input.implementation.changedFiles),
 			patchPath: input.implementation.patchPath ?? "(none)",
@@ -134,11 +197,11 @@ export class ContextBuilder {
 		reviewExplanation?: string;
 		inclusion?: ResolvedArtifactInclusion;
 	}): string {
-		const includePlan = input.inclusion?.includePlan !== false;
 		const includeReview = input.inclusion?.includeReviewFindings !== false;
 		const includeVerification = input.inclusion?.includeVerification !== false;
+		const projected = projectPlanForPrompt(input.plan, input.inclusion);
 		return renderContextTemplate(repairContextTemplate, {
-			planJson: includePlan ? JSON.stringify(this.#truncatePlan(input.plan), null, 2) : OMITTED,
+			planJson: projected.planJson,
 			findings: includeReview ? this.#findingsBlock(input.findings) : OMITTED,
 			reviewExplanation: includeReview ? (input.reviewExplanation?.trim() ?? "") : OMITTED,
 			verificationJson:
@@ -182,16 +245,37 @@ export class ContextBuilder {
 
 	/**
 	 * Append a persisted stage-boundary handoff block for the next role.
+	 * When the base context already inlines a full Approved plan, omit plan-kind
+	 * preserved items that would duplicate acceptance / verification / steps.
 	 * Source artifacts remain intact; this is a deterministic extract only.
+	 *
+	 * Note: `bytesAfterHandoff` on the StageHandoffV1 object counts preserved
+	 * summary field bytes only — it is not final request / wire token size.
 	 */
 	appendStageHandoff(context: string, handoff: StageHandoffV1 | null | undefined): string {
 		if (!handoff) return context;
 		const edge = stageHandoffEdge(handoff.fromStage, handoff.toStage);
-		return `${context.trim()}\n\n## Stage handoff (${edge})\n\`\`\`json\n${serializeStageHandoff(handoff)}\n\`\`\`\n`;
-	}
-
-	#truncatePlan(plan: PlanArtifactV1): PlanArtifactV1 {
-		return plan;
+		const baseHasFullPlan = /## Approved plan\b/.test(context) && !context.includes(OMITTED);
+		const promptHandoff: StageHandoffV1 = baseHasFullPlan
+			? {
+					...handoff,
+					preservedItems: handoff.preservedItems.filter(item => item.kind !== "plan"),
+				}
+			: handoff;
+		if (baseHasFullPlan && promptHandoff.preservedItems.length === 0) {
+			const compact = {
+				kind: handoff.kind,
+				schemaVersion: handoff.schemaVersion,
+				fromStage: handoff.fromStage,
+				toStage: handoff.toStage,
+				omittedArtifactIds: handoff.omittedArtifactIds,
+				recoveryUris: handoff.recoveryUris,
+				dedupeNote:
+					"plan-kind preservedItems omitted from prompt view because Approved plan is already inlined; artifact sources remain recoverable",
+			};
+			return `${context.trim()}\n\n## Stage handoff (${edge})\n\`\`\`json\n${JSON.stringify(compact, null, 2)}\n\`\`\`\n`;
+		}
+		return `${context.trim()}\n\n## Stage handoff (${edge})\n\`\`\`json\n${serializeStageHandoff(promptHandoff)}\n\`\`\`\n`;
 	}
 
 	#findingsBlock(findings: ReviewFindingV1[]): string {

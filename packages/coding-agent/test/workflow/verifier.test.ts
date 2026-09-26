@@ -197,4 +197,11 @@ describe("Verifier", () => {
 		expect(result.checks[0]?.summary).toMatch(/timed out|timeout/i);
 		expect(aborted).toBe(true);
 	});
+
+	it("rejects empty command lists as missing evidence (not auto-pass)", async () => {
+		const verifier = new Verifier({ cwd: process.cwd(), artifactDir });
+		const result = await verifier.verify({ workflowId: "wf1", attemptId: "att1", stage: "final_verify" }, []);
+		expect(result.checks).toEqual([]);
+		expect(result.passed).toBe(false);
+	});
 });

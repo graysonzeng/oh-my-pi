@@ -2,9 +2,16 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 
 export interface BudgetSnapshot {
 	limitUsd: number;
-	/** Provider-reported total when known; `null` means unknown (never invent). */
+	/**
+	 * Fully known total when every recorded request had cost; `null` when any
+	 * coverage gap exists. Never invent a zero total from unknown coverage.
+	 */
 	costUsd: number | null;
 	costKnown: boolean;
+	/** Cumulative known cost lower bound — keeps accumulating after unknowns. */
+	knownCostLowerBoundUsd: number;
+	/** Count of external requests that lacked a usable cost total. */
+	unknownCostRequestCount: number;
 	requests: number;
 	tokensIn: number;
 	tokensOut: number;
@@ -17,7 +24,11 @@ export interface BudgetSnapshot {
 	profiles: Array<{
 		profileId: string;
 		requests: number;
+		/** Fully known profile total, or null if this profile has a coverage gap. */
 		costUsd: number | null;
+		/** Known lower bound for this profile (independent of other profiles). */
+		knownCostLowerBoundUsd: number;
+		unknownCostRequestCount: number;
 	}>;
 }
 
@@ -33,8 +44,17 @@ export interface ProfileBudgetGate {
 	maxCostUsd?: number;
 	/** Requests already counted for this profile in the current workflow. */
 	profileRequests: number;
-	/** Known cost attributed to this profile (null if unknown). */
+	/** Fully known cost attributed to this profile (null if unknown). */
 	profileCostUsd: number | null;
+	/** Known lower bound for this profile. */
+	profileKnownCostLowerBoundUsd: number;
+}
+
+interface ProfileCostState {
+	knownLowerBoundUsd: number;
+	unknownCount: number;
+	/** null once any unknown cost was recorded for this profile. */
+	totalUsd: number | null;
 }
 
 export class BudgetLedger {
@@ -44,6 +64,8 @@ export class BudgetLedger {
 	readonly #maxStageTimeMs: number;
 	#costUsd: number | null = 0;
 	#costKnown = true;
+	#knownCostLowerBoundUsd = 0;
+	#unknownCostRequestCount = 0;
 	#requests = 0;
 	#tokensIn = 0;
 	#tokensOut = 0;
@@ -54,7 +76,7 @@ export class BudgetLedger {
 	#repairCycles = 0;
 	#reviewerCycles = 0;
 	readonly #profileRequests = new Map<string, number>();
-	readonly #profileCost = new Map<string, number | null>();
+	readonly #profileCost = new Map<string, ProfileCostState>();
 
 	constructor(limits: BudgetLimits | number = {}) {
 		if (typeof limits === "number") {
@@ -88,8 +110,17 @@ export class BudgetLedger {
 		if (this.#requests >= this.#maxRequests) return false;
 		if (options.includeRepairCap && this.#repairCycles >= this.#maxRepairCycles) return false;
 		if (this.#stageTimeMs >= this.#maxStageTimeMs) return false;
-		if (this.#costKnown && this.#costUsd !== null && this.#costUsd >= this.#limitUsd) return false;
+		// Known lower bound stops the next external call even when total is unknown.
+		if (this.#knownCostLowerBoundUsd >= this.#limitUsd) return false;
 		return true;
+	}
+
+	#profileState(profileId: string): ProfileCostState {
+		const existing = this.#profileCost.get(profileId);
+		if (existing) return existing;
+		const created: ProfileCostState = { knownLowerBoundUsd: 0, unknownCount: 0, totalUsd: 0 };
+		this.#profileCost.set(profileId, created);
+		return created;
 	}
 
 	recordRequest(usage?: Usage | null, profileId?: string): void {
@@ -97,26 +128,47 @@ export class BudgetLedger {
 		if (profileId) {
 			this.#profileRequests.set(profileId, (this.#profileRequests.get(profileId) ?? 0) + 1);
 		}
-		if (!usage) return;
+		if (!usage) {
+			// Missing usage on a counted external request is a coverage gap.
+			this.#costKnown = false;
+			this.#costUsd = null;
+			this.#unknownCostRequestCount += 1;
+			if (profileId) {
+				const state = this.#profileState(profileId);
+				state.unknownCount += 1;
+				state.totalUsd = null;
+			}
+			return;
+		}
 		this.#tokensIn += usage.input ?? 0;
 		this.#tokensOut += usage.output ?? 0;
 		this.#cacheRead += usage.cacheRead ?? 0;
 		this.#cacheWrite += usage.cacheWrite ?? 0;
 		const total = usage.cost?.total;
 		if (total === undefined || total === null || Number.isNaN(total)) {
-			// Never invent cost — mark unknown once any response lacks cost
+			// Never invent cost — mark unknown, keep known lower bound.
 			this.#costKnown = false;
 			this.#costUsd = null;
-			if (profileId) this.#profileCost.set(profileId, null);
-		} else if (this.#costKnown && this.#costUsd !== null) {
-			this.#costUsd += total;
+			this.#unknownCostRequestCount += 1;
 			if (profileId) {
-				const prev = this.#profileCost.get(profileId);
-				if (prev === null) {
-					// stay unknown
-				} else {
-					this.#profileCost.set(profileId, (prev ?? 0) + total);
-				}
+				const state = this.#profileState(profileId);
+				state.unknownCount += 1;
+				state.totalUsd = null;
+			}
+			return;
+		}
+		// Always accumulate the known lower bound, including after prior unknowns.
+		this.#knownCostLowerBoundUsd += total;
+		if (this.#costKnown) {
+			this.#costUsd = this.#knownCostLowerBoundUsd;
+		} else {
+			this.#costUsd = null;
+		}
+		if (profileId) {
+			const state = this.#profileState(profileId);
+			state.knownLowerBoundUsd += total;
+			if (state.totalUsd !== null) {
+				state.totalUsd = state.knownLowerBoundUsd;
 			}
 		}
 	}
@@ -125,17 +177,20 @@ export class BudgetLedger {
 	checkProfileBudget(profileId: string, limits: { maxRequests?: number; maxCostUsd?: number }): boolean {
 		const reqs = this.#profileRequests.get(profileId) ?? 0;
 		if (limits.maxRequests !== undefined && reqs >= limits.maxRequests) return false;
-		const cost = this.#profileCost.get(profileId);
-		if (limits.maxCostUsd !== undefined && cost !== null && cost !== undefined && cost >= limits.maxCostUsd) {
+		const state = this.#profileCost.get(profileId);
+		const knownLower = state?.knownLowerBoundUsd ?? 0;
+		if (limits.maxCostUsd !== undefined && knownLower >= limits.maxCostUsd) {
 			return false;
 		}
 		return true;
 	}
 
 	profileSnapshot(profileId: string): ProfileBudgetGate {
+		const state = this.#profileCost.get(profileId);
 		return {
 			profileRequests: this.#profileRequests.get(profileId) ?? 0,
-			profileCostUsd: this.#profileCost.has(profileId) ? (this.#profileCost.get(profileId) ?? null) : 0,
+			profileCostUsd: state ? state.totalUsd : 0,
+			profileKnownCostLowerBoundUsd: state?.knownLowerBoundUsd ?? 0,
 		};
 	}
 
@@ -159,6 +214,20 @@ export class BudgetLedger {
 	restore(snapshot: Partial<BudgetSnapshot>): void {
 		if (snapshot.costUsd !== undefined) this.#costUsd = snapshot.costUsd;
 		if (snapshot.costKnown !== undefined) this.#costKnown = snapshot.costKnown;
+		if (snapshot.knownCostLowerBoundUsd !== undefined) {
+			this.#knownCostLowerBoundUsd = snapshot.knownCostLowerBoundUsd;
+		} else if (snapshot.costKnown === true && typeof snapshot.costUsd === "number") {
+			// Legacy snapshot without lower-bound field: known total is the bound.
+			this.#knownCostLowerBoundUsd = snapshot.costUsd;
+		} else if (snapshot.costKnown === false) {
+			// Unknown total cannot be reconstructed — keep bound at 0 unless provided.
+			this.#knownCostLowerBoundUsd = 0;
+		}
+		if (snapshot.unknownCostRequestCount !== undefined) {
+			this.#unknownCostRequestCount = snapshot.unknownCostRequestCount;
+		} else if (snapshot.costKnown === false) {
+			this.#unknownCostRequestCount = Math.max(1, this.#unknownCostRequestCount);
+		}
 		if (snapshot.requests !== undefined) this.#requests = snapshot.requests;
 		if (snapshot.tokensIn !== undefined) this.#tokensIn = snapshot.tokensIn;
 		if (snapshot.tokensOut !== undefined) this.#tokensOut = snapshot.tokensOut;
@@ -173,7 +242,23 @@ export class BudgetLedger {
 			this.#profileCost.clear();
 			for (const profile of snapshot.profiles) {
 				this.#profileRequests.set(profile.profileId, profile.requests);
-				this.#profileCost.set(profile.profileId, profile.costUsd);
+				const knownLower =
+					profile.knownCostLowerBoundUsd !== undefined
+						? profile.knownCostLowerBoundUsd
+						: profile.costUsd !== null && profile.costUsd !== undefined
+							? profile.costUsd
+							: 0;
+				const unknownCount =
+					profile.unknownCostRequestCount !== undefined
+						? profile.unknownCostRequestCount
+						: profile.costUsd === null
+							? 1
+							: 0;
+				this.#profileCost.set(profile.profileId, {
+					knownLowerBoundUsd: knownLower,
+					unknownCount,
+					totalUsd: profile.costUsd,
+				});
 			}
 		}
 	}
@@ -183,6 +268,8 @@ export class BudgetLedger {
 			limitUsd: this.#limitUsd,
 			costUsd: this.#costUsd,
 			costKnown: this.#costKnown,
+			knownCostLowerBoundUsd: this.#knownCostLowerBoundUsd,
+			unknownCostRequestCount: this.#unknownCostRequestCount,
 			requests: this.#requests,
 			tokensIn: this.#tokensIn,
 			tokensOut: this.#tokensOut,
@@ -192,11 +279,16 @@ export class BudgetLedger {
 			stageTimeMs: this.#stageTimeMs,
 			repairCycles: this.#repairCycles,
 			reviewerCycles: this.#reviewerCycles,
-			profiles: [...this.#profileRequests.entries()].map(([profileId, requests]) => ({
-				profileId,
-				requests,
-				costUsd: this.#profileCost.has(profileId) ? (this.#profileCost.get(profileId) ?? null) : 0,
-			})),
+			profiles: [...this.#profileRequests.entries()].map(([profileId, requests]) => {
+				const state = this.#profileCost.get(profileId);
+				return {
+					profileId,
+					requests,
+					costUsd: state ? state.totalUsd : 0,
+					knownCostLowerBoundUsd: state?.knownLowerBoundUsd ?? 0,
+					unknownCostRequestCount: state?.unknownCount ?? 0,
+				};
+			}),
 		};
 	}
 }

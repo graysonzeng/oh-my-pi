@@ -166,3 +166,57 @@ Optional, cost-bearing. Automated tests use injectable runners only; live smoke 
 **Recorded full path (2026-07-25):** protocol default anthropic-messages; OpenAI chat/completions smoke ok; probes 7/7 (`claude-sonnet-5`, `claude-fable-5`, `claude-opus-4-8`, `gpt-5.6-sol`, `gpt-5.6-terra`, `grok-4.5`, `glm-5.2`); workflow `wf_61f89e3f-…` → **`completed`** (`final_verify:passed`) through plan → plan_review → implement → implementation_verify → code_review → final_verify; artifacts include `plan`, `review`, `implementation`, `verification`, `findings-state`, `routing-audit`, `usage`, `stage_handoff`, `prompt_assembly_receipt`. Details: `.agent-artifacts/live-e2e/report.json` and root `progress.md` (session notes; not a package artifact).
 
 **Recorded quality-route fixtures (2026-08-02):** `balanced` workflow `wf_2588513c-…` and `critical` workflow `wf_dc1cf3ad-…` both reached `completed`, changed only `src/math.ts`, passed the fixture test, persisted routing/runtime/usage/scope/verification evidence, and had no model attempt in deterministic verify stages. Reports: `.agent-artifacts/quality-routing-goal/e2e-balanced-latest.json` and `e2e-critical-latest.json`. These local live checks prove route availability and execution identity only; they are not a statistical quality claim.
+
+## Acceptance facts, budget honesty, and entry boundaries (workflow consolidation)
+
+These contracts are engineering invariants — they do **not** claim live quality or cost wins without paired measurements.
+
+### Code identity and verification reuse
+
+- Parent freshness and parent-final receipts use **content identity** (`content:<sha256>` from `captureVerificationWorkspace`), not opaque `HEAD:dirty` strings. Different dirty trees under the same HEAD must not share a reusable version.
+- Empty command lists / empty checks / skipped-only checklists are **missing evidence**, never auto-passed.
+- Only host-observed execution facts with sealed code identity can mint reusable greens. Worker JSON `proven:true`, command-text regex alone, and eval snippets that merely mention `bun test` are not pass proofs.
+- Goal host-gate: bash verification-shaped commands remain **candidates** for nomination; `/goal complete` user confirmation semantics are unchanged. Eval text containing a test command string is not execution.
+
+### Child delivery vs parent accept
+
+- Auto delivery packets without terminal host checks stay `claimedProven:false` / `checksNotRun` (parent owns final acceptance).
+- Parent-owns-verify packages coordinate to the parent; they must not loop `return_to_worker` for checks the parent owns.
+- `done_valid` / integrate-eligible ≠ final parent acceptance ≠ user accepted. `finalAccepted` stays false on settle/consume. Offline reports must not infer `falseAccept=false` solely from `final_verify` green.
+
+### Budget ledger
+
+- Unknown cost ≠ zero. After any coverage gap, `costUsd` stays `null` / `costKnown=false`, while `knownCostLowerBoundUsd` keeps accumulating known totals.
+- Known lower bound reaching `limitUsd` hard-stops the next external call even when the full total is unknown.
+- Profile lower bounds accumulate independently; one profile's unknown coverage does not zero another's known bound.
+- Gate retry only retries recoverable parse/schema failures — budget, identity, and policy errors are not remapped to `gate_parse_failed`.
+
+### Context / handoff
+
+- Implement context does not expand acceptance/verification lists beside a full inlined plan JSON.
+- Large plans use a deterministic field projection + recovery hint (not a per-model token guess).
+- Stage handoff prompt views may omit plan-kind duplicates when Approved plan is already inlined; artifact sources remain recoverable.
+- `bytesAfterHandoff` counts preserved summary-field bytes only — not wire / provider request tokens.
+
+### Defaults and experiments (unchanged)
+
+| Switch | Default | This consolidation |
+| --- | --- | --- |
+| Ordinary `latency.arms.readDedupe` | on (with model-optimization eligibility) | keep; save path returns content identity to avoid redundant re-read after fresh write |
+| `deliveryExperiment.readDedupe` | **off** | stays off |
+| stable-prefix cache experiment | **off** | stays off |
+| context-strategy / phase-handoff experiments | **off** | stays off |
+| Model / effort / concurrency defaults | unchanged | not modified |
+
+Ordinary sessions continue to use the session/tool path without automatic planning/review model calls. Explicit `/delivery` or `workflow` keeps the full stage graph — this work does **not** add a complexity classifier or skip mandatory review.
+
+### Offline comparison (engineering vs live)
+
+Use `bun scripts/session-stats/subagent-report.ts` (or `omp stats:subagents`) over local JSONL:
+
+1. **Engineering verify** — host checks / `parentFinalVerification` / delivery evidence settle facts.
+2. **Parent integrate / accept** — settle/consume events; `finalAccepted` remains false until an explicit parent acceptance record.
+3. **User accept** — only user-facing accept commands / explicit acceptance receipts.
+4. **Post-hoc quality** — `deliveryQualityOutcomes` (`falseAccept` / `missedDefect`) when present as labeled custom entries. Missing outcomes stay **unknown**; never set `falseAccept=false` from `final_verify` green alone.
+
+Controlled ordinary vs `/delivery` comparisons are offline (timing, coverage gaps, unknown cost). Paid paired A/B, production mode flips, and experiment enables are **out of scope** for this consolidation.

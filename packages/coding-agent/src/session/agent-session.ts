@@ -5299,9 +5299,14 @@ export class AgentSession implements SettingsScope {
 
 			let artifactRef = recoveryUri;
 			if (!artifactRef || !(await this.#verifyReadArtifact(artifactRef, immutableSha256))) {
-				const savedId = await this.sessionManager.saveArtifact(originalText, "read");
-				if (typeof savedId !== "string" || savedId.length === 0) return visibleText;
-				artifactRef = savedId.startsWith("artifact://") ? savedId : `artifact://${savedId}`;
+				const saved = await this.sessionManager.saveArtifactWithIdentity(originalText, "read");
+				if (!saved?.id) return visibleText;
+				artifactRef = saved.id.startsWith("artifact://") ? saved.id : `artifact://${saved.id}`;
+				// Fresh write of the same bytes — trust returned identity; skip redundant re-read.
+				if (saved.contentSha256 === immutableSha256) {
+					this.#readDedupeArtifacts.set(readViewKey.key, { artifactRef, immutableSha256 });
+					return visibleText;
+				}
 			}
 			if (!(await this.#verifyReadArtifact(artifactRef, immutableSha256))) return visibleText;
 			this.#readDedupeArtifacts.set(readViewKey.key, { artifactRef, immutableSha256 });

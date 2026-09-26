@@ -118,6 +118,7 @@ function finalize(input: {
 	const recoveryUris = [...new Set(input.sources.map(s => s.recoveryUri))].sort();
 	const omittedArtifactIds = [...new Set(input.omittedArtifactIds)].sort();
 	const bytesBeforeHandoff = input.sources.reduce((sum, s) => sum + s.bytes, 0);
+	// Preserved summary-field bytes only — not final provider request / wire tokens.
 	const bytesAfterHandoff = preservedItems.reduce((sum, p) => sum + p.bytes, 0);
 	const base: Omit<StageHandoffV1, "contentFingerprint"> = {
 		schemaVersion: STAGE_HANDOFF_VERSION,

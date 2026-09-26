@@ -37,6 +37,7 @@ import {
 	buildChildDeliveryEvidenceFromExecutorFacts,
 	classifyChildResultForParentIntegrate,
 	extractChildDeliveryEvidence,
+	extractHostTerminalChecksFromExecutorResult,
 	type ParentIntegrateDecision,
 } from "./child-delivery-evidence";
 import {
@@ -907,20 +908,30 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					}
 				}
 				const fromHandoff = inspectEvidenceHandoffContext(request.context);
-				const acceptanceItems = (fromHandoff.handoff?.acceptance ?? []).map(id => ({
-					id,
-					claimedProven: false as const,
-					evidenceLocations: [] as string[],
-				}));
+				const hostTerminal = extractHostTerminalChecksFromExecutorResult(result);
+				const hostById = new Map(hostTerminal.map(check => [check.id, check] as const));
+				const acceptanceItems = (fromHandoff.handoff?.acceptance ?? []).map(id => {
+					const host = hostById.get(id);
+					return {
+						id,
+						// Host terminal receipt may seal; without it stay explicitly unproven.
+						claimedProven: host ? true : (false as const),
+						evidenceLocations: host?.evidenceLocation ? [host.evidenceLocation] : ([] as string[]),
+					};
+				});
 				deliveryEvidence = buildChildDeliveryEvidenceFromExecutorFacts({
 					codeVersion: {
 						version: workspaceVersion || `unresolved:${result.id}`,
 						changedFiles: [...changedFiles],
 					},
 					acceptanceItems,
+					terminalChecksPassed: hostTerminal.length > 0 ? hostTerminal : undefined,
 					writeOwnershipReleased: false,
 					finishOwner: "original_worker",
-					checksNotRun: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
+					checksNotRun:
+						hostTerminal.length > 0
+							? undefined
+							: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
 				});
 			}
 		}

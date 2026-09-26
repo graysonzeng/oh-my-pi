@@ -221,6 +221,35 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 		expect(engine2.routingAudit.some(a => a.profileId === "claude_plan_reviewer")).toBe(false);
 	});
 
+	it("same-engine start of a second workflow clears prior routing audit and work-package cache (G1)", async () => {
+		const engine = new WorkflowEngine({
+			store,
+			adapter: new RuntimeAdapter(
+				scriptedRunner({
+					plan: planArtifact(),
+					planReview: reviewArtifact("approved", "plan"),
+					implement: implArtifact(),
+					codeReview: reviewArtifact("approved", "implementation"),
+				}),
+			),
+			verifier: passVerifier(),
+			artifactStore: new ArtifactStore(artifactDir),
+			session: fakeSession(),
+		});
+		const first = await engine.startWorkflow({ request: "first workflow" });
+		await engine.resume(first, { singleStep: true });
+		await engine.resume(first, { singleStep: true });
+		expect(engine.routingAudit.length).toBeGreaterThan(0);
+
+		const second = await engine.startWorkflow({ request: "second workflow" });
+		expect(second).not.toBe(first);
+		expect(engine.routingAudit.length).toBe(0);
+
+		await engine.resume(second, { singleStep: true });
+		await engine.resume(second, { singleStep: true });
+		expect(engine.routingAudit.some(a => a.profileId)).toBe(true);
+	});
+
 	it("abort unregister is owner-scoped under concurrent registration", () => {
 		const workflowId = `wf_abort_${crypto.randomUUID()}`;
 		const ownerA = { id: "a" };

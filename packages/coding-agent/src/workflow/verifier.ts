@@ -140,7 +140,8 @@ export class Verifier implements VerifierPort {
 
 		const final: VerificationArtifactV1 = {
 			kind: "verification",
-			passed: checks.length > 0 ? checks.every(check => check.status !== "failed") : true,
+			// Empty command lists are missing evidence, not a free pass.
+			passed: checks.length > 0 && checks.every(check => check.status !== "failed"),
 			checks,
 			schemaVersion: 1,
 			workflowId: artifact.workflowId,

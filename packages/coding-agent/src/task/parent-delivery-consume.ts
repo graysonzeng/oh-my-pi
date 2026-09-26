@@ -23,6 +23,7 @@ import {
 	persistEvidenceHandoffObserve,
 	type EvidenceHandoffObservePersistSink,
 } from "./evidence-handoff-observe";
+import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
 
 export type ParentDeliveryConsumeSink = EvidenceHandoffObservePersistSink & {
 	getSessionId?: () => string;
@@ -133,7 +134,10 @@ export function consumeChildDeliveryForParent(input: ParentDeliveryConsumeInput)
 	return { decision, entry, entryId };
 }
 
-/** Persist a child_settled observe boundary (W3). */
+/**
+ * Persist a child_settled observe boundary (W3).
+ * Idempotent on eventId when the sink dedupes custom entries by id.
+ */
 export function noteChildSettledObserve(input: {
 	sink: EvidenceHandoffObservePersistSink;
 	eventId: string;
@@ -152,6 +156,64 @@ export function noteChildSettledObserve(input: {
 			reason: input.reason,
 		}),
 	);
+}
+
+/**
+ * Shared end-of-child observe + parent consume path for task tool and workpool.
+ * Entry points only pass identifiers, context, and sink — classification stays
+ * one domain function (`consumeChildDeliveryForParent`).
+ *
+ * `finalAccepted` stays false here: settle/consume ≠ user or parent-final accept.
+ */
+export async function settleChildDeliveryForParent(input: {
+	sink: ParentDeliveryConsumeSink;
+	cwd: string;
+	delivery: ChildDeliveryEvidenceV1 | null | undefined;
+	spawnContext?: string;
+	eventIdPrefix: string;
+	jobId?: string | null;
+	agentId?: string | null;
+	taskToolCallId?: string | null;
+	/** When true (default), emit child_settled for a completed exit. */
+	noteSettled?: boolean;
+	settledReason?: string;
+}): Promise<ParentDeliveryConsumeResult | null> {
+	const noteSettled = input.noteSettled !== false;
+	if (noteSettled) {
+		try {
+			noteChildSettledObserve({
+				sink: input.sink,
+				eventId: `${input.eventIdPrefix}:child_settled`,
+				jobId: input.jobId ?? undefined,
+				agentId: input.agentId ?? undefined,
+				reason: input.settledReason ?? "completed",
+			});
+		} catch (error) {
+			logger.warn("settle child delivery: child_settled observe failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	if (!input.delivery) return null;
+	const episode = resolveParentConsumeEpisode(input.sink);
+	if (!episode) return null;
+	// Never fall back to the child's package version — empty stays fail-closed stale.
+	const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(input.cwd);
+	const fromContext = acceptanceAndFreshnessFromContext(input.spawnContext);
+	return consumeChildDeliveryForParent({
+		delivery: input.delivery,
+		currentCodeVersion,
+		requiredAcceptance: fromContext.requiredAcceptance,
+		staleEvidence: fromContext.staleEvidence,
+		writeOwnershipReleased: false,
+		episodeSessionId: episode.sessionId,
+		rootUserEntryId: episode.rootUserEntryId,
+		taskToolCallId: input.taskToolCallId,
+		jobId: input.jobId,
+		agentId: input.agentId,
+		sink: input.sink,
+		eventIdPrefix: input.eventIdPrefix,
+	});
 }
 
 /**

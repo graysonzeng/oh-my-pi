@@ -186,4 +186,22 @@ describe("W2 executor producer", () => {
 		expect(decision.action).not.toBe("integrate");
 		expect(decision.reasons).toContain("acceptance_unproven:<acceptance_contract>");
 	});
+
+	test("parent-owns-verify missing acceptance coordinates to parent instead of return_to_worker", () => {
+		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
+			codeVersion: { version: "v1", changedFiles: ["a.ts"] },
+			acceptanceItems: [{ id: "Tests pass", claimedProven: false, evidenceLocations: [] }],
+			checksNotRun: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
+			writeOwnershipReleased: true,
+		});
+		const decision = reclassifyParentIntegrateAgainstWorkspace({
+			delivery,
+			currentCodeVersion: "v1",
+			requiredAcceptance: ["Tests pass"],
+			writeOwnershipReleased: true,
+		});
+		expect(decision.action).toBe("parent_coordinate");
+		expect(decision.reasons).toContain("parent_owns_verify");
+		expect(decision.action).not.toBe("return_to_worker");
+	});
 });

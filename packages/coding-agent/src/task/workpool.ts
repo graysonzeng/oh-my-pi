@@ -16,13 +16,7 @@ import {
 	noteEvidenceHandoffReuseDecision,
 	persistEvidenceHandoffObserve,
 } from "./evidence-handoff-observe";
-import {
-	acceptanceAndFreshnessFromContext,
-	consumeChildDeliveryForParent,
-	noteChildSettledObserve,
-	resolveParentConsumeEpisode,
-} from "./parent-delivery-consume";
-import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
+import { settleChildDeliveryForParent } from "./parent-delivery-consume";
 import type { ChildDeliveryEvidenceV1, ParentIntegrateDecision } from "./child-delivery-evidence";
 import {
 	type EffectiveSubagentPolicy,
@@ -611,51 +605,26 @@ export class WorkPool {
 		const sink = this.session.sessionManager;
 		if (sink?.appendCustomEntry && batch.status === "completed") {
 			try {
-				noteChildSettledObserve({
+				const consumed = await settleChildDeliveryForParent({
 					sink,
-					eventId: `wp:${this.name}:${agent.id}:${batch.id}:child_settled`,
+					cwd: this.session.cwd,
+					delivery: result.deliveryEvidence,
+					spawnContext: this.context,
+					eventIdPrefix: `wp:${this.name}:${agent.id}:${batch.id}`,
 					jobId: batch.jobId || batch.id,
 					agentId: agent.id,
-					reason: "completed",
+					noteSettled: true,
 				});
+				if (consumed) {
+					// Replace packet-only settle decision with workspace-bound consume.
+					result.parentIntegrateDecision = consumed.decision;
+				}
 			} catch (error) {
-				logger.warn("workpool: child_settled observe failed", {
+				logger.warn("workpool: parent consume reclassify failed", {
 					pool: this.name,
 					agent: agent.id,
 					error: error instanceof Error ? error.message : String(error),
 				});
-			}
-			if (result.deliveryEvidence) {
-				try {
-					const episode = resolveParentConsumeEpisode(sink);
-					if (episode) {
-						// Never fall back to the child's package version — empty stays fail-closed stale.
-						const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(this.session.cwd);
-						const fromContext = acceptanceAndFreshnessFromContext(this.context);
-						const consumed = consumeChildDeliveryForParent({
-							delivery: result.deliveryEvidence,
-							currentCodeVersion,
-							requiredAcceptance: fromContext.requiredAcceptance,
-							staleEvidence: fromContext.staleEvidence,
-							// Parent must confirm release — never inherit child claim.
-							writeOwnershipReleased: false,
-							episodeSessionId: episode.sessionId,
-							rootUserEntryId: episode.rootUserEntryId,
-							jobId: batch.jobId || batch.id,
-							agentId: agent.id,
-							sink,
-							eventIdPrefix: `wp:${this.name}:${agent.id}:${batch.id}`,
-						});
-						// Replace packet-only settle decision with workspace-bound consume.
-						result.parentIntegrateDecision = consumed.decision;
-					}
-				} catch (error) {
-					logger.warn("workpool: parent consume reclassify failed", {
-						pool: this.name,
-						agent: agent.id,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
 			}
 		}
 

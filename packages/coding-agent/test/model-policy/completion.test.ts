@@ -196,6 +196,32 @@ describe("evaluateWorkflowFinalCompletion", () => {
 		expect(ok.decision).toBe("success");
 	});
 
+	it("rejects empty checks as missing evidence instead of auto-passing", () => {
+		const empty = evaluateWorkflowFinalCompletion({
+			implementation: { unresolved: [] },
+			openBlockingFindings: [],
+			verification: { passed: true, checks: [] },
+			scopeStatus: "adhered",
+		});
+		expect(empty.passed).toBe(false);
+		expect(empty.failedGuards).toContain("verification_must_pass");
+		expect(empty.reasons.some(r => r.includes("verification_incomplete"))).toBe(true);
+	});
+
+	it("rejects skipped-only checks as incomplete verification", () => {
+		const skipped = evaluateWorkflowFinalCompletion({
+			implementation: { unresolved: [] },
+			openBlockingFindings: [],
+			verification: {
+				passed: true,
+				checks: [{ id: "parent_owns", status: "skipped" }],
+			},
+			scopeStatus: "adhered",
+		});
+		expect(skipped.passed).toBe(false);
+		expect(skipped.failedGuards).toContain("verification_must_pass");
+	});
+
 	it("treats implementation unresolved list as open work", () => {
 		const result = evaluateWorkflowFinalCompletion({
 			implementation: { unresolved: ["wire receipts"] },

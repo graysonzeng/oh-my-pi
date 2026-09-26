@@ -48,6 +48,114 @@ describe("BudgetLedger", () => {
 		const snap = ledger.snapshot();
 		expect(snap.costKnown).toBe(false);
 		expect(snap.costUsd).toBeNull();
+		expect(snap.knownCostLowerBoundUsd).toBe(0);
+		expect(snap.unknownCostRequestCount).toBe(1);
+	});
+
+	it("keeps accumulating known lower bound after an unknown cost appears", () => {
+		const known = (total: number): Usage => ({
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: total, output: 0, cacheRead: 0, cacheWrite: 0, total },
+		});
+		ledger.recordRequest(known(1), "p1");
+		ledger.recordRequest(
+			{
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: undefined as unknown as number },
+			} as Usage,
+			"p1",
+		);
+		ledger.recordRequest(known(2), "p1");
+		const snap = ledger.snapshot();
+		expect(snap.costKnown).toBe(false);
+		expect(snap.costUsd).toBeNull();
+		expect(snap.knownCostLowerBoundUsd).toBe(3);
+		expect(snap.unknownCostRequestCount).toBe(1);
+		const p1 = snap.profiles.find(p => p.profileId === "p1");
+		expect(p1?.knownCostLowerBoundUsd).toBe(3);
+		expect(p1?.costUsd).toBeNull();
+	});
+
+	it("isolates profile unknown coverage from other profiles", () => {
+		const known = (total: number): Usage => ({
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: total, output: 0, cacheRead: 0, cacheWrite: 0, total },
+		});
+		const led = new BudgetLedger({ limitUsd: 100, maxRequests: 100 });
+		led.recordRequest(
+			{
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: undefined as unknown as number },
+			} as Usage,
+			"unknown_profile",
+		);
+		led.recordRequest(known(0.4), "known_profile");
+		const snap = led.snapshot();
+		expect(snap.costKnown).toBe(false);
+		expect(snap.knownCostLowerBoundUsd).toBe(0.4);
+		const unknown = snap.profiles.find(p => p.profileId === "unknown_profile");
+		const knownProf = snap.profiles.find(p => p.profileId === "known_profile");
+		expect(unknown?.costUsd).toBeNull();
+		expect(unknown?.knownCostLowerBoundUsd).toBe(0);
+		expect(knownProf?.costUsd).toBe(0.4);
+		expect(knownProf?.knownCostLowerBoundUsd).toBe(0.4);
+	});
+
+	it("hard-stops when known lower bound reaches the limit even if total is unknown", async () => {
+		const led = new BudgetLedger({ limitUsd: 1 });
+		led.recordRequest({
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0.6, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.6 },
+		});
+		led.recordRequest({
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: undefined as unknown as number },
+		} as Usage);
+		led.recordRequest({
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0.5, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.5 },
+		});
+		expect(led.snapshot().knownCostLowerBoundUsd).toBe(1.1);
+		expect(led.snapshot().costUsd).toBeNull();
+		expect(await led.checkPreStage()).toBe(false);
+	});
+
+	it("does not reconstruct known zero from a legacy unknown snapshot", () => {
+		const restored = new BudgetLedger({ limitUsd: 5 });
+		restored.restore({ costKnown: false, costUsd: null, requests: 2 });
+		const snap = restored.snapshot();
+		expect(snap.costKnown).toBe(false);
+		expect(snap.costUsd).toBeNull();
+		expect(snap.knownCostLowerBoundUsd).toBe(0);
+		expect(snap.unknownCostRequestCount).toBeGreaterThanOrEqual(1);
 	});
 
 	it("enforces per-profile request caps", () => {

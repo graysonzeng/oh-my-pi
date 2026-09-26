@@ -61,14 +61,19 @@ export function toolInvocationText(record: GoalSettleToolRecord): string {
 	return "";
 }
 
+/**
+ * Candidate host-observed verification execution for goal nomination.
+ * Command regex only identifies candidates — it is not a reusable pass proof.
+ * `eval` code that merely mentions a test command is not execution; only `bash`
+ * (and equivalent shell) invocations with a verification-shaped command count.
+ */
 export function hasSuccessfulVerification(snapshot: GoalCompletionSettleSnapshot): boolean {
-	return snapshot.tools.some(
-		record =>
-			!record.unpaired &&
-			!record.isError &&
-			(record.name === "bash" || record.name === "eval") &&
-			commandLooksLikeVerification(toolInvocationText(record)),
-	);
+	return snapshot.tools.some(record => {
+		if (record.unpaired || record.isError) return false;
+		// Eval text containing "bun test" etc. is not a shipped verification run.
+		if (record.name !== "bash") return false;
+		return commandLooksLikeVerification(toolInvocationText(record));
+	});
 }
 
 export function hasOpenTodos(snapshot: GoalCompletionSettleSnapshot): boolean {
