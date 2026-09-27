@@ -583,7 +583,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			{ name: "import-preview", description: "Preview a memory export package without applying" },
 			{
 				name: "import-apply",
-				description: "Apply a previewed export (same scope; --confirm-cross-scope for others)",
+				description: "Apply a previewed export (same scope; --confirm-cross-scope=<binding> for others)",
 			},
 			{ name: "mm list", description: "List mental models on the active bank" },
 			{ name: "mm show", description: "Show one mental model (id required)" },
@@ -674,7 +674,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					const parsed = parseMemoryImportApplyArgs(command.args.trim().split(/\s+/).slice(1));
 					if (!parsed.filePath) {
 						return usage(
-							"Usage: /memory import-apply <path> [--confirm-cross-scope] [--replace-system]",
+							"Usage: /memory import-apply <path> [--confirm-cross-scope=<binding>] [--replace-system]",
 							runtime,
 						);
 					}
@@ -685,6 +685,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 							parsed.filePath,
 							{
 								confirmCrossScope: parsed.confirmCrossScope,
+								confirmBinding: parsed.confirmBinding,
 								replaceSystemArtifacts: parsed.replaceSystemArtifacts,
 							},
 						),

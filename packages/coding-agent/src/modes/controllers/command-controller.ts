@@ -36,6 +36,9 @@ import {
 	previewMemoryPackageFile,
 	resolveMemoryBackend,
 } from "../../memory-backend";
+import { appendContextDiagnosisSections, buildContextReportText } from "../../slash-commands/helpers/context-report";
+import { observeLimiterAttribution } from "../../latency/limiter-observation";
+import { AsyncJobManager } from "../../async/job-manager";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
@@ -616,24 +619,31 @@ export class CommandController {
 
 		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
 			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
-			return;
-		}
+		} else {
+			if (snapshot.running.length > 0) {
+				info += `\n${theme.bold("Running Jobs")}\n`;
+				for (const job of snapshot.running) {
+					info += `${renderJobLine(job, now)}\n`;
+					info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+				}
+			}
 
-		if (snapshot.running.length > 0) {
-			info += `\n${theme.bold("Running Jobs")}\n`;
-			for (const job of snapshot.running) {
-				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+			if (snapshot.recent.length > 0) {
+				info += `\n${theme.bold("Recent Jobs")}\n`;
+				for (const job of snapshot.recent) {
+					info += `${renderJobLine(job, now)}\n`;
+					info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+				}
 			}
 		}
 
-		if (snapshot.recent.length > 0) {
-			info += `\n${theme.bold("Recent Jobs")}\n`;
-			for (const job of snapshot.recent) {
-				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
-			}
+		try {
+			const observation = await observeLimiterAttribution({
+				asyncJobManager: AsyncJobManager.instance() ?? null,
+			});
+			info += `\n${theme.bold("Limiter attribution")}\n${observation.formatted}\n`;
+		} catch {
+			info += `\n${theme.fg("dim", "Limiter attribution: unknown (occupancy sample failed)")}\n`;
 		}
 
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
@@ -725,6 +735,35 @@ export class CommandController {
 		block.addChild(new Text(output, 1, 0));
 		block.addChild(new DynamicBorder());
 		this.ctx.presentCommandOutput(block);
+		// D3/D5/D8 diagnosis sections (recommended action, rule sources, limiter) are
+		// emitted asynchronously so the usage panel stays immediate.
+		void this.#appendContextDiagnosisPanel();
+	}
+
+	async #appendContextDiagnosisPanel(): Promise<void> {
+		try {
+			const runtime = {
+				session: this.ctx.session,
+				sessionManager: this.ctx.sessionManager,
+				settings: this.ctx.settings,
+				cwd: this.ctx.sessionManager.getCwd(),
+				output: () => {},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {},
+			};
+			const full = await appendContextDiagnosisSections(runtime, buildContextReportText(runtime));
+			const diagnosisStart = full.indexOf("recommended action (D3)");
+			const diagnosis = diagnosisStart >= 0 ? full.slice(diagnosisStart) : full;
+			const block = new TranscriptBlock();
+			block.addChild(new DynamicBorder());
+			block.addChild(new Text(theme.bold(theme.fg("accent", "Context Diagnosis")), 1, 0));
+			block.addChild(new Spacer(1));
+			block.addChild(new Text(diagnosis, 1, 0));
+			block.addChild(new DynamicBorder());
+			this.ctx.presentCommandOutput(block);
+		} catch {
+			// Diagnosis is best-effort; usage panel already shown.
+		}
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -855,7 +894,9 @@ export class CommandController {
 		if (action === "import-apply") {
 			const parsed = parseMemoryImportApplyArgs(argumentText.slice(action.length).trim().split(/\s+/));
 			if (!parsed.filePath) {
-				this.ctx.showError("Usage: /memory import-apply <path> [--confirm-cross-scope] [--replace-system]");
+				this.ctx.showError(
+					"Usage: /memory import-apply <path> [--confirm-cross-scope=<binding>] [--replace-system]",
+				);
 				return;
 			}
 			try {
@@ -865,6 +906,7 @@ export class CommandController {
 					parsed.filePath,
 					{
 						confirmCrossScope: parsed.confirmCrossScope,
+						confirmBinding: parsed.confirmBinding,
 						replaceSystemArtifacts: parsed.replaceSystemArtifacts,
 					},
 				);

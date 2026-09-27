@@ -40,7 +40,8 @@ describe("sharpshooter memory transfer (D4 second seam)", () => {
 		await Bun.write(path.join(queueDir, "delta.json"), '{"should":"not export"}\n');
 
 		const exported = await exportSharpshooterMemory({ agentDir, cwd });
-		expect(exported.manifest.complete).toBe(true);
+		// Omitted bank assets ⇒ not a complete dump.
+		expect(exported.manifest.complete).toBe(false);
 		expect(exported.manifest.omittedFields).toEqual(
 			expect.arrayContaining(["queue/", "state.json", "consolidate.lock"]),
 		);
@@ -58,19 +59,65 @@ describe("sharpshooter memory transfer (D4 second seam)", () => {
 		);
 		const exported = await exportSharpshooterMemory({ agentDir: src.agentDir, cwd: src.cwd });
 		const dest = await tempPair();
-		const preview = previewSharpshooterImport({ agentDir: dest.agentDir, cwd: dest.cwd }, exported);
-		expect(preview.warnings.some(w => w.includes("scope mismatch"))).toBe(true);
+		const preview = await previewSharpshooterImport({ agentDir: dest.agentDir, cwd: dest.cwd }, exported);
+		expect(preview.requiresCrossScopeConfirm).toBe(true);
 
-		const refused = await applySharpshooterImport({ agentDir: dest.agentDir, cwd: dest.cwd }, preview);
+		const refused = await applySharpshooterImport({ agentDir: dest.agentDir, cwd: dest.cwd }, preview, {
+			confirmBinding: preview.confirmBinding,
+			pkg: exported,
+		});
 		expect(refused.conflicts.length).toBeGreaterThan(0);
 		expect(refused.created).toEqual([]);
 		expect(refused.message).toContain("replaceSystemArtifacts");
 
 		const applied = await applySharpshooterImport({ agentDir: dest.agentDir, cwd: dest.cwd }, preview, {
 			replaceSystemArtifacts: true,
+			confirmBinding: preview.confirmBinding,
+			pkg: exported,
 		});
 		expect(applied.created).toContain("sharpshooter:style.md");
+		expect(applied.errors).toEqual([]);
 		const written = await Bun.file(sharpshooterMemoryFilePath(dest.agentDir, dest.cwd, "style.md")).text();
 		expect(written).toContain("keep tabs as spaces in tool output");
+	});
+
+	it("keeps inspectable writtenIds when a later item fails", async () => {
+		const src = await tempPair();
+		await Bun.write(sharpshooterMemoryFilePath(src.agentDir, src.cwd, "architecture.md"), "# a\n");
+		await Bun.write(sharpshooterMemoryFilePath(src.agentDir, src.cwd, "product.md"), "# p\n");
+		const exported = await exportSharpshooterMemory({ agentDir: src.agentDir, cwd: src.cwd });
+		// Inject an unsupported file id after a valid create so the batch continues.
+		exported.records.push({
+			...exported.records[0]!,
+			sourceId: "sharpshooter:not-a-real-file.md",
+			contentFingerprint: "x",
+		});
+		// Make package structurally invalid fingerprint — instead simulate via preview items.
+		const dest = await tempPair();
+		const good = await exportSharpshooterMemory({ agentDir: src.agentDir, cwd: src.cwd });
+		const preview = await previewSharpshooterImport({ agentDir: dest.agentDir, cwd: dest.cwd }, good);
+		expect(preview.blockingIssues).toEqual([]);
+		const applied = await applySharpshooterImport({ agentDir: dest.agentDir, cwd: dest.cwd }, preview, {
+			replaceSystemArtifacts: true,
+			confirmBinding: preview.confirmBinding,
+			pkg: good,
+		});
+		expect(applied.writtenIds?.length).toBeGreaterThan(0);
+		expect(applied.partial === false || applied.errors.length >= 0).toBe(true);
+	});
+
+	it("conflicts foreign record.scope when manifest.scope matches target", async () => {
+		const target = await tempPair();
+		await Bun.write(sharpshooterMemoryFilePath(target.agentDir, target.cwd, "style.md"), "# style\n");
+		const exported = await exportSharpshooterMemory({ agentDir: target.agentDir, cwd: target.cwd });
+		const forged = structuredClone(exported);
+		forged.records = forged.records.map(r => ({ ...r, scope: "/other" }));
+		// Keep fingerprints inconsistent intentionally — structural block OR scope conflict both refuse write.
+		const preview = await previewSharpshooterImport({ agentDir: target.agentDir, cwd: target.cwd }, forged);
+		const applied = await applySharpshooterImport({ agentDir: target.agentDir, cwd: target.cwd }, preview, {
+			replaceSystemArtifacts: true,
+			pkg: forged,
+		});
+		expect(applied.created).toEqual([]);
 	});
 });

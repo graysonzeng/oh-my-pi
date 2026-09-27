@@ -613,6 +613,7 @@ export class GoalRuntime {
 			this.#abortInFlightLocked(state.goal.id, "replaced");
 			const revision = (existing?.goalRevision ?? 0) + 1;
 			state.goal.hostGate = {
+				...(existing ?? emptyHostGate()),
 				goalRevision: revision,
 				pendingVerification: true,
 				nominationId: input.nominationId,

@@ -457,6 +457,21 @@ export class AsyncJobManager {
 		return this.#visibleJobs(filter).filter(job => job.status === "running");
 	}
 
+	/**
+	 * Occupancy for D8 limiter attribution. Counts running (non-queued) jobs only —
+	 * the same unit `atCapacity` / `register` use. Does not merge with provider/task.
+	 */
+	getOccupancySnapshot(): { inFlight: number; capacity: number; queued: number } {
+		let inFlight = 0;
+		let queued = 0;
+		for (const job of this.#jobs.values()) {
+			if (job.status !== "running") continue;
+			if (job.queued) queued++;
+			else inFlight++;
+		}
+		return { inFlight, capacity: this.#maxRunningJobs, queued };
+	}
+
 	/** Settled background jobs, newest first; foreground-backed jobs stay hidden. */
 	getRecentJobs(limit = 10, filter?: AsyncJobFilter): AsyncJob[] {
 		return this.#visibleJobs(filter)

@@ -5,21 +5,14 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import {
-	getAgentDbPath,
-	getMemoriesDir,
-	isEnoent,
-	logger,
-	parseJsonlLenient,
-	peekFile,
-	prompt,
-} from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, isEnoent, logger, parseJsonlLenient, peekFile, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
-import type { MemoryBackendSaveInput, MemoryBackendSaveResult } from "../memory-backend/types";
+import { getMemoryRoot, readLearnedLessons } from "./learned";
+export { getMemoryRoot, saveLearnedLesson } from "./learned";
 import consolidationTemplate from "../prompts/memories/consolidation.md" with { type: "text" };
 import consolidationSystemTemplate from "../prompts/memories/consolidation_system.md" with { type: "text" };
 import readPathTemplate from "../prompts/memories/read-path.md" with { type: "text" };
@@ -1286,152 +1279,6 @@ function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 		fallbackTokenLimit: cfgMemoriesFallbackTokenLimit.get(settings),
 		summaryInjectionTokenLimit: cfgMemoriesSummaryInjectionTokenLimit.get(settings),
 	};
-}
-
-export function getMemoryRoot(agentDir: string, cwd: string): string {
-	return path.join(getMemoriesDir(agentDir), encodeProjectPath(normalizeScopeCwd(cwd)));
-}
-
-/**
- * Filename of the captured-lessons file under a project's memory root.
- *
- * Written by the `learn` tool via {@link saveLearnedLesson} and read back by
- * {@link buildMemoryToolDeveloperInstructions}. Deliberately distinct from the
- * consolidation artifacts (`MEMORY.md`, `memory_summary.md`, `skills/`) so a
- * consolidation pass never clobbers manually captured lessons.
- */
-const LEARNED_LESSONS_FILE = "learned.md";
-/** Newest-first cap on retained lessons, bounding file growth by entry count. */
-const MAX_LEARNED_LESSONS = 100;
-/** Per-field char caps so a single huge capture can't bloat learned.md. */
-const MAX_LEARNED_CONTENT_CHARS = 2000;
-const MAX_LEARNED_CONTEXT_CHARS = 400;
-
-/**
- * Strip prompt-injection vectors from a single line of lesson text: control/
- * format chars, angle brackets (`</skills>`), backticks, and `~~~` fences, then
- * collapse whitespace. Applied on BOTH write and read (the block renders
- * unescaped into the system prompt), mirroring managed-skill descriptions.
- */
-function neutralizeInjection(text: string): string {
-	return text
-		.replace(/[\p{Cc}\p{Cf}]/gu, " ")
-		.replace(/[<>`]/g, "")
-		.replace(/~{2,}/g, "~")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
-/** Slice to `maxChars`, dropping a trailing unpaired high surrogate. */
-function boundChars(text: string, maxChars: number): string {
-	if (text.length <= maxChars) return text;
-	const sliced = text.slice(0, maxChars);
-	return /[\uD800-\uDBFF]$/.test(sliced) ? sliced.slice(0, -1) : sliced;
-}
-
-/**
- * Normalize one lesson field for storage: neutralize injection delimiters
- * FIRST, then redact secrets (so delimiter stripping can't reassemble a token
- * the redactor would have caught), then bound the length.
- */
-function normalizeLearnedText(text: string, maxChars: number): string {
-	return boundChars(redactSecrets(neutralizeInjection(text)).trim(), maxChars);
-}
-
-/** Per-path write chains serializing `learned.md` read-modify-write. */
-const learnedWriteChains = new Map<string, Promise<unknown>>();
-
-/**
- * Append one lesson to the project's `learned.md` (newest-first, deduped,
- * capped, secret-redacted, injection-neutralized). The file backs the `learn`
- * tool when `memory.backend` is `local`.
- */
-export async function saveLearnedLesson(
-	agentDir: string,
-	cwd: string,
-	input: MemoryBackendSaveInput,
-): Promise<MemoryBackendSaveResult> {
-	const content = normalizeLearnedText(input.content, MAX_LEARNED_CONTENT_CHARS);
-	if (!content) {
-		return { backend: "local", stored: 0, message: "Empty lesson; nothing stored." };
-	}
-	const context = input.context ? normalizeLearnedText(input.context, MAX_LEARNED_CONTEXT_CHARS) : "";
-	const line = context ? `- ${content} _(context: ${context})_` : `- ${content}`;
-	const filePath = path.join(getMemoryRoot(agentDir, cwd), LEARNED_LESSONS_FILE);
-
-	// Serialize the read-modify-write per file: parallel `learn` calls (sibling
-	// subagents, or two shared tool calls in one turn) share the project memory
-	// root, so an unguarded RMW would let the last writer drop the other's lesson.
-	const run = (learnedWriteChains.get(filePath) ?? Promise.resolve()).then(() => appendLearnedLine(filePath, line));
-	const guarded = run.catch(() => {});
-	learnedWriteChains.set(filePath, guarded);
-	try {
-		await run;
-	} finally {
-		// Drop the entry once this write is the chain tail, so the map does not
-		// retain one promise per distinct memory root for the process lifetime.
-		if (learnedWriteChains.get(filePath) === guarded) learnedWriteChains.delete(filePath);
-	}
-	return { backend: "local", stored: 1, message: `Lesson saved to ${LEARNED_LESSONS_FILE}.` };
-}
-
-async function appendLearnedLine(filePath: string, line: string): Promise<void> {
-	let existing = "";
-	try {
-		existing = await Bun.file(filePath).text();
-	} catch (err) {
-		if (!isEnoent(err)) throw err;
-	}
-	// Treat the file as an ordered line list so headings, prose, and blank
-	// lines keep their positions relative to the bullets they scope. Managed
-	// operations touch only bullet lines: dedupe removes an existing copy of
-	// the incoming lesson in place, the new lesson enters at the head of the
-	// first bullet run (newest-first, matching the read path and cap docs),
-	// and the cap drops the oldest (bottom-most) bullets. Hand-edited content
-	// outside the list region survives every write byte-for-byte.
-	const lines = existing.split("\n");
-	// A well-formed file ends with "\n"; drop the terminal split artifact so
-	// repeated saves stay idempotent instead of growing a blank line each time.
-	if (lines.at(-1) === "") lines.pop();
-	const isLesson = (l: string) => l.trimStart().startsWith("- ");
-	const out = lines.filter(l => !(isLesson(l) && l.trim() === line));
-	const firstBullet = out.findIndex(isLesson);
-	if (firstBullet === -1) out.push(line);
-	else out.splice(firstBullet, 0, line);
-	let lessonCount = 0;
-	for (const l of out) if (isLesson(l)) lessonCount++;
-	for (let i = out.length - 1; i >= 0 && lessonCount > MAX_LEARNED_LESSONS; i--) {
-		if (isLesson(out[i])) {
-			out.splice(i, 1);
-			lessonCount--;
-		}
-	}
-	await Bun.write(filePath, `${out.join("\n")}\n`);
-}
-
-/**
- * Read `learned.md`, neutralizing each line on read too — a hand-edited or
- * pre-existing file bypasses write-time normalization and the block renders
- * unescaped into the system prompt. Returns "" when absent/unreadable.
- */
-async function readLearnedLessons(memoryRoot: string): Promise<string> {
-	let raw = "";
-	try {
-		raw = (await Bun.file(path.join(memoryRoot, LEARNED_LESSONS_FILE)).text()).trim();
-	} catch {
-		return "";
-	}
-	if (!raw) return "";
-	// Neutralize delimiters THEN redact per line — mirrors the write path so a
-	// hand-edited line cannot reassemble a token after delimiter stripping.
-	return raw
-		.split("\n")
-		.map(line => redactSecrets(neutralizeInjection(line)))
-		.join("\n");
-}
-
-function encodeProjectPath(cwd: string): string {
-	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
 function unixNow(): number {

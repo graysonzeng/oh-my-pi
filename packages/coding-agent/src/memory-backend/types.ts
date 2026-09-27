@@ -210,6 +210,12 @@ export interface MemoryBackend {
 	applyImport?(
 		context: MemoryBackendOperationContext,
 		preview: MemoryImportPreview,
-		options?: { replaceSystemArtifacts?: boolean },
+		options?: {
+			replaceSystemArtifacts?: boolean;
+			/** Cross-scope confirm binding from preview — required when scopes differ. */
+			confirmBinding?: string;
+			/** Original package re-validated at the apply boundary. */
+			pkg?: MemoryExportPackage;
+		},
 	): Promise<MemoryImportApplyResult>;
 }

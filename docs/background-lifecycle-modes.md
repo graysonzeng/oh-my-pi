@@ -27,13 +27,20 @@ UI / Hub may show “waiting on which limiter”; they must not unify the locks.
 
 ## Exit / revoke matrix (verification targets)
 
-| Event | Who still runs | Artifacts | Retry of irreversible send/publish |
-|---|---|---|---|
-| Session stop | In-process jobs until cancelled; no new model turns | Session JSONL / outputs retained | Never auto |
-| Main process exit | Nothing | On-disk artifacts retained | Never auto |
-| Worker terminate | That worker only | Partial outputs as written | Confirm external state first |
-| Auth revoke | Pending privileged tools fail closed | Unchanged | Need new user auth |
-| Resume after crash | Nothing until explicit revive | History readable | Unknown external results → ask user; no exactly-once claim |
+| Event | Who still runs | Artifacts | Retry of irreversible send/publish | Verify status |
+|---|---|---|---|---|
+| Session stop | In-process jobs until cancelled; no new model turns | Session JSONL / outputs retained | Never auto | Fixture: `AsyncJobManager` cancel + session dispose paths; live TUI stop 未验证 |
+| Main process exit | Nothing | On-disk artifacts retained | Never auto | Documented; process-exit integration 未验证 |
+| Worker terminate | That worker only | Partial outputs as written | Confirm external state first | Stats/tiny workers via `omp --smoke-test`; computer worker 未验证 on all platforms |
+| Auth revoke | Pending privileged tools fail closed | Unchanged | Need new user auth | Approval fail-closed unit paths; live revoke 未验证 |
+| Resume after crash | Nothing until explicit revive | History readable | Unknown external results → ask user; no exactly-once | Hub revive ≠ continue process; blind replay forbidden |
+| Dispose / exit diagnostics | Session writes exit marker + pending tool calls | Exit diagnostics retained | N/A | `session/exit-diagnostics.ts` + pending tool collection |
+
+Isolate-verify notes (no new daemon, no blind replay):
+
+- Occupancy for provider / task / job is observed separately via `observeLimiterAttribution` (`latency/limiter-observation.ts`) and shown on `/jobs` + `/context` diagnosis. Missing samples → `unknown_occupancy=…`, never a merged semaphore.
+- `attributeLimiterState(...).unifiedSemaphore` is always `false`.
+- Cross-process cron / permanent service remains out of scope.
 
 ## Related docs
 
