@@ -95,6 +95,7 @@ These restrictions also apply to collab guests controlling the host's Hub.
 
 Agent Hub is the human-facing live session view. Adjacent commands and internal URLs serve narrower purposes:
 
+- **Action queue projection (D6):** `projectHubActionQueue` (`packages/tui/src/overlays/agent-hub-action-queue.ts`) buckets roster rows into need_decision / need_auth / need_integrate / blocked_or_no_progress / running_or_handled. It is a **view** over existing roster + host hints — it does not schedule tasks or replace status. `done_valid` integrate-eligible children belong in need_integrate until parent acceptance.
 - `/jobs` prints a snapshot of running and recently settled asynchronous tool jobs. It does not replace the per-agent transcript or control view.
 - `history://<id>` gives the coding agent a concise transcript for a live or parked subagent.
 - `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript.
@@ -103,4 +104,4 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 
 Advisor rows are intentionally excluded from the agent-facing peer roster, `history://` index, and `agent://` messaging workflows.
 
-See also [Task Agent Discovery and Selection](./task-agent-discovery.md), [Collaboration](./collab.md), and [Advisor, WATCHDOG.md, and WATCHDOG.yml](./advisor-watchdog.md).
+See also [Task Agent Discovery and Selection](./task-agent-discovery.md), [Collaboration](./collab.md), [Advisor, WATCHDOG.md, and WATCHDOG.yml](./advisor-watchdog.md), and [Background lifecycle modes](./background-lifecycle-modes.md).
