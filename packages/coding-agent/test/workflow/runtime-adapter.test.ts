@@ -802,6 +802,41 @@ describe("RuntimeAdapter", () => {
 		expect(calls).toBe(0);
 	});
 
+	it("W5: observes final provider payload at onPayload and associates usage without claiming live win", async () => {
+		const adapter = new RuntimeAdapter(async request => {
+			await request.onPayload?.(
+				{
+					model: "grok-4",
+					system: "STATIC SECRET=do-not-log",
+					messages: [{ role: "user", content: "task" }],
+					tools: [{ name: "bash", parameters: { type: "object", properties: { command: { type: "string" } } } }],
+				},
+				undefined,
+			);
+			return okResult(
+				{ ok: true },
+				{
+					usage: {
+						input: 10,
+						output: 5,
+						cacheRead: 42,
+						cacheWrite: 0,
+						totalTokens: 57,
+						cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+					},
+				},
+			);
+		});
+		const result = await adapter.run(baseRequest());
+		expect(result.stablePrefixFinalObserve?.boundary).toBe("provider_final_serialize");
+		expect(result.stablePrefixFinalObserve?.toolSchemaFromPayload).toBe(true);
+		expect(result.stablePrefixFinalObserve?.providerIdentity.toolSchemaFingerprint).toMatch(/^[a-f0-9]{64}$/);
+		expect(result.stablePrefixFinalObserve?.metrics.cacheRead).toBe(42);
+		expect(result.stablePrefixFinalObserve?.metrics.costTotal).toBe(0.03);
+		expect(result.stablePrefixFinalObserve?.claimedLiveWin).toBe(false);
+		expect(JSON.stringify(result.stablePrefixFinalObserve)).not.toContain("do-not-log");
+	});
+
 	it("keeps an unknown charge when the provider throws after onPayload and later usage does not double count", async () => {
 		const adapter = new RuntimeAdapter(async request => {
 			await request.onPayload?.({ call: 1 }, undefined);

@@ -46,6 +46,33 @@ describe("resolveArtifactInclusion", () => {
 		expect(resolved.includeReviewFindings).toBe(false);
 		expect(resolved.maxArtifactBytes).toBe(2_000);
 	});
+
+	it("grok_implementer dual fields: strategy 80_000 wins over policy 1 MiB (no threshold change)", () => {
+		// Documents override rules — must not silently flip effective bytes.
+		const resolved = resolveArtifactInclusion(
+			profile({
+				contextPolicy: {
+					includePlan: true,
+					includeReviewFindings: false,
+					includeVerification: true,
+					includeFullTranscript: false,
+					maxArtifactBytes: 1024 * 1024,
+				},
+				contextStrategy: {
+					targetUtilization: 0.55,
+					artifactInclusion: {
+						includePlan: true,
+						includeReviewFindings: true,
+						includeVerification: true,
+						maxArtifactBytes: 80_000,
+					},
+				},
+			}),
+		);
+		expect(resolved.maxArtifactBytes).toBe(80_000);
+		expect(resolved.includeReviewFindings).toBe(true);
+		expect(resolved.includeFullTranscript).toBe(false);
+	});
 });
 
 describe("ContextBuilder inclusion flags", () => {

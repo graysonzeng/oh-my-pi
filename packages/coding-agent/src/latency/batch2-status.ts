@@ -27,8 +27,8 @@ export interface Batch2WorkPackageStatus {
 }
 
 /**
- * Status after Batch 2 review-fix residuals. Update only when call sites or
- * evidence change. paired_evidence_ready remains false for the whole batch.
+ * Status after Batch 2 residual engineering (W4 durable reopen + W5 final-request).
+ * Update only when call sites or evidence change. paired_evidence_ready remains false.
  */
 export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 	{
@@ -37,7 +37,7 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 		runtime_wired: true,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "selectedRoute parse-owner revision for config env/!command (unobservable → fail-open); credentialRouteAuthScope wired; stream-stall thinking-loop fixtures retained but full side-effect durable reopen acceptance still residual; no live cost / 13.60min claim",
+		note: "selectedRoute parse-owner revision for config env/!command (unobservable → fail-open); credentialRouteAuthScope wired; ordinary-session durable reopen acceptance (real side-effect write → interrupt → SessionManager.open continue) in durable-interrupt-reopen-acceptance; stream-stall thinking-loop fixtures retained; no live cost / 13.60min claim",
 		call_sites: [
 			"packages/ai/src/auth/cascade.ts#selectedRoute",
 			"packages/ai/src/auth/cascade.ts#KeyOverrides.configParseRevision",
@@ -45,18 +45,22 @@ export const BATCH2_STATUS: readonly Batch2WorkPackageStatus[] = [
 			"packages/coding-agent/src/session/turn-recovery.ts#credentialRouteScope",
 			"packages/coding-agent/src/workflow/availability-preflight.ts#availabilityCredentialRouteScope",
 			"packages/coding-agent/src/session/agent-session.ts (stream-stall/thinking-loop → TurnRecovery.handleRetryableError)",
+			"packages/coding-agent/test/session/durable-interrupt-reopen-acceptance.test.ts",
 		],
 	},
 	{
 		id: "W5",
 		code_complete: true,
-		runtime_wired: false,
+		runtime_wired: true,
 		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "NOT fully request-wired: observe remains at prepare/assembly (not provider-final serialize); toolSchemaFingerprint is presentation-mode best-effort not full send schema; scope often unknown; reorder_static_prefix refuses applied when treatment===control; A/B/S2 single-factor mutex at entrypoints; claimedLiveWin false; no auto warmup/paid traffic",
+		note: "Final-request observe wired at RuntimeAdapter.onPayload (provider_final_serialize); tool schema fingerprint prefers sent tools JSON / captured full schemas; usage association fills cacheRead/costTotal/ttftMs when provider reports them (else null); stablePrefixCache experiment default OFF; claimedLiveWin false; no auto warmup/paid traffic / cache cost reduction claim",
 		call_sites: [
 			"packages/coding-agent/src/latency/stable-prefix-assembly-bridge.ts#observeStablePrefixAtAssembly",
+			"packages/coding-agent/src/latency/stable-prefix-assembly-bridge.ts#observeStablePrefixAtFinalRequest",
+			"packages/coding-agent/src/latency/stable-prefix-assembly-bridge.ts#associateStablePrefixObserveUsage",
 			"packages/coding-agent/src/workflow/runtime-invocation.ts#prepareWorkflowInvocation",
+			"packages/coding-agent/src/workflow/runtime-adapter.ts#onPayload",
 		],
 	},
 	{

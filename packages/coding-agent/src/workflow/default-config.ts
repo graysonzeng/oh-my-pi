@@ -292,6 +292,8 @@ const WORKFLOW_MODEL_PROFILES = {
 			aliases: { bash: "run_command" },
 			argAliases: { read: { path: "file_path" } },
 		}),
+		// Preferred budget surface: artifactInclusion.maxArtifactBytes=80_000 wins
+		// over contextPolicy.maxArtifactBytes below via resolveArtifactInclusion.
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.55,
 			repoMap: false,
@@ -309,6 +311,9 @@ const WORKFLOW_MODEL_PROFILES = {
 			retryableErrorKinds: [],
 			fallbackProfileIds: ["gpt_astra_implementer", "deepseek_implementer"],
 		},
+		// Compat / legacy surface. Effective maxArtifactBytes is 80_000 from
+		// contextStrategy.artifactInclusion (strategy wins) — do not treat 1 MiB
+		// as the runtime inclusion cap. Thresholds intentionally unchanged.
 		contextPolicy: {
 			includePlan: true,
 			includeReviewFindings: false,

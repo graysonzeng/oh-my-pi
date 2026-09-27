@@ -1,4 +1,10 @@
 import type { SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
+import {
+	associateStablePrefixObserveUsage,
+	observeStablePrefixAtFinalRequest,
+	usageMetricsFromProviderUsage,
+	type StablePrefixFinalRequestObserveV1,
+} from "../latency/stable-prefix-assembly-bridge";
 import type { SubagentCompletionKind } from "../task/types";
 import type { ToolSession } from "../tools";
 import { withContextProviderUsage } from "./context-ledger";
@@ -480,6 +486,11 @@ export class RuntimeAdapter implements RuntimePort {
 
 		const identityCollector = new ProviderIdentityCollector();
 		let providerOrdinal = 0;
+		/** W5 final-request observe — last serialized payload wins (multi-turn). */
+		let finalRequestObserve: StablePrefixFinalRequestObserveV1 | undefined;
+		const settingsGet = request.session.settings?.get?.bind(request.session.settings);
+		const readDedupeExperimentOn = settingsGet?.("deliveryExperiment.readDedupe.enabled" as never) === true;
+		const phaseHandoffExperimentOn = settingsGet?.("deliveryExperiment.phaseHandoff.enabled" as never) === true;
 		const mappedAgent =
 			request.agent ??
 			RuntimeAdapter.agentNameForRole(request.role, {
@@ -512,14 +523,40 @@ export class RuntimeAdapter implements RuntimePort {
 			onResponse: identityCollector.onResponse,
 			budgetGuard: hooks?.budgetGuard,
 			providerChargeKeys: hooks?.budgetGuard ? [] : undefined,
-			onPayload: hooks?.budgetGuard
-				? (payload, model, signal) => {
-						providerOrdinal += 1;
-						const key = hooks.budgetGuard?.beforeProviderRequest({ ordinal: providerOrdinal });
-						if (key) mappedRequest.providerChargeKeys?.push(key);
-						return undefined;
+			onPayload: (payload, model, _signal) => {
+				providerOrdinal += 1;
+				if (hooks?.budgetGuard) {
+					const key = hooks.budgetGuard.beforeProviderRequest({ ordinal: providerOrdinal });
+					if (key) mappedRequest.providerChargeKeys?.push(key);
+				}
+				// Safe observe at final provider-serialized boundary (fingerprints only).
+				try {
+					finalRequestObserve = observeStablePrefixAtFinalRequest({
+						payload,
+						config: prepared.stablePrefixConfig,
+						peer: {
+							readDedupeEnabled: readDedupeExperimentOn,
+							phaseHandoffEnabled: phaseHandoffExperimentOn,
+						},
+						providerIdentity: {
+							provider: model?.provider,
+							api: model?.api,
+							model: model?.id,
+						},
+						scope: prepared.stablePrefixObserve?.scope ?? "same_child_session",
+						assemblyObserve: prepared.stablePrefixObserve,
+					});
+					if (prepared.session.workflowAttemptEvidence && prepared.stablePrefixConfig.enabled) {
+						prepared.session.workflowAttemptEvidence = {
+							...prepared.session.workflowAttemptEvidence,
+							stablePrefixFinalObserve: finalRequestObserve,
+						};
 					}
-				: undefined,
+				} catch {
+					// Observe must never block or alter the provider send.
+				}
+				return undefined;
+			},
 			strictModelIdentity: request.profile.strictIdentity === true,
 			shadowReview:
 				request.pipelineKind === "devflow" && (request.role === "plan_reviewer" || request.role === "code_reviewer")
@@ -673,6 +710,19 @@ export class RuntimeAdapter implements RuntimePort {
 			const resolved = parseResolvedModel(body.resolvedModel);
 			// Merge provider cache counters after usage is known (prepare-time receipt is unobservable).
 			const promptAssemblyReceipt = withProviderCacheMetrics(prepared.promptAssemblyReceipt, body.usage);
+			const associatedFinalObserve = finalRequestObserve
+				? associateStablePrefixObserveUsage(finalRequestObserve, usageMetricsFromProviderUsage(body.usage))
+				: undefined;
+			if (
+				associatedFinalObserve &&
+				prepared.session.workflowAttemptEvidence &&
+				prepared.stablePrefixConfig.enabled
+			) {
+				prepared.session.workflowAttemptEvidence = {
+					...prepared.session.workflowAttemptEvidence,
+					stablePrefixFinalObserve: associatedFinalObserve,
+				};
+			}
 			return {
 				artifact: structured.data as TArtifact,
 				rawResultId: body.id,
@@ -686,6 +736,7 @@ export class RuntimeAdapter implements RuntimePort {
 				toolCalls: body.toolCalls,
 				// After the live tool path finishes, optimization receipts (if any) sit on the shared array.
 				promptAssemblyReceipt,
+				stablePrefixFinalObserve: associatedFinalObserve,
 				contextLedger: withContextProviderUsage(prepared.contextLedger, body.usage),
 				optimizationReceipts:
 					prepared.optimizationReceipts.length > 0 ? [...prepared.optimizationReceipts] : undefined,
