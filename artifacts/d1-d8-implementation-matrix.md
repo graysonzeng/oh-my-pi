@@ -1,6 +1,7 @@
 # D1–D8 Implementation Matrix
 
-Base tip: `08b957745792fbb489678e1190647d55111545c7` (workflow + merged #35 thin-orch Batch1).
+Base tip (pre-fix): `f4b85f1f4214e0544a12997cb18b3e2698e4709b` (workflow + merged D1–D8 #36).
+Review range: `08b9577457...f4b85f1f42`. Defect-fix branch tip updates this matrix.
 Date: 2026-09-27 (review-defect fix increment).
 
 Labels: **已有且验证** / **本次修复** / **真实外部阻塞**
@@ -10,7 +11,10 @@ Labels: **已有且验证** / **本次修复** / **真实外部阻塞**
 | ID | Item | Status | Evidence |
 |---|---|---|---|
 | D1 | Acceptance types (episode/attempt/parent-final/child delivery) | 已有且验证 | Batch1 F3 + `task-episode.ts`, `parent-final-verification.ts`, `child-delivery-evidence.ts` |
-| D1 | Coverage matrix with missing coverage reasons | 已有且验证 | Prior fix on branch; `latency/acceptance-coverage-matrix.ts` |
+| D1 | Coverage matrix — all receipts by episode/attempt | 本次修复 | `subagent-report` uses `groupVerificationsByEpisode`; never last-receipt-only; `ReturnType<>` → `AcceptanceCoverageCell[]` |
+| D1 | legacy/missing authority ≠ covered | 本次修复 | `missing_authority` / `legacy_compat`; never covered without trusted authority |
+| D1 | candidateComplete / child integrate wiring | 本次修复 | mode_change goal facts + `classifyChildIntegrateCoverage` from delivery evidence |
+| D1 | verification-type branching | 本次修复 | review/manual-only do not force code fingerprint; command-check still does |
 | D3 | Freshness table (asset → invalidate → visibility) | 本次修复 | `docs/context-freshness-table.md` — managed skill row corrected (not accept-gated); recommended action/reason/impact; edit/external/refresh/clear/new/restart matrix |
 | D3 | Recommended action on existing exit | 本次修复 | `/context` via `recommendContextAction` + `appendContextDiagnosisSections` |
 | D5 | Source diagnosis (winner/shadowed/disabled) | 本次修复 | Wired into `/context` with live `loadCapability` items/all + `ttsr.disabledRules` |
@@ -21,7 +25,10 @@ Labels: **已有且验证** / **本次修复** / **真实外部阻塞**
 
 | ID | Item | Status | Evidence |
 |---|---|---|---|
-| D2 | Opt-in no-progress + observation fields | 已有且验证 | Prior fix on branch |
+| D2 | nominateComplete preserves observation fields | 本次修复 | Spreads existing hostGate; streak survives re-nominate |
+| D2 | complete.ts wires real host facts | 本次修复 | acceptanceRevision / trustedFailureIds / provenAcceptanceIds from seals + goal revision |
+| D2 | Opt-in no-progress policy default OFF | 已有且验证 | `goal.hostGate.noProgressPolicy` default false |
+| D2 | Progress / incomparable / replay / cancel / late / resume regressions | 本次修复 | `test/goals/no-progress.test.ts` + nominate preserve cases |
 
 ## Phase C
 
@@ -43,8 +50,16 @@ Labels: **已有且验证** / **本次修复** / **真实外部阻塞**
 
 | ID | Item | Status | Evidence |
 |---|---|---|---|
-| D4 | Local transfer + sharpshooter seam + CLI | 已有且验证 | Prior work on branch (most of D4) |
+| D4 | Scope gate per-record (no AND smuggle) | 本次修复 | Foreign `record.scope` conflicts even when manifest matches |
+| D4 | Content checksum + fingerprint re-verify + version hard fail | 本次修复 | `transfer-integrity.ts`; apply-boundary re-check; never parse warning text |
+| D4 | Confirm binding source/target/preview | 本次修复 | `--confirm-cross-scope=<binding>`; bare flag refused |
+| D4 | Redact before fingerprint; learned bullet boundaries | 本次修复 | `buildExportRecord` + `splitLearnedLessonBullets`; no silent truncate drop |
+| D4 | Reuse `saveLearnedLesson` owner + sharpshooter lock | 本次修复 | `memories/learned.ts`; exclusive transfer lock; inspectable `errors`/`writtenIds` |
+| D4 | Preview reads target; idempotency; overwrite explicit | 本次修复 | dup/skip/overwrite vs live target; system artifacts need replaceSystemArtifacts |
+| D4 | Completeness vs omittedFields | 本次修复 | `complete=false` when omitted existing assets / sharpshooter bank dump incomplete |
+| D4 | Learning candidate ≠ formal activation | 本次修复 | candidates → learned.md only; system facts require explicit replace |
 | D4 | hindsight / mnemopi migrate | 真实外部阻塞 | Remote/auth traverse unavailable |
+| D4 | Entry delete | 真实外部阻塞 | Explicit unsupported; must not fake via `clear` |
 
 ## Phase F
 
@@ -68,16 +83,20 @@ Labels: **已有且验证** / **本次修复** / **真实外部阻塞**
 ## Offline verify (this environment)
 
 ```text
-Focused D3/D5–D8 + D4 transfer suites this increment:
-context-decision, hub-action-hints, limiter-observation/attribution,
-rule-source-diagnosis, computer-coordinate-boundary, agent-hub-action-queue,
-local/sharpshooter/transfer-cli: 43 pass / 0 fail
+Focused D1–D8 defect regressions (12 files):
+68 pass / 0 fail
 
-bun run check:types (coding-agent, tui, ai): clean
+Suites: no-progress + nominate preserve, acceptance-coverage-matrix (+wiring),
+local/sharpshooter/transfer-cli, context-decision, hub-action-hints,
+limiter-observation/attribution, rule-source-diagnosis,
+computer-coordinate-boundary, agent-hub-action-queue
 ```
+
+## Unverified / residual risk
 
 - Live Hub TUI session (Needs me wired; interactive paint 未验证).
 - Live computer-use platforms beyond fixture + adapter.
 - Paid/live A/B and production coverage statistics.
 - Cross-backend memory migrate (hindsight / mnemopi).
 - Full rule/prompt deletion thinning pending zero-caller proof.
+- pi-natives addon not built in this VM (ninja missing); D4 transfer tests avoid natives graph.
