@@ -296,3 +296,27 @@ Clamp fix：fixed `thresholdTokens` 现夹到 `window − resolveBudgetReserveTo
 ### 回退
 
 将 `compaction.thresholdTokens` 默认改回 `-1`，并还原 usable-window clamp / UI Default 映射；正确性三项可独立回退。用户显式配置不受影响。用户选 Legacy（`-1`）可立即恢复旧 usable-window 触发。
+
+---
+
+## 实施记录（生产 soft-cap 修订：200K 固定 → 60% 窗口）
+
+日期：2026-09-27。基线 tip：`8e87da9d8d9f7e09b57aa69d1fc5deb9e5a87021`（`workflow`，含 #40）。  
+用户反馈固定 200K 触发过于频繁；目标改为**按窗口百分比**的生产 soft-cap，而非固定 600K tokens。
+
+### Before → After（生产默认 / 有效阈值）
+
+| Knob / Window | Before（#40：固定 200K） | After（60% + tokens=-1） |
+|---|---:|---:|
+| `compaction.thresholdPercent` | `-1` | **`60`** |
+| `compaction.thresholdTokens` | `200_000` | **`-1`**（percent 生效） |
+| `compaction.experiment.enabled` | `false` | `false`（未开实验） |
+| 200_000 window | 170_000（usable clamp） | **120_000**（60%） |
+| 256_000 window | 200_000 | **153_600** |
+| 1_000_000 window | 200_000 | **600_000** |
+
+Clamp（#40）：固定 `thresholdTokens>0` 仍夹到 `window − reserve`，不回归 `window−1`。Percent 路径按现有实现取 `floor(window × pct/100)`；在默认 15% reserve 下 60% 始终 ≤ usable。
+
+### 回退
+
+将 `thresholdPercent` 默认改回 `-1`、`thresholdTokens` 改回 `200_000`（或再退到双 `-1` usable-only）；UI Default 映射同步回退。

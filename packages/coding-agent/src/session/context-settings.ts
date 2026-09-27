@@ -102,31 +102,36 @@ export const cfgCompactionMethodOrder = register({
 	},
 });
 
-/** Production default soft truncation ceiling for working context (tokens). */
-export const DEFAULT_COMPACTION_SOFT_CAP_TOKENS = 200_000;
+/** Production default soft-cap as a fraction of the model context window. */
+export const DEFAULT_COMPACTION_SOFT_CAP_PERCENT = 60;
 
 export const cfgCompactionThresholdPercent = register({
 	id: "compaction.thresholdPercent",
 	type: "number",
-	default: -1,
+	default: DEFAULT_COMPACTION_SOFT_CAP_PERCENT,
 	ui: {
 		tab: "context",
 		group: "Compaction",
 		label: "Compaction Threshold",
 		description:
-			"Percent threshold for context maintenance; ignored when a token soft-cap is set (production default is the 200K token soft-cap)",
+			"Percent of context window that triggers maintenance; ignored when a positive token soft-cap is set (production default is 60%)",
 		options: [
 			{
 				value: "default",
 				label: "Default",
-				description: "Defer to the token soft-cap (or legacy usable-window when tokens are unset)",
+				description: "60% of context window (production soft-cap)",
+			},
+			{
+				value: "-1",
+				label: "Unset",
+				description: "No percent threshold; use token soft-cap or usable window (window − reserve)",
 			},
 			{ value: "10", label: "10%", description: "Extremely early maintenance" },
 			{ value: "20", label: "20%", description: "Very early maintenance" },
 			{ value: "30", label: "30%", description: "Early maintenance" },
 			{ value: "40", label: "40%", description: "Moderately early maintenance" },
 			{ value: "50", label: "50%", description: "Halfway point" },
-			{ value: "60", label: "60%", description: "Moderate context usage" },
+			{ value: "60", label: "60%", description: "Production soft-cap (same as Default)" },
 			{ value: "70", label: "70%", description: "Balanced" },
 			{ value: "75", label: "75%", description: "Slightly aggressive" },
 			{ value: "80", label: "80%", description: "Typical threshold" },
@@ -140,31 +145,27 @@ export const cfgCompactionThresholdPercent = register({
 export const cfgCompactionThresholdTokens = register({
 	id: "compaction.thresholdTokens",
 	type: "number",
-	default: DEFAULT_COMPACTION_SOFT_CAP_TOKENS,
+	default: -1,
 	ui: {
 		tab: "context",
 		group: "Compaction",
 		label: "Compaction Token Limit",
 		description:
-			"Working-context soft-cap for maintenance; clamped to usable window (model window − reserve). Overrides percentage when set",
+			"Optional fixed-token soft-cap; when set (>0) overrides percentage and clamps to usable window (model window − reserve)",
 		options: [
 			{
 				value: "default",
 				label: "Default",
-				description: "200K soft-cap (min with usable window − reserve)",
-			},
-			{
-				value: "-1",
-				label: "Legacy (window − reserve)",
-				description: "No fixed soft-cap; trigger at usable window only",
+				description: "No fixed soft-cap; use the percentage threshold",
 			},
 			{ value: "25000", label: "25K tokens", description: "1/8 of a 200K window" },
 			{ value: "50000", label: "50K tokens", description: "1/4 of a 200K window" },
 			{ value: "100000", label: "100K tokens", description: "1/2 of a 200K window" },
 			{ value: "150000", label: "150K tokens", description: "3/4 of a 200K window" },
-			{ value: "200000", label: "200K tokens", description: "Production soft-cap ceiling" },
+			{ value: "200000", label: "200K tokens", description: "Fixed 200K soft-cap" },
 			{ value: "300000", label: "300K tokens", description: "Large context window" },
 			{ value: "500000", label: "500K tokens", description: "Very large context window" },
+			{ value: "600000", label: "600K tokens", description: "Fixed 600K soft-cap" },
 		],
 	},
 });
