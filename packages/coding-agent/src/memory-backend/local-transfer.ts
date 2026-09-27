@@ -16,7 +16,7 @@ import {
 	listExistingLearnedBodies,
 	MAX_LEARNED_CONTENT_CHARS,
 	normalizeLearnedText,
-	saveLearnedLesson,
+	stageLearnedCandidate,
 	splitLearnedLessonBullets,
 } from "../memories/learned";
 import { normalizeScopeCwd } from "../memories/storage";
@@ -226,11 +226,11 @@ export async function previewLocalMemoryImport(
 					items.push({ action: "skip", record, reason: "duplicate_lesson" });
 					continue;
 				}
-				// Learning candidates stay candidates — never auto-activate as system facts.
+				// Learning candidates stay staged — never auto-inject into context.
 				items.push({
 					action: "create",
 					record,
-					reason: "append_via_saveLearnedLesson_owner",
+					reason: "stage_candidate_not_injected",
 				});
 				continue;
 			}
@@ -282,9 +282,11 @@ export async function previewLocalMemoryImport(
 }
 
 /**
- * Apply a previewed import. Learning candidates append via saveLearnedLesson.
+ * Apply a previewed import. Learning candidates are staged (not injected).
  * Summary/MEMORY.md writes require explicit replaceSystemArtifacts (formal activation).
  * Never throws away written IDs on a later failure — returns inspectable batch result.
+ *
+ * Writes ONLY verified package record bodies — preview supplies actions, never content.
  */
 export async function applyLocalMemoryImport(
 	context: MemoryBackendOperationContext,
@@ -292,7 +294,7 @@ export async function applyLocalMemoryImport(
 	options?: {
 		replaceSystemArtifacts?: boolean;
 		confirmBinding?: string;
-		/** Original package for re-validation at the apply boundary. */
+		/** Original package for re-validation at the apply boundary — required. */
 		pkg?: MemoryExportPackage;
 	},
 ): Promise<MemoryImportApplyResult> {
@@ -302,6 +304,19 @@ export async function applyLocalMemoryImport(
 	const overwritten: string[] = [];
 	const errors: MemoryImportApplyResult["errors"] = [];
 	const root = localMemoryRoot(context.agentDir, context.cwd);
+
+	if (!options?.pkg) {
+		return {
+			created,
+			skipped,
+			conflicts: preview.items.map(i => i.record.sourceId ?? i.record.contentFingerprint),
+			overwritten,
+			errors: [{ id: "*", error: "pkg_required: apply refuses to write without the verified package" }],
+			partial: false,
+			message: "import refused — package required at apply boundary",
+			writtenIds: [],
+		};
+	}
 
 	if (preview.blockingIssues.length > 0) {
 		return {
@@ -316,45 +331,27 @@ export async function applyLocalMemoryImport(
 		};
 	}
 
-	if (options?.pkg) {
-		const gate = assertPackageApplyable(options.pkg, scopeFor(context.cwd), {
-			confirmBinding: options.confirmBinding,
-			preview,
-		});
-		if (!gate.ok) {
-			return {
-				created,
-				skipped,
-				conflicts: preview.items.map(i => i.record.sourceId ?? i.record.contentFingerprint),
-				overwritten,
-				errors: gate.issues.map(i => ({ id: i.sourceId ?? "*", error: `${i.code}: ${i.message}` })),
-				partial: false,
-				message: "import refused — apply-boundary validation failed",
-				writtenIds: [],
-			};
-		}
-	} else if (preview.requiresCrossScopeConfirm) {
-		if (!options?.confirmBinding || options.confirmBinding !== preview.confirmBinding) {
-			return {
-				created,
-				skipped,
-				conflicts: preview.items.map(i => i.record.sourceId ?? i.record.contentFingerprint),
-				overwritten,
-				errors: [
-					{
-						id: "*",
-						error: "confirm_binding_required: cross-scope import requires matching preview confirm binding",
-					},
-				],
-				partial: false,
-				message: "import refused — confirm binding missing or mismatched",
-				writtenIds: [],
-			};
-		}
+	const pkg = options.pkg;
+	const gate = assertPackageApplyable(pkg, scopeFor(context.cwd), {
+		confirmBinding: options.confirmBinding,
+		preview,
+	});
+	if (!gate.ok) {
+		return {
+			created,
+			skipped,
+			conflicts: preview.items.map(i => i.record.sourceId ?? i.record.contentFingerprint),
+			overwritten,
+			errors: gate.issues.map(i => ({ id: i.sourceId ?? "*", error: `${i.code}: ${i.message}` })),
+			partial: false,
+			message: "import refused — apply-boundary validation failed",
+			writtenIds: [],
+		};
 	}
 
-	for (const item of preview.items) {
-		const id = item.record.sourceId ?? item.record.contentFingerprint;
+	for (const [index, item] of preview.items.entries()) {
+		const verified = pkg.records[index]!;
+		const id = verified.sourceId ?? verified.contentFingerprint;
 		if (item.action === "skip") {
 			skipped.push(id);
 			continue;
@@ -364,19 +361,28 @@ export async function applyLocalMemoryImport(
 			continue;
 		}
 		try {
-			if (item.record.kind === "learning_candidate" || item.record.kind === "user_preference") {
-				const outcome = await saveLearnedLesson(context.agentDir, context.cwd, {
-					content: item.record.content,
-					source: item.record.sourceRef ?? item.record.sourceId,
+			if (verified.kind === "learning_candidate" || verified.kind === "user_preference") {
+				const outcome = await stageLearnedCandidate(context.agentDir, context.cwd, {
+					content: verified.content,
+					source: verified.sourceRef ?? verified.sourceId,
 				});
 				if (outcome.stored > 0) {
 					created.push(id);
+					if (outcome.truncated) {
+						errors.push({ id, error: "lesson_truncated: content exceeded interactive lesson char cap" });
+					}
+					if ((outcome.evicted ?? 0) > 0) {
+						errors.push({
+							id,
+							error: `lesson_evicted: ${outcome.evicted} older lesson(s) removed to enforce cap`,
+						});
+					}
 				} else {
 					skipped.push(id);
 				}
 				continue;
 			}
-			if (item.record.kind === "summary" || item.record.kind === "project_fact") {
+			if (verified.kind === "summary" || verified.kind === "project_fact") {
 				if (!options?.replaceSystemArtifacts) {
 					conflicts.push(id);
 					continue;
@@ -386,8 +392,8 @@ export async function applyLocalMemoryImport(
 					continue;
 				}
 				await fs.mkdir(root, { recursive: true });
-				const fileName = item.record.kind === "summary" ? SUMMARY : MEMORY_MD;
-				await Bun.write(path.join(root, fileName), `${item.record.content.trim()}\n`);
+				const fileName = verified.kind === "summary" ? SUMMARY : MEMORY_MD;
+				await Bun.write(path.join(root, fileName), `${verified.content.trim()}\n`);
 				if (item.action === "overwrite") overwritten.push(id);
 				else created.push(id);
 				continue;

@@ -4,6 +4,10 @@
  *
  * Extracted from the heavy `memories/index` graph so memory transfer (and other
  * light callers) can reuse the real owner without pulling natives/SQLite.
+ *
+ * Import candidates are staged in `learned.candidates.md` and are NOT injected
+ * into context via `readLearnedLessons` until explicitly promoted through the
+ * interactive learn path (`saveLearnedLesson`).
  */
 import * as path from "node:path";
 import { getMemoriesDir } from "@oh-my-pi/pi-utils/dirs";
@@ -14,6 +18,8 @@ import { normalizeScopeCwd } from "./storage";
 
 /** Filename under a project's memory root. */
 export const LEARNED_LESSONS_FILE = "learned.md";
+/** Staged import candidates — not injected into context. */
+export const LEARNED_CANDIDATES_FILE = "learned.candidates.md";
 /** Newest-first cap on retained lessons. */
 export const MAX_LEARNED_LESSONS = 100;
 /** Per-field char caps so a single huge capture can't bloat learned.md. */
@@ -26,6 +32,10 @@ export function getMemoryRoot(agentDir: string, cwd: string): string {
 
 export function learnedLessonsPath(agentDir: string, cwd: string): string {
 	return path.join(getMemoryRoot(agentDir, cwd), LEARNED_LESSONS_FILE);
+}
+
+export function learnedCandidatesPath(agentDir: string, cwd: string): string {
+	return path.join(getMemoryRoot(agentDir, cwd), LEARNED_CANDIDATES_FILE);
 }
 
 /**
@@ -56,38 +66,113 @@ export function normalizeLearnedText(text: string, maxChars: number): string {
 	return boundChars(redactSecrets(neutralizeInjection(text)).trim(), maxChars);
 }
 
-/** Per-path write chains serializing `learned.md` read-modify-write. */
+/** Per-path write chains serializing learned file read-modify-write. */
 const learnedWriteChains = new Map<string, Promise<unknown>>();
+
+interface AppendLessonOutcome {
+	stored: boolean;
+	truncated: boolean;
+	evicted: number;
+}
 
 /**
  * Append one lesson to the project's `learned.md` (newest-first, deduped,
  * capped, secret-redacted, injection-neutralized).
+ * Truncation / eviction are surfaced on the result — never silent full success.
  */
 export async function saveLearnedLesson(
 	agentDir: string,
 	cwd: string,
 	input: MemoryBackendSaveInput,
 ): Promise<MemoryBackendSaveResult> {
-	const content = normalizeLearnedText(input.content, MAX_LEARNED_CONTENT_CHARS);
+	const rawContent = input.content ?? "";
+	const neutralized = redactSecrets(neutralizeInjection(rawContent)).trim();
+	const content = boundChars(neutralized, MAX_LEARNED_CONTENT_CHARS);
 	if (!content) {
 		return { backend: "local", stored: 0, message: "Empty lesson; nothing stored." };
 	}
+	const truncated = neutralized.length > content.length;
 	const context = input.context ? normalizeLearnedText(input.context, MAX_LEARNED_CONTEXT_CHARS) : "";
-	const line = context ? `- ${content} _(context: ${context})_` : `- ${content}`;
+	const sourceNote = input.source ? normalizeLearnedText(input.source, 200) : "";
+	const metaParts = [context ? `context: ${context}` : "", sourceNote ? `source: ${sourceNote}` : ""].filter(Boolean);
+	const line = metaParts.length > 0 ? `- ${content} _(${metaParts.join("; ")})_` : `- ${content}`;
 	const filePath = learnedLessonsPath(agentDir, cwd);
 
-	const run = (learnedWriteChains.get(filePath) ?? Promise.resolve()).then(() => appendLearnedLine(filePath, line));
-	const guarded = run.catch(() => {});
+	const outcome = await enqueueLearnedWrite(filePath, () => appendLearnedLine(filePath, line, MAX_LEARNED_LESSONS));
+	const warnings: string[] = [];
+	if (truncated) warnings.push("lesson_truncated");
+	if (outcome.evicted > 0) warnings.push(`lesson_evicted=${outcome.evicted}`);
+	return {
+		backend: "local",
+		stored: outcome.stored ? 1 : 0,
+		truncated: truncated || undefined,
+		evicted: outcome.evicted > 0 ? outcome.evicted : undefined,
+		message:
+			warnings.length > 0
+				? `Lesson saved to ${LEARNED_LESSONS_FILE} with loss: ${warnings.join(", ")}.`
+				: `Lesson saved to ${LEARNED_LESSONS_FILE}.`,
+	};
+}
+
+/**
+ * Stage an import learning candidate without injecting into context.
+ * Persists source provenance; does not touch `learned.md`.
+ */
+export async function stageLearnedCandidate(
+	agentDir: string,
+	cwd: string,
+	input: MemoryBackendSaveInput,
+): Promise<MemoryBackendSaveResult> {
+	const rawContent = input.content ?? "";
+	const neutralized = redactSecrets(neutralizeInjection(rawContent)).trim();
+	const content = boundChars(neutralized, MAX_LEARNED_CONTENT_CHARS);
+	if (!content) {
+		return { backend: "local", stored: 0, message: "Empty candidate; nothing staged." };
+	}
+	const truncated = neutralized.length > content.length;
+	const sourceNote = input.source ? normalizeLearnedText(input.source, 200) : "";
+	const line = sourceNote ? `- (from: ${sourceNote}) ${content}` : `- ${content}`;
+	const filePath = learnedCandidatesPath(agentDir, cwd);
+
+	const outcome = await enqueueLearnedWrite(filePath, () => appendLearnedLine(filePath, line, MAX_LEARNED_LESSONS));
+	const warnings: string[] = [];
+	if (truncated) warnings.push("lesson_truncated");
+	if (outcome.evicted > 0) warnings.push(`lesson_evicted=${outcome.evicted}`);
+	return {
+		backend: "local",
+		stored: outcome.stored ? 1 : 0,
+		truncated: truncated || undefined,
+		evicted: outcome.evicted > 0 ? outcome.evicted : undefined,
+		message:
+			warnings.length > 0
+				? `Candidate staged to ${LEARNED_CANDIDATES_FILE} with loss: ${warnings.join(", ")}.`
+				: `Candidate staged to ${LEARNED_CANDIDATES_FILE} (not injected).`,
+	};
+}
+
+async function enqueueLearnedWrite(
+	filePath: string,
+	fn: () => Promise<AppendLessonOutcome>,
+): Promise<AppendLessonOutcome> {
+	const { promise, resolve, reject } = Promise.withResolvers<AppendLessonOutcome>();
+	const run = (learnedWriteChains.get(filePath) ?? Promise.resolve()).then(fn, fn);
+	const guarded = run.then(
+		value => {
+			resolve(value);
+		},
+		err => {
+			reject(err);
+		},
+	);
 	learnedWriteChains.set(filePath, guarded);
 	try {
-		await run;
+		return await promise;
 	} finally {
 		if (learnedWriteChains.get(filePath) === guarded) learnedWriteChains.delete(filePath);
 	}
-	return { backend: "local", stored: 1, message: `Lesson saved to ${LEARNED_LESSONS_FILE}.` };
 }
 
-async function appendLearnedLine(filePath: string, line: string): Promise<void> {
+async function appendLearnedLine(filePath: string, line: string, maxLessons: number): Promise<AppendLessonOutcome> {
 	let existing = "";
 	try {
 		existing = await Bun.file(filePath).text();
@@ -103,17 +188,21 @@ async function appendLearnedLine(filePath: string, line: string): Promise<void> 
 	else out.splice(firstBullet, 0, line);
 	let lessonCount = 0;
 	for (const l of out) if (isLesson(l)) lessonCount++;
-	for (let i = out.length - 1; i >= 0 && lessonCount > MAX_LEARNED_LESSONS; i--) {
+	let evicted = 0;
+	for (let i = out.length - 1; i >= 0 && lessonCount > maxLessons; i--) {
 		if (isLesson(out[i])) {
 			out.splice(i, 1);
 			lessonCount--;
+			evicted++;
 		}
 	}
 	await Bun.write(filePath, `${out.join("\n")}\n`);
+	return { stored: true, truncated: false, evicted };
 }
 
 /**
  * Read `learned.md`, neutralizing each line on read. Returns "" when absent.
+ * Never reads `learned.candidates.md` — staged imports stay out of context.
  */
 export async function readLearnedLessons(memoryRoot: string): Promise<string> {
 	let raw = "";
@@ -151,6 +240,16 @@ export async function listExistingLearnedBodies(agentDir: string, cwd: string): 
 		const raw = await Bun.file(learnedLessonsPath(agentDir, cwd)).text();
 		for (const body of splitLearnedLessonBullets(raw)) {
 			bodies.add(normalizeLearnedText(body, MAX_LEARNED_CONTENT_CHARS));
+		}
+	} catch (err) {
+		if (!isEnoent(err)) throw err;
+	}
+	// Also treat staged candidates as already-present for idempotent import preview.
+	try {
+		const raw = await Bun.file(learnedCandidatesPath(agentDir, cwd)).text();
+		for (const body of splitLearnedLessonBullets(raw)) {
+			const stripped = body.replace(/^\(from:\s*[^)]+\)\s*/, "");
+			bodies.add(normalizeLearnedText(stripped, MAX_LEARNED_CONTENT_CHARS));
 		}
 	} catch (err) {
 		if (!isEnoent(err)) throw err;

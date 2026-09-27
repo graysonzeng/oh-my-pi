@@ -54,11 +54,11 @@ function pendingAsk(session: AgentSession): boolean {
 	return pending.some(call => call.toolName === "ask");
 }
 
-function pendingUnstartedTools(session: AgentSession): boolean {
-	const pending = collectPendingToolCalls(readBranch(session));
-	// Tool calls present without tool_execution_start are typically waiting on
-	// approval / user gate (ask is handled separately as need_decision).
-	return pending.some(call => call.toolName !== "ask" && call.startedAt === undefined);
+function pendingUnstartedTools(_session: AgentSession): boolean {
+	// Real order is tool_execution_start THEN approval gate. Missing startedAt
+	// means pre-start (schedule/prepare), not approval waiting. Do not treat as
+	// need_auth — prefer explicit pendingApprovalAgentIds overlays.
+	return false;
 }
 
 function goalBlocked(session: AgentSession): { blocked: boolean; summary?: string } {
@@ -82,11 +82,10 @@ function goalBlocked(session: AgentSession): { blocked: boolean; summary?: strin
 }
 
 function childLooksIntegrateEligible(ref: AgentRecordLike): boolean {
-	if (ref.kind !== "sub") return false;
-	if (ref.status !== "idle" && ref.status !== "parked") return false;
-	// Persisted output without an aborted tombstone is integrate-candidate visibility
-	// for the parent — done_valid ≠ accepted; Hub only surfaces need_integrate.
-	return Boolean(ref.history?.outputPath);
+	// outputPath + idle/parked is NOT integrate-eligible delivery evidence.
+	// Prefer explicit pendingIntegrateAgentIds from delivery classification owners.
+	void ref;
+	return false;
 }
 
 /**

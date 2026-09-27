@@ -55,7 +55,8 @@ function progressObservationFromHost(input: {
 }): ProgressObservationInput {
 	const acceptanceRevision = fingerprintStable({
 		objective: input.goal.objective,
-		goalRevision: input.goal.hostGate?.goalRevision ?? 0,
+		// Intentionally omit goalRevision / nominate counter — nominate churn
+		// must not reset the no-progress streak. Acceptance content only.
 	});
 	const current = input.currentCodeVersion.trim();
 	const proven = current
@@ -64,17 +65,15 @@ function progressObservationFromHost(input: {
 				acceptanceIds: [input.goal.objective],
 				currentCodeVersion: current,
 			}).map(row => row.id)
-		: [];
-	const staleFailureIds = current
-		? input.hostReceipts.filter(seal => seal.codeVersion !== current).map(seal => seal.id)
-		: [];
+		: undefined;
 	return {
 		hostReasons: [...input.hostReasons],
 		codeVersionFingerprint: current || null,
 		nominationId: input.nominationId,
 		acceptanceRevision,
-		provenAcceptanceIds: proven,
-		trustedFailureIds: staleFailureIds,
+		// Fresh seals only via bindHostSealsToAcceptance. Stale seals are unknown
+		// evidence — never invent trustedFailureIds from codeVersion mismatch.
+		...(proven !== undefined ? { provenAcceptanceIds: proven } : {}),
 		...(input.evaluatorUnavailable === true ? { evaluatorUnavailable: true } : {}),
 	};
 }
@@ -260,13 +259,15 @@ export async function executeGoalComplete(
 		const result = await evaluator.runGoalEvaluator({ session, goal, snapshot, signal: combined });
 		if (combined.aborted) throw new ToolAbortError();
 		const nominationKey = goal.hostGate?.nominationId ?? nominationId;
+		const failOpen = result.failOpen === true;
+		const decision = failOpen ? "continue" : result.decision === "blocked" ? "blocked" : "candidate_complete";
 		const applied = await runtime.applyNominationResult({
 			goalId: goal.id,
 			goalRevision: goal.hostGate?.goalRevision ?? 0,
 			nominationId: nominationKey,
 			turnId,
 			generation,
-			decision: result.decision === "blocked" ? "blocked" : "candidate_complete",
+			decision,
 			evidence: result.evidence,
 			nextStep: result.nextStep,
 			blockerKey: result.blockerKey || undefined,
@@ -280,7 +281,7 @@ export async function executeGoalComplete(
 					nominationId: nominationKey,
 					currentCodeVersion: currentCodeVersion ?? "",
 					hostReceipts: snapshot.hostReceipts ?? [],
-					evaluatorUnavailable: result.failOpen === true,
+					evaluatorUnavailable: failOpen,
 				}),
 			},
 		});
@@ -308,6 +309,14 @@ export async function executeGoalComplete(
 		const paused = session.getGoalModeState?.()?.goal ?? latest;
 		const extra = `Host gate: blocked\nblocker_key: ${paused.hostGate?.lastBlockerKey ?? latest.hostGate?.lastBlockerKey}\n${paused.hostGate?.lastNextStep ?? latest.hostGate?.lastNextStep}`;
 		return completeResponse(paused, "blocked", extra);
+	}
+
+	if (latest.hostGate?.lastDecision === "continue") {
+		return completeResponse(
+			latest,
+			"continue",
+			`Host gate: continue\nReasons: evaluator_unavailable\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+		);
 	}
 
 	return completeResponse(

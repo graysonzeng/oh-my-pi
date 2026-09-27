@@ -107,13 +107,21 @@ export function attributeLimiterState(
 	};
 }
 
-export function formatLimiterAttribution(report: LimiterAttributionReport): string {
+export function formatLimiterAttribution(
+	report: LimiterAttributionReport,
+	options?: { unknownOwners?: readonly LimiterOwner[] },
+): string {
+	const unknown = new Set(options?.unknownOwners ?? []);
 	const lines = [
 		"limiter attribution (D8)",
 		`unifiedSemaphore=${report.unifiedSemaphore}`,
-		`blocking=${report.blockingOwners.join(",") || "none"}`,
+		`blocking=${report.blockingOwners.filter(o => !unknown.has(o)).join(",") || "none"}`,
 	];
 	for (const owner of LIMITER_OWNERS) {
+		if (unknown.has(owner)) {
+			lines.push(`  ${owner}: unknown_occupancy (no sample — not idle)`);
+			continue;
+		}
 		const row = report.byOwner[owner];
 		lines.push(
 			`  ${owner}: blocking=${row.blocking} inFlight=${row.inFlight} capacity=${row.capacity} queued=${row.queued} waitMs=${row.waitMs} waitCount=${row.waitCount}`,

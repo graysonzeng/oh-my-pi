@@ -41,7 +41,7 @@ export interface ParentFinalVerificationDetails {
 	/** Epoch ms when verification settled; message timestamp is used when omitted. */
 	verifiedAtMs?: number;
 	/** Schema version for extended fields; omitted on legacy receipts. */
-	v?: typeof PARENT_FINAL_VERIFICATION_DETAILS_VERSION;
+	v?: number;
 	/** Idempotent event id — duplicate writes with the same id must not double-bill. */
 	eventId?: string;
 	/** Episode/attempt linkage (sessionId + rootUserEntryId). */
@@ -68,7 +68,7 @@ export interface ParentFinalVerificationObservation {
 	codeState?: ParentFinalCodeStateRef;
 	authority?: AcceptanceAuthority;
 	/** Schema version when present — v1+ requires authority to count as accepted. */
-	v?: typeof PARENT_FINAL_VERIFICATION_DETAILS_VERSION;
+	v?: number;
 	buildIdentityRef?: string;
 	evidenceRefs?: string[];
 }
@@ -123,6 +123,10 @@ export function parseParentFinalVerificationDetails(details: unknown): ParentFin
 				.map(item => item.trim())
 				.filter(Boolean)
 		: undefined;
+	// Reject unknown / future schema versions — never silently drop v and cover.
+	if (details.v !== undefined && details.v !== PARENT_FINAL_VERIFICATION_DETAILS_VERSION) {
+		return null;
+	}
 	const v =
 		details.v === PARENT_FINAL_VERIFICATION_DETAILS_VERSION ? PARENT_FINAL_VERIFICATION_DETAILS_VERSION : undefined;
 

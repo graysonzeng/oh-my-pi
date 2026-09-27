@@ -25,7 +25,8 @@ export type MissingCoverageReasonCode =
 	| "pending_parent_integrate"
 	| "stale_or_scope_unknown"
 	| "candidate_not_user_confirmed"
-	| "price_unknown";
+	| "price_unknown"
+	| "unknown_receipt_version";
 
 export type CoverageCellStatus = "covered" | "missing" | "incomplete" | "excluded" | "pending";
 
@@ -68,6 +69,8 @@ export interface ClassifyParentFinalCoverageInput {
 	currentCodeFingerprint?: string | null;
 	/** Goal/UI candidate without user_confirmed. */
 	candidateComplete?: boolean;
+	/** Episode key when observation is missing but the episode exists in the universe. */
+	episodeKeyHint?: string | null;
 }
 
 export interface ClassifyChildIntegrateCoverageInput {
@@ -129,7 +132,7 @@ export function classifyParentFinalCoverage(input: ClassifyParentFinalCoverageIn
 	const obs = input.observation;
 
 	if (input.candidateComplete === true) {
-		const ep = obs ? episodeFromObservation(obs) : null;
+		const ep = obs ? episodeFromObservation(obs) : (input.episodeKeyHint ?? null);
 		return [
 			{
 				rowId: input.rowId,
@@ -146,7 +149,7 @@ export function classifyParentFinalCoverage(input: ClassifyParentFinalCoverageIn
 		return [
 			{
 				rowId: input.rowId,
-				episodeKey: null,
+				episodeKey: input.episodeKeyHint ?? null,
 				itemId: "*",
 				status: "missing",
 				reasons: ["no_parent_final_receipt"],
@@ -155,12 +158,17 @@ export function classifyParentFinalCoverage(input: ClassifyParentFinalCoverageIn
 		];
 	}
 
-	const ep = episodeFromObservation(obs);
+	const ep = episodeFromObservation(obs) ?? input.episodeKeyHint ?? null;
 
 	const sharedReasons: MissingCoverageReasonCode[] = [];
 
 	if (obs.status === "failed") {
 		sharedReasons.push("receipt_failed");
+	}
+
+	// Unknown / future schema versions must never count as covered.
+	if (obs.v !== undefined && obs.v !== 1) {
+		sharedReasons.push("unknown_receipt_version");
 	}
 
 	if (obs.authority === undefined && obs.v === undefined) {

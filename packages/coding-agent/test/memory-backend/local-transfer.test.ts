@@ -160,7 +160,7 @@ describe("local memory transfer (D4)", () => {
 		});
 		expect(applied.partial).toBe(false);
 		expect(applied.created).toHaveLength(2);
-		const text = await Bun.file(path.join(localMemoryRoot(destAgent, cwd), "learned.md")).text();
+		const text = await Bun.file(path.join(localMemoryRoot(destAgent, cwd), "learned.candidates.md")).text();
 		expect(text).toContain(lessonB);
 		expect(text).toContain(lessonA.slice(0, 40));
 	});
@@ -252,6 +252,142 @@ describe("local memory transfer (D4)", () => {
 		expect(caps.fullTraverse).toBe(true);
 		expect(caps.entryDelete).toBe(false);
 		expect(caps.export).toBe(true);
+	});
+
+	it("refuses apply without pkg and refuses mutated preview bodies", async () => {
+		const src = await tempPair();
+		const root = localMemoryRoot(src.agentDir, src.cwd);
+		await fs.mkdir(root, { recursive: true });
+		await Bun.write(path.join(root, "learned.md"), "- honest lesson\n");
+		const exported = await exportLocalMemory({ agentDir: src.agentDir, cwd: src.cwd });
+		const dest = await tempPair();
+		const preview = await previewLocalMemoryImport({ agentDir: dest.agentDir, cwd: dest.cwd }, exported);
+
+		const noPkg = await applyLocalMemoryImport({ agentDir: dest.agentDir, cwd: dest.cwd }, preview);
+		expect(noPkg.created).toEqual([]);
+		expect(noPkg.errors.some(e => e.error.includes("pkg_required"))).toBe(true);
+
+		preview.items[0]!.record = { ...preview.items[0]!.record, content: "mutated after preview" };
+		const mutated = await applyLocalMemoryImport({ agentDir: dest.agentDir, cwd: dest.cwd }, preview, {
+			pkg: exported,
+		});
+		expect(mutated.created).toEqual([]);
+		expect(mutated.errors.some(e => e.error.includes("preview_package_mismatch"))).toBe(true);
+	});
+
+	it("reports truncate/eviction as partial on import apply", async () => {
+		const dest = await tempPair();
+		const long = "x".repeat(2122);
+		const pkg = {
+			manifest: {
+				formatVersion: MEMORY_EXPORT_FORMAT_VERSION,
+				backend: "local" as const,
+				exportedAt: new Date().toISOString(),
+				scope: dest.cwd,
+				complete: true,
+				omittedCapabilities: [] as string[],
+				omittedFields: [] as string[],
+				contentChecksum: "",
+				recordCount: 1,
+			},
+			records: [
+				{
+					sourceId: "local:learned.md#0",
+					kind: "learning_candidate" as const,
+					content: long,
+					scope: dest.cwd,
+					trust: "learned_candidate" as const,
+					contentFingerprint: fingerprintRecordContent({
+						kind: "learning_candidate",
+						content: long,
+						scope: dest.cwd,
+						sourceId: "local:learned.md#0",
+					}),
+				},
+			],
+		};
+		pkg.manifest.contentChecksum = checksumPackageRecords(pkg.records);
+		pkg.manifest.recordCount = pkg.records.length;
+		const preview = await previewLocalMemoryImport({ agentDir: dest.agentDir, cwd: dest.cwd }, pkg);
+		const applied = await applyLocalMemoryImport({ agentDir: dest.agentDir, cwd: dest.cwd }, preview, { pkg });
+		expect(applied.created.length).toBe(1);
+		expect(applied.partial).toBe(true);
+		expect(applied.errors.some(e => e.error.includes("lesson_truncated"))).toBe(true);
+		const candidates = await Bun.file(
+			path.join(localMemoryRoot(dest.agentDir, dest.cwd), "learned.candidates.md"),
+		).text();
+		expect(candidates.length).toBeLessThan(long.length + 40);
+		expect(await Bun.file(path.join(localMemoryRoot(dest.agentDir, dest.cwd), "learned.md")).exists()).toBe(false);
+	});
+
+	it("detects intra-package MEMORY.md body conflicts", async () => {
+		const dest = await tempPair();
+		const a = {
+			sourceId: "local:MEMORY.md",
+			kind: "project_fact" as const,
+			content: "body-a",
+			scope: dest.cwd,
+			trust: "system" as const,
+			contentFingerprint: fingerprintRecordContent({
+				kind: "project_fact",
+				content: "body-a",
+				scope: dest.cwd,
+				sourceId: "local:MEMORY.md",
+			}),
+		};
+		const b = {
+			...a,
+			content: "body-b",
+			contentFingerprint: fingerprintRecordContent({
+				kind: "project_fact",
+				content: "body-b",
+				scope: dest.cwd,
+				sourceId: "local:MEMORY.md",
+			}),
+		};
+		const pkg = {
+			manifest: {
+				formatVersion: MEMORY_EXPORT_FORMAT_VERSION,
+				backend: "local" as const,
+				exportedAt: new Date().toISOString(),
+				scope: dest.cwd,
+				complete: true,
+				omittedCapabilities: [] as string[],
+				omittedFields: [] as string[],
+				contentChecksum: checksumPackageRecords([a, b]),
+				recordCount: 2,
+			},
+			records: [a, b],
+		};
+		const preview = await previewLocalMemoryImport({ agentDir: dest.agentDir, cwd: dest.cwd }, pkg);
+		expect(preview.blockingIssues.some(i => i.includes("intra_package_conflict"))).toBe(true);
+		const applied = await applyLocalMemoryImport({ agentDir: dest.agentDir, cwd: dest.cwd }, preview, {
+			pkg,
+			replaceSystemArtifacts: true,
+		});
+		expect(applied.created).toEqual([]);
+		expect(await pathExists(path.join(localMemoryRoot(dest.agentDir, dest.cwd), "MEMORY.md"))).toBe(false);
+	});
+
+	it("stages import candidates without injecting into learned.md", async () => {
+		const src = await tempPair();
+		const root = localMemoryRoot(src.agentDir, src.cwd);
+		await fs.mkdir(root, { recursive: true });
+		await Bun.write(path.join(root, "learned.md"), "- imported candidate body\n");
+		const exported = await exportLocalMemory({ agentDir: src.agentDir, cwd: src.cwd });
+		const destAgent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mem-agent-"));
+		dirs.push(destAgent);
+		const preview = await previewLocalMemoryImport({ agentDir: destAgent, cwd: src.cwd }, exported);
+		expect(preview.requiresCrossScopeConfirm).toBe(false);
+		expect(preview.items.some(i => i.reason === "stage_candidate_not_injected")).toBe(true);
+		const applied = await applyLocalMemoryImport({ agentDir: destAgent, cwd: src.cwd }, preview, {
+			pkg: exported,
+		});
+		expect(applied.created.length).toBeGreaterThan(0);
+		expect(await pathExists(path.join(localMemoryRoot(destAgent, src.cwd), "learned.md"))).toBe(false);
+		const staged = await Bun.file(path.join(localMemoryRoot(destAgent, src.cwd), "learned.candidates.md")).text();
+		expect(staged).toContain("imported candidate body");
+		expect(staged).toContain("(from:");
 	});
 });
 

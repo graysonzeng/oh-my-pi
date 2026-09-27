@@ -90,7 +90,7 @@ export async function observeLimiterAttribution(
 	}
 
 	const report = attributeLimiterState(occupancies);
-	const lines = [formatLimiterAttribution(report)];
+	const lines = [formatLimiterAttribution(report, { unknownOwners })];
 	if (unknownOwners.length > 0) {
 		lines.push(`unknown_occupancy=${unknownOwners.join(",")}`);
 	}

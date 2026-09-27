@@ -217,28 +217,43 @@ export async function snapshotProviderInFlightOccupancy(
 }
 
 /**
- * Snapshot every configured provider's in-flight occupancy (aggregated).
- * Returns null when no provider has a configured maxInFlightRequests cap.
+ * Snapshot every configured provider's in-flight occupancy.
+ * Does NOT sum capacities across providers (that masks local saturation:
+ * 4/4 + 0/4 must not look like 4/8 idle). Reports the worst-saturated
+ * provider's occupancy so blocking reflects any local saturation.
  */
 export async function snapshotConfiguredProviderInFlightOccupancy(): Promise<{
 	inFlight: number;
 	capacity: number;
 	providers: number;
+	/** True when any sampled provider is at/over capacity. */
+	anyBlocking: boolean;
+	saturatedProviders: string[];
 } | null> {
 	const providers = Object.keys(configuredProviderMaxInFlightRequests);
 	if (providers.length === 0) return null;
-	let inFlight = 0;
-	let capacity = 0;
 	let counted = 0;
+	let worst: { inFlight: number; capacity: number; score: number } | null = null;
+	const saturatedProviders: string[] = [];
 	for (const provider of providers) {
 		const snap = await snapshotProviderInFlightOccupancy(provider);
 		if (!snap) continue;
-		inFlight += snap.inFlight;
-		capacity += snap.capacity;
 		counted++;
+		const unlimited = !Number.isFinite(snap.capacity) || snap.capacity <= 0;
+		const score = unlimited ? 0 : snap.inFlight / snap.capacity;
+		if (!unlimited && snap.inFlight >= snap.capacity) saturatedProviders.push(provider);
+		if (!worst || score > worst.score) {
+			worst = { inFlight: snap.inFlight, capacity: snap.capacity, score };
+		}
 	}
-	if (counted === 0) return null;
-	return { inFlight, capacity, providers: counted };
+	if (counted === 0 || !worst) return null;
+	return {
+		inFlight: worst.inFlight,
+		capacity: worst.capacity,
+		providers: counted,
+		anyBlocking: saturatedProviders.length > 0,
+		saturatedProviders,
+	};
 }
 
 function resolveProviderInFlightLimit(

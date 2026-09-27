@@ -390,4 +390,92 @@ describe("acceptance coverage matrix wiring (D1 behavioral)", () => {
 		expect(childCell).toBeDefined();
 		expect(childCell!.status).toBe("pending");
 	});
+
+	it("rejects unknown receipt versions — never covered", () => {
+		const obs: ParentFinalVerificationObservation = {
+			status: "passed",
+			source: "workflow",
+			ts: 1,
+			v: 999,
+			authority: "trusted_verifier",
+			acceptanceContract: { items: ["item-1"] },
+			codeState: { fingerprint: "abc" },
+			evidenceRefs: ["check:1"],
+			attempt: {
+				episode: { sessionId: "s", rootUserEntryId: "u" },
+				attemptId: "a1",
+				workflowId: null,
+				branchLeafId: null,
+				taskToolCallId: null,
+				jobId: null,
+				agentId: null,
+			},
+		};
+		const cells = classifyParentFinalCoverage({ rowId: "v999", observation: obs });
+		expect(cells[0]!.status).not.toBe("covered");
+		expect(cells[0]!.reasons).toContain("unknown_receipt_version");
+	});
+
+	it("builds coverage from episode universe — receipt-less episodes are missing", () => {
+		const path = "/tmp/sessions/cov/episode-universe.jsonl";
+		const session = parseSessionJsonl(
+			[
+				{ type: "session", version: 3, id: "sess-ep", timestamp: "2026-09-09T10:00:00.000Z", cwd: "/tmp" },
+				{
+					type: "message",
+					id: "u1",
+					parentId: null,
+					timestamp: "2026-09-09T10:00:01.000Z",
+					message: { role: "user", content: "goal A", timestamp: 1 },
+				},
+				{
+					type: "custom",
+					id: "pfv1",
+					parentId: null,
+					timestamp: "2026-09-09T10:00:02.000Z",
+					customType: "parent_final_verification",
+					data: {
+						status: "passed",
+						source: "workflow",
+						v: 1,
+						authority: "trusted_verifier",
+						eventId: "e1",
+						acceptanceContract: {
+							items: ["item-1"],
+							criteria: [{ criterionId: "c1", description: "ok", verification: "review", evidenceRefs: [] }],
+						},
+						evidenceRefs: ["review:1"],
+						attempt: {
+							episode: { sessionId: "sess-ep", rootUserEntryId: "u1" },
+							attemptId: "a1",
+							workflowId: null,
+							branchLeafId: null,
+							taskToolCallId: null,
+							jobId: null,
+							agentId: null,
+						},
+					},
+				},
+				{
+					type: "message",
+					id: "u2",
+					parentId: null,
+					timestamp: "2026-09-09T10:00:03.000Z",
+					message: { role: "user", content: "goal B", timestamp: 2 },
+				},
+			]
+				.map(line => JSON.stringify(line))
+				.join("\n"),
+			path,
+		);
+		expect(session.episodeKeys).toEqual(expect.arrayContaining(["sess-ep::u1", "sess-ep::u2"]));
+		const report = buildSubagentBaselineReport([session]);
+		expect(report.acceptanceCoverage.summary.covered).toBeGreaterThanOrEqual(1);
+		expect(report.acceptanceCoverage.summary.missing).toBeGreaterThanOrEqual(1);
+		expect(
+			report.acceptanceCoverage.cells.some(
+				c => c.episodeKey === "sess-ep::u2" && c.reasons.includes("no_parent_final_receipt"),
+			),
+		).toBe(true);
+	});
 });

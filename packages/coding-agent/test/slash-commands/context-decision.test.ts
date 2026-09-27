@@ -32,4 +32,23 @@ describe("context decision projection (D3)", () => {
 			}).action,
 		).toBe("continue");
 	});
+
+	it("does not recommend new_session at 95% when unfinished is unknown", () => {
+		const hint = recommendContextAction({
+			contextWindow: 100_000,
+			usedTokens: 96_000,
+			// hasUnfinishedWork omitted ⇒ unknown ≠ none
+		});
+		expect(hint.action).toBe("compact");
+		expect(hint.action).not.toBe("new_session");
+	});
+
+	it("recommends new_session at 95% only with explicit no unfinished work", () => {
+		const hint = recommendContextAction({
+			contextWindow: 100_000,
+			usedTokens: 96_000,
+			hasUnfinishedWork: false,
+		});
+		expect(hint.action).toBe("new_session");
+	});
 });

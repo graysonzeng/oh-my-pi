@@ -286,4 +286,41 @@ mod tests {
 		assert_eq!((image.width(), image.height()), (400, 300));
 		assert_eq!(f.map_point(200.0, 100.0, None).unwrap(), (300.0, 150.0));
 	}
+
+	#[test]
+	fn multi_monitor_negative_origin_maps_to_global_hit() {
+		let left = DesktopDisplay {
+			id: "left".into(),
+			name: "left".into(),
+			x: -1920,
+			y: 0,
+			width: 1920,
+			height: 1080,
+			scale: 1.0,
+			pixel_x: 0,
+			pixel_y: 0,
+			pixel_width: 1920,
+			pixel_height: 1080,
+			is_primary: false,
+		};
+		let main = DesktopDisplay {
+			id: "main".into(),
+			name: "main".into(),
+			x: 0,
+			y: 0,
+			width: 1920,
+			height: 1080,
+			scale: 1.0,
+			pixel_x: 1920,
+			pixel_y: 0,
+			pixel_width: 1920,
+			pixel_height: 1080,
+			is_primary: true,
+		};
+		let f = FrameGeometry::for_displays(&[left, main]);
+		// Screenshot pixel in the left display region → global desktop hit.
+		assert_eq!(f.map_point(100.0, 200.0, None).unwrap(), (-1820.0, 200.0));
+		// Screenshot pixel in the main display region.
+		assert_eq!(f.map_point(2020.0, 50.0, None).unwrap(), (100.0, 50.0));
+	}
 }
