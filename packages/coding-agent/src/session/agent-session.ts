@@ -468,6 +468,7 @@ import {
 	type CustomMessage,
 	type CustomMessagePayload,
 	convertToLlm,
+	invalidateConvertToLlmArrayCache,
 	dedupeEphemeralReply,
 	demoteInterruptedThinking,
 	didSessionMessagesChange,
@@ -2579,7 +2580,7 @@ export class AgentSession implements SettingsScope {
 				this.#readDedupeArtifacts.clear();
 				this.#stats.rebaseAfterCompaction();
 			},
-			refreshLiveGoalModeContext: () => this.refreshLiveGoalModeContext(),
+			refreshLiveGoalModeContext: liveMessages => this.refreshLiveGoalModeContext(liveMessages),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -7920,17 +7921,39 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * After mid-run compaction removes older context (including a prior goal
-	 * message), reinject the current goal into the live tool loop as an aside.
-	 * `auto_compaction_end` already clears the goal hash; clear again for paths
-	 * that rewrite history without that event so `#buildGoalModeMessage` emits.
+	 * After mid-run compaction, the next provider request must carry the current
+	 * structured goal. A kept goal message from an earlier objective is dropped
+	 * so that permission is not sent again as current state. The goal hash is
+	 * cleared when a replacement has to be emitted; `auto_compaction_end` already
+	 * clears it, and history rewrites that skip that event need the same reset.
 	 */
-	async refreshLiveGoalModeContext(): Promise<void> {
+	async refreshLiveGoalModeContext(liveMessages?: AgentMessage[]): Promise<void> {
 		const state = this.#goalModeState;
 		if (!(state?.enabled === true && state.goal.status === "active")) return;
+		const current = this.#renderGoalModeContent();
+		if (!current) return;
+		this.#dropSupersededGoalContext(this.agent.state.messages, current);
+		if (liveMessages && liveMessages !== this.agent.state.messages) {
+			this.#dropSupersededGoalContext(liveMessages, current);
+		}
+		const visible = liveMessages ?? this.agent.state.messages;
+		if (visible.some(message => message.role === "custom" && message.customType === "goal-mode-context")) return;
 		this.#goalContextHash = undefined;
 		this.#goalHashResetReason = "compaction";
 		await this.sendGoalModeContext({ deliverAs: "aside" });
+	}
+
+	/** Remove goal-context messages that are not the current structured objective. */
+	#dropSupersededGoalContext(messages: AgentMessage[], current: string): void {
+		let removed = false;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (!message || message.role !== "custom" || message.customType !== "goal-mode-context") continue;
+			if (message.content === current) continue;
+			messages.splice(index, 1);
+			removed = true;
+		}
+		if (removed) invalidateConvertToLlmArrayCache(messages);
 	}
 
 	async sendVibeModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" }): Promise<void> {
@@ -8076,11 +8099,16 @@ export class AgentSession implements SettingsScope {
 		};
 	}
 
-	#buildGoalModeMessage(): CustomMessage | null {
+	#renderGoalModeContent(): string | null {
 		const inner = this.#goalRuntime.buildActivePrompt();
 		if (!inner) return null;
 		const todoContext = this.#buildGoalTodoContext();
-		const content = prompt.render(goalModeContextPrompt, { goalContext: inner, todoContext });
+		return prompt.render(goalModeContextPrompt, { goalContext: inner, todoContext });
+	}
+
+	#buildGoalModeMessage(): CustomMessage | null {
+		const content = this.#renderGoalModeContent();
+		if (!content) return null;
 		const snapshot = this.#ensureLatencyArmSnapshot();
 		if (snapshot.arms.dsh_goal_hash_shadow === true) {
 			const finalHash = hashGoalFinalString(content);

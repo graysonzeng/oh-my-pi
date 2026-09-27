@@ -562,11 +562,11 @@ export interface SessionMaintenanceHost {
 	rebaseAdvisorPrefix(reason: string): void;
 	rebaseAfterCompaction(): void;
 	/**
-	 * Re-inject live goal-mode context after mid-run history rewrite so the
-	 * continuing tool loop still sees current goals/constraints without waiting
-	 * for the next user `prompt()`.
+	 * Keep the live tool loop on the current structured goal after a mid-run
+	 * rewrite. Pass the loop's message array so a kept earlier goal message is
+	 * dropped instead of remaining the current objective.
 	 */
-	refreshLiveGoalModeContext(): Promise<void>;
+	refreshLiveGoalModeContext(liveMessages?: AgentMessage[]): Promise<void>;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
@@ -3893,9 +3893,7 @@ export class SessionMaintenance {
 				activeMessages.splice(0, activeMessages.length, ...compactedMessages);
 				invalidateConvertToLlmArrayCache(activeMessages);
 			}
-			if (!activeMessages.some(message => message.role === "custom" && message.customType === "goal-mode-context")) {
-				await this.#host.refreshLiveGoalModeContext();
-			}
+			await this.#host.refreshLiveGoalModeContext(activeMessages);
 			return;
 		}
 
@@ -3983,12 +3981,9 @@ export class SessionMaintenance {
 			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
 			invalidateConvertToLlmArrayCache(activeMessages);
 		}
-		// Soft/context-full commits rewrite history but do not always set
-		// `historyRewritten` on the check result (continuation-suppressed mid-run).
-		// Reinject when an active goal message is missing from the live tool loop.
-		if (!activeMessages.some(message => message.role === "custom" && message.customType === "goal-mode-context")) {
-			await this.#host.refreshLiveGoalModeContext();
-		}
+		// A kept goal-mode-context can still describe an objective the user has
+		// already replaced. Refresh drops that text and emits the current one.
+		await this.#host.refreshLiveGoalModeContext(activeMessages);
 		logger.debug("Mid-run compaction ran between provider calls", {
 			contextTokens,
 			contextWindow,

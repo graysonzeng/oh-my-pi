@@ -18,14 +18,17 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-function activeGoalState(): GoalModeState {
+const ALLOW_RENAME_OBJECTIVE = "Organize the module. Renaming files is allowed. MARKER-ALLOW-RENAME";
+const FORBID_RENAME_OBJECTIVE = "Organize the module only. Do not rename files. MARKER-FORBID-RENAME";
+
+function goalState(objective: string): GoalModeState {
 	const now = Date.now();
 	return {
 		enabled: true,
 		mode: "active",
 		goal: {
 			id: "goal-midrun-compaction",
-			objective: "Ship the release",
+			objective,
 			status: "active",
 			tokensUsed: 0,
 			timeUsedSeconds: 0,
@@ -33,6 +36,55 @@ function activeGoalState(): GoalModeState {
 			updatedAt: now,
 		},
 	};
+}
+
+function activeGoalState(): GoalModeState {
+	return goalState("Ship the release");
+}
+
+function goalObjectives(turn: string): string[] {
+	return [...turn.matchAll(/<objective>([\s\S]*?)<\/objective>/g)].map(match => match[1] ?? "");
+}
+
+function toolPairIds(messages: readonly string[]): { calls: string[]; results: string[] } {
+	const calls: string[] = [];
+	const results: string[] = [];
+	for (const raw of messages) {
+		const message = JSON.parse(raw) as {
+			toolCallId?: unknown;
+			content?: Array<{ type?: string; id?: string }>;
+		};
+		if (typeof message.toolCallId === "string") results.push(message.toolCallId);
+		if (!Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (block?.type === "toolCall" && typeof block.id === "string") calls.push(block.id);
+		}
+	}
+	return { calls, results };
+}
+
+function seedSummarizableHistory(sessionManager: SessionManager): void {
+	const bigText = "prior history ".repeat(4_000);
+	for (let i = 0; i < 4; i++) {
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: bigText }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 50,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_050,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({ role: "user", content: "next", timestamp: Date.now() });
+	}
 }
 
 function highUsage(input: number) {
@@ -230,16 +282,52 @@ describe("AgentSession mid-run threshold compaction", () => {
 	it("reinjects live goal context after mid-run compaction for the next tool-loop turn", async () => {
 		const { session, observedContexts } = await createHarness();
 		session.setGoalModeState(activeGoalState());
-		const refreshSpy = vi.spyOn(session, "refreshLiveGoalModeContext");
 		mockCompaction("GOAL-REINJECT-COMPACTED");
 
 		await session.prompt("work on the release");
 
-		expect(refreshSpy).toHaveBeenCalled();
 		const secondTurn = observedContexts[1]?.join("\n") ?? "";
 		expect(secondTurn).toContain("GOAL-REINJECT-COMPACTED");
-		// Goal objective must still be visible after mid-run rewrite (aside reinject).
+		// Goal objective must still be visible after mid-run rewrite.
 		expect(secondTurn).toContain("Ship the release");
+	});
+
+	it("sends the latest structured rename constraint, not the replaced permission, after mid-run compaction", async () => {
+		// Failure mode: the next provider request still shows "renaming is allowed"
+		// as the current <objective> after structured state forbids renaming and
+		// mid-run maintenance rewrites history. This does not parse natural language
+		// and does not claim a live model obeys the constraint.
+		const harness = await createHarness(
+			{ "compaction.keepRecentTokens": 30_000 },
+			{
+				onProviderCall: index => {
+					if (index === 0) session?.setGoalModeState(goalState(FORBID_RENAME_OBJECTIVE));
+				},
+			},
+		);
+		const session = harness.session;
+		seedSummarizableHistory(harness.sessionManager);
+		session.setGoalModeState(goalState(ALLOW_RENAME_OBJECTIVE));
+		mockCompaction("MID-RUN-SUMMARY-NOT-CURRENT-AUTHORIZATION");
+
+		await session.prompt("work on the release");
+
+		const firstTurn = harness.observedContexts[0]?.join("\n") ?? "";
+		const secondMessages = harness.observedContexts[1] ?? [];
+		const secondTurn = secondMessages.join("\n");
+		expect(goalObjectives(firstTurn).some(objective => objective.includes("MARKER-ALLOW-RENAME"))).toBe(true);
+		expect(firstTurn).not.toContain("MARKER-FORBID-RENAME");
+		expect(secondTurn).toContain("MID-RUN-SUMMARY-NOT-CURRENT-AUTHORIZATION");
+		const nextObjectives = goalObjectives(secondTurn);
+		expect(nextObjectives.length).toBeGreaterThan(0);
+		expect(nextObjectives.every(objective => objective.includes("MARKER-FORBID-RENAME"))).toBe(true);
+		expect(nextObjectives.some(objective => objective.includes("MARKER-ALLOW-RENAME"))).toBe(false);
+		expect(secondTurn).not.toContain("MARKER-ALLOW-RENAME");
+		expect(secondTurn).not.toContain("Renaming files is allowed");
+		expect(session.getGoalModeState()?.goal.objective).toBe(FORBID_RENAME_OBJECTIVE);
+		const pairs = toolPairIds(secondMessages);
+		expect([...pairs.calls].sort()).toEqual([...pairs.results].sort());
+		expect(pairs.calls).toContain("tc-0");
 	});
 
 	it("continues below the mid-run threshold while message_end notifications remain pending", async () => {

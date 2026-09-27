@@ -488,19 +488,17 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 		return Math.min(usable, Math.max(1, Math.floor(thresholdTokens)));
 	}
 
-	// Percentage-based threshold. The default absolute reserve can exceed bundled
-	// small-context windows, or nearly consume a 16k-class window; in those
-	// known-impossible default configurations, fall back to the proportional
-	// reserve so threshold/recovery-band checks stay usable. Explicit valid
-	// configured reserves still define the usable prompt budget. Cap at
-	// contextWindow - 1 (matching the fixed-token clamp above) so the threshold
-	// never reaches the whole window even when the reserve resolves to 0.
+	// Percent thresholds share the same usable-window bound as fixed thresholds:
+	// an absolute reserve can exceed the remaining percentage on small windows.
 	const thresholdPercent = settings.thresholdPercent;
 	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
 		return resolveUsableContextTokens(contextWindow, settings);
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
-	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
+	return Math.min(
+		resolveUsableContextTokens(contextWindow, settings),
+		Math.floor(contextWindow * (clampedThresholdPercent / 100)),
+	);
 }
 
 // ============================================================================

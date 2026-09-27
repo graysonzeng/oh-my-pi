@@ -302,7 +302,7 @@ describe("shouldCompact", () => {
 		expect(shouldCompact(10_001, 100_000, settings)).toBe(true);
 	});
 
-	it("should use configured threshold percent", () => {
+	it("caps a configured percent at the proportional safety reserve", () => {
 		const settings: CompactionSettings = {
 			enabled: true,
 			thresholdPercent: 90,
@@ -310,8 +310,8 @@ describe("shouldCompact", () => {
 			keepRecentTokens: 20000,
 		};
 
-		expect(shouldCompact(89_000, 100_000, settings)).toBe(false);
-		expect(shouldCompact(90_001, 100_000, settings)).toBe(true);
+		expect(shouldCompact(85_000, 100_000, settings)).toBe(false);
+		expect(shouldCompact(85_001, 100_000, settings)).toBe(true);
 	});
 
 	it("should use legacy reserve behavior when threshold is set to default sentinel", () => {
