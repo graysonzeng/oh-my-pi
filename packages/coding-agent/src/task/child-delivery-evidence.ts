@@ -63,7 +63,13 @@ export interface ChildDeliveryEvidenceV1 {
 	contentFingerprint?: string;
 }
 
-export type ParentIntegrateClass = "done_valid" | "missing_local_evidence" | "cross_module" | "stale_context";
+export type ParentIntegrateClass =
+	| "done_valid"
+	| "missing_local_evidence"
+	| "cross_module"
+	| "parent_verification_required"
+	| "stale_context"
+	| "scope_unknown";
 
 export type ParentIntegrateAction = "integrate" | "return_to_worker" | "parent_coordinate" | "reread_then_decide";
 
@@ -345,6 +351,11 @@ export function classifyParentIntegrate(input: {
 	requiredAcceptance?: readonly string[];
 	/** Child edited paths outside declared scope. */
 	outOfScopeEdits?: boolean;
+	/**
+	 * Empty change-scope is "unknown", not proven in-scope (F3).
+	 * Prefer this over interpreting outOfScopeEdits===false as adhered.
+	 */
+	scopeBoundary?: "outside" | "inside" | "unknown";
 	/** Shared-interface / multi-module coordination required. */
 	crossModule?: boolean;
 }): ParentIntegrateDecision {
@@ -379,7 +390,16 @@ export function classifyParentIntegrate(input: {
 		};
 	}
 
-	if (input.outOfScopeEdits === true) {
+	if (input.scopeBoundary === "unknown") {
+		return {
+			classification: "scope_unknown",
+			action: "parent_coordinate",
+			reasons: ["change_scope_unknown"],
+			usedAuthorSelfAssessment: false,
+		};
+	}
+
+	if (input.outOfScopeEdits === true || input.scopeBoundary === "outside") {
 		return {
 			classification: "cross_module",
 			action: "parent_coordinate",
@@ -415,11 +435,10 @@ export function classifyParentIntegrate(input: {
 				/parent owns/i.test(check.reason) ||
 				/parent_owns_verify/i.test(check.reason),
 		);
-		// Parent-owns-verify checklists are not worker failures — parent must run
-		// the missing checks instead of bouncing back to the worker.
+		// Parent-owns-verify is distinct from cross_module (F3).
 		if (parentOwnsVerify) {
 			return {
-				classification: "cross_module",
+				classification: "parent_verification_required",
 				action: "parent_coordinate",
 				reasons: ["parent_owns_verify", ...acceptance.missing.map(id => `acceptance_unproven:${id}`)],
 				usedAuthorSelfAssessment: false,
@@ -477,6 +496,7 @@ export function classifyChildResultForParentIntegrate(input: {
 	codeVersionStale?: boolean;
 	requiredAcceptance?: readonly string[];
 	outOfScopeEdits?: boolean;
+	scopeBoundary?: "outside" | "inside" | "unknown";
 	crossModule?: boolean;
 }): ParentIntegrateDecision {
 	return classifyParentIntegrate({
@@ -485,6 +505,7 @@ export function classifyChildResultForParentIntegrate(input: {
 		codeVersionStale: input.codeVersionStale,
 		requiredAcceptance: input.requiredAcceptance,
 		outOfScopeEdits: input.outOfScopeEdits,
+		scopeBoundary: input.scopeBoundary,
 		crossModule: input.crossModule,
 	});
 }
@@ -583,6 +604,7 @@ export function reclassifyParentIntegrateAgainstWorkspace(input: {
 	/** Inbound handoff / facts marked stale. */
 	staleEvidence?: boolean;
 	outOfScopeEdits?: boolean;
+	scopeBoundary?: "outside" | "inside" | "unknown";
 	crossModule?: boolean;
 	/** When false/undefined, write ownership still held blocks integrate. */
 	writeOwnershipReleased?: boolean;
@@ -609,6 +631,7 @@ export function reclassifyParentIntegrateAgainstWorkspace(input: {
 		codeVersionStale,
 		requiredAcceptance: input.requiredAcceptance,
 		outOfScopeEdits: input.outOfScopeEdits,
+		scopeBoundary: input.scopeBoundary,
 		crossModule: input.crossModule === true,
 	});
 

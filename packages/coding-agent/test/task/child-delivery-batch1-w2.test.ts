@@ -202,6 +202,7 @@ describe("W2 executor producer", () => {
 		});
 		expect(decision.action).toBe("parent_coordinate");
 		expect(decision.reasons).toContain("parent_owns_verify");
+		expect(decision.classification).toBe("parent_verification_required");
 		expect(decision.action).not.toBe("return_to_worker");
 	});
 });

@@ -389,7 +389,8 @@ export const cfgWorkflowStoragePath = register({
 		tab: "tasks",
 		group: "Modes",
 		label: "Workflow Storage Path",
-		description: "SQLite path for workflow state; empty uses the default workflow.db in cwd",
+		description:
+			"SQLite path for workflow state; empty uses ~/.omp/agent/workflow.db (never cwd). Legacy cwd workflow.db requires explicit discover/migrate.",
 	},
 });
 

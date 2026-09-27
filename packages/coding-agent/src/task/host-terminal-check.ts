@@ -114,6 +114,11 @@ export async function beginHostTerminalSeal(command: string, cwd: string): Promi
 
 const trustedHostSeals = new Map<string, HostTerminalSeal>();
 
+/** @internal Test-only: register a seal as if {@link finishHostTerminalSeal} minted it. */
+export function rememberHostTerminalSealForTests(seal: HostTerminalSeal): void {
+	trustedHostSeals.set(seal.trustId, seal);
+}
+
 /** Seal only when the after-capture matches the before-capture. Unknown identity does not seal. */
 export async function finishHostTerminalSeal(
 	attempt: HostSealAttempt,
@@ -210,33 +215,91 @@ export function bindHostSealsToAcceptance(input: {
 	acceptanceIds: readonly string[];
 	verificationCommands?: readonly string[];
 	currentCodeVersion: string;
+	/**
+	 * When present, seals prove only command-check criteria with an explicit
+	 * bind (criterionId/description/evidenceRefs ↔ seal.command).
+	 */
+	criteria?: readonly {
+		criterionId: string;
+		description: string;
+		verification: "command-check" | "review" | "manual";
+		evidenceRefs: string[];
+	}[];
 }): { id: string; evidenceLocation: string }[] {
 	const current = input.currentCodeVersion.trim();
 	if (!current) return [];
 	const fresh = input.seals.filter(seal => seal.codeVersion === current && readHostTerminalSeal({ hostSeal: seal }));
 	if (fresh.length === 0) return [];
-	const commands = new Set((input.verificationCommands ?? []).map(sealEligibleVerificationCommand));
+	const commands = new Set(
+		(input.verificationCommands ?? [])
+			.map(sealEligibleVerificationCommand)
+			.filter((cmd): cmd is string => typeof cmd === "string" && cmd.length > 0),
+	);
 	const out: { id: string; evidenceLocation: string }[] = [];
+	const criteria = input.criteria;
+
+	if (criteria && criteria.length > 0) {
+		for (const criterion of criteria) {
+			if (criterion.verification !== "command-check") continue;
+			const match = fresh.find(seal => {
+				const cmd = sealEligibleVerificationCommand(seal.command) ?? seal.command;
+				if (commands.size > 0 && !commands.has(cmd)) return false;
+				return (
+					criterion.criterionId === seal.command ||
+					criterion.criterionId === seal.id ||
+					criterion.description === seal.command ||
+					criterion.evidenceRefs.includes(seal.command) ||
+					criterion.evidenceRefs.includes(cmd)
+				);
+			});
+			if (!match) continue;
+			out.push({ id: criterion.criterionId, evidenceLocation: match.evidenceLocation });
+		}
+		return out;
+	}
+
+	// Legacy path: acceptance ids must explicitly equal seal.command (or be listed
+	// in verificationCommands). seal.id alone does not invent a bind.
 	for (const id of input.acceptanceIds) {
 		const trimmed = id.trim();
 		if (!trimmed) continue;
-		const match = fresh.find(
-			seal =>
-				(seal.id === trimmed || seal.command === trimmed) &&
-				((input.verificationCommands?.length ?? 0) === 0 || commands.has(seal.command)),
-		);
+		const match = fresh.find(seal => {
+			const cmd = sealEligibleVerificationCommand(seal.command) ?? seal.command;
+			const commandBound = trimmed === seal.command || trimmed === cmd;
+			if (!commandBound) return false;
+			if (commands.size === 0) return true;
+			return commands.has(cmd);
+		});
 		if (!match) continue;
 		out.push({ id: trimmed, evidenceLocation: match.evidenceLocation });
 	}
 	return out;
 }
 
-export function filesOutsideScope(changedFiles: readonly string[], scopePaths: readonly string[] | undefined): boolean {
-	if (!scopePaths || scopePaths.length === 0) return false;
+/**
+ * Scope boundary classification (F3).
+ * Empty / missing scope means "unknown" — never "proven in-scope".
+ */
+export type ScopeBoundaryStatus = "outside" | "inside" | "unknown";
+
+export function classifyFilesAgainstScope(
+	changedFiles: readonly string[],
+	scopePaths: readonly string[] | undefined,
+): ScopeBoundaryStatus {
+	if (!scopePaths || scopePaths.length === 0) return "unknown";
 	const scopes = scopePaths.map(scope => scope.replaceAll("\\", "/").replace(/\/+$/, "")).filter(Boolean);
-	if (scopes.length === 0) return false;
-	return changedFiles.some(file => {
+	if (scopes.length === 0) return "unknown";
+	const outside = changedFiles.some(file => {
 		const normalized = file.replaceAll("\\", "/").replace(/^\.\//, "");
 		return !scopes.some(scope => normalized === scope || normalized.startsWith(`${scope}/`));
 	});
+	return outside ? "outside" : "inside";
+}
+
+/**
+ * @deprecated Prefer {@link classifyFilesAgainstScope}. Empty scope returns false
+ * for backward compat but must NOT be read as "proven in-scope" — use classifyFilesAgainstScope.
+ */
+export function filesOutsideScope(changedFiles: readonly string[], scopePaths: readonly string[] | undefined): boolean {
+	return classifyFilesAgainstScope(changedFiles, scopePaths) === "outside";
 }
