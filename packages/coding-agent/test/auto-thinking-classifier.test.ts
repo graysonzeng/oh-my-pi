@@ -394,7 +394,7 @@ describe("auto thinking classifier helpers", () => {
 		expect(parseConfiguredThinkingLevel("max")).toBe(ThinkingLevel.Max);
 	});
 
-	it("maps task effort selectors onto each model's supported thinking range", () => {
+	it("resolves task effort to canonical thinking levels and defaults unrecognized input to high", () => {
 		const xhighCeilingModel = buildModel({
 			id: "mock-xhigh-ceiling",
 			name: "Mock XHigh Ceiling",
@@ -409,17 +409,22 @@ describe("auto thinking classifier helpers", () => {
 			maxTokens: 4096,
 		});
 
-		// hi = whatever the model tops out at; lo = its floor; med = middle of
-		// the supported range (lower-middle for an even-sized range).
-		expect(resolveTaskEffortLevel(xhighCeilingModel, "hi")).toBe(Effort.XHigh);
-		expect(resolveTaskEffortLevel(xhighCeilingModel, "lo")).toBe(Effort.Low);
-		expect(resolveTaskEffortLevel(xhighCeilingModel, "med")).toBe(Effort.Medium);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "high")).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "hi")).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "lo")).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "med")).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, undefined)).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "garbage")).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "low")).toBe(Effort.Low);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "medium")).toBe(Effort.Medium);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "xhigh")).toBe(Effort.XHigh);
+		expect(resolveTaskEffortLevel(xhighCeilingModel, "max")).toBe(Effort.XHigh);
 
 		const sonnet = getBundledModel("anthropic", "claude-sonnet-4-6");
 		if (!sonnet) throw new Error("Expected bundled Claude Sonnet 4.6 model");
-		const sonnetEfforts = sonnet.thinking?.efforts ?? [];
-		expect(resolveTaskEffortLevel(sonnet, "hi")).toBe(sonnetEfforts[sonnetEfforts.length - 1]);
-		expect(resolveTaskEffortLevel(sonnet, "lo")).toBe(sonnetEfforts[0]);
+		expect(resolveTaskEffortLevel(sonnet, "hi")).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(sonnet, "lo")).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(sonnet, "low")).toBe(Effort.Low);
 
 		const highOnlyModel = buildModel({
 			id: "mock-high-only",
@@ -434,12 +439,11 @@ describe("auto thinking classifier helpers", () => {
 			contextWindow: 128_000,
 			maxTokens: 4096,
 		});
-		expect(() => resolveTaskEffortLevel(highOnlyModel, "hi", Effort.Low)).toThrow(
+		expect(() => resolveTaskEffortLevel(highOnlyModel, "high", Effort.Low)).toThrow(
 			"mock/mock-high-only has no supported thinking effort at or below task.maxEffort=low",
 		);
+		expect(resolveTaskEffortLevel(highOnlyModel, "xhigh", Effort.High)).toBe(Effort.High);
 
-		// No controllable effort surface (devin-agent shape) → undefined, so the
-		// spawn falls back to its default selector instead of forcing an effort.
 		const devinModel = {
 			id: "glm-5-2",
 			name: "GLM-5.2",
@@ -453,10 +457,9 @@ describe("auto thinking classifier helpers", () => {
 			maxTokens: 4096,
 		} as Model;
 		expect(resolveTaskEffortLevel(devinModel, "hi")).toBeUndefined();
-
-		// No model at all → full canonical range.
-		expect(resolveTaskEffortLevel(undefined, "lo")).toBe(Effort.Minimal);
-		expect(resolveTaskEffortLevel(undefined, "hi")).toBe(Effort.Max);
+		expect(resolveTaskEffortLevel(undefined, undefined)).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(undefined, "hi")).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(undefined, "max")).toBe(Effort.Max);
 	});
 
 	it("rejects inherited object keys as thinking selectors", () => {

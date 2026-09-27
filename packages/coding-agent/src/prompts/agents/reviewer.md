@@ -5,6 +5,7 @@ tools: read, find, grep, glob, bash, lsp, web_search, ast_grep
 spawns: scout
 shadow-review: code
 model: "@slow"
+thinking-level: high
 output:
   properties:
     overall_correctness:

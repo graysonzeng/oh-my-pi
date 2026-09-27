@@ -33,8 +33,7 @@ _No files to review._
 Use one `task` call with `agent: "reviewer"`, a shared `context`, and a `tasks` array. Put the snapshot ID, captured diff reference, manifest, and instructions in `context` once; task assignments contain only the review axis and owned files.
 {{#when agentCount "==" 1}}Create exactly **1 reviewer task**.{{else}}Spawn exactly **{{agentCount}} reviewer agents** in parallel.{{/when}}
 
-Every routine reviewer task MUST use `effort: "med"`.
-If and only if the diff changes a critical contract boundary—cross-module/public API, persisted schema, authentication/authorization, protocol, compatibility migration, or externally consumed configuration—designate exactly one of the existing tasks as the critical-contract reviewer and use `effort: "hi"`; the reviewer agent caps this at `xhigh`. NEVER add a duplicate full-scope reviewer.
+Every reviewer task SHOULD use `effort: "high"`; no automatic effort escalation for critical contracts. NEVER add a duplicate full-scope reviewer.
 {{#if multiAgent}}
 Partition files into non-overlapping ownership groups:
 - Same directory/module → same agent

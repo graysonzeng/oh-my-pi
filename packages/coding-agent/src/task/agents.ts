@@ -12,7 +12,6 @@ import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
 import scoutMd from "../prompts/agents/scout.md" with { type: "text" };
 import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
@@ -53,7 +52,7 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 			description: "General-purpose subagent with full capabilities for delegated multi-step tasks",
 			spawns: "*",
 			model: "@task",
-			thinkingLevel: AUTO_THINKING,
+			thinkingLevel: Effort.High,
 			// No `prewalk` frontmatter: the generic task hand-off (strong model
 			// plans, then hands off to the smol role) is armed by the
 			// `task.prewalk` setting (default off) or per agent via /agents
@@ -65,11 +64,11 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		fileName: "sonic.md",
 		frontmatter: {
 			name: "sonic",
-			description: "Low-reasoning agent for strictly mechanical updates or data collection only",
-			model: ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"],
-			thinkingLevel: Effort.Medium,
-			// Clamp model :max/:high suffixes — explore/mechanical work must not inherit hi/xhigh (P2 Track R).
-			maxEffort: Effort.Medium,
+			description: "Mechanical execution agent for strictly mechanical updates or data collection only",
+			model: ["gateway/deepseek-v4-flash:high", "gateway/grok-4.6:high"],
+			thinkingLevel: Effort.High,
+			// Keep an explicit high ceiling if a later model pattern carries a higher suffix.
+			maxEffort: Effort.High,
 		},
 		template: taskMd,
 	},

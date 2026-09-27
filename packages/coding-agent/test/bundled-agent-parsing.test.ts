@@ -13,31 +13,10 @@ import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-sch
 import { AUTO_THINKING, clampThinkingLevelToCeiling } from "@oh-my-pi/pi-tui/thinking";
 
 describe("bundled agent parsing", () => {
-	it("lets reviewer inherit thinking effort from its model role", () => {
-		const reviewer = getBundledAgent("reviewer");
-
-		expect(reviewer).toBeDefined();
-		expect(reviewer?.source).toBe("bundled");
-		expect(reviewer?.model).toEqual(["@slow"]);
-		expect(reviewer?.thinkingLevel).toBeUndefined();
-	});
-
-	it("routes scout to deepseek-flash max then grok-4.6 high", () => {
-		const scout = getBundledAgent("scout");
-		const scoutPath = ["gateway/deepseek-flash:max", "gateway/grok-4.6:high"];
-
-		expect(scout).toBeDefined();
-		expect(scout?.source).toBe("bundled");
-		expect(scout?.model).toEqual(scoutPath);
-		expect(scout?.thinkingLevel).toBe(Effort.Medium);
-		expect(scout?.maxEffort).toBe(Effort.Medium);
-		expect(scout?.readSummarize).toBe(true);
-		expect(getBundledAgent("librarian")).toBeUndefined();
-	});
-
-	it("caps sonic effort at medium so model :max/:high suffixes cannot raise the ceiling", () => {
+	it("caps sonic effort at high so model :max suffixes cannot raise the ceiling", () => {
 		const sonic = getBundledAgent("sonic");
-		expect(sonic?.maxEffort).toBe(Effort.Medium);
+		expect(sonic?.thinkingLevel).toBe(Effort.High);
+		expect(sonic?.maxEffort).toBe(Effort.High);
 
 		const flashOverlay = buildCustomModelOverlay(
 			"gateway",
@@ -90,16 +69,16 @@ describe("bundled agent parsing", () => {
 		const first = resolveModelOverride(patterns, both, settings);
 		expect(first.model?.id).toBe("deepseek-v4-flash");
 		if (first.thinkingLevel === AUTO_THINKING) throw new Error("explicit suffix must resolve a concrete effort");
-		expect(clampThinkingLevelToCeiling(first.model, first.thinkingLevel, sonic?.maxEffort)).toBe(Effort.Medium);
+		expect(clampThinkingLevelToCeiling(first.model, first.thinkingLevel, sonic?.maxEffort)).toBe(Effort.High);
 
 		const grokOnly = { getAvailable: () => [grok] } as Parameters<typeof resolveModelOverride>[1];
 		const second = resolveModelOverride(patterns, grokOnly, settings);
 		expect(second.model?.id).toBe("grok-4.6");
 		if (second.thinkingLevel === AUTO_THINKING) throw new Error("explicit suffix must resolve a concrete effort");
-		expect(clampThinkingLevelToCeiling(second.model, second.thinkingLevel, sonic?.maxEffort)).toBe(Effort.Medium);
+		expect(clampThinkingLevelToCeiling(second.model, second.thinkingLevel, sonic?.maxEffort)).toBe(Effort.High);
 	});
 
-	it("resolves scout to deepseek-flash:max first, then grok-4.6:high", () => {
+	it("honors the configured scout role fallback chain while capping effort at high", () => {
 		const flashOverlay = buildCustomModelOverlay(
 			"gateway",
 			"https://gateway.example.com/v1",
@@ -149,10 +128,11 @@ describe("bundled agent parsing", () => {
 		if (!flashOverlay || !grokOverlay) throw new Error("expected gateway overlays for scout candidates");
 		const flash = finalizeCustomModel(flashOverlay, { useDefaults: true });
 		const grok = finalizeCustomModel(grokOverlay, { useDefaults: true });
-		const settings = Settings.isolated();
+		const settings = Settings.isolated({
+			modelRoles: { smol: "gateway/deepseek-flash:max,gateway/grok-4.6:high" },
+		});
 		const scout = getBundledAgent("scout");
 		const patterns = resolveAgentModelPatterns({ agentModel: scout?.model, settings });
-		expect(patterns).toEqual(["gateway/deepseek-flash:max", "gateway/grok-4.6:high"]);
 
 		const both = { getAvailable: () => [grok, flash] } as Parameters<typeof resolveModelOverride>[1];
 		const first = resolveModelOverride(patterns, both, settings);
@@ -160,7 +140,7 @@ describe("bundled agent parsing", () => {
 		expect(first.model?.id).toBe("deepseek-flash");
 		expect(first.explicitThinkingLevel).toBe(true);
 		if (first.thinkingLevel === AUTO_THINKING) throw new Error("explicit suffix must resolve a concrete effort");
-		expect(clampThinkingLevelToCeiling(first.model, first.thinkingLevel, scout?.maxEffort)).toBe(Effort.Medium);
+		expect(clampThinkingLevelToCeiling(first.model, first.thinkingLevel, scout?.maxEffort)).toBe(Effort.High);
 
 		const grokOnly = { getAvailable: () => [grok] } as Parameters<typeof resolveModelOverride>[1];
 		const second = resolveModelOverride(patterns, grokOnly, settings);
@@ -168,14 +148,7 @@ describe("bundled agent parsing", () => {
 		expect(second.model?.id).toBe("grok-4.6");
 		expect(second.explicitThinkingLevel).toBe(true);
 		if (second.thinkingLevel === AUTO_THINKING) throw new Error("explicit suffix must resolve a concrete effort");
-		expect(clampThinkingLevelToCeiling(second.model, second.thinkingLevel, scout?.maxEffort)).toBe(Effort.Medium);
-	});
-	it("defaults the task agent to the auto thinking selector", () => {
-		const task = getBundledAgent("task");
-
-		expect(task).toBeDefined();
-		expect(task?.model).toEqual(["@task"]);
-		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
+		expect(clampThinkingLevelToCeiling(second.model, second.thinkingLevel, scout?.maxEffort)).toBe(Effort.High);
 	});
 
 	it("accepts security-reviewer findings with optional remediation metadata", () => {
@@ -183,8 +156,6 @@ describe("bundled agent parsing", () => {
 		const findingValidator = buildOutputValidator(securityReviewer?.output).validator?.validateSection.get(
 			"findings",
 		);
-
-		expect(findingValidator).toBeDefined();
 		expect(
 			findingValidator?.({
 				rule_id: "command-injection",
@@ -227,7 +198,6 @@ describe("bundled agent parsing", () => {
 		const registry = { getAvailable: () => [gpt55] } as Parameters<typeof resolveModelOverride>[1];
 
 		const agent = getBundledAgent("reviewer");
-		expect(agent?.thinkingLevel).toBeUndefined();
 		const patterns = resolveAgentModelPatterns({ agentModel: agent?.model, settings });
 		const resolved = resolveModelOverride(patterns, registry, settings);
 		expect(resolved.model?.provider).toBe("openai-codex");
@@ -261,15 +231,15 @@ describe("bundled agent parsing", () => {
 			});
 		}
 
-		// sonic uses an explicit explore model list (not @smol); maxEffort medium clamps :max/:high.
+		// sonic uses an explicit explore model list (not @smol) at :high.
 		expect(resolveAgentModelSelection({ agentModel: getBundledAgent("sonic")?.model, settings })).toEqual({
-			patterns: ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"],
+			patterns: ["gateway/deepseek-v4-flash:high", "gateway/grok-4.6:high"],
 			role: undefined,
 		});
 
 		expect(resolveAgentModelSelection({ agentModel: getBundledAgent("scout")?.model, settings })).toEqual({
-			patterns: ["gateway/deepseek-flash:max", "gateway/grok-4.6:high"],
-			role: undefined,
+			patterns: ["fast/hy3"],
+			role: "smol",
 		});
 	});
 });

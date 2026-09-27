@@ -25,7 +25,7 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { ConfiguredThinkingLevel, TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -132,8 +132,8 @@ export interface StructuredSubagentRequest {
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
-	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
-	effort?: TaskEffort;
+	/** Per-spawn thinking effort; canonical names clamp to model support and override the agent's default selector. */
+	effort?: string;
 	/** Request a code-review shadow cohort (`code`) or force it off. */
 	shadowReview?: "code" | "off";
 	identity?: StructuredSubagentIdentity;

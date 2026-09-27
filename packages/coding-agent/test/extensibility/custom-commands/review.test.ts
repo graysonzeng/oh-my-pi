@@ -182,8 +182,8 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		const promptText = result!;
 		expect(promptText).toContain("Check authentication boundaries");
-		expect(promptText).toContain('Use `effort: "med"` by default');
-		expect(promptText).toContain('use `effort: "hi"`');
+		expect(promptText).toContain('Use `effort: "high"`');
+		expect(promptText).toContain("no automatic effort escalation");
 	});
 
 	it("does not submit empty custom review instructions", async () => {
@@ -230,8 +230,8 @@ describe("ReviewCommand", () => {
 			expect(promptText).toContain(
 				`Snapshot ID: \`sha256:${new Bun.CryptoHasher("sha256").update(SAMPLE_JJ_DIFF).digest("hex")}\``,
 			);
-			expect(promptText).toContain('Every routine reviewer task MUST use `effort: "med"`');
-			expect(promptText).toContain('use `effort: "hi"`');
+			expect(promptText).toContain('Every reviewer task SHOULD use `effort: "high"`');
+			expect(promptText).toContain("no automatic effort escalation");
 			expect(promptText).toContain(
 				"Put the snapshot ID, captured diff reference, manifest, and instructions in `context` once",
 			);
@@ -757,7 +757,5 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		const promptText = result!;
 		expect(promptText).toContain("focus auth");
-		expect(promptText).toContain('Use `effort: "med"` by default');
-		expect(promptText).toContain("**2 parallel tasks** only when");
 	});
 });

@@ -70,7 +70,6 @@ import {
 	modelSupportsEffortCeiling,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
-	type TaskEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
@@ -515,8 +514,8 @@ export interface ExecutorOptions {
 	 */
 	parentActiveModelPattern?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
-	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
-	effort?: TaskEffort;
+	/** Caller-requested thinking effort; canonical names clamp to model support and win over {@link thinkingLevel}. Unrecognized values resolve to high. */
+	effort?: string;
 	/** Request a code-review shadow cohort (`code`) or force it off. */
 	shadowReview?: "code" | "off";
 	/** Schema used to validate the final structured completion. */
@@ -4237,13 +4236,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
-			// Caller-requested coarse effort maps onto the resolved model's
-			// supported range, then respects the operator-configured ceiling and
-			// the agent frontmatter `maxEffort`. Undefined falls through to the
-			// normal selectors below. The ceiling outlives initial resolution: it
-			// rides into the session so retry-fallback recovery cannot clamp effort
-			// back up past it. Mandatory single-effort models override the ceiling
-			// only when resolving their own effective level.
+			// Caller-requested effort maps onto the resolved model's supported
+			// range, then respects the operator-configured ceiling and the agent
+			// frontmatter `maxEffort`. Undefined falls through to explicit `:level`
+			// suffixes and the agent default. A leftover `auto` agent default
+			// becomes high so omitted effort cannot inherit auto. The ceiling
+			// outlives initial resolution: it rides into the session so
+			// retry-fallback recovery cannot clamp effort back up past it.
+			// Mandatory single-effort models override the ceiling only when
+			// resolving their own effective level.
 			const globalEffortCeiling = options.effort !== undefined ? cfgTaskMaxEffort.get(settings) : undefined;
 			const spawnEffortCeiling =
 				agent.maxEffort !== undefined
@@ -4264,11 +4265,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level. Agent ceilings clamp every concrete selector;
-			// `auto` is constrained later by the same session ceiling.
+			// model pattern > agent-definition default > high. Agent ceilings
+			// clamp every concrete selector.
+			const agentThinkingLevel =
+				thinkingLevel === AUTO_THINKING || thinkingLevel === undefined
+					? resolveTaskEffortLevel(model)
+					: thinkingLevel;
 			const selectedThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
+				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : agentThinkingLevel);
 			const effectiveThinkingLevel =
 				selectedThinkingLevel === AUTO_THINKING
 					? selectedThinkingLevel

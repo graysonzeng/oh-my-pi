@@ -270,42 +270,37 @@ export function clampAutoThinkingEffort(
 	return chosen;
 }
 
-/** Coarse per-spawn effort selectors accepted by the task tool. */
-export const TASK_EFFORTS = ["lo", "med", "hi"] as const;
+/** Canonical per-spawn thinking efforts accepted by the task tool. */
+export const TASK_EFFORTS = THINKING_EFFORTS;
 
-/** Coarse task-spawn effort: the lowest, middle, or highest thinking level the target model supports. */
-export type TaskEffort = (typeof TASK_EFFORTS)[number];
+/** Per-spawn thinking effort: a real {@link Effort}, not a relative lo/med/hi rank. */
+export type TaskEffort = Effort;
+
+function parseCanonicalTaskEffort(value: string | null | undefined): Effort | undefined {
+	if (value === undefined || value === null) return undefined;
+	const trimmed = value.trim();
+	return THINKING_EFFORTS.includes(trimmed as Effort) ? (trimmed as Effort) : undefined;
+}
 
 /**
- * Maps a coarse task effort onto the model's supported thinking range:
- * `lo` = lowest supported level, `hi` = highest (whatever the model tops out
- * at — high, xhigh, or max), `med` = the middle (lower of the two middles for
- * an even-sized range). Without a model, maps over the full canonical range.
- * Returns `undefined` when the model has no controllable effort surface, so
- * callers fall back to their default selector (e.g. `auto`). Throws when the
- * configured ceiling is below the model's lowest supported effort.
+ * Resolves a per-spawn effort onto the model's supported thinking range.
+ * Only exact canonical names (`minimal`/`low`/`medium`/`high`/`xhigh`/`max`)
+ * keep their meaning; abbreviations such as `hi`/`lo`/`med` and any other
+ * unrecognized or missing value default to {@link Effort.High}. Returns
+ * `undefined` when the model has no controllable effort surface. Throws when
+ * the configured ceiling is below the model's lowest supported effort.
  */
 export function resolveTaskEffortLevel(
 	model: Model | undefined,
-	effort: TaskEffort,
+	effort?: string | null,
 	maxEffort?: Effort,
 ): Effort | undefined {
 	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
 	const mandatorySingleEffort =
 		model?.thinking?.requiresEffort === true && supported.length === 1 ? supported[0] : undefined;
 	if (supported.length === 0) return undefined;
-	let resolved: Effort;
-	switch (effort) {
-		case "lo":
-			resolved = supported[0];
-			break;
-		case "med":
-			resolved = supported[(supported.length - 1) >> 1];
-			break;
-		case "hi":
-			resolved = supported[supported.length - 1];
-			break;
-	}
+	const requested = parseCanonicalTaskEffort(effort) ?? Effort.High;
+	const resolved = (model ? clampThinkingLevelForModel(model, requested) : requested) ?? requested;
 	if (maxEffort === undefined) return resolved;
 	if (mandatorySingleEffort !== undefined) return mandatorySingleEffort;
 	const maxIndex = THINKING_EFFORTS.indexOf(maxEffort);

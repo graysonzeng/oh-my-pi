@@ -1726,8 +1726,8 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
-	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
-	effort?: "lo" | "med" | "hi";
+	/** Per-spawn thinking effort (`minimal`/`low`/`medium`/`high`/`xhigh`/`max`). Overrides the agent's default selector. Unrecognized values resolve to high. */
+	effort?: string;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -1751,8 +1751,8 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
-	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
-	effort?: "lo" | "med" | "hi";
+	/** Per-spawn thinking effort (flat form). Canonical names clamp to model support; unrecognized values resolve to high. */
+	effort?: string;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */

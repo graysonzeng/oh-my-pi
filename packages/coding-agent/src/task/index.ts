@@ -30,7 +30,7 @@ import taskCoordinationAdvisoryTemplate from "../prompts/tools/task-coordination
 import taskSpawnFeedbackTemplate from "../prompts/tools/task-spawn-feedback.md" with { type: "text" };
 import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specialization-advisory.md" with { type: "text" };
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
-import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
@@ -267,10 +267,10 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
  * undefined when valid.
  */
 
-/** Reject an out-of-range `effort` selector on internal/stale-transcript calls that bypass the wire schema. */
-function validateEffort(effort: TaskEffort | undefined, label: string): string | undefined {
-	if (effort === undefined || TASK_EFFORTS.includes(effort)) return undefined;
-	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
+/** Non-string `effort` values are invalid; unrecognized strings default to high at resolve time. */
+function validateEffort(effort: TaskEffort | string | undefined, label: string): string | undefined {
+	if (effort === undefined || typeof effort === "string") return undefined;
+	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}.`;
 }
 
 function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {

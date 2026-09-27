@@ -156,6 +156,13 @@ describe("task.batch schema gating", () => {
 		cfgTaskEnableEffort.override(batchSession.settings, true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
 		expect(batch.description).toContain("`effort`");
+		const effortSchema = getSchemaProperties(flat).effort;
+		expect(effortSchema).toEqual(expect.objectContaining({ type: "string" }));
+		const effortJson = JSON.stringify(effortSchema);
+		expect(effortJson).toContain("minimal");
+		expect(effortJson).toContain("xhigh");
+		expect(effortJson).not.toContain('"enum"');
+		expect(effortJson).not.toContain('"hi"');
 	});
 
 	it("keeps isolation boolean-only in the batch item schema", async () => {

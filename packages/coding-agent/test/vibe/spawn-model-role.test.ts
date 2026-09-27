@@ -87,7 +87,7 @@ describe("vibe worker spawn model role", () => {
 			}),
 		);
 
-		expect(options.modelOverride).toEqual(["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"]);
+		expect(options.modelOverride).toEqual(["gateway/deepseek-v4-flash:high", "gateway/grok-4.6:high"]);
 		expect(options.modelRole).toBeUndefined();
 		expect(options.performanceClass).toBe("explore");
 	});

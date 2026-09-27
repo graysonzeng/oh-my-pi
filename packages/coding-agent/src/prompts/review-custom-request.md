@@ -8,7 +8,7 @@ Use `task`: `agent: "reviewer"`, `tasks` array. Create exactly **1 reviewer task
 
 Use the `task` tool with `agent: "reviewer"`, shared `context`, and a `tasks` array.
 Create exactly **1 reviewer task**. Put the custom instructions and referenced evidence in `context`; keep the assignment scoped.
-Use `effort: "med"` by default. Only when the custom instructions explicitly target a critical contract boundary—cross-module/public API, persisted schema, authentication/authorization, protocol, compatibility migration, or externally consumed configuration—use `effort: "hi"`; the reviewer agent caps this at `xhigh`.
+Use `effort: "high"`. Keep critical-contract review within the assigned scope; no automatic effort escalation.
 
 ### Reviewer Instructions
 

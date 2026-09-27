@@ -3,8 +3,8 @@ name: scout
 description: Fast read-only scout for broad codebase exploration when delegation saves time or context. Handle bounded lookups directly; an unknown path alone does not require a scout.
 tools: read, find, grep, glob, ast_grep, code_intel, web_search
 model: "@smol"
-thinking-level: medium
-max-effort: medium
+thinking-level: high
+max-effort: high
 read-summarize: true
 output:
   properties:

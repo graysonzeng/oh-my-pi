@@ -10,12 +10,13 @@ Job IDs are process-local and expire roughly five minutes after settlement. Afte
 Handle small, clear work and bounded lookups directly. Delegate only when expected time savings, necessary independent evidence, or specialist capability outweighs handoff costs; honor explicit user requests for agents.
 Use most specific agent.{{#if scoutAvailable}} Delegated read-only research uses `scout` only when broad exploration justifies the handoff, not merely because paths are unknown.{{/if}}{{#if sonicAvailable}} Delegated mechanical implementation uses `sonic`; complex implementation, design, or multi-file contracts use `task`.{{/if}} Prefer one agent to investigate + edit. Omit `agent` only for default (`{{defaultAgent}}`); NEVER specify it.
 Do not spawn then immediately enter a wait loop; continue other work until blocked. Review/Gate dual-axis MUST be one `tasks[]` batch.
+Include already-confirmed findings, relevant symbols, and reproduction evidence in the brief; avoid making the child rediscover them. Keep one acceptance goal per assignment; retain unrelated follow-up checks in the parent.
 Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate via `write agent://<id>`{{/if}}. While a subagent job is running, its declared target files are mid-run state and MUST NOT be overwritten until delivery or cancellation. Set interfaces in {{#if batchEnabled}}`context`{{else}}the task{{/if}}. Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
 
 # Inputs
 `name`: CamelCase ≤32, auto-generated if omitted; address agent by name. `outputSchema` overrides agent/session schemas.
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
-{{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by complexity.
+{{/if}}{{#if effortEnabled}}`effort`: `"minimal"`|`"low"`|`"medium"`|`"high"`|`"xhigh"`|`"max"`. Omitted or unrecognized values default to `"high"`; use canonical names, not `"lo"`/`"med"`/`"hi"`.
 {{/if}}`schemaMode`: default permissive warns after retries; strict fails.
 {{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
 {{else}}`isolated`: worktree; changes retained, not applied.

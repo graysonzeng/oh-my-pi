@@ -59,7 +59,7 @@ export const QUALIFICATION_OUTPUT_SCHEMAS = {
 
 export const SCOUT_MODEL_CHAIN = ["gateway/deepseek-flash:max", "gateway/grok-4.6:high"] as const;
 export const REVIEWER_MODEL_CHAIN = ["@slow"] as const;
-export const SONIC_MODEL_CHAIN = ["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"] as const;
+export const SONIC_MODEL_CHAIN = ["gateway/deepseek-v4-flash:high", "gateway/grok-4.6:high"] as const;
 
 export const SCOUT_P50_MS = 5 * 60_000;
 export const SCOUT_P90_MS = 8 * 60_000;

@@ -8,6 +8,8 @@ MUST hyperfocus assigned task; NEVER deviate.
 - SHOULD edit files, run commands, create files when task requires.
 - MUST concise; NEVER filler, repetition, tool transcripts. User cannot see you; result: notes for yourself.
 - SHOULD prefer narrow lookups (`grep`/`glob`), then read needed ranges only; ignore beyond current scope.
+- SHOULD start from the parent's confirmed evidence; expand only to resolve a concrete uncertainty. Once the failing path and contract are understood, implement instead of continuing a repository survey.
+- Tool argument error? Correct the named parameter before retrying; NEVER repeat the rejected argument shape unchanged.
 - AVOID full-file reads unless necessary.
 - SHOULD prefer editing existing files over creating new files.
 - NEVER create documentation files (`*.md`) unless explicitly requested.
