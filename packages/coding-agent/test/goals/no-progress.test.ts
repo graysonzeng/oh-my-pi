@@ -90,22 +90,67 @@ describe("goal no-progress observation (D2)", () => {
 			hostReasons: ["missing_verification"],
 			codeVersionFingerprint: "v2",
 		});
-		// Pairing context differs → fingerprints differ by design when code version
-		// is included as pairing. Progress equality still requires host facts.
+		// Code version is pairing context only — not part of the equality key.
 		expect(first).toBeTruthy();
 		expect(second).toBeTruthy();
-		expect(first).not.toBe(second);
+		expect(first).toBe(second);
 
-		// Same pairing + same host facts → identical.
-		const a = buildProgressFingerprint({
-			trustedFailureIds: ["x"],
-			codeVersionFingerprint: "same",
+		let state = gate();
+		for (const [i, hash] of ["h1", "h2", "h3"].entries()) {
+			const result = applyNoProgressObservation({
+				gate: state,
+				decision: "continue",
+				policyEnabled: true,
+				threshold: 3,
+				observation: {
+					hostReasons: ["missing_verification"],
+					codeVersionFingerprint: hash,
+					nominationId: `n-hash-${i}`,
+				},
+			});
+			state = mergeNoProgressIntoGate(state, result);
+		}
+		expect(state.noProgressCount).toBe(3);
+	});
+
+	it("mixed unpaired_tools + missing_verification waits and does not pause at threshold 1", () => {
+		const result = applyNoProgressObservation({
+			gate: gate({ noProgressCount: 0 }),
+			decision: "continue",
+			policyEnabled: true,
+			threshold: 1,
+			observation: {
+				hostReasons: ["unpaired_tools", "missing_verification"],
+				nominationId: "n-mixed",
+			},
 		});
-		const b = buildProgressFingerprint({
-			trustedFailureIds: ["x"],
-			codeVersionFingerprint: "same",
-		});
-		expect(a).toBe(b);
+		expect(result.shouldPause).toBe(false);
+		expect(result.comparable).toBe(false);
+		expect(result.noProgressCount).toBe(0);
+	});
+
+	it("nominate revision churn does not reset no-progress streak (acceptance content only)", () => {
+		const acceptanceRevision = "obj-fp-stable";
+		let state = gate({ goalRevision: 1 });
+		const counts: number[] = [];
+		for (let i = 1; i <= 4; i++) {
+			state = { ...state, goalRevision: i };
+			const result = applyNoProgressObservation({
+				gate: state,
+				decision: "continue",
+				policyEnabled: true,
+				threshold: 3,
+				observation: {
+					acceptanceRevision,
+					hostReasons: ["missing_verification"],
+					nominationId: `nom-${i}`,
+				},
+			});
+			state = mergeNoProgressIntoGate(state, result);
+			counts.push(result.noProgressCount);
+		}
+		expect(counts).toEqual([1, 2, 3, 4]);
+		expect(state.noProgressCount).toBe(4);
 	});
 
 	it("does not double-count the same nomination id", () => {
@@ -378,13 +423,47 @@ describe("goal nominateComplete preserves no-progress observation fields (D2)", 
 		expect(late).toBe("stale");
 		expect(harness.getState()?.goal.hostGate?.noProgressCount).toBe(1);
 
-		// Resume: new nomination preserves observation baseline.
-		const resumed = await harness.runtime.nominateComplete({
+		// Recover path: new nomination preserves observation baseline.
+		const recovered = await harness.runtime.nominateComplete({
 			nominationId: "n2",
 			turnId: "turn-1",
 			generation: 7,
 		});
-		expect(resumed.goal.hostGate?.noProgressCount).toBe(1);
-		expect(resumed.goal.hostGate?.lastProgressFingerprint).toBe(finger ?? "fp");
+		expect(recovered.goal.hostGate?.noProgressCount).toBe(1);
+		expect(recovered.goal.hostGate?.lastProgressFingerprint).toBe(finger ?? "fp");
+	});
+
+	it("explicit resumeGoal rebuilds no-progress baseline", async () => {
+		const finger = buildProgressFingerprint({
+			trustedFailureIds: ["seal:a"],
+			hostReasons: ["missing_verification"],
+		});
+		const harness = createHarness({
+			enabled: false,
+			mode: "active",
+			goal: {
+				id: "g-resume",
+				objective: "Ship it",
+				status: "paused",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: 1,
+				updatedAt: 1,
+				hostGate: {
+					goalRevision: 2,
+					pendingVerification: false,
+					consecutiveContinueCount: 0,
+					noProgressCount: 3,
+					lastProgressFingerprint: finger ?? "fp",
+					lastObservedNominationId: "n-old",
+					lastPauseReason: "identical_host_observation",
+				},
+			},
+		});
+		const resumed = await harness.runtime.resumeGoal();
+		expect(resumed.goal.hostGate?.noProgressCount).toBe(0);
+		expect(resumed.goal.hostGate?.lastProgressFingerprint).toBeUndefined();
+		expect(resumed.goal.hostGate?.lastObservedNominationId).toBeUndefined();
+		expect(resumed.goal.hostGate?.lastPauseReason).toBeUndefined();
 	});
 });

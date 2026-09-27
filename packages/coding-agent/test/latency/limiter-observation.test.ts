@@ -14,6 +14,8 @@ describe("limiter observation (D8)", () => {
 		expect(result.unknownOwners).toEqual(["provider_request", "task_concurrency", "async_job_capacity"]);
 		expect(result.formatted).toContain("unknown_occupancy=");
 		expect(result.formatted).toContain("unifiedSemaphore=false");
+		expect(result.formatted).toContain("task_concurrency: unknown_occupancy");
+		expect(result.formatted).not.toMatch(/task_concurrency: blocking=false inFlight=0/);
 	});
 
 	it("attributes task and job occupancy on separate owners", async () => {

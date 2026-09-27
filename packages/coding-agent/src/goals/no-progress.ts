@@ -97,8 +97,7 @@ export function buildProgressFingerprint(input: ProgressObservationInput): strin
 	if (!hasComparable) return null;
 
 	// Intentionally omit codeVersionFingerprint from the equality key: hash
-	// churn alone is not progress. Include it only as pairing context so stale
-	// evidence against a different version is not compared.
+	// churn alone is not progress.
 	return fingerprintStable({
 		v: NO_PROGRESS_OBSERVATION_VERSION,
 		acceptanceRevision: acceptanceRevision ?? null,
@@ -106,7 +105,6 @@ export function buildProgressFingerprint(input: ProgressObservationInput): strin
 		provenAcceptanceIds: provenAcceptanceIds ?? null,
 		blockerKey: blockerKey ?? null,
 		hostReasons: hostReasons ?? null,
-		codeVersionPairing: input.codeVersionFingerprint?.trim() || null,
 	});
 }
 
@@ -140,8 +138,9 @@ export function applyNoProgressObservation(input: ApplyNoProgressPolicyInput): P
 	}
 
 	// Unsettled / waiting reasons should not burn a no-progress quota.
-	const waiting =
-		observation.hostReasons?.includes("unpaired_tools") === true && (observation.hostReasons?.length ?? 0) === 1;
+	// Any unpaired_tools signal means tools are still in flight — wait even
+	// when mixed with other continue reasons.
+	const waiting = observation.hostReasons?.includes("unpaired_tools") === true;
 	if (waiting) {
 		return {
 			fingerprint: gate.lastProgressFingerprint ?? null,

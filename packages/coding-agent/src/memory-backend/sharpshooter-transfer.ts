@@ -6,11 +6,10 @@
  * Per-record scope checks, content checksums, consolidation lock, and
  * inspectable per-item errors (no throw that loses written IDs).
  *
- * Uses an exclusive lock file (not `@oh-my-pi/pi-utils` barrel / natives) so
- * transfer stays loadable without the native addon in unit tests.
+ * Uses the SAME consolidation lock as the write owner (`withFileLock` on
+ * `sharpshooterLockPath`) — never a sidecar `.transfer.lock`.
  */
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { sharpshooterLockPath, sharpshooterMemoryFilePath } from "../sharpshooter/paths";
 import { SHARPSHOOTER_MEMORY_FILES } from "../sharpshooter/types";
@@ -50,28 +49,6 @@ async function readOptionalText(filePath: string): Promise<string | null> {
 	} catch (err) {
 		if (isEnoent(err)) return null;
 		throw err;
-	}
-}
-
-/** Exclusive lock file beside consolidate.lock — no natives dependency. */
-async function withSharpshooterTransferLock<T>(agentDir: string, cwd: string, fn: () => Promise<T>): Promise<T> {
-	const lockPath = `${sharpshooterLockPath(agentDir, cwd)}.transfer.lock`;
-	await fs.mkdir(path.dirname(lockPath), { recursive: true });
-	let handle: fs.FileHandle | undefined;
-	try {
-		handle = await fs.open(lockPath, "wx");
-	} catch (err) {
-		const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
-		if (code === "EEXIST") {
-			throw new Error("sharpshooter transfer lock held — refuse concurrent apply");
-		}
-		throw err;
-	}
-	try {
-		return await fn();
-	} finally {
-		await handle.close().catch(() => {});
-		await fs.unlink(lockPath).catch(() => {});
 	}
 }
 
@@ -202,6 +179,19 @@ export async function applySharpshooterImport(
 	const overwritten: string[] = [];
 	const errors: MemoryImportApplyResult["errors"] = [];
 
+	if (!options?.pkg) {
+		return {
+			created,
+			skipped,
+			conflicts: preview.items.map(i => i.record.sourceId ?? i.record.contentFingerprint),
+			overwritten,
+			errors: [{ id: "*", error: "pkg_required: apply refuses to write without the verified package" }],
+			partial: false,
+			message: "import refused — package required at apply boundary",
+			writtenIds: [],
+		};
+	}
+
 	if (preview.blockingIssues.length > 0) {
 		return {
 			created,
@@ -215,41 +205,22 @@ export async function applySharpshooterImport(
 		};
 	}
 
-	if (options?.pkg) {
-		const gate = assertPackageApplyable(options.pkg, context.cwd, {
-			confirmBinding: options.confirmBinding,
-			preview,
-		});
-		if (!gate.ok) {
-			return {
-				created,
-				skipped,
-				conflicts: preview.items.map(i => i.record.sourceId ?? i.record.contentFingerprint),
-				overwritten,
-				errors: gate.issues.map(i => ({ id: i.sourceId ?? "*", error: `${i.code}: ${i.message}` })),
-				partial: false,
-				message: "import refused — apply-boundary validation failed",
-				writtenIds: [],
-			};
-		}
-	} else if (preview.requiresCrossScopeConfirm) {
-		if (!options?.confirmBinding || options.confirmBinding !== preview.confirmBinding) {
-			return {
-				created,
-				skipped,
-				conflicts: preview.items.map(i => i.record.sourceId ?? i.record.contentFingerprint),
-				overwritten,
-				errors: [
-					{
-						id: "*",
-						error: "confirm_binding_required: cross-scope import requires matching preview confirm binding",
-					},
-				],
-				partial: false,
-				message: "import refused — confirm binding missing or mismatched",
-				writtenIds: [],
-			};
-		}
+	const pkg = options.pkg;
+	const gate = assertPackageApplyable(pkg, context.cwd, {
+		confirmBinding: options.confirmBinding,
+		preview,
+	});
+	if (!gate.ok) {
+		return {
+			created,
+			skipped,
+			conflicts: preview.items.map(i => i.record.sourceId ?? i.record.contentFingerprint),
+			overwritten,
+			errors: gate.issues.map(i => ({ id: i.sourceId ?? "*", error: `${i.code}: ${i.message}` })),
+			partial: false,
+			message: "import refused — apply-boundary validation failed",
+			writtenIds: [],
+		};
 	}
 
 	if (!options?.replaceSystemArtifacts) {
@@ -271,33 +242,39 @@ export async function applySharpshooterImport(
 
 	const allowed = new Set<string>(SHARPSHOOTER_MEMORY_FILES);
 	try {
-		await withSharpshooterTransferLock(context.agentDir, context.cwd, async () => {
-			for (const item of preview.items) {
-				const id = item.record.sourceId ?? item.record.contentFingerprint;
-				if (item.action === "skip") {
-					skipped.push(id);
-					continue;
+		// Same lock stem + options as runSharpshooterConsolidation.
+		await withFileLock(
+			sharpshooterLockPath(context.agentDir, context.cwd),
+			async () => {
+				for (const [index, item] of preview.items.entries()) {
+					const verified = pkg.records[index]!;
+					const id = verified.sourceId ?? verified.contentFingerprint;
+					if (item.action === "skip") {
+						skipped.push(id);
+						continue;
+					}
+					if (item.action === "conflict") {
+						conflicts.push(id);
+						continue;
+					}
+					const name = verified.sourceId?.replace(/^sharpshooter:/, "") ?? "";
+					if (!allowed.has(name)) {
+						skipped.push(id);
+						continue;
+					}
+					try {
+						const dest = sharpshooterMemoryFilePath(context.agentDir, context.cwd, name);
+						await Bun.write(dest, `${verified.content.trim()}\n`);
+						if (item.action === "overwrite") overwritten.push(id);
+						else created.push(id);
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						errors.push({ id, error: message });
+					}
 				}
-				if (item.action === "conflict") {
-					conflicts.push(id);
-					continue;
-				}
-				const name = item.record.sourceId?.replace(/^sharpshooter:/, "") ?? "";
-				if (!allowed.has(name)) {
-					skipped.push(id);
-					continue;
-				}
-				try {
-					const dest = sharpshooterMemoryFilePath(context.agentDir, context.cwd, name);
-					await Bun.write(dest, `${item.record.content.trim()}\n`);
-					if (item.action === "overwrite") overwritten.push(id);
-					else created.push(id);
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					errors.push({ id, error: message });
-				}
-			}
-		});
+			},
+			{ retries: 1, retryDelayMs: 1 },
+		);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		errors.push({ id: "*", error: `consolidate_lock: ${message}` });

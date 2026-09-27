@@ -146,7 +146,17 @@ export interface ParsedSession {
 	thinkingLevels: string[];
 	spawnObservations: SpawnResultRow[];
 	parentFinalVerifications: ParentFinalVerificationObservation[];
-	/** Goal host-gate lastDecision was candidate_complete (mode_change facts). */
+	/**
+	 * Episode keys opened during parse (`sessionId::rootUserEntryId`).
+	 * Coverage matrices must include every episode — even those without a receipt.
+	 */
+	episodeKeys?: string[];
+	/**
+	 * Per-episode latest candidate_complete sticky flag. Session-wide sticky
+	 * must not pollute later episodes after user_confirmed / new goal.
+	 */
+	goalCandidateByEpisode?: Record<string, boolean>;
+	/** @deprecated Prefer goalCandidateByEpisode — retained for older callers. */
 	goalCandidateComplete?: boolean;
 	/** Parent integrate decisions collected from custom entries (delivery evidence). */
 	parentIntegrateDecisions?: Array<{
@@ -776,14 +786,36 @@ function collectParentIntegrateDecision(session: ParsedSession, customType: unkn
 	session.parentIntegrateDecisions.push({ rowId, episodeKey: ep, decision });
 }
 
-function collectGoalCandidateComplete(session: ParsedSession, mode: unknown, data: unknown): void {
+function collectGoalCandidateComplete(
+	session: ParsedSession,
+	mode: unknown,
+	data: unknown,
+	episodeKey: string | null,
+): void {
 	if (mode !== "goal" && mode !== "goal_paused") return;
 	if (!isRecord(data)) return;
 	const goal = isRecord(data.goal) ? data.goal : undefined;
 	if (!goal) return;
 	const hostGate = isRecord(goal.hostGate) ? goal.hostGate : undefined;
-	if (hostGate?.lastDecision === "candidate_complete") {
+	const decision = hostGate?.lastDecision;
+	if (decision === "candidate_complete") {
 		session.goalCandidateComplete = true;
+		if (episodeKey) {
+			session.goalCandidateByEpisode ??= {};
+			session.goalCandidateByEpisode[episodeKey] = true;
+		}
+		return;
+	}
+	// user_confirmed / continue / blocked / new goal clears candidate sticky for this episode.
+	if (decision === "user_confirmed" || decision === "continue" || decision === "blocked" || mode === "goal_paused") {
+		if (episodeKey) {
+			session.goalCandidateByEpisode ??= {};
+			session.goalCandidateByEpisode[episodeKey] = false;
+		}
+		// Session sticky only clears on explicit confirmation / goal replace signals.
+		if (decision === "user_confirmed" || decision === "continue") {
+			session.goalCandidateComplete = false;
+		}
 	}
 }
 
@@ -931,7 +963,7 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 			continue;
 		}
 		if (type === "mode_change") {
-			if (onActiveBranch) collectGoalCandidateComplete(session, raw.mode, raw.data);
+			if (onActiveBranch) collectGoalCandidateComplete(session, raw.mode, raw.data, episodeFor());
 			continue;
 		}
 		if (type === "custom") {
@@ -981,6 +1013,11 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 				if (entryId) {
 					currentRootUserEntryId = entryId;
 					afterAccepted = false;
+					const key = episodeFor();
+					if (key) {
+						session.episodeKeys ??= [];
+						if (!session.episodeKeys.includes(key)) session.episodeKeys.push(key);
+					}
 				}
 			}
 			continue;
@@ -1402,33 +1439,61 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 			}
 		}
 
-		const candidateComplete = parent.goalCandidateComplete === true;
 		const groups = groupVerificationsByEpisode(parent.parentFinalVerifications);
+		const episodeUniverse = parent.episodeKeys ?? [];
+		const coveredEpisodes = new Set<string>();
+		const seenEventIds = new Set<string>();
 		for (const group of groups) {
+			if (group.episodeKey) coveredEpisodes.add(group.episodeKey);
 			if (group.verifications.length === 0) {
-				acceptanceCoverageCells.push(
-					...classifyParentFinalCoverage({
-						rowId: parent.stem || parent.path,
-						observation: null,
-						excludeFixtureAuthority: true,
-						candidateComplete,
-					}),
-				);
+				// Legacy null-bucket only when we have no episode inventory.
+				if (episodeUniverse.length === 0) {
+					acceptanceCoverageCells.push(
+						...classifyParentFinalCoverage({
+							rowId: parent.stem || parent.path,
+							observation: null,
+							excludeFixtureAuthority: true,
+							candidateComplete: parent.goalCandidateComplete === true,
+						}),
+					);
+				}
 				continue;
 			}
 			for (const verification of group.verifications) {
+				if (verification.eventId) {
+					if (seenEventIds.has(verification.eventId)) continue;
+					seenEventIds.add(verification.eventId);
+				}
 				const attemptId = verification.attempt?.attemptId?.trim();
 				const baseRow = group.episodeKey ?? (parent.stem || parent.path);
 				const rowId = attemptId ? `${baseRow}:${attemptId}` : baseRow;
+				const candidateComplete =
+					(group.episodeKey && parent.goalCandidateByEpisode?.[group.episodeKey] === true) === true ||
+					(!group.episodeKey && parent.goalCandidateComplete === true);
 				acceptanceCoverageCells.push(
 					...classifyParentFinalCoverage({
 						rowId,
 						observation: verification,
 						excludeFixtureAuthority: true,
 						candidateComplete,
+						episodeKeyHint: group.episodeKey,
 					}),
 				);
 			}
+		}
+		// Episode universe: every opened episode without a receipt is missing/uncovered.
+		for (const episodeKey of episodeUniverse) {
+			if (coveredEpisodes.has(episodeKey)) continue;
+			const candidateComplete = parent.goalCandidateByEpisode?.[episodeKey] === true;
+			acceptanceCoverageCells.push(
+				...classifyParentFinalCoverage({
+					rowId: episodeKey,
+					observation: null,
+					excludeFixtureAuthority: true,
+					candidateComplete,
+					episodeKeyHint: episodeKey,
+				}),
+			);
 		}
 		for (const integrate of parent.parentIntegrateDecisions ?? []) {
 			acceptanceCoverageCells.push(

@@ -3,6 +3,7 @@
  * changing priority or name identity. Pure projection over capability load results.
  */
 import type { SourceMeta } from "./types";
+import { BUILTIN_DEFAULTS_PROVIDER_ID, ruleAppliesToAgent } from "./rule";
 
 export type RuleSourceStatus = "winner" | "shadowed" | "disabled" | "suppressed";
 
@@ -21,18 +22,25 @@ export interface RuleLikeForDiagnosis {
 	_source?: Partial<SourceMeta> & Pick<SourceMeta, "provider">;
 	_shadowed?: boolean;
 	disabled?: boolean;
+	agents?: string[];
 }
 
 /**
  * Build a diagnosis table from capability `items` (winners) and optional `all`
- * (includes shadowed). Does not change load semantics.
+ * (includes shadowed). Applies the same effective filters as `bucketRules`
+ * (disabledRules, builtinRules, agent scope) without changing load priority.
  */
 export function diagnoseRuleSources(input: {
 	items: readonly RuleLikeForDiagnosis[];
 	all?: readonly RuleLikeForDiagnosis[];
 	disabledNames?: readonly string[];
+	/** When false, builtin-defaults rows are suppressed (same as bucketRules). */
+	builtinRules?: boolean;
+	/** Agent name for agents-scope filtering (same as bucketRules). */
+	agentName?: string;
 }): RuleSourceDiagnosisRow[] {
 	const disabled = new Set((input.disabledNames ?? []).map(n => n.trim()).filter(Boolean));
+	const includeBuiltin = input.builtinRules !== false;
 	const winners = new Map<string, RuleLikeForDiagnosis>();
 	for (const item of input.items) {
 		if (!item.name) continue;
@@ -60,6 +68,36 @@ export function diagnoseRuleSources(input: {
 				reason: "listed in disabledRules",
 			});
 			continue;
+		}
+
+		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) {
+			rows.push({
+				name,
+				status: "suppressed",
+				provider: rule._source?.provider,
+				providerName: rule._source?.providerName,
+				path: rule._source?.path,
+				reason: "builtinRules:false",
+			});
+			continue;
+		}
+
+		if (input.agentName !== undefined) {
+			const agents = rule.agents;
+			if (Array.isArray(agents) && agents.length > 0) {
+				const applies = ruleAppliesToAgent({ agents }, input.agentName);
+				if (!applies) {
+					rows.push({
+						name,
+						status: "suppressed",
+						provider: rule._source?.provider,
+						providerName: rule._source?.providerName,
+						path: rule._source?.path,
+						reason: `agents scope excludes agentName=${input.agentName}`,
+					});
+					continue;
+				}
+			}
 		}
 
 		if (rule._shadowed === true) {

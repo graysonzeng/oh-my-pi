@@ -25,7 +25,10 @@ export type TransferValidationCode =
 	| "scope_conflict"
 	| "confirm_binding_required"
 	| "confirm_binding_mismatch"
-	| "backend_mismatch";
+	| "backend_mismatch"
+	| "pkg_required"
+	| "preview_package_mismatch"
+	| "intra_package_conflict";
 
 export interface TransferValidationIssue {
 	code: TransferValidationCode;
@@ -192,6 +195,44 @@ export function validateExportPackageStructure(pkg: unknown): TransferValidation
 		}
 	}
 
+	// Intra-package identity collisions for single-slot artifacts (same sourceId /
+	// kind+slot with divergent bodies) — last-wins would silently drop content.
+	const identityBodies = new Map<string, string>();
+	for (const [index, record] of candidate.records.entries()) {
+		if (!record || typeof record !== "object" || typeof record.content !== "string") continue;
+		const identity = intraPackageIdentity(record, index);
+		if (!identity) continue;
+		const prior = identityBodies.get(identity);
+		if (prior === undefined) {
+			identityBodies.set(
+				identity,
+				record.contentFingerprint ??
+					fingerprintRecordContent({
+						kind: record.kind,
+						content: record.content,
+						scope: record.scope ?? "",
+						sourceId: record.sourceId,
+					}),
+			);
+			continue;
+		}
+		const current =
+			record.contentFingerprint ??
+			fingerprintRecordContent({
+				kind: record.kind,
+				content: record.content,
+				scope: record.scope ?? "",
+				sourceId: record.sourceId,
+			});
+		if (prior !== current) {
+			issues.push({
+				code: "intra_package_conflict",
+				message: `duplicate identity ${identity} with divergent bodies`,
+				sourceId: typeof record.sourceId === "string" ? record.sourceId : `index:${index}`,
+			});
+		}
+	}
+
 	let computedChecksum: string | undefined;
 	if (issues.every(i => i.code !== "malformed_package" && i.code !== "record_structure_invalid")) {
 		computedChecksum = checksumPackageRecords(candidate.records);
@@ -205,6 +246,90 @@ export function validateExportPackageStructure(pkg: unknown): TransferValidation
 
 	const blocking = issues.filter(i => i.code !== "ok");
 	return { ok: blocking.length === 0, issues: blocking, computedChecksum };
+}
+
+/**
+ * Identity key for single-slot artifacts that must not appear twice with
+ * different bodies in one package (MEMORY.md / summary / sharpshooter files).
+ * Learning candidates may share kind but use distinct sourceIds — only collide
+ * when sourceId matches.
+ */
+export function intraPackageIdentity(
+	record: Pick<MemoryExportRecord, "sourceId" | "kind">,
+	index: number,
+): string | null {
+	if (typeof record.sourceId === "string" && record.sourceId.length > 0) {
+		return `id:${record.sourceId}`;
+	}
+	if (record.kind === "summary" || record.kind === "project_fact" || record.kind === "decision") {
+		return `kind:${record.kind}`;
+	}
+	return `index:${index}`;
+}
+
+/**
+ * Bind preview items to the verified package: same length, matching
+ * sourceId/fingerprint/content per item. Apply must write package bodies only.
+ */
+export function assertPreviewBoundToPackage(
+	pkg: MemoryExportPackage,
+	preview: { items: readonly MemoryImportPreviewItem[] },
+): TransferValidationResult {
+	const issues: TransferValidationIssue[] = [];
+	if (preview.items.length !== pkg.records.length) {
+		issues.push({
+			code: "preview_package_mismatch",
+			message: `preview items=${preview.items.length} !== package records=${pkg.records.length}`,
+		});
+		return { ok: false, issues };
+	}
+	const byFingerprint = new Map(pkg.records.map(r => [r.contentFingerprint, r]));
+	for (const [index, item] of preview.items.entries()) {
+		const pkgRecord = pkg.records[index]!;
+		const previewRecord = item.record;
+		const id = previewRecord.sourceId ?? pkgRecord.sourceId ?? `index:${index}`;
+		if ((previewRecord.sourceId ?? null) !== (pkgRecord.sourceId ?? null)) {
+			issues.push({
+				code: "preview_package_mismatch",
+				message: `item[${index}] sourceId diverged from package`,
+				sourceId: id,
+			});
+			continue;
+		}
+		if (previewRecord.contentFingerprint !== pkgRecord.contentFingerprint) {
+			issues.push({
+				code: "preview_package_mismatch",
+				message: `item[${index}] contentFingerprint diverged from package`,
+				sourceId: id,
+			});
+			continue;
+		}
+		if (previewRecord.content !== pkgRecord.content) {
+			issues.push({
+				code: "preview_package_mismatch",
+				message: `item[${index}] content body diverged from package`,
+				sourceId: id,
+			});
+			continue;
+		}
+		if (previewRecord.scope !== pkgRecord.scope || previewRecord.kind !== pkgRecord.kind) {
+			issues.push({
+				code: "preview_package_mismatch",
+				message: `item[${index}] scope/kind diverged from package`,
+				sourceId: id,
+			});
+			continue;
+		}
+		// Defense: fingerprint must still resolve to the same package record.
+		if (byFingerprint.get(previewRecord.contentFingerprint) !== pkgRecord) {
+			issues.push({
+				code: "preview_package_mismatch",
+				message: `item[${index}] fingerprint does not uniquely bind to package record`,
+				sourceId: id,
+			});
+		}
+	}
+	return { ok: issues.length === 0, issues };
 }
 
 /**
@@ -256,6 +381,10 @@ export function assertPackageApplyable(
 	if (!structural.ok) return structural;
 
 	const issues: TransferValidationIssue[] = [...structural.issues];
+	if (options?.preview) {
+		const bound = assertPreviewBoundToPackage(pkg, options.preview);
+		issues.push(...bound.issues);
+	}
 	const crossScope = pkg.manifest.scope !== targetScope;
 	if (crossScope) {
 		const expected =

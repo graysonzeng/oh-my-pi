@@ -90,7 +90,7 @@ describe("computer coordinate / frame product contracts (D7)", () => {
 		expect(capture).toMatchObject({ width: 10, height: 5, sourceWidth: 40, sourceHeight: 20, target: "desktop" });
 	});
 
-	it("supports multi-monitor negative origins in capture display metadata", async () => {
+	it("supports multi-monitor negative origins in capture display metadata and click coords", async () => {
 		LegacyDesktopSession.instances = [];
 		class NegOriginLegacy extends LegacyDesktopSession {
 			override async capture() {
@@ -119,9 +119,10 @@ describe("computer coordinate / frame product contracts (D7)", () => {
 		const capture = await session.capture("desktop");
 		expect(capture.sourceWidth).toBeGreaterThan(1920);
 		expect(capture.width).toBe(40);
-		await session.click("desktop", 1, 1);
+		await session.click("desktop", 12, 34);
 		const legacy = LegacyDesktopSession.instances.at(-1);
-		expect(legacy?.actions.some(a => a.type === "click")).toBe(true);
+		const click = legacy?.actions.find(a => a.type === "click");
+		expect(click).toMatchObject({ type: "click", x: 12, y: 34 });
 	});
 
 	it("invalidates the coordinate frame after move/zoom geometry change (stale)", async () => {
@@ -150,11 +151,4 @@ describe("computer coordinate / frame product contracts (D7)", () => {
 	});
 });
 
-describe("computer D7 platform coverage notes", () => {
-	it("documents unverified live platforms without claiming pass", () => {
-		// Contract for reviewers: fixture + adapter coverage ≠ live platform matrix.
-		const unverified = ["wayland-live", "macos-live", "win32-live", "browser-dom-live"] as const;
-		expect(unverified).toContain("wayland-live");
-		// 未验证: no interactive desktop/browser session in this environment.
-	});
-});
+// Live Wayland / macOS / Win / Retina multi-screen remain 真实外部阻塞 — fixture coverage ≠ live matrix.

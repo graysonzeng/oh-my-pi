@@ -1,8 +1,8 @@
 # Context / config freshness table (D3)
 
-Date: 2026-09-27. Owner: capability FS cache + SessionMaintenance + rule/skill discovery.
+Date: 2026-09-27. Owner: **session-tools capability reset / prompt rebuild** (primary visibility owner). Capability FS invalidate + SessionMaintenance are dependencies, not the mid-session visibility owner.
 
-This table is a **published visibility contract**, not a new TTL cache. The capability FS layer (`packages/coding-agent/src/capability/fs.ts`) is invalidate/clear based — silent TTL refresh is rejected (would drift prompts and break stable-prefix experiments).
+This table is a **published visibility contract**, not a new TTL cache. The capability FS layer (`packages/coding-agent/src/capability/fs.ts`) is invalidate/clear based — silent TTL refresh is rejected (would drift prompts and break stable-prefix experiments). Live rule/skill visibility after `/clear`/`/new` is owned by session-tools rebuild + sdk rediscover (`sdk.ts` bucketRules / rediscover paths).
 
 ## Asset → invalidate / reload → session visibility
 

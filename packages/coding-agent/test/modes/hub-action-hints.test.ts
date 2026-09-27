@@ -21,13 +21,26 @@ function ref(partial: Partial<AgentRecordLike> & Pick<AgentRecordLike, "id">): A
 }
 
 describe("collectHubActionHints (D6)", () => {
-	it("surfaces integrate-eligible parked children with outputPath", () => {
+	it("does not treat outputPath + parked as integrate-eligible without explicit overlay", () => {
 		const worker = ref({
 			id: "worker-1",
 			status: "parked",
 			history: { outputPath: "/tmp/out.md" },
 		});
 		const hints = collectHubActionHints({ agents: [ref({ id: "Main", kind: "main", status: "running" }), worker] });
+		expect(hints.pendingIntegrateAgentIds ?? []).not.toContain("worker-1");
+	});
+
+	it("surfaces integrate only via explicit pendingIntegrateAgentIds", () => {
+		const worker = ref({
+			id: "worker-1",
+			status: "parked",
+			history: { outputPath: "/tmp/out.md" },
+		});
+		const hints = collectHubActionHints({
+			agents: [ref({ id: "Main", kind: "main", status: "running" }), worker],
+			pendingIntegrateAgentIds: ["worker-1"],
+		});
 		expect(hints.pendingIntegrateAgentIds).toContain("worker-1");
 		const queue = projectHubActionQueue([ref({ id: "Main", kind: "main", status: "running" }), worker], hints);
 		expect(formatAgentActionNeeds(queue, "worker-1").some(line => line.includes("need_integrate"))).toBe(true);
@@ -70,5 +83,16 @@ describe("collectHubActionHints (D6)", () => {
 		const advisor = ref({ id: "adv", kind: "advisor", status: "idle", history: { outputPath: "/tmp/a.md" } });
 		const hints = collectHubActionHints({ agents: [advisor] });
 		expect(hints.pendingIntegrateAgentIds ?? []).not.toContain("adv");
+	});
+
+	it("uses explicit pendingApprovalAgentIds for auth (not missing startedAt)", () => {
+		const main = ref({ id: "Main", kind: "main", status: "running" });
+		const without = collectHubActionHints({ agents: [main] });
+		expect(without.pendingAuthAgentIds ?? []).not.toContain("Main");
+		const withOverlay = collectHubActionHints({
+			agents: [main],
+			pendingApprovalAgentIds: ["Main"],
+		});
+		expect(withOverlay.pendingAuthAgentIds).toContain("Main");
 	});
 });

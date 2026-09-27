@@ -39,4 +39,25 @@ describe("rule source diagnosis (D5)", () => {
 		expect(line).toContain("Rule discovery warnings (2)");
 		expect(line).toContain("bad frontmatter");
 	});
+
+	it("suppresses builtin-defaults when builtinRules is false", () => {
+		const builtin = {
+			name: "default-safety",
+			_source: { provider: "builtin-defaults", providerName: "Builtin", path: "builtin:default-safety" },
+		};
+		const rows = diagnoseRuleSources({ items: [builtin], all: [builtin], builtinRules: false });
+		expect(rows[0]!.status).toBe("suppressed");
+		expect(rows[0]!.reason).toBe("builtinRules:false");
+	});
+
+	it("suppresses agent-scoped rules that do not match agentName", () => {
+		const scoped = {
+			name: "reviewer-only",
+			agents: ["reviewer"],
+			_source: { provider: "project", path: "/proj/review.md" },
+		};
+		const rows = diagnoseRuleSources({ items: [scoped], all: [scoped], agentName: "main" });
+		expect(rows[0]!.status).toBe("suppressed");
+		expect(rows[0]!.reason).toContain("agents scope");
+	});
 });

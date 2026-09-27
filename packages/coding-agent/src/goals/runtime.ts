@@ -488,6 +488,17 @@ export class GoalRuntime {
 					lastNextStep: "verification interrupted; keep working from current repo evidence",
 				};
 			}
+			// Explicit resume rebuilds the no-progress baseline — do not carry
+			// a prior pause streak into the new working window.
+			if (state.goal.hostGate) {
+				state.goal.hostGate = {
+					...state.goal.hostGate,
+					noProgressCount: 0,
+					lastProgressFingerprint: undefined,
+					lastObservedNominationId: undefined,
+					lastPauseReason: undefined,
+				};
+			}
 			state.enabled = true;
 			state.mode = "active";
 			state.reason = undefined;

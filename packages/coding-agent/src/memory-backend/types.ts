@@ -74,6 +74,10 @@ export interface MemoryBackendSaveResult {
 	ids?: string[];
 	queued?: boolean;
 	message?: string;
+	/** True when content was truncated to the interactive lesson char cap. */
+	truncated?: boolean;
+	/** Number of older lessons evicted to enforce the interactive lesson cap. */
+	evicted?: number;
 }
 
 export interface MemoryBackendOperationContext {
