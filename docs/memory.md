@@ -153,9 +153,23 @@ Recall is injected as background context, not instructions, and recalled memory 
 
 `/memory view`, `/memory stats`, `/memory diagnose`, and `/memory enqueue` operate through the active Hindsight state. `/memory clear` first drains pending retains, then clears only the local session state and recall cache. It **does not delete the server-side bank**; delete that bank with the Hindsight UI or API.
 
+## Export / preview / import (D4)
+
+Local backend supports optional transfer via `MemoryBackend.transferCapabilities` / `exportRecords` / `previewImport` / `applyImport`:
+
+- Walks `getMemoryRoot` (`learned.md`, `memory_summary.md`, `MEMORY.md`) — **never** search top-N.
+- Manifest marks omitted capabilities (`entryDelete`, `structuredSearch`) and omitted fields (`skills/`, sqlite index).
+- Import preview lists create / skip / conflict; content is data only (no instruction execution).
+- Learning candidates apply through `saveLearnedLesson` (dedupe). System artifacts require explicit `replaceSystemArtifacts`.
+- Entry delete is **unsupported** — do not fake it with `clear`.
+- Other backends omit transfer methods until a full traverse seam exists (report as unsupported).
+
+Implementation: `packages/coding-agent/src/memory-backend/local-transfer.ts`, types in `transfer-types.ts`.
+
 ## Key files
 
 - `packages/coding-agent/src/memories/index.ts` — pipeline orchestration, injection, clear/enqueue entry points (the `/memory` command routes here via `packages/coding-agent/src/memory-backend/local-backend.ts`)
 - `packages/coding-agent/src/memories/storage.ts` — SQLite-backed job queue and thread registry
 - `packages/coding-agent/src/prompts/memories/` — memory prompt templates
 - `packages/coding-agent/src/internal-urls/memory-protocol.ts` — `memory://` URL handler
+- `packages/coding-agent/src/memory-backend/local-transfer.ts` — D4 local export/preview/import
