@@ -83,10 +83,15 @@ Labels: **已有且验证** / **本次实现** / **条件不满足暂缓**
 ## Offline verify (this environment)
 
 ```text
-bun test acceptance-coverage-matrix no-progress rule-source-diagnosis
-         agent-hub-action-queue local-transfer transfer-cli sharpshooter-transfer
-         limiter-attribution computer-coordinate-boundary
-         subagent-report memory-command acp-builtins (+ host-gate / goal-complete when natives built)
+Focused D1–D8 + this increment (no-progress, rule-source-diagnosis, hub queue,
+local/transfer-cli/sharpshooter-transfer, limiter-attribution, memory-command,
+subagent-report): 66 pass / 0 fail
+
+Plus coordinate fixtures + coverage matrix + ACP /memory export|import-preview:
+all new/related cases pass. `bun run check:types` clean for coding-agent and tui.
+
+Full acp-builtins file also ran: 1 pre-existing fail (`/todo append` custom-entry
+length) unrelated to memory transfer; all /memory cases in that file passed.
 ```
 
 ## Unverified / residual risk

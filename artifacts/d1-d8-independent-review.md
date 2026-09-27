@@ -26,4 +26,6 @@ Reviewer stance: adversarial pass after implementation, before draft PR.
 
 ## Verify rerun after fixes
 
-Focused suite rerun after this increment (see matrix). `bun run check:types` in coding-agent must stay clean.
+Focused suite rerun after this increment: **66 pass / 0 fail** (no-progress, rule diagnosis, hub queue, local/transfer-cli/sharpshooter-transfer, limiter-attribution, memory-command, subagent-report).
+`bun run check:types` in coding-agent and tui: **clean**.
+ACP `/memory export` / `import-preview` cases pass. An unrelated `/todo append` custom-entry assertion failed when the full `acp-builtins` file was included; this increment does not touch todo persistence.
