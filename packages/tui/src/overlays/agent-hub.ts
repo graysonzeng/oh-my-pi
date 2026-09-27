@@ -28,6 +28,12 @@ import {
 import type { KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
 import type { AgentLifecycleLike, IrcBusLike } from "./agent-hub-types";
+import {
+	actionableHubItems,
+	formatAgentActionNeeds,
+	projectHubActionQueue,
+	type HubActionQueueHints,
+} from "./agent-hub-action-queue";
 import { type AgentRecordLike, type AgentHubRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
 import { USER_INTERRUPT_LABEL } from "../chat/messages";
 import { shortenPath, truncateToWidth } from "../render/render-utils";
@@ -171,6 +177,11 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	activity: AgentActivitySource;
 	/** Whether observer progress should update live activity rows. */
 	manageActivityLive?: boolean;
+	/**
+	 * Optional host hints for the D6 action-queue projection (decision/auth/integrate/blocked).
+	 * View-only — does not schedule work.
+	 */
+	actionHints?: () => HubActionQueueHints;
 
 	/** Collab guest: route actions/transcripts to the host instead of local sessions. */
 	remote?: AgentHubRemote;
@@ -201,6 +212,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#section: AgentHubSection;
 	#activity: AgentActivitySource;
 	#manageActivityLive: boolean;
+	#actionHints: (() => HubActionQueueHints) | undefined;
 	#activityRows: AgentActivityRow[] = [];
 	#selectedActivityRow = 0;
 	#activityFilter: ActivityFilter = "all";
@@ -315,6 +327,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#section = deps.initialSection ?? "agents";
 		this.#activity = deps.activity;
 		this.#manageActivityLive = deps.manageActivityLive ?? true;
+		this.#actionHints = deps.actionHints;
 		this.#registry = deps.registry;
 		this.#observers = deps.observers;
 		this.#getRoleInfo = deps.getRoleInfo;
@@ -1092,6 +1105,12 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			if (progress?.retryState) {
 				add(theme.fg("warning", `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`));
 			}
+		}
+
+		const needs = formatAgentActionNeeds(projectHubActionQueue(this.#rows, this.#actionHints?.() ?? {}), ref.id);
+		if (needs.length > 0) {
+			section("Needs me");
+			for (const line of needs.slice(0, 4)) addWrapped(line);
 		}
 
 		section("Usage", 1);

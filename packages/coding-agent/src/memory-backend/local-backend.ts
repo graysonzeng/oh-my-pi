@@ -6,6 +6,12 @@ import {
 	saveLearnedLesson,
 	startMemoryStartupTask,
 } from "../memories";
+import {
+	applyLocalMemoryImport,
+	exportLocalMemory,
+	localMemoryTransferCapabilities,
+	previewLocalMemoryImport,
+} from "./local-transfer";
 import type { MemoryBackend } from "./types";
 
 /**
@@ -14,7 +20,7 @@ import type { MemoryBackend } from "./types";
  * The rollout-summarisation pipeline (rollouts → SQLite → memory_summary.md) is
  * delegated unchanged. On top of it, `save()` persists `learn`-tool lessons to
  * `learned.md` (so `status()` reports `writable: true`); structured search is
- * still unavailable.
+ * still unavailable. D4 transfer walks the memory root — never search results.
  */
 export const localBackend: MemoryBackend = {
 	id: "local",
@@ -43,5 +49,17 @@ export const localBackend: MemoryBackend = {
 			message:
 				"Local rollout-summary memory is active; lessons from the `learn` tool are saved to learned.md. Structured search is not available.",
 		};
+	},
+	transferCapabilities() {
+		return localMemoryTransferCapabilities();
+	},
+	exportRecords(context) {
+		return exportLocalMemory(context);
+	},
+	previewImport(context, pkg) {
+		return previewLocalMemoryImport(context, pkg);
+	},
+	applyImport(context, preview, options) {
+		return applyLocalMemoryImport(context, preview, options);
 	},
 };

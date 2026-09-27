@@ -153,9 +153,28 @@ Recall is injected as background context, not instructions, and recalled memory 
 
 `/memory view`, `/memory stats`, `/memory diagnose`, and `/memory enqueue` operate through the active Hindsight state. `/memory clear` first drains pending retains, then clears only the local session state and recall cache. It **does not delete the server-side bank**; delete that bank with the Hindsight UI or API.
 
+## Export / preview / import (D4)
+
+Local and sharpshooter backends support optional transfer via `MemoryBackend.transferCapabilities` / `exportRecords` / `previewImport` / `applyImport`:
+
+- Local walks `getMemoryRoot` (`learned.md`, `memory_summary.md`, `MEMORY.md`) — **never** search top-N.
+- Sharpshooter walks `architecture.md` / `product.md` / `style.md` and **omits** `queue/`, `state.json`, and `consolidate.lock`.
+- Manifest marks omitted capabilities (`entryDelete`, `structuredSearch`) and omitted fields.
+- Import preview lists create / skip / conflict; content is data only (no instruction execution).
+- Learning candidates apply through `saveLearnedLesson` (dedupe). System / decision files require explicit `replaceSystemArtifacts`.
+- Cross-project apply requires `--confirm-cross-scope` after preview. Entry delete is **unsupported** — do not fake it with `clear`.
+- `off` / hindsight / mnemopi report unsupported until a full traverse seam exists.
+
+Slash: `/memory export [path]`, `/memory import-preview <path>`, `/memory import-apply <path> [--confirm-cross-scope] [--replace-system]`.
+
+Implementation: `packages/coding-agent/src/memory-backend/local-transfer.ts`, `sharpshooter-transfer.ts`, `transfer-cli.ts`; types in `transfer-types.ts`.
+
 ## Key files
 
 - `packages/coding-agent/src/memories/index.ts` — pipeline orchestration, injection, clear/enqueue entry points (the `/memory` command routes here via `packages/coding-agent/src/memory-backend/local-backend.ts`)
 - `packages/coding-agent/src/memories/storage.ts` — SQLite-backed job queue and thread registry
 - `packages/coding-agent/src/prompts/memories/` — memory prompt templates
 - `packages/coding-agent/src/internal-urls/memory-protocol.ts` — `memory://` URL handler
+- `packages/coding-agent/src/memory-backend/local-transfer.ts` — D4 local export/preview/import
+- `packages/coding-agent/src/memory-backend/sharpshooter-transfer.ts` — D4 second-seam decision-file transfer
+- `packages/coding-agent/src/memory-backend/transfer-cli.ts` — `/memory export` / import preview/apply

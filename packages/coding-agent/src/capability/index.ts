@@ -586,3 +586,4 @@ export function cacheStats(): { content: number; dir: number } {
 // =============================================================================
 
 export type * from "./types";
+export * from "./rule-source-diagnosis";

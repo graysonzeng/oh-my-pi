@@ -356,6 +356,43 @@ export const cfgGoalHostGateFalseCompletion = register({
 	},
 });
 
+/**
+ * Opt-in D2 no-progress pause. Default false = observe fingerprints only.
+ * Does not change production stop behavior until explicitly enabled.
+ */
+export const cfgGoalHostGateNoProgressPolicy = register({
+	id: "goal.hostGate.noProgressPolicy",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Modes",
+		label: "Goal No-Progress Pause (Opt-in)",
+		description:
+			"When true, pause after N identical comparable host observations (acceptance/check coverage/blockers). Default off — observation only. consecutiveContinueCount is never used as the progress signal.",
+		condition: "goalHostGateEnabled",
+	},
+});
+
+export const cfgGoalHostGateNoProgressThreshold = register({
+	id: "goal.hostGate.noProgressThreshold",
+	type: "number",
+	default: 3,
+	ui: {
+		tab: "tasks",
+		group: "Modes",
+		label: "Goal No-Progress Threshold",
+		description:
+			"Identical comparable host observations before an opt-in no-progress pause. Fixture/offline default is 3; not a calibrated production commitment. Ignored when noProgressPolicy is false.",
+		condition: "goalHostGateEnabled",
+		options: [
+			{ value: "3", label: "3 (fixture default)" },
+			{ value: "5", label: "5" },
+			{ value: "10", label: "10" },
+		],
+	},
+});
+
 export const cfgGoalGrokOverlayUnload = register({
 	id: "goal.grokOverlayUnload",
 	type: "boolean",

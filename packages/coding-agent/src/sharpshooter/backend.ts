@@ -17,6 +17,12 @@ import { startSharpshooterScheduler } from "./scheduler";
 import { SHARPSHOOTER_MEMORY_FILES } from "./types";
 
 import { cfgSharpshooterInjectionTokenLimit, cfgSharpshooterIntervalMinutes } from "./settings";
+import {
+	applySharpshooterImport,
+	exportSharpshooterMemory,
+	previewSharpshooterImport,
+	sharpshooterMemoryTransferCapabilities,
+} from "../memory-backend/sharpshooter-transfer";
 
 interface SharpshooterSessionResources {
 	unsubscribe: () => void;
@@ -248,5 +254,18 @@ export const sharpshooterBackend: MemoryBackend = {
 		const limit = Math.max(0, options?.limit ?? items.length);
 		const limited = items.slice(0, limit);
 		return { backend: "sharpshooter", query, count: limited.length, items: limited };
+	},
+
+	transferCapabilities() {
+		return sharpshooterMemoryTransferCapabilities();
+	},
+	exportRecords(context) {
+		return exportSharpshooterMemory(context);
+	},
+	previewImport(context, pkg) {
+		return previewSharpshooterImport(context, pkg);
+	},
+	applyImport(context, preview, options) {
+		return applySharpshooterImport(context, preview, options);
 	},
 };

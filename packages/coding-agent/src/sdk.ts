@@ -58,6 +58,7 @@ import {
 	SUB_AGENT_RULE_NAME,
 } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
+import { formatRuleDiscoveryWarnings } from "./capability/rule-source-diagnosis";
 import type { EffectiveExtensionRoots } from "./capability/types";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
@@ -2034,7 +2035,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const ttsrManager = new TtsrManager(() => cfgTtsr.get(settings));
 		const rulesResult =
 			options.rules !== undefined
-				? { items: options.rules, warnings: undefined }
+				? {
+						items: options.rules,
+						warnings: undefined as string[] | undefined,
+						all: undefined as Rule[] | undefined,
+					}
 				: await loadCapability<Rule>(ruleCapability.id, { cwd });
 		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
 			builtinRules: ttsrSettings.builtinRules,
@@ -2044,7 +2049,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (existingSession.injectedTtsrRules.length > 0) {
 			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
 		}
-		return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
+		// D5: surface discovery warnings once via logger (source-bearing, no rule body).
+		const warningLine = formatRuleDiscoveryWarnings(rulesResult.warnings ?? []);
+		if (warningLine) {
+			logger.warn(warningLine);
+		}
+		return {
+			ttsrManager,
+			rulebookRules,
+			alwaysApplyRules,
+			allRules: rulesResult.items,
+			ruleWarnings: rulesResult.warnings ?? [],
+			allRulesIncludingShadowed: rulesResult.all ?? rulesResult.items,
+		};
 	});
 	const { ttsrManager, allRules } = discovered;
 	// Mutable so the mid-session prompt rebuild (on /clear and /new) can re-discover

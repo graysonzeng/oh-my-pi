@@ -18,6 +18,12 @@ import {
 	type DeliveryQualityOutcomeObservation,
 } from "./delivery-cost-baseline";
 import {
+	buildAcceptanceCoverageMatrix,
+	classifyParentFinalCoverage,
+	formatAcceptanceCoverageMatrix,
+	type AcceptanceCoverageMatrix,
+} from "./acceptance-coverage-matrix";
+import {
 	criticalPathMsFromIntervals,
 	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
 	parseParentFinalVerificationDetails,
@@ -44,6 +50,11 @@ export interface SubagentBaselineReport {
 	/** Parent assistant active wall through verification when known; null otherwise. */
 	taskCompletionMs: PercentileSummary | null;
 	uncomputableFromHistory: string[];
+	/**
+	 * D1 acceptance coverage matrix with missing-coverage reasons.
+	 * Present/unknown counts alone are not treated as production coverage complete.
+	 */
+	acceptanceCoverage: AcceptanceCoverageMatrix;
 	sessions: {
 		parentCount: number;
 		childCount: number;
@@ -1277,6 +1288,7 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 	const qualityFalse = { true: 0, false: 0, unknown: 0 };
 	const qualityMissed = { true: 0, false: 0, unknown: 0 };
 	const qualityCoverage = emptyCoverage();
+	const acceptanceCoverageCells: ReturnType<typeof classifyParentFinalCoverage> = [];
 
 	for (const parent of parents) {
 		const fileWall = fileWallMs(parent);
@@ -1309,6 +1321,13 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 		}
 
 		const verification = parent.parentFinalVerifications[parent.parentFinalVerifications.length - 1];
+		acceptanceCoverageCells.push(
+			...classifyParentFinalCoverage({
+				rowId: parent.stem || parent.path,
+				observation: verification,
+				excludeFixtureAuthority: true,
+			}),
+		);
 		if (!verification || (verification.v !== undefined && verification.authority === undefined)) {
 			parentFinalUnknown++;
 			cover(coverage.parentFinalVerification, false);
@@ -1426,11 +1445,15 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 	if (e2eMs === null || criticalPathMs === null) uncomputableFromHistory.push("e2eCriticalPathMs");
 	if (taskCompletionMs === null) uncomputableFromHistory.push("taskCompletionMs");
 	uncomputableFromHistory.push(...ALWAYS_UNCOMPUTABLE_FROM_HISTORY);
+	const acceptanceCoverage = buildAcceptanceCoverageMatrix(acceptanceCoverageCells, {
+		excludeFixtureAuthority: true,
+	});
 	return {
 		e2eMs,
 		criticalPathMs,
 		taskCompletionMs,
 		uncomputableFromHistory,
+		acceptanceCoverage,
 		sessions: {
 			parentCount: parents.length,
 			childCount: children.length,
@@ -1499,6 +1522,7 @@ export function formatSubagentBaselineReport(report: SubagentBaselineReport): st
 		`sessions: parents=${report.sessions.parentCount} children=${report.sessions.childCount} unlinked=${report.sessions.unlinkedChildCount} spawns=${report.sessions.spawnCalls} skippedLines=${report.sessions.skippedLines}`,
 		"uncomputable from history:",
 		...report.uncomputableFromHistory.map(field => `  - ${field}`),
+		formatAcceptanceCoverageMatrix(report.acceptanceCoverage),
 		"missing timings stay null; completionKind is never inferred from exit/stop; concurrent children are not summed as e2e",
 		"coverage:",
 		`  parentChildLink          ${fmtCover(report.coverage.parentChildLink)}`,

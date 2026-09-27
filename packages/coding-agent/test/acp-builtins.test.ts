@@ -1167,6 +1167,21 @@ describe("wave 3 commands", () => {
 		expect(output[0]).toBe("Memory stats is not available for the local backend.");
 	});
 
+	it("/memory export: reports unsupported instead of inventing a package when memory is off", async () => {
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/memory export", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("unsupported");
+		expect(output[0]).toContain("off");
+	});
+
+	it("/memory import-preview: requires a path", async () => {
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/memory import-preview", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("Usage: /memory import-preview <path>");
+	});
+
 	// /todo start fuzzy match
 	it("/todo start: finds pending task by substring and starts it", async () => {
 		const { output, session, runtime } = createRuntime();

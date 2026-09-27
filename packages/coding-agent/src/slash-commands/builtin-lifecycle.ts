@@ -4,7 +4,14 @@ import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
-import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import {
+	applyMemoryPackageFile,
+	exportMemoryPackage,
+	memoryStatsUnavailableMessage,
+	parseMemoryImportApplyArgs,
+	previewMemoryPackageFile,
+	resolveMemoryBackend,
+} from "../memory-backend";
 import type { AgentSession, FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { buildReplanTitleContext, USER_INTERRUPT_LABEL } from "../session/messages";
@@ -572,6 +579,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			{ name: "reset", description: "Alias for clear" },
 			{ name: "enqueue", description: "Enqueue memory consolidation maintenance" },
 			{ name: "rebuild", description: "Alias for enqueue" },
+			{ name: "export", description: "Export traversable memory records (optional path)" },
+			{ name: "import-preview", description: "Preview a memory export package without applying" },
+			{
+				name: "import-apply",
+				description: "Apply a previewed export (same scope; --confirm-cross-scope for others)",
+			},
 			{ name: "mm list", description: "List mental models on the active bank" },
 			{ name: "mm show", description: "Show one mental model (id required)" },
 			{
@@ -631,13 +644,63 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					await runtime.output(payload ?? memoryStatsUnavailableMessage(backend.id, verb));
 					return commandConsumed();
 				}
+				case "export": {
+					const dest = command.args.trim().split(/\s+/).slice(1).join(" ").trim() || undefined;
+					const result = await exportMemoryPackage(
+						backend,
+						{ agentDir: runtime.settings.getAgentDir(), cwd: runtime.cwd, session: runtime.session },
+						dest,
+					);
+					await runtime.output(result.text);
+					return commandConsumed();
+				}
+				case "import-preview": {
+					const filePath = command.args.trim().split(/\s+/).slice(1).join(" ").trim();
+					if (!filePath) return usage("Usage: /memory import-preview <path>", runtime);
+					await runtime.output(
+						await previewMemoryPackageFile(
+							backend,
+							{
+								agentDir: runtime.settings.getAgentDir(),
+								cwd: runtime.cwd,
+								session: runtime.session,
+							},
+							filePath,
+						),
+					);
+					return commandConsumed();
+				}
+				case "import-apply": {
+					const parsed = parseMemoryImportApplyArgs(command.args.trim().split(/\s+/).slice(1));
+					if (!parsed.filePath) {
+						return usage(
+							"Usage: /memory import-apply <path> [--confirm-cross-scope] [--replace-system]",
+							runtime,
+						);
+					}
+					await runtime.output(
+						await applyMemoryPackageFile(
+							backend,
+							{ agentDir: runtime.settings.getAgentDir(), cwd: runtime.cwd, session: runtime.session },
+							parsed.filePath,
+							{
+								confirmCrossScope: parsed.confirmCrossScope,
+								replaceSystemArtifacts: parsed.replaceSystemArtifacts,
+							},
+						),
+					);
+					return commandConsumed();
+				}
 				case "mm":
 					return usage(
 						"Mental-model maintenance via /memory mm is unsupported in ACP mode; use the hindsight HTTP API directly.",
 						runtime,
 					);
 				default:
-					return usage("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync>", runtime);
+					return usage(
+						"Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|export|import-preview|import-apply>",
+						runtime,
+					);
 			}
 		},
 		handleTui: async (command, runtime) => {
