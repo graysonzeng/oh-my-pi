@@ -561,6 +561,12 @@ export interface SessionMaintenanceHost {
 	/** Re-aligns advisors after an in-place prune their own contexts already cover (no re-prime). */
 	rebaseAdvisorPrefix(reason: string): void;
 	rebaseAfterCompaction(): void;
+	/**
+	 * Re-inject live goal-mode context after mid-run history rewrite so the
+	 * continuing tool loop still sees current goals/constraints without waiting
+	 * for the next user `prompt()`.
+	 */
+	refreshLiveGoalModeContext(): Promise<void>;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
@@ -3887,6 +3893,9 @@ export class SessionMaintenance {
 				activeMessages.splice(0, activeMessages.length, ...compactedMessages);
 				invalidateConvertToLlmArrayCache(activeMessages);
 			}
+			if (!activeMessages.some(message => message.role === "custom" && message.customType === "goal-mode-context")) {
+				await this.#host.refreshLiveGoalModeContext();
+			}
 			return;
 		}
 
@@ -3973,6 +3982,12 @@ export class SessionMaintenance {
 		if (compactedMessages !== activeMessages) {
 			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
 			invalidateConvertToLlmArrayCache(activeMessages);
+		}
+		// Soft/context-full commits rewrite history but do not always set
+		// `historyRewritten` on the check result (continuation-suppressed mid-run).
+		// Reinject when an active goal message is missing from the live tool loop.
+		if (!activeMessages.some(message => message.role === "custom" && message.customType === "goal-mode-context")) {
+			await this.#host.refreshLiveGoalModeContext();
 		}
 		logger.debug("Mid-run compaction ran between provider calls", {
 			contextTokens,

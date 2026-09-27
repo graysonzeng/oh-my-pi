@@ -10,6 +10,7 @@ import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: 
 import { AgentRegistry } from "../registry/agent-registry";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { checksIndicateParentOwnsVerify } from "./child-delivery-evidence";
 
 /** Inline preview budget before the envelope points at `agent://<id>` instead. */
 const FULL_OUTPUT_THRESHOLD = 5000;
@@ -73,16 +74,23 @@ export function formatTaskResultSummary(
 	const resumable = result.aborted && !result.isolated && (refStatus === "idle" || refStatus === "parked");
 	const decision = result.parentIntegrateDecision;
 	const verificationStatus =
-		decision?.action === "integrate" && "boundToWorkspaceVersion" in decision ? "integrate_eligible" : "unverified";
+		decision?.action === "integrate" && "boundToWorkspaceVersion" in decision
+			? "integrate_eligible"
+			: decision?.classification === "done_valid"
+				? "done_valid"
+				: decision?.classification
+					? decision.classification
+					: "unverified";
 	return prompt.render(taskSummaryTemplate, {
 		agentName: result.agent,
 		id: result.id,
 		status,
 		verificationStatus,
+		integrateClassification: decision?.classification,
+		integrateAction: decision?.action,
+		integrateReasons: decision?.reasons?.length ? decision.reasons.join(", ") : undefined,
 		pendingChecks: result.deliveryEvidence?.checksNotRun,
-		parentOwnsVerification: result.deliveryEvidence?.checksNotRun.some(
-			check => check.reason === "parent_owns_verify",
-		),
+		parentOwnsVerification: checksIndicateParentOwnsVerify(result.deliveryEvidence?.checksNotRun),
 		duration: formatDuration(options.totalDurationMs),
 		completionKind: completionKind !== "completed" ? completionKind : undefined,
 		abortReason: result.aborted ? result.abortReason : undefined,
