@@ -33,4 +33,4 @@ bun test packages/agent/test/compaction-soft-cap-threshold.test.ts
 bun test packages/coding-agent/test/session/soft-cap-default.test.ts
 ```
 
-No paid/model evals. `paired_evidence_ready=false`.
+Results: `bun check` pass; soft-cap suites **11 pass / 0 fail**. No paid/model evals. `paired_evidence_ready=false`.
