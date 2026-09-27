@@ -349,9 +349,7 @@ describe("acceptance coverage matrix wiring (D1 behavioral)", () => {
 		);
 		expect(session.goalCandidateComplete).toBe(true);
 		const report = buildSubagentBaselineReport([session]);
-		expect(report.acceptanceCoverage.cells.some(c => c.reasons.includes("candidate_not_user_confirmed"))).toBe(
-			true,
-		);
+		expect(report.acceptanceCoverage.cells.some(c => c.reasons.includes("candidate_not_user_confirmed"))).toBe(true);
 	});
 
 	it("classifies child integrate coverage from parent_integrate_decision delivery evidence", () => {

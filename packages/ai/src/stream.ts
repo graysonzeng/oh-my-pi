@@ -194,6 +194,53 @@ export function configureProviderMaxInFlightRequests(limits: Record<string, numb
 	configuredProviderMaxInFlightRequests = limits ?? {};
 }
 
+/**
+ * Read-only occupancy for D8 limiter attribution.
+ * Counts active (non-stale) leases under the provider's in-flight root without
+ * acquiring a slot. Missing/empty roots report inFlight=0; capacity comes from
+ * the configured limit (or 0 = unlimited / unknown cap when unset).
+ */
+export async function snapshotProviderInFlightOccupancy(
+	provider: string,
+): Promise<{ inFlight: number; capacity: number } | null> {
+	const capacity = resolveProviderInFlightLimit(provider);
+	if (capacity === undefined) return null;
+	const dir = providerInFlightDir(provider);
+	let inFlight = 0;
+	try {
+		inFlight = await cleanupProviderInFlightLeases(dir);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		inFlight = 0;
+	}
+	return { inFlight, capacity };
+}
+
+/**
+ * Snapshot every configured provider's in-flight occupancy (aggregated).
+ * Returns null when no provider has a configured maxInFlightRequests cap.
+ */
+export async function snapshotConfiguredProviderInFlightOccupancy(): Promise<{
+	inFlight: number;
+	capacity: number;
+	providers: number;
+} | null> {
+	const providers = Object.keys(configuredProviderMaxInFlightRequests);
+	if (providers.length === 0) return null;
+	let inFlight = 0;
+	let capacity = 0;
+	let counted = 0;
+	for (const provider of providers) {
+		const snap = await snapshotProviderInFlightOccupancy(provider);
+		if (!snap) continue;
+		inFlight += snap.inFlight;
+		capacity += snap.capacity;
+		counted++;
+	}
+	if (counted === 0) return null;
+	return { inFlight, capacity, providers: counted };
+}
+
 function resolveProviderInFlightLimit(
 	provider: string,
 	options?: Pick<StreamOptions, "maxInFlightRequests">,

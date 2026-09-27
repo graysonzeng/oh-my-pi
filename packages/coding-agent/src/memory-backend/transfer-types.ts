@@ -34,6 +34,12 @@ export interface MemoryExportManifest {
 	backend: MemoryBackendId;
 	exportedAt: string;
 	scope: string;
+	/**
+	 * True only when every transfer-supported artifact that exists was included
+	 * and no out-of-surface existing assets were left on the floor.
+	 * Omitted capabilities (entryDelete) do not alone make a package incomplete;
+	 * omittedFields that name existing non-exported assets do.
+	 */
 	complete: boolean;
 	omittedCapabilities: string[];
 	omittedFields: string[];
@@ -60,7 +66,7 @@ export interface MemoryExportPackage {
 	records: MemoryExportRecord[];
 }
 
-export type MemoryImportAction = "create" | "skip" | "conflict";
+export type MemoryImportAction = "create" | "skip" | "conflict" | "overwrite";
 
 export interface MemoryImportPreviewItem {
 	action: MemoryImportAction;
@@ -72,18 +78,38 @@ export interface MemoryImportPreview {
 	formatVersion: typeof MEMORY_EXPORT_FORMAT_VERSION;
 	backend: MemoryBackendId;
 	scope: string;
+	/** Package source scope from manifest (for confirm binding). */
+	sourceScope: string;
 	items: MemoryImportPreviewItem[];
-	/** True when package claims complete and preview accepted the claim. */
+	/** True when package claims complete AND integrity validation passed. */
 	packageComplete: boolean;
 	warnings: string[];
+	/** Structured integrity / authorization failures (never parse warnings for these). */
+	blockingIssues: string[];
+	/**
+	 * Binding token for cross-scope apply: source + target + checksum + plan.
+	 * Required when sourceScope !== scope or any record.scope differs.
+	 */
+	confirmBinding?: string;
+	requiresCrossScopeConfirm: boolean;
+}
+
+export interface MemoryImportApplyItemError {
+	id: string;
+	error: string;
 }
 
 export interface MemoryImportApplyResult {
 	created: string[];
 	skipped: string[];
 	conflicts: string[];
+	overwritten?: string[];
+	/** Per-item failures that did not abort the whole batch. */
+	errors: MemoryImportApplyItemError[];
 	partial: boolean;
 	message?: string;
+	/** IDs successfully written before a later failure (inspectable partial). */
+	writtenIds?: string[];
 }
 
 export function defaultMemoryTransferCapabilities(

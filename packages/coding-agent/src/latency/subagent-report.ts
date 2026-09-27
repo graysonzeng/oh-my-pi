@@ -34,10 +34,7 @@ import {
 } from "./parent-final-verification";
 import { episodeKey } from "./task-episode";
 import { sha256Hex } from "./stable-serialize";
-import {
-	PARENT_INTEGRATE_DECISION_CUSTOM_TYPE,
-	type ParentIntegrateDecision,
-} from "../task/child-delivery-evidence";
+import { PARENT_INTEGRATE_DECISION_CUSTOM_TYPE, type ParentIntegrateDecision } from "../task/child-delivery-evidence";
 
 export interface CoverageCount {
 	present: number;

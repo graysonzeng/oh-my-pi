@@ -197,8 +197,7 @@ export function classifyParentFinalCoverage(input: ClassifyParentFinalCoverageIn
 					}))
 				: [{ itemId: "*", needsCodeFingerprint: contractRequiresCodeFingerprint(obs) }];
 
-	const trustOk =
-		isTrustedProductionAuthority(obs.authority) || (obs.authority === "fixture" && !excludeFixture);
+	const trustOk = isTrustedProductionAuthority(obs.authority) || (obs.authority === "fixture" && !excludeFixture);
 	const passedTrusted = obs.status === "passed" && trustOk;
 
 	const cells: AcceptanceCoverageCell[] = [];

@@ -2,11 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
-import {
-	bindHostSealsToAcceptance,
-	collectTrustedHostSeals,
-	type HostTerminalSeal,
-} from "../task/host-terminal-check";
+import { bindHostSealsToAcceptance, collectTrustedHostSeals, type HostTerminalSeal } from "../task/host-terminal-check";
 import { resolveCurrentWorkspaceCodeVersion } from "../task/workspace-code-version";
 import { fingerprintStable } from "../latency/stable-serialize";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";

@@ -1,90 +1,160 @@
 /**
- * D7 computer-use boundary fixtures — coordinate / frame contracts.
+ * D7 computer-use boundary fixtures — product native frame / capture / transport contracts.
  *
- * Validates documented mapping rules without claiming live platform coverage.
- * Native InvalidCoordinateFrame before capture is already covered in
- * packages/natives/test/desktop.test.ts. read_only is NOT a host sandbox.
+ * Does **not** reimplement coordinate mapping. Exercises desktop-adapter /
+ * DesktopSession contracts already owned by natives. Live Wayland / macOS /
+ * Win platforms remain 未验证 in this environment.
+ *
+ * `read_only` is NOT a host sandbox — covered by computer tool approval tests;
+ * this file only documents the facade boundary via adapter fixtures.
  */
 import { describe, expect, it } from "bun:test";
+import { adaptDesktopSession } from "../../../natives/native/desktop-adapter.js";
 
-/** Model-visible frame geometry (what the model actually sees). */
-export interface ModelFrameGeometry {
-	width: number;
-	height: number;
-	/** Display scale (Retina = 2). */
-	scale: number;
-	/** Origin of this frame in desktop virtual coords (may be negative on multi-monitor). */
-	originX: number;
-	originY: number;
-}
+class LegacyDesktopSession {
+	static instances: LegacyDesktopSession[] = [];
 
-export interface MappedPoint {
-	desktopX: number;
-	desktopY: number;
-}
-
-export type MapPointResult =
-	| { ok: true; point: MappedPoint }
-	| { ok: false; reason: "stale_frame" | "out_of_bounds" | "no_frame" };
-
-/**
- * Map model-image pixel coords onto desktop coords using the frame the model saw.
- * Rejects stale / missing frames and out-of-bounds pixels — never silently reuse.
- */
-export function mapModelPointToDesktop(
-	frame: ModelFrameGeometry | null,
-	imageX: number,
-	imageY: number,
-	options?: { frameGeneration?: number; expectedGeneration?: number },
-): MapPointResult {
-	if (!frame) return { ok: false, reason: "no_frame" };
-	if (
-		options?.frameGeneration !== undefined &&
-		options.expectedGeneration !== undefined &&
-		options.frameGeneration !== options.expectedGeneration
-	) {
-		return { ok: false, reason: "stale_frame" };
-	}
-	if (imageX < 0 || imageY < 0 || imageX >= frame.width || imageY >= frame.height) {
-		return { ok: false, reason: "out_of_bounds" };
-	}
-	return {
-		ok: true,
-		point: {
-			desktopX: frame.originX + imageX * frame.scale,
-			desktopY: frame.originY + imageY * frame.scale,
-		},
+	readonly actions: Array<Record<string, unknown>> = [];
+	readonly options: Record<string, unknown>;
+	readonly capabilities = {
+		backend: "unavailable",
+		capture: true,
+		input: true,
+		capturePermission: "unknown",
+		inputPermission: "unknown",
+		displayCount: 0,
 	};
+	closed = false;
+	#captureImpl: (() => Promise<Record<string, unknown>>) | undefined;
+	#executeImpl:
+		| ((actions: Array<Record<string, unknown>>) => Promise<Record<string, unknown> | undefined>)
+		| undefined;
+
+	constructor(options: Record<string, unknown>) {
+		this.options = options;
+		LegacyDesktopSession.instances.push(this);
+	}
+
+	setCaptureImpl(fn: () => Promise<Record<string, unknown>>): void {
+		this.#captureImpl = fn;
+	}
+
+	setExecuteImpl(fn: (actions: Array<Record<string, unknown>>) => Promise<Record<string, unknown> | undefined>): void {
+		this.#executeImpl = fn;
+	}
+
+	async capture() {
+		if (this.#captureImpl) return this.#captureImpl();
+		return {
+			width: (this.options.maxWidth as number | undefined) ?? 20,
+			height: (this.options.maxHeight as number | undefined) ?? 10,
+			data: new Uint8Array(),
+		};
+	}
+
+	async execute(actions: Array<Record<string, unknown>>): Promise<Record<string, unknown> | undefined> {
+		this.actions.push(...actions);
+		if (this.#executeImpl) return this.#executeImpl(actions);
+		return undefined;
+	}
+
+	async close() {
+		this.closed = true;
+	}
 }
 
-describe("computer coordinate boundary fixtures (D7)", () => {
-	it("maps Retina-scaled points from the model-visible frame, not a raw capture size", () => {
-		const frame: ModelFrameGeometry = { width: 1280, height: 800, scale: 2, originX: 0, originY: 0 };
-		const mapped = mapModelPointToDesktop(frame, 100, 50);
-		expect(mapped.ok).toBe(true);
-		if (mapped.ok) {
-			expect(mapped.point.desktopX).toBe(200);
-			expect(mapped.point.desktopY).toBe(100);
-		}
+describe("computer coordinate / frame product contracts (D7)", () => {
+	it("rejects coordinate input before any capture (InvalidCoordinateFrame)", async () => {
+		LegacyDesktopSession.instances = [];
+		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
+		const session = new DesktopSession({ display: "all" });
+		await expect(session.click("desktop", 1, 1)).rejects.toThrow(/^InvalidCoordinateFrame: /);
 	});
 
-	it("supports negative multi-monitor origins", () => {
-		const frame: ModelFrameGeometry = { width: 800, height: 600, scale: 1, originX: -1920, originY: 0 };
-		const mapped = mapModelPointToDesktop(frame, 10, 20);
-		expect(mapped.ok).toBe(true);
-		if (mapped.ok) {
-			expect(mapped.point.desktopX).toBe(-1910);
-			expect(mapped.point.desktopY).toBe(20);
+	it("preserves Retina / scale via sourceWidth from display geometry (transport rescale)", async () => {
+		LegacyDesktopSession.instances = [];
+		class ScaledLegacy extends LegacyDesktopSession {
+			override async capture() {
+				return {
+					width: 10,
+					height: 5,
+					data: new Uint8Array(),
+					displays: [{ id: "1", x: 0, y: 0, width: 20, height: 10, scale: 2, pixelWidth: 10, pixelHeight: 5 }],
+				};
+			}
 		}
+		const DesktopSession = adaptDesktopSession(ScaledLegacy);
+		const session = new DesktopSession({ display: "all" });
+		const capture = await session.capture("desktop", { maxWidth: 10, maxHeight: 5 });
+		// Model-visible size is capped; source dimensions keep native scale identity.
+		expect(capture).toMatchObject({ width: 10, height: 5, sourceWidth: 40, sourceHeight: 20, target: "desktop" });
 	});
 
-	it("rejects out-of-bounds and stale frames instead of reusing last coordinates", () => {
-		const frame: ModelFrameGeometry = { width: 100, height: 100, scale: 1, originX: 0, originY: 0 };
-		expect(mapModelPointToDesktop(frame, 100, 0).ok).toBe(false);
-		expect(mapModelPointToDesktop(null, 1, 1)).toEqual({ ok: false, reason: "no_frame" });
-		expect(mapModelPointToDesktop(frame, 1, 1, { frameGeneration: 1, expectedGeneration: 2 })).toEqual({
-			ok: false,
-			reason: "stale_frame",
-		});
+	it("supports multi-monitor negative origins in capture display metadata", async () => {
+		LegacyDesktopSession.instances = [];
+		class NegOriginLegacy extends LegacyDesktopSession {
+			override async capture() {
+				return {
+					width: 40,
+					height: 20,
+					data: new Uint8Array(),
+					displays: [
+						{
+							id: "left",
+							x: -1920,
+							y: 0,
+							width: 1920,
+							height: 1080,
+							scale: 1,
+							pixelWidth: 1920,
+							pixelHeight: 1080,
+						},
+						{ id: "main", x: 0, y: 0, width: 1920, height: 1080, scale: 1, pixelWidth: 1920, pixelHeight: 1080 },
+					],
+				};
+			}
+		}
+		const DesktopSession = adaptDesktopSession(NegOriginLegacy);
+		const session = new DesktopSession({ display: "all" });
+		const capture = await session.capture("desktop");
+		expect(capture.sourceWidth).toBeGreaterThan(1920);
+		expect(capture.width).toBe(40);
+		await session.click("desktop", 1, 1);
+		const legacy = LegacyDesktopSession.instances.at(-1);
+		expect(legacy?.actions.some(a => a.type === "click")).toBe(true);
+	});
+
+	it("invalidates the coordinate frame after move/zoom geometry change (stale)", async () => {
+		LegacyDesktopSession.instances = [];
+		class LayoutChangingLegacy extends LegacyDesktopSession {
+			override async execute(actions: Array<Record<string, unknown>>) {
+				this.actions.push(...actions);
+				// Post-action geometry change → next pointer must reject as stale frame.
+				return { width: 19, height: 10, data: new Uint8Array() };
+			}
+		}
+		const DesktopSession = adaptDesktopSession(LayoutChangingLegacy);
+		const session = new DesktopSession({ display: "all" });
+		await session.capture("desktop");
+		await session.click("desktop", 1, 1);
+		await expect(session.click("desktop", 1, 1)).rejects.toThrow(/^InvalidCoordinateFrame: /);
+	});
+
+	it("fails closed for PermissionDenied-class targets without inventing a sandbox", async () => {
+		LegacyDesktopSession.instances = [];
+		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
+		const session = new DesktopSession({ display: "all" });
+		await expect(session.capture("window-name")).rejects.toThrow(/^InvalidTarget: /);
+		await session.close();
+		await expect(session.capture("desktop")).rejects.toThrow(/^Closed: /);
+	});
+});
+
+describe("computer D7 platform coverage notes", () => {
+	it("documents unverified live platforms without claiming pass", () => {
+		// Contract for reviewers: fixture + adapter coverage ≠ live platform matrix.
+		const unverified = ["wayland-live", "macos-live", "win32-live", "browser-dom-live"] as const;
+		expect(unverified).toContain("wayland-live");
+		// 未验证: no interactive desktop/browser session in this environment.
 	});
 });

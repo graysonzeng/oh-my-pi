@@ -1,31 +1,50 @@
 # Independent review notes (D1–D8)
 
-Reviewer stance: adversarial pass after implementation, before draft PR.
+Reviewer stance: adversarial pass after review-defect fixes (D3/D5–D8).
 
-## Issues found and fixed
+## Checklist
 
-1. **Circular type risk** — `NoProgressPauseReason` moved to `goals/state.ts`; `no-progress.ts` re-exports. Avoids state↔no-progress cycle.
-2. **Persist typing** — `interactive-mode` now narrows `lastPauseReason` to the union (not bare `string`).
-3. **Memory transfer natives pull** — `local-transfer` no longer imports `memories/index` or `@oh-my-pi/pi-utils` barrel (both load natives). Uses `dirs`/`fs-error` subpaths + `memories/storage.normalizeScopeCwd`.
-4. **Import scope semantics** — cross-project import correctly conflicts; round-trip test uses same cwd/different agentDir.
-5. **No-progress streak** — first comparable observation counts as 1 so threshold=3 pauses on the third identical observation (matches “3 identical observations” fixture wording).
-6. **Formatting** — oxfmt on touched TS files; `bun run check:types` clean for coding-agent.
+| Label | Meaning |
+|---|---|
+| 已有且验证 | Already correct on tip; re-checked |
+| 本次修复 | Fixed in this defect-fix increment |
+| 真实外部阻塞 | Cannot complete here (platform / auth / live session) |
+
+## Defects addressed this increment
+
+### D3 — 本次修复
+- Managed skills row no longer claims accept-gating; documents `manage_skill`→`refreshSkills` vs `learn` skip refresh.
+- Recommended action/reason/impact projected on `/context` (`context-decision.ts`).
+- Visibility matrix covers edit / external / refresh / clear / new / restart.
+
+### D5 — 本次修复
+- `diagnoseRuleSources` wired into `/context` with real `disabledRules` + discovery `items`/`all`.
+- Warnings path in `sdk.ts` kept.
+- Thinning Batch 1 documented with call-site evidence + migration checklist; no blind module deletes.
+
+### D6 — 本次修复
+- `collectHubActionHints` feeds `createAgentHubRuntime.actionHints` from ask/approval pending tools, goal blocked/no-progress, integrate-eligible children.
+- Selector passes live AskDialog focus for Main.
+- Tests cover cancel-then-late, dedupe/refresh, advisor skip.
+- Live TUI interactive session: **未验证** (真实外部阻塞).
+
+### D7 — 本次修复
+- Removed parallel `mapModelPointToDesktop` test algorithm.
+- Product `adaptDesktopSession` contracts: pre-capture reject, Retina/sourceWidth, multi-monitor neg origin, stale layout change, closed/invalid target.
+- Live platforms: **未验证**.
+
+### D8 — 本次修复
+- `observeLimiterAttribution` samples provider leases (when configured), task semaphore, async job capacity separately.
+- Wired into `/context` diagnosis + `/jobs`.
+- Missing occupancy → `unknown_occupancy=…`; `unifiedSemaphore` always false.
+- Exit/revoke matrix expanded in lifecycle docs; no new daemon / no blind replay.
 
 ## Residual risks (not bugs)
 
-- Live Hub TUI session still 未验证; inspector Needs me is wired from the projection.
-- Live computer platforms / paid A/B / hindsight+mnemopi migrate — 未验证 / 暂缓 per matrix.
-- `diagnoseRuleSources` winner heuristic is best-effort over capability snapshots; does not change load order.
+- Live Hub TUI paint 未验证.
+- Live computer platforms / paid A/B / hindsight+mnemopi migrate — 真实外部阻塞.
+- Task spawn semaphore only observed when a TaskTool instance is passed; `/context` currently marks `task_concurrency` unknown unless wired — acceptable (unknown ≠ merged).
 
-## Follow-up increment (this turn)
+## Verify (this environment)
 
-- ACP `/memory` transfer uses top-level import (no `await import`).
-- TUI CommandController handles export / import-preview / import-apply.
-- Sharpshooter second seam + transfer CLI helpers.
-- D8 `attributeLimiterState` keeps provider / task / job owners separate.
-
-## Verify rerun after fixes
-
-Focused suite rerun after this increment: **66 pass / 0 fail** (no-progress, rule diagnosis, hub queue, local/transfer-cli/sharpshooter-transfer, limiter-attribution, memory-command, subagent-report).
-`bun run check:types` in coding-agent and tui: **clean**.
-ACP `/memory export` / `import-preview` cases pass. An unrelated `/todo append` custom-entry assertion failed when the full `acp-builtins` file was included; this increment does not touch todo persistence.
+Focused suites for context-decision, hub-action-hints, limiter-observation/attribution, rule-source-diagnosis, computer-coordinate-boundary, plus prior D1/D2 suites as needed. See commit message for pass counts.

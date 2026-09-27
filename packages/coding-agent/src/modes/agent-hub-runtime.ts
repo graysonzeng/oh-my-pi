@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import type { AgentHubDeps, AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import type { HubActionQueueHints } from "@oh-my-pi/pi-tui/overlays/agent-hub-action-queue";
 import type { AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { AgentActivityIndex } from "../activity";
 import { getRoleInfo } from "../config/model-roles";
@@ -8,7 +9,9 @@ import { IrcBus } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
+import type { AgentSession } from "../session/agent-session";
 import { parseSessionEntries } from "../session/session-loader";
+import { collectHubActionHints } from "./hub-action-hints";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
@@ -17,22 +20,50 @@ export const agentTranscriptSource: AgentTranscriptSource = {
 		parseSessionEntries(text).filter(entry => entry.type === "message" || entry.type === "model_change"),
 };
 
+export interface AgentHubRuntimeOptions {
+	registry?: AgentRegistry;
+	lifecycle?: AgentLifecycleManager;
+	irc?: IrcBus;
+	activity?: AgentActivityIndex;
+	remote?: AgentHubRemote;
+	settings?: Settings;
+	sessionFile?: string | null;
+	/** Optional live ask-dialog / approval overlays from the TUI host. */
+	askDialogOpenForAgentIds?: () => ReadonlySet<string> | readonly string[] | undefined;
+	pendingApprovalAgentIds?: () => ReadonlySet<string> | readonly string[] | undefined;
+	pendingIntegrateAgentIds?: () => ReadonlySet<string> | readonly string[] | undefined;
+}
+
 /** Host services used by the roster, without exposing runtime implementation to tui. */
 export function createAgentHubRuntime(
-	options: {
-		registry?: AgentRegistry;
-		lifecycle?: AgentLifecycleManager;
-		irc?: IrcBus;
-		activity?: AgentActivityIndex;
-		remote?: AgentHubRemote;
-		settings?: Settings;
-		sessionFile?: string | null;
-	} = {},
+	options: AgentHubRuntimeOptions = {},
 ): Pick<
 	AgentHubDeps<AgentRef>,
-	"registry" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "transcript" | "loadPersisted" | "getRoleInfo"
+	| "registry"
+	| "lifecycle"
+	| "irc"
+	| "activity"
+	| "manageActivityLive"
+	| "transcript"
+	| "loadPersisted"
+	| "getRoleInfo"
+	| "actionHints"
 > {
 	const registry = options.registry ?? AgentRegistry.global();
+	const actionHints = (): HubActionQueueHints =>
+		collectHubActionHints({
+			agents: registry.list(),
+			resolveSession: id => {
+				const ref = registry.get(id);
+				const session = ref?.session;
+				return session && typeof (session as AgentSession).getGoalModeState === "function"
+					? (session as AgentSession)
+					: null;
+			},
+			askDialogOpenForAgentIds: options.askDialogOpenForAgentIds?.(),
+			pendingApprovalAgentIds: options.pendingApprovalAgentIds?.(),
+			pendingIntegrateAgentIds: options.pendingIntegrateAgentIds?.(),
+		});
 	return {
 		registry,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
@@ -42,5 +73,6 @@ export function createAgentHubRuntime(
 		transcript: agentTranscriptSource,
 		loadPersisted: shouldContinue => registerPersistedSubagents(registry, options.sessionFile, { shouldContinue }),
 		getRoleInfo: options.settings ? role => getRoleInfo(role, options.settings!) : undefined,
+		actionHints,
 	};
 }
