@@ -10,6 +10,7 @@ import { resolveSubagentPerformanceClass, type SubagentPerformanceClass } from "
 import { computeActiveWallMs } from "./active-wall";
 import {
 	buildDeliveryCostBaselineReport,
+	groupVerificationsByEpisode,
 	type DeliveryCostBaselineReport,
 	DELIVERY_QUALITY_OUTCOME_MESSAGE_TYPE,
 	formatDeliveryCostBaselineReport,
@@ -19,8 +20,10 @@ import {
 } from "./delivery-cost-baseline";
 import {
 	buildAcceptanceCoverageMatrix,
+	classifyChildIntegrateCoverage,
 	classifyParentFinalCoverage,
 	formatAcceptanceCoverageMatrix,
+	type AcceptanceCoverageCell,
 	type AcceptanceCoverageMatrix,
 } from "./acceptance-coverage-matrix";
 import {
@@ -29,7 +32,12 @@ import {
 	parseParentFinalVerificationDetails,
 	type ParentFinalVerificationObservation,
 } from "./parent-final-verification";
+import { episodeKey } from "./task-episode";
 import { sha256Hex } from "./stable-serialize";
+import {
+	PARENT_INTEGRATE_DECISION_CUSTOM_TYPE,
+	type ParentIntegrateDecision,
+} from "../task/child-delivery-evidence";
 
 export interface CoverageCount {
 	present: number;
@@ -141,6 +149,14 @@ export interface ParsedSession {
 	thinkingLevels: string[];
 	spawnObservations: SpawnResultRow[];
 	parentFinalVerifications: ParentFinalVerificationObservation[];
+	/** Goal host-gate lastDecision was candidate_complete (mode_change facts). */
+	goalCandidateComplete?: boolean;
+	/** Parent integrate decisions collected from custom entries (delivery evidence). */
+	parentIntegrateDecisions?: Array<{
+		rowId: string;
+		episodeKey: string | null;
+		decision: ParentIntegrateDecision;
+	}>;
 	/** Optional quality-defect receipts; absent ⇒ unknown, never zero-filled. */
 	qualityOutcomes?: DeliveryQualityOutcomeObservation[];
 }
@@ -711,6 +727,69 @@ function collectParentFinalVerification(
 	session.parentFinalVerifications.push(observation);
 }
 
+function collectParentIntegrateDecision(session: ParsedSession, customType: unknown, details: unknown): void {
+	if (customType !== PARENT_INTEGRATE_DECISION_CUSTOM_TYPE) return;
+	if (!isRecord(details)) return;
+	const classification = details.classification;
+	const action = details.action;
+	if (
+		classification !== "done_valid" &&
+		classification !== "missing_local_evidence" &&
+		classification !== "cross_module" &&
+		classification !== "parent_verification_required" &&
+		classification !== "stale_context" &&
+		classification !== "scope_unknown"
+	) {
+		return;
+	}
+	if (
+		action !== "integrate" &&
+		action !== "return_to_worker" &&
+		action !== "parent_coordinate" &&
+		action !== "reread_then_decide"
+	) {
+		return;
+	}
+	const reasons = Array.isArray(details.reasons)
+		? details.reasons.filter((r): r is string => typeof r === "string")
+		: [];
+	const decision: ParentIntegrateDecision = {
+		classification,
+		action,
+		reasons,
+		usedAuthorSelfAssessment: false,
+	};
+	const ep =
+		isRecord(details.episode) &&
+		typeof details.episode.sessionId === "string" &&
+		typeof details.episode.rootUserEntryId === "string"
+			? episodeKey({
+					sessionId: details.episode.sessionId.trim(),
+					rootUserEntryId: details.episode.rootUserEntryId.trim(),
+				})
+			: null;
+	const rowId =
+		(typeof details.agentId === "string" && details.agentId.trim()) ||
+		(typeof details.taskToolCallId === "string" && details.taskToolCallId.trim()) ||
+		(typeof details.jobId === "string" && details.jobId.trim()) ||
+		ep ||
+		session.stem ||
+		session.path;
+	session.parentIntegrateDecisions ??= [];
+	session.parentIntegrateDecisions.push({ rowId, episodeKey: ep, decision });
+}
+
+function collectGoalCandidateComplete(session: ParsedSession, mode: unknown, data: unknown): void {
+	if (mode !== "goal" && mode !== "goal_paused") return;
+	if (!isRecord(data)) return;
+	const goal = isRecord(data.goal) ? data.goal : undefined;
+	if (!goal) return;
+	const hostGate = isRecord(goal.hostGate) ? goal.hostGate : undefined;
+	if (hostGate?.lastDecision === "candidate_complete") {
+		session.goalCandidateComplete = true;
+	}
+}
+
 function collectDeliveryQualityOutcome(
 	session: ParsedSession,
 	customType: unknown,
@@ -736,6 +815,7 @@ function collectTerminalObservations(
 	ts: number | null = null,
 ): void {
 	collectParentFinalVerification(session, customType, details, ts);
+	collectParentIntegrateDecision(session, customType, details);
 	collectDeliveryQualityOutcome(session, customType, details, ts);
 	const type = typeof customType === "string" ? customType : "";
 	const text = textFromContent(content);
@@ -853,11 +933,16 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 			if (onActiveBranch) session.thinkingLevels.push(raw.thinkingLevel);
 			continue;
 		}
+		if (type === "mode_change") {
+			if (onActiveBranch) collectGoalCandidateComplete(session, raw.mode, raw.data);
+			continue;
+		}
 		if (type === "custom") {
 			const ts = entryTimestamp(raw, undefined);
 			if (onActiveBranch) {
 				touchTs(session, ts);
 				collectParentFinalVerification(session, raw.customType, raw.data, ts);
+				collectParentIntegrateDecision(session, raw.customType, raw.data);
 				collectDeliveryQualityOutcome(session, raw.customType, raw.data, ts);
 				if (raw.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE) {
 					const parsed = parseParentFinalVerificationDetails(raw.data);
@@ -1288,7 +1373,7 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 	const qualityFalse = { true: 0, false: 0, unknown: 0 };
 	const qualityMissed = { true: 0, false: 0, unknown: 0 };
 	const qualityCoverage = emptyCoverage();
-	const acceptanceCoverageCells: ReturnType<typeof classifyParentFinalCoverage> = [];
+	const acceptanceCoverageCells: AcceptanceCoverageCell[] = [];
 
 	for (const parent of parents) {
 		const fileWall = fileWallMs(parent);
@@ -1320,14 +1405,45 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 			}
 		}
 
+		const candidateComplete = parent.goalCandidateComplete === true;
+		const groups = groupVerificationsByEpisode(parent.parentFinalVerifications);
+		for (const group of groups) {
+			if (group.verifications.length === 0) {
+				acceptanceCoverageCells.push(
+					...classifyParentFinalCoverage({
+						rowId: parent.stem || parent.path,
+						observation: null,
+						excludeFixtureAuthority: true,
+						candidateComplete,
+					}),
+				);
+				continue;
+			}
+			for (const verification of group.verifications) {
+				const attemptId = verification.attempt?.attemptId?.trim();
+				const baseRow = group.episodeKey ?? (parent.stem || parent.path);
+				const rowId = attemptId ? `${baseRow}:${attemptId}` : baseRow;
+				acceptanceCoverageCells.push(
+					...classifyParentFinalCoverage({
+						rowId,
+						observation: verification,
+						excludeFixtureAuthority: true,
+						candidateComplete,
+					}),
+				);
+			}
+		}
+		for (const integrate of parent.parentIntegrateDecisions ?? []) {
+			acceptanceCoverageCells.push(
+				classifyChildIntegrateCoverage({
+					rowId: integrate.rowId,
+					episodeKey: integrate.episodeKey,
+					decision: integrate.decision,
+				}),
+			);
+		}
+
 		const verification = parent.parentFinalVerifications[parent.parentFinalVerifications.length - 1];
-		acceptanceCoverageCells.push(
-			...classifyParentFinalCoverage({
-				rowId: parent.stem || parent.path,
-				observation: verification,
-				excludeFixtureAuthority: true,
-			}),
-		);
 		if (!verification || (verification.v !== undefined && verification.authority === undefined)) {
 			parentFinalUnknown++;
 			cover(coverage.parentFinalVerification, false);

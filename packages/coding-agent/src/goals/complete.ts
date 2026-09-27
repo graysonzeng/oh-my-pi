@@ -2,8 +2,13 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
-import { collectTrustedHostSeals, type HostTerminalSeal } from "../task/host-terminal-check";
+import {
+	bindHostSealsToAcceptance,
+	collectTrustedHostSeals,
+	type HostTerminalSeal,
+} from "../task/host-terminal-check";
 import { resolveCurrentWorkspaceCodeVersion } from "../task/workspace-code-version";
+import { fingerprintStable } from "../latency/stable-serialize";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import * as evaluator from "./evaluator";
 import {
@@ -13,6 +18,7 @@ import {
 	type GoalCompletionSettleSnapshot,
 	settleTurnMessages,
 } from "./host-gate";
+import type { ProgressObservationInput } from "./no-progress";
 import type { GoalRuntime } from "./runtime";
 import type { Goal, GoalToolDetails } from "./state";
 import { buildGoalToolResponse, type GoalToolResponse } from "./tools/goal-tool";
@@ -37,6 +43,44 @@ function formatCompleteText(response: GoalToolResponse, extra?: string): string 
 		text += `\n\n${response.completionBudgetReport}`;
 	}
 	return text;
+}
+
+/**
+ * Host-fact progress observation for D2 — seals/gate snapshot only.
+ * Does not invent failure ids when checks were never assessed.
+ */
+function progressObservationFromHost(input: {
+	goal: Goal;
+	hostReasons: readonly string[];
+	nominationId: string;
+	currentCodeVersion: string;
+	hostReceipts: readonly HostTerminalSeal[];
+	evaluatorUnavailable?: boolean;
+}): ProgressObservationInput {
+	const acceptanceRevision = fingerprintStable({
+		objective: input.goal.objective,
+		goalRevision: input.goal.hostGate?.goalRevision ?? 0,
+	});
+	const current = input.currentCodeVersion.trim();
+	const proven = current
+		? bindHostSealsToAcceptance({
+				seals: input.hostReceipts,
+				acceptanceIds: [input.goal.objective],
+				currentCodeVersion: current,
+			}).map(row => row.id)
+		: [];
+	const staleFailureIds = current
+		? input.hostReceipts.filter(seal => seal.codeVersion !== current).map(seal => seal.id)
+		: [];
+	return {
+		hostReasons: [...input.hostReasons],
+		codeVersionFingerprint: current || null,
+		nominationId: input.nominationId,
+		acceptanceRevision,
+		provenAcceptanceIds: proven,
+		trustedFailureIds: staleFailureIds,
+		...(input.evaluatorUnavailable === true ? { evaluatorUnavailable: true } : {}),
+	};
 }
 
 function latestAssistant(messages: readonly AgentMessage[]): AssistantMessage | undefined {
@@ -165,10 +209,11 @@ export async function executeGoalComplete(
 		try {
 			const noProgressPolicy = session.settings.get("goal.hostGate.noProgressPolicy") === true;
 			const noProgressThreshold = Number(session.settings.get("goal.hostGate.noProgressThreshold") ?? 3);
+			const nominationKey = goal.hostGate?.nominationId ?? nominationId;
 			const applied = await runtime.applyNominationResult({
 				goalId: goal.id,
 				goalRevision: goal.hostGate?.goalRevision ?? 0,
-				nominationId: goal.hostGate?.nominationId ?? nominationId,
+				nominationId: nominationKey,
 				turnId,
 				generation,
 				decision: "continue",
@@ -178,11 +223,13 @@ export async function executeGoalComplete(
 				noProgress: {
 					policyEnabled: noProgressPolicy,
 					threshold: Number.isFinite(noProgressThreshold) ? noProgressThreshold : 3,
-					observation: {
+					observation: progressObservationFromHost({
+						goal,
 						hostReasons: host.reasons,
-						codeVersionFingerprint: currentCodeVersion || null,
-						nominationId: goal.hostGate?.nominationId ?? nominationId,
-					},
+						nominationId: nominationKey,
+						currentCodeVersion: currentCodeVersion ?? "",
+						hostReceipts: snapshot.hostReceipts ?? [],
+					}),
 				},
 			});
 			if (applied === "stale") {
@@ -216,10 +263,11 @@ export async function executeGoalComplete(
 	try {
 		const result = await evaluator.runGoalEvaluator({ session, goal, snapshot, signal: combined });
 		if (combined.aborted) throw new ToolAbortError();
+		const nominationKey = goal.hostGate?.nominationId ?? nominationId;
 		const applied = await runtime.applyNominationResult({
 			goalId: goal.id,
 			goalRevision: goal.hostGate?.goalRevision ?? 0,
-			nominationId: goal.hostGate?.nominationId ?? nominationId,
+			nominationId: nominationKey,
 			turnId,
 			generation,
 			decision: result.decision === "blocked" ? "blocked" : "candidate_complete",
@@ -230,12 +278,14 @@ export async function executeGoalComplete(
 			noProgress: {
 				policyEnabled: false,
 				threshold: 3,
-				observation: {
+				observation: progressObservationFromHost({
+					goal,
 					hostReasons: host.reasons,
-					codeVersionFingerprint: currentCodeVersion || null,
-					nominationId: goal.hostGate?.nominationId ?? nominationId,
+					nominationId: nominationKey,
+					currentCodeVersion: currentCodeVersion ?? "",
+					hostReceipts: snapshot.hostReceipts ?? [],
 					evaluatorUnavailable: result.failOpen === true,
-				},
+				}),
 			},
 		});
 		if (applied === "stale") {

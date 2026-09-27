@@ -13,6 +13,8 @@ import { episodeKey, type AcceptanceAuthority } from "./task-episode";
 export type MissingCoverageReasonCode =
 	| "no_parent_final_receipt"
 	| "receipt_lacks_authority"
+	| "missing_authority"
+	| "legacy_compat"
 	| "fixture_authority_excluded"
 	| "acceptance_contract_missing"
 	| "code_state_missing"
@@ -108,14 +110,38 @@ function isTrustedProductionAuthority(authority: AcceptanceAuthority | undefined
 	);
 }
 
+/** True when any (or default) criterion still requires a code fingerprint bind. */
+function contractRequiresCodeFingerprint(obs: ParentFinalVerificationObservation): boolean {
+	const criteria = obs.acceptanceContract?.criteria;
+	if (!criteria || criteria.length === 0) return true;
+	return criteria.some(c => c.verification === "command-check");
+}
+
 /**
  * Classify one parent-final receipt into coverage cell(s).
  * Missing receipt ⇒ one missing cell with `no_parent_final_receipt`.
  * Presence of fields alone never yields `covered` without trusted authority + passed status.
+ * Legacy pre-v1 (authority+v both absent) is labeled `legacy_compat` — never covered.
+ * Review/manual-only criteria do not force a code fingerprint obligation.
  */
 export function classifyParentFinalCoverage(input: ClassifyParentFinalCoverageInput): AcceptanceCoverageCell[] {
 	const excludeFixture = input.excludeFixtureAuthority !== false;
 	const obs = input.observation;
+
+	if (input.candidateComplete === true) {
+		const ep = obs ? episodeFromObservation(obs) : null;
+		return [
+			{
+				rowId: input.rowId,
+				episodeKey: ep,
+				itemId: "*",
+				status: "pending",
+				reasons: ["candidate_not_user_confirmed"],
+				detail: "candidate_complete is advisory — not accepted until user_confirmed",
+			},
+		];
+	}
+
 	if (!obs) {
 		return [
 			{
@@ -130,98 +156,97 @@ export function classifyParentFinalCoverage(input: ClassifyParentFinalCoverageIn
 	}
 
 	const ep = episodeFromObservation(obs);
-	const cells: AcceptanceCoverageCell[] = [];
-	const reasons: MissingCoverageReasonCode[] = [];
 
-	if (input.candidateComplete === true) {
-		return [
-			{
-				rowId: input.rowId,
-				episodeKey: ep,
-				itemId: "*",
-				status: "pending",
-				reasons: ["candidate_not_user_confirmed"],
-				detail: "candidate_complete is advisory — not accepted until user_confirmed",
-			},
-		];
-	}
+	const sharedReasons: MissingCoverageReasonCode[] = [];
 
 	if (obs.status === "failed") {
-		reasons.push("receipt_failed");
+		sharedReasons.push("receipt_failed");
 	}
 
-	if (obs.v !== undefined && obs.authority === undefined) {
-		reasons.push("receipt_lacks_authority");
+	if (obs.authority === undefined && obs.v === undefined) {
+		sharedReasons.push("legacy_compat");
+	} else if (obs.authority === undefined) {
+		sharedReasons.push("missing_authority");
 	} else if (obs.authority === "fixture" && excludeFixture) {
-		reasons.push("fixture_authority_excluded");
-	} else if (
-		obs.authority !== undefined &&
-		!isTrustedProductionAuthority(obs.authority) &&
-		obs.authority !== "fixture"
-	) {
-		reasons.push("receipt_lacks_authority");
+		sharedReasons.push("fixture_authority_excluded");
+	} else if (!isTrustedProductionAuthority(obs.authority) && obs.authority !== "fixture") {
+		sharedReasons.push("receipt_lacks_authority");
 	}
 
 	if (!obs.acceptanceContract || obs.acceptanceContract.items.length === 0) {
-		reasons.push("acceptance_contract_missing");
-	}
-	if (!obs.codeState?.fingerprint) {
-		reasons.push("code_state_missing");
+		sharedReasons.push("acceptance_contract_missing");
 	}
 	if (!obs.evidenceRefs || obs.evidenceRefs.length === 0) {
-		reasons.push("evidence_refs_missing");
+		sharedReasons.push("evidence_refs_missing");
 	}
 	if (!obs.attempt?.episode) {
-		reasons.push("episode_linkage_missing");
-	}
-	if (
-		input.currentCodeFingerprint &&
-		obs.codeState?.fingerprint &&
-		input.currentCodeFingerprint !== obs.codeState.fingerprint
-	) {
-		reasons.push("stale_or_scope_unknown");
+		sharedReasons.push("episode_linkage_missing");
 	}
 
-	const items =
-		obs.acceptanceContract && obs.acceptanceContract.items.length > 0
-			? obs.acceptanceContract.items
-			: (["*"] as string[]);
+	const criteria = obs.acceptanceContract?.criteria;
+	const items: Array<{ itemId: string; needsCodeFingerprint: boolean }> =
+		criteria && criteria.length > 0
+			? criteria.map(c => ({
+					itemId: c.criterionId,
+					needsCodeFingerprint: c.verification === "command-check",
+				}))
+			: obs.acceptanceContract && obs.acceptanceContract.items.length > 0
+				? obs.acceptanceContract.items.map(itemId => ({
+						itemId,
+						needsCodeFingerprint: true,
+					}))
+				: [{ itemId: "*", needsCodeFingerprint: contractRequiresCodeFingerprint(obs) }];
 
-	const passedTrusted =
-		obs.status === "passed" &&
-		(obs.authority === undefined && obs.v === undefined
-			? true // legacy pre-v1: retained for history labeling only
-			: isTrustedProductionAuthority(obs.authority) || (obs.authority === "fixture" && !excludeFixture));
+	const trustOk =
+		isTrustedProductionAuthority(obs.authority) || (obs.authority === "fixture" && !excludeFixture);
+	const passedTrusted = obs.status === "passed" && trustOk;
 
-	if (passedTrusted && reasons.length === 0) {
-		for (const itemId of items) {
+	const cells: AcceptanceCoverageCell[] = [];
+	for (const item of items) {
+		const reasons = [...sharedReasons];
+		if (item.needsCodeFingerprint && !obs.codeState?.fingerprint) {
+			reasons.push("code_state_missing");
+		}
+		if (
+			item.needsCodeFingerprint &&
+			input.currentCodeFingerprint &&
+			obs.codeState?.fingerprint &&
+			input.currentCodeFingerprint !== obs.codeState.fingerprint
+		) {
+			reasons.push("stale_or_scope_unknown");
+		}
+
+		if (passedTrusted && reasons.length === 0) {
 			cells.push({
 				rowId: input.rowId,
 				episodeKey: ep,
-				itemId,
+				itemId: item.itemId,
 				status: "covered",
 				reasons: [],
 			});
+			continue;
 		}
-		return cells;
-	}
 
-	let status: CoverageCellStatus = "incomplete";
-	if (reasons.includes("fixture_authority_excluded") && reasons.length === 1) {
-		status = "excluded";
-	} else if (reasons.includes("no_parent_final_receipt") || reasons.includes("receipt_failed")) {
-		status = reasons.includes("receipt_failed") ? "incomplete" : "missing";
-	} else if (!passedTrusted && reasons.includes("receipt_lacks_authority")) {
-		status = "incomplete";
-	}
+		let status: CoverageCellStatus = "incomplete";
+		if (reasons.includes("fixture_authority_excluded") && reasons.length === 1) {
+			status = "excluded";
+		} else if (reasons.includes("receipt_failed")) {
+			status = "incomplete";
+		} else if (
+			!passedTrusted &&
+			(reasons.includes("receipt_lacks_authority") ||
+				reasons.includes("missing_authority") ||
+				reasons.includes("legacy_compat"))
+		) {
+			status = "incomplete";
+		}
 
-	for (const itemId of items) {
 		cells.push({
 			rowId: input.rowId,
 			episodeKey: ep,
-			itemId,
+			itemId: item.itemId,
 			status,
-			reasons: [...reasons],
+			reasons,
 			detail:
 				status === "excluded"
 					? "fixture authority excluded from production coverage"

@@ -819,7 +819,7 @@ export function observeDeliveryCostTask(args: {
  * Group parent-final receipts by episode. Legacy receipts without episode
  * anchors stay in a single session-level bucket (episodeKey null).
  */
-function groupVerificationsByEpisode(
+export function groupVerificationsByEpisode(
 	verifications: readonly ParentFinalVerificationObservation[],
 ): Array<{ episodeKey: string | null; verifications: ParentFinalVerificationObservation[] }> {
 	if (verifications.length === 0) {
