@@ -65,7 +65,16 @@ Labels: **已有且验证** / **本次修复** / **真实外部阻塞**
 | No CHANGELOG edit | Held |
 | No TTL / second SessionMaintenance scheduler | Held |
 
-## Unverified / residual risk
+## Offline verify (this environment)
+
+```text
+Focused D3/D5–D8 + D4 transfer suites this increment:
+context-decision, hub-action-hints, limiter-observation/attribution,
+rule-source-diagnosis, computer-coordinate-boundary, agent-hub-action-queue,
+local/sharpshooter/transfer-cli: 43 pass / 0 fail
+
+bun run check:types (coding-agent, tui, ai): clean
+```
 
 - Live Hub TUI session (Needs me wired; interactive paint 未验证).
 - Live computer-use platforms beyond fixture + adapter.
