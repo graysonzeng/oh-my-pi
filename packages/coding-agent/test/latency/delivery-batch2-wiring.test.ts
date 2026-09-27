@@ -26,7 +26,7 @@ import { detectPhaseBoundaryShadow, hasRequiredRetainedState } from "../../src/s
 import { runPhaseHandoffMaintenance } from "../../src/session/phase-handoff-maintenance";
 
 describe("Batch2 status honesty", () => {
-	it("keeps paired_evidence_ready false; W5 stays not fully runtime_wired", () => {
+	it("keeps paired_evidence_ready false; W5 final-request wired without live cache claims", () => {
 		for (const id of ["W4", "W5", "W6", "W7"] as const) {
 			const row = batch2Status(id);
 			expect(row.code_complete).toBe(true);
@@ -35,8 +35,12 @@ describe("Batch2 status honesty", () => {
 			expect(row.call_sites.length).toBeGreaterThan(0);
 		}
 		expect(batch2Status("W4").runtime_wired).toBe(true);
-		expect(batch2Status("W5").runtime_wired).toBe(false);
-		expect(batch2Status("W5").note.toLowerCase()).toContain("not fully request-wired");
+		expect(batch2Status("W4").note.toLowerCase()).toContain("durable reopen");
+		expect(batch2Status("W5").runtime_wired).toBe(true);
+		expect(batch2Status("W5").note.toLowerCase()).toContain("final-request");
+		expect(batch2Status("W5").note.toLowerCase()).toContain("default off");
+		expect(batch2Status("W5").call_sites.some(s => s.includes("observeStablePrefixAtFinalRequest"))).toBe(true);
+		expect(batch2Status("W5").call_sites.some(s => s.includes("runtime-adapter.ts#onPayload"))).toBe(true);
 		expect(batch2Status("W6").runtime_wired).toBe(true);
 		expect(batch2Status("W7").runtime_wired).toBe(true);
 		const w6 = batch2Status("W6");

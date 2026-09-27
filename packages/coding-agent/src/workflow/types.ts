@@ -1,5 +1,6 @@
 import type { BudgetInvocationSettlement, WorkflowBudgetGuard, WorkflowBudgetPort } from "./budget-ledger";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import type { StablePrefixFinalRequestObserveV1 } from "../latency/stable-prefix-assembly-bridge";
 import type { ModelFactsSource } from "../model-policy/adapters";
 import type {
 	ModelFactsV1,
@@ -687,6 +688,11 @@ export interface ContextStrategy {
 		evictPersisted: boolean;
 		keepRecentN: number;
 	};
+	/**
+	 * Preferred artifact budget surface. When set, each defined field overrides
+	 * the matching `contextPolicy` field via `resolveArtifactInclusion`
+	 * (see `artifact-inclusion.ts` dual-field docs; no threshold change).
+	 */
 	artifactInclusion?: {
 		includePlan: boolean;
 		includeReviewFindings: boolean;
@@ -768,6 +774,11 @@ export interface WorkflowModelProfile {
 		retryableErrorKinds: string[];
 		fallbackProfileIds: string[];
 	};
+	/**
+	 * Compat / legacy budget surface. Effective inclusion flags and
+	 * `maxArtifactBytes` prefer `contextStrategy.artifactInclusion` when set
+	 * (see `resolveArtifactInclusion`). `includeFullTranscript` is policy-only.
+	 */
 	contextPolicy: {
 		includePlan: boolean;
 		includeReviewFindings: boolean;
@@ -835,6 +846,11 @@ export interface WorkflowAgentResult<TArtifact = unknown> {
 	 * After a successful run, provider cache counters are merged when usage reports them.
 	 */
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
+	/**
+	 * W5 safe observe at the final provider-serialized request boundary (onPayload).
+	 * Fingerprints only; claimedLiveWin always false. Usage/cache/TTFT associated when known.
+	 */
+	stablePrefixFinalObserve?: StablePrefixFinalRequestObserveV1;
 	contextLedger?: ContextLedgerV1;
 	/** Tool optimization receipts accumulated on the live tool path during the attempt. */
 	optimizationReceipts?: unknown[];

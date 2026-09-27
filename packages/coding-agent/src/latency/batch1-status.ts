@@ -21,7 +21,8 @@ export interface Batch1WorkPackageStatus {
 }
 
 /**
- * Status after production-wiring PR. Update only when call sites or evidence change.
+ * Status after production-wiring PR + residual alignment.
+ * Update only when call sites or evidence change.
  * paired_evidence_ready remains false for the whole batch.
  */
 export const BATCH1_STATUS: readonly Batch1WorkPackageStatus[] = [
@@ -37,25 +38,25 @@ export const BATCH1_STATUS: readonly Batch1WorkPackageStatus[] = [
 		id: "W1",
 		code_complete: true,
 		runtime_wired: true,
-		mechanism_verified: false,
+		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "Ordinary sink wired (/goal complete + extension appendEntry); gaps: multi-episode production path + abandoned-branch filter not fully mechanism-verified",
+		note: "Ordinary sink wired (/goal complete + extension appendEntry); multi-episode attribution + abandoned-branch filter locked by delivery-batch1-w1-w2-regressions; no live cost claims",
 	},
 	{
 		id: "W2",
 		code_complete: true,
 		runtime_wired: true,
-		mechanism_verified: false,
+		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "Parent consume reclassify+bind wired; gaps: terminal-required proven seal + forged path-only negatives need broader fixture coverage",
+		note: "Parent consume reclassify+bind wired; terminal-required proven seal + forged path-only negatives covered by child-delivery-batch1-w2 + w1-w2-regressions + e4-host-terminal-checks; no live cost claims",
 	},
 	{
 		id: "W3",
 		code_complete: true,
 		runtime_wired: true,
-		mechanism_verified: false,
+		mechanism_verified: true,
 		paired_evidence_ready: false,
-		note: "Durable observe wired; gaps: plan/start vs run/end + unique multi-round eventIds need production-path regression lock-in",
+		note: "Durable observe wired; plan/start vs run/end + multi-round unique eventIds locked by evidence-handoff-observe-durable + workpool scope keys + delivery-batch1-w3-observe-regressions; no live cost claims",
 	},
 	{
 		id: "W8",

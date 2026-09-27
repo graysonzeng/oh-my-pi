@@ -5,6 +5,10 @@
  * embedded structured-subagent path.
  */
 
+import type {
+	StablePrefixAssemblyObserveV1,
+	StablePrefixFinalRequestObserveV1,
+} from "../latency/stable-prefix-assembly-bridge";
 import type { ContextLedgerV1 } from "../workflow/context-ledger";
 import type { ToolOptimizationReceiptV1 } from "../workflow/optimization-receipt";
 import type { PromptAssemblyReceiptV1 } from "../workflow/prompt-assembly";
@@ -61,6 +65,10 @@ export type WorkflowToolOptimization = {
 export type WorkflowAttemptEvidence = {
 	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
 	contextLedger?: ContextLedgerV1;
+	/** W5 assembly-boundary observe (fingerprints only; experiment may be off). */
+	stablePrefixObserve?: StablePrefixAssemblyObserveV1;
+	/** W5 final provider-serialize observe (onPayload); usage associated when known. */
+	stablePrefixFinalObserve?: StablePrefixFinalRequestObserveV1;
 };
 
 export type WorkflowWritePolicy = { repoRoot: string; forbiddenPaths: string[] };

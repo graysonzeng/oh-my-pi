@@ -38,11 +38,15 @@ import {
 	type WorkflowPresentationPolicy,
 } from "./presentation-policy";
 import {
+	fingerprintToolSchemasForSend,
 	observeStablePrefixAtAssembly,
 	STABLE_PREFIX_OBSERVE_CUSTOM_TYPE,
 	type StablePrefixAssemblyObserveV1,
 } from "../latency/stable-prefix-assembly-bridge";
-import { parseStablePrefixCacheExperimentConfig } from "../latency/stable-prefix-cache-experiment";
+import {
+	parseStablePrefixCacheExperimentConfig,
+	type StablePrefixCacheExperimentConfig,
+} from "../latency/stable-prefix-cache-experiment";
 import { assemblePrompt, type PromptAssemblyReceiptV1, type PromptSection } from "./prompt-assembly";
 import { applyPromptStrategy, buildStablePromptSections } from "./prompt-strategy";
 import { enhanceSchemaForProfile, type ToolDescriptor, transformToolsForProfile } from "./schema-enhancer";
@@ -354,10 +358,15 @@ export interface PreparedWorkflowInvocation {
 	promptAssemblyReceipt: PromptAssemblyReceiptV1;
 	/**
 	 * W5 Experiment B observe receipt at the assembly boundary (fingerprints only).
-	 * Present when deliveryExperiment.stablePrefixCache is consulted; claimedLiveWin
-	 * is always false. Does not prove server cache hits.
+	 * Always produced when prepare runs; claimedLiveWin is always false.
+	 * Final provider-serialize observe is attached later by RuntimeAdapter.onPayload.
 	 */
 	stablePrefixObserve?: StablePrefixAssemblyObserveV1;
+	/**
+	 * Parsed stable-prefix experiment config (default off). Shared with the
+	 * final-request observe path so assembly + onPayload stay single-factor consistent.
+	 */
+	stablePrefixConfig: StablePrefixCacheExperimentConfig;
 	/** Versioned per-request context bucket ledger; provider facts merge after response. */
 	contextLedger: ContextLedgerV1;
 	/**
@@ -702,8 +711,8 @@ export function prepareWorkflowInvocation(
 		},
 	];
 	// W5: observe (and optionally reorder) at the assembly boundary. Default off.
-	// Residual honesty: this is still the prepare/assembly boundary, not the final
-	// provider wire serialize — paired evidence stays false; no live cost claims.
+	// Final provider-serialize observe is wired in RuntimeAdapter.onPayload; this
+	// prepare-time fingerprint prefers captured full schemas when present.
 	const settingsGet = request.session.settings?.get?.bind(request.session.settings);
 	const stablePrefixConfig = parseStablePrefixCacheExperimentConfig({
 		enabled: settingsGet?.("deliveryExperiment.stablePrefixCache.enabled" as never) === true,
@@ -711,17 +720,16 @@ export function prepareWorkflowInvocation(
 	});
 	const readDedupeExperimentOn = settingsGet?.("deliveryExperiment.readDedupe.enabled" as never) === true;
 	const phaseHandoffExperimentOn = settingsGet?.("deliveryExperiment.phaseHandoff.enabled" as never) === true;
-	// Schema identity: names + presentation mode + essential set + any schemas
-	// already captured on the profile path. Full provider-final tool JSON may
-	// still differ at send time (catalog expand) — fingerprint is best-effort.
-	const toolSchemaFingerprint = sha256Hex(
-		JSON.stringify({
-			names: toolNames,
-			mode: presentationPolicy.mode,
-			essential: [...presentationPolicy.essentialTools].sort(),
-			skills: presentedSkillsText ? sha256Hex(presentedSkillsText) : null,
-		}),
-	);
+	// Schema identity at prepare: names + mode + any schemas already captured on
+	// the transform path (often empty until transformTools runs). Final onPayload
+	// observe replaces this with the actually-sent tools JSON fingerprint.
+	const toolSchemaFingerprint = fingerprintToolSchemasForSend({
+		names: toolNames,
+		mode: presentationPolicy.mode,
+		essential: [...presentationPolicy.essentialTools],
+		schemas: presentationToolSchemas,
+		skillsFingerprint: presentedSkillsText ? sha256Hex(presentedSkillsText) : null,
+	});
 	const effortFingerprint = sha256Hex(
 		JSON.stringify({
 			mode: adaptedPolicy.modelFacts.reasoning.mode,
@@ -729,6 +737,9 @@ export function prepareWorkflowInvocation(
 			supportedEfforts: adaptedPolicy.modelFacts.reasoning.supportedEfforts,
 		}),
 	);
+	// Session-scoped labeling: same workflow+attempt child path → same_child_session.
+	const observeScope =
+		request.workflowId && request.attemptId ? ("same_child_session" as const) : ("unknown" as const);
 	const prefixBridge = observeStablePrefixAtAssembly({
 		sections: baseSections,
 		config: stablePrefixConfig,
@@ -743,7 +754,7 @@ export function prepareWorkflowInvocation(
 			toolSchemaFingerprint,
 			effortFingerprint,
 		},
-		scope: "unknown",
+		scope: observeScope,
 	});
 	const assembled = assemblePrompt({
 		sections: prefixBridge.sections,
@@ -847,6 +858,7 @@ export function prepareWorkflowInvocation(
 		transformTools,
 		promptAssemblyReceipt: assembled.receipt,
 		stablePrefixObserve,
+		stablePrefixConfig,
 		contextLedger,
 		assembledPromptText: assembledContext,
 		presentationPolicy,
