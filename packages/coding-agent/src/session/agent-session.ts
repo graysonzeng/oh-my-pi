@@ -2579,6 +2579,7 @@ export class AgentSession implements SettingsScope {
 				this.#readDedupeArtifacts.clear();
 				this.#stats.rebaseAfterCompaction();
 			},
+			refreshLiveGoalModeContext: () => this.refreshLiveGoalModeContext(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -7916,6 +7917,20 @@ export class AgentSession implements SettingsScope {
 			},
 			options ? { deliverAs: options.deliverAs } : undefined,
 		);
+	}
+
+	/**
+	 * After mid-run compaction removes older context (including a prior goal
+	 * message), reinject the current goal into the live tool loop as an aside.
+	 * `auto_compaction_end` already clears the goal hash; clear again for paths
+	 * that rewrite history without that event so `#buildGoalModeMessage` emits.
+	 */
+	async refreshLiveGoalModeContext(): Promise<void> {
+		const state = this.#goalModeState;
+		if (!(state?.enabled === true && state.goal.status === "active")) return;
+		this.#goalContextHash = undefined;
+		this.#goalHashResetReason = "compaction";
+		await this.sendGoalModeContext({ deliverAs: "aside" });
 	}
 
 	async sendVibeModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" }): Promise<void> {

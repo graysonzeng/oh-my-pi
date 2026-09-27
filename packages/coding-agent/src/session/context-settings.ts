@@ -102,6 +102,9 @@ export const cfgCompactionMethodOrder = register({
 	},
 });
 
+/** Production default soft truncation ceiling for working context (tokens). */
+export const DEFAULT_COMPACTION_SOFT_CAP_TOKENS = 200_000;
+
 export const cfgCompactionThresholdPercent = register({
 	id: "compaction.thresholdPercent",
 	type: "number",
@@ -110,9 +113,14 @@ export const cfgCompactionThresholdPercent = register({
 		tab: "context",
 		group: "Compaction",
 		label: "Compaction Threshold",
-		description: "Percent threshold for context maintenance; set to Default to use legacy reserve-based behavior",
+		description:
+			"Percent threshold for context maintenance; ignored when a token soft-cap is set (production default is the 200K token soft-cap)",
 		options: [
-			{ value: "default", label: "Default", description: "Legacy reserve-based threshold" },
+			{
+				value: "default",
+				label: "Default",
+				description: "Defer to the token soft-cap (or legacy usable-window when tokens are unset)",
+			},
 			{ value: "10", label: "10%", description: "Extremely early maintenance" },
 			{ value: "20", label: "20%", description: "Very early maintenance" },
 			{ value: "30", label: "30%", description: "Early maintenance" },
@@ -132,19 +140,29 @@ export const cfgCompactionThresholdPercent = register({
 export const cfgCompactionThresholdTokens = register({
 	id: "compaction.thresholdTokens",
 	type: "number",
-	default: -1,
+	default: DEFAULT_COMPACTION_SOFT_CAP_TOKENS,
 	ui: {
 		tab: "context",
 		group: "Compaction",
 		label: "Compaction Token Limit",
-		description: "Fixed token limit for context maintenance; overrides percentage if set",
+		description:
+			"Working-context soft-cap for maintenance; clamped to usable window (model window − reserve). Overrides percentage when set",
 		options: [
-			{ value: "default", label: "Default", description: "Use percentage-based threshold" },
+			{
+				value: "default",
+				label: "Default",
+				description: "200K soft-cap (min with usable window − reserve)",
+			},
+			{
+				value: "-1",
+				label: "Legacy (window − reserve)",
+				description: "No fixed soft-cap; trigger at usable window only",
+			},
 			{ value: "25000", label: "25K tokens", description: "1/8 of a 200K window" },
 			{ value: "50000", label: "50K tokens", description: "1/4 of a 200K window" },
 			{ value: "100000", label: "100K tokens", description: "1/2 of a 200K window" },
 			{ value: "150000", label: "150K tokens", description: "3/4 of a 200K window" },
-			{ value: "200000", label: "200K tokens", description: "Full standard context window" },
+			{ value: "200000", label: "200K tokens", description: "Production soft-cap ceiling" },
 			{ value: "300000", label: "300K tokens", description: "Large context window" },
 			{ value: "500000", label: "500K tokens", description: "Very large context window" },
 		],

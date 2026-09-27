@@ -959,8 +959,11 @@ export class SettingsSelectorComponent implements Component {
 		if (path === "compaction.thresholdPercent" && (rawValue === "-1" || rawValue === "")) {
 			return "default";
 		}
-		if (path === "compaction.thresholdTokens" && (rawValue === "-1" || rawValue === "")) {
-			return "default";
+		// Production soft-cap default is 200K; UI "Default" maps to that value.
+		// Legacy usable-window behavior remains available via the "-1" option.
+		if (path === "compaction.thresholdTokens") {
+			if (rawValue === "200000" || rawValue === "") return "default";
+			if (rawValue === "-1") return "-1";
 		}
 		return rawValue;
 	}
@@ -1192,7 +1195,7 @@ export class SettingsSelectorComponent implements Component {
 		if (path === "compaction.thresholdPercent" && value === "default") {
 			this.#context.settings.set(path, -1);
 		} else if (path === "compaction.thresholdTokens" && value === "default") {
-			this.#context.settings.set(path, -1);
+			this.#context.settings.set(path, 200_000);
 		} else if (schemaType === "record") {
 			let parsed: unknown;
 			try {

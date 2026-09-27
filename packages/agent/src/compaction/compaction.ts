@@ -466,12 +466,26 @@ export function compactionContextTokens(providerContextTokens: number, storedCon
 	return Math.max(Math.max(0, providerContextTokens), Math.max(0, storedConversationEstimate));
 }
 
+/**
+ * Usable working-context budget under a model window: `window − reserve`,
+ * capped below the full window. Soft-cap thresholds and legacy defaults both
+ * clamp to this bound so maintenance cannot defer past the hard capacity reserve.
+ */
+export function resolveUsableContextTokens(contextWindow: number, settings: CompactionSettings): number {
+	if (!(contextWindow > 0)) return 0;
+	return Math.max(0, Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)));
+}
+
 export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
 	// Fixed token limit takes priority over percentage
 	const thresholdTokens = settings.thresholdTokens;
 	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
-		// Clamp to [1, contextWindow - 1] so there's always room
-		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
+		// Soft-cap contract: clamp to the usable window (window − reserve), not
+		// merely window−1. A configured 200K on a smaller window must take the
+		// safer usable bound; soft must not bypass hard capacity reserves.
+		const usable = resolveUsableContextTokens(contextWindow, settings);
+		if (usable <= 0) return 0;
+		return Math.min(usable, Math.max(1, Math.floor(thresholdTokens)));
 	}
 
 	// Percentage-based threshold. The default absolute reserve can exceed bundled
@@ -483,10 +497,7 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 	// never reaches the whole window even when the reserve resolves to 0.
 	const thresholdPercent = settings.thresholdPercent;
 	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
-		return Math.max(
-			0,
-			Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)),
-		);
+		return resolveUsableContextTokens(contextWindow, settings);
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
 	return Math.floor(contextWindow * (clampedThresholdPercent / 100));

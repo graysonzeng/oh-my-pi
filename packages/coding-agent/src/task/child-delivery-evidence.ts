@@ -100,6 +100,23 @@ function nonEmptyStrings(values: readonly string[] | undefined): string[] {
 }
 
 /**
+ * Shared parent-owns-verify detection for delivery classification and
+ * `<task-result>` envelopes — keep both paths aligned.
+ */
+export function checksIndicateParentOwnsVerify(
+	checks: ReadonlyArray<{ id: string; reason: string }> | undefined,
+): boolean {
+	if (!checks?.length) return false;
+	return checks.some(
+		check =>
+			check.id === "parent_acceptance" ||
+			check.reason === "parent_owns_verify" ||
+			/parent owns/i.test(check.reason) ||
+			/parent_owns_verify/i.test(check.reason),
+	);
+}
+
+/**
  * Strong evidence locations for reviewer navigation (paths / URIs).
  * Path shape alone never seals `proven` — that requires a terminal receipt.
  */
@@ -429,12 +446,7 @@ export function classifyParentIntegrate(input: {
 
 	const acceptance = acceptanceSatisfied(delivery, input.requiredAcceptance);
 	if (!acceptance.ok) {
-		const parentOwnsVerify = delivery.checksNotRun.some(
-			check =>
-				check.id === "parent_acceptance" ||
-				/parent owns/i.test(check.reason) ||
-				/parent_owns_verify/i.test(check.reason),
-		);
+		const parentOwnsVerify = checksIndicateParentOwnsVerify(delivery.checksNotRun);
 		// Parent-owns-verify is distinct from cross_module (F3).
 		if (parentOwnsVerify) {
 			return {

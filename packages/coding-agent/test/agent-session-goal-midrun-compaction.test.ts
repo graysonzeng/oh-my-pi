@@ -227,6 +227,21 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts[1].join("\n")).toContain("ACTIVE-GOAL-MID-RUN-COMPACTED");
 	});
 
+	it("reinjects live goal context after mid-run compaction for the next tool-loop turn", async () => {
+		const { session, observedContexts } = await createHarness();
+		session.setGoalModeState(activeGoalState());
+		const refreshSpy = vi.spyOn(session, "refreshLiveGoalModeContext");
+		mockCompaction("GOAL-REINJECT-COMPACTED");
+
+		await session.prompt("work on the release");
+
+		expect(refreshSpy).toHaveBeenCalled();
+		const secondTurn = observedContexts[1]?.join("\n") ?? "";
+		expect(secondTurn).toContain("GOAL-REINJECT-COMPACTED");
+		// Goal objective must still be visible after mid-run rewrite (aside reinject).
+		expect(secondTurn).toContain("Ship the release");
+	});
+
 	it("continues below the mid-run threshold while message_end notifications remain pending", async () => {
 		const releaseMessageEnd = Promise.withResolvers<void>();
 		const messageEndEntered = Promise.withResolvers<void>();
