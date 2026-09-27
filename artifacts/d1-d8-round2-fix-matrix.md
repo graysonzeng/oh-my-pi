@@ -95,4 +95,4 @@ bun test packages/coding-agent/test/memory-backend/local-transfer.test.ts \
 cargo test -p pi-natives multi_monitor_negative_origin -- --nocapture
 ```
 
-Focused result this VM: **77 pass / 0 fail** (after D5 builtin/agent rows), `check:types` clean, Rust map_point ok.
+Focused result this VM: **77 pass / 0 fail**, `check:types` clean, Rust map_point ok.
