@@ -75,6 +75,7 @@ import { FindingTracker } from "./finding-tracker";
 import { gateAdapter } from "./gate-adapter";
 import { derivePlanReviewArtifactV2, deriveReviewArtifact, stampGateResultArtifact } from "./gate-derive";
 import { classifyGateError } from "./gate-retry";
+import { checkExecutionWindow } from "./execution-control";
 import { assertStrictRuntimeIdentity } from "./identity-receipt";
 import { GateResultJsonSchema } from "./json-schemas";
 import {
@@ -1070,17 +1071,25 @@ export class WorkflowEngine {
 					state = await this.#requireState(workflowId);
 
 					// Availability preflight before any stage attempt or model work.
+					// Same-run reuse: start() already produced a valid report for this workflow —
+					// do not probe again (F2). resume()/fresh engines still preflight.
 					if (!preflightDone && (await this.#budgetLedger.checkPreStage())) {
 						preflightDone = true;
-						availability = await this.#runPreflight({
-							workflowId,
-							operation: "resume",
-							status: state.status,
-							singleStep,
-							session,
-							signal: this.#controller.signal,
-							failClosed: this.#run.qualityRouteSnapshot !== undefined,
-						});
+						const reused = this.#reusableStartPreflight(workflowId);
+						if (reused) {
+							availability = reused;
+							this.#applyPreflightUnavailableReasons(reused);
+						} else {
+							availability = await this.#runPreflight({
+								workflowId,
+								operation: "resume",
+								status: state.status,
+								singleStep,
+								session,
+								signal: this.#controller.signal,
+								failClosed: this.#run.qualityRouteSnapshot !== undefined,
+							});
+						}
 						this.#run.lastAvailability = availability;
 					}
 
@@ -1437,13 +1446,8 @@ export class WorkflowEngine {
 				? this.#providerHealthBreaker
 				: undefined,
 		});
-		this.#run.preflightUnavailableReasons = {};
+		this.#applyPreflightUnavailableReasons(report);
 		for (const row of report.profiles) {
-			if (row.status !== "available" && !isDiagnosticAvailabilityTimeout(row)) {
-				this.#run.preflightUnavailableReasons[row.profileId] = [row.errorKind, row.errorSummary]
-					.filter((part): part is string => Boolean(part))
-					.join(":");
-			}
 			if (
 				row.source === "live" &&
 				(row.usage !== undefined || row.status === "available") &&
@@ -1462,6 +1466,30 @@ export class WorkflowEngine {
 		}
 		if (options.failClosed) assertRequiredRolesAvailable(report);
 		return report;
+	}
+
+	/**
+	 * Same-run F2: reuse start()'s valid availability report inside the following run()
+	 * when it still targets this workflow. resume() / reset snapshots never hit this path.
+	 */
+	#reusableStartPreflight(workflowId: string): WorkflowAvailabilityReport | undefined {
+		const report = this.#run.lastAvailability;
+		if (!report) return undefined;
+		if (report.workflowId !== workflowId) return undefined;
+		if (report.operation !== "start") return undefined;
+		if (report.status === "blocked") return undefined;
+		return report;
+	}
+
+	#applyPreflightUnavailableReasons(report: WorkflowAvailabilityReport): void {
+		this.#run.preflightUnavailableReasons = {};
+		for (const row of report.profiles) {
+			if (row.status !== "available" && !isDiagnosticAvailabilityTimeout(row)) {
+				this.#run.preflightUnavailableReasons[row.profileId] = [row.errorKind, row.errorSummary]
+					.filter((part): part is string => Boolean(part))
+					.join(":");
+			}
+		}
 	}
 
 	async #executeCurrentStage(workflowId: string, state: WorkflowState, session: ToolSession): Promise<void> {
@@ -3668,25 +3696,39 @@ export class WorkflowEngine {
 		const maxAttempts =
 			preferredProfileIds?.length ??
 			Math.max(1, this.#router.list().filter(p => p.roles.includes(role) && !unavailable.has(p.id)).length);
+		const fallbackStartedAt = Date.now();
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
-			if (!(await this.#budgetLedger.checkPreRetry())) {
-				const snap = this.#budgetLedger.snapshot();
-				throw new BudgetExhaustedError(snap.requests, snap.costUsd ?? "unknown", snap.limitUsd);
-			}
 			const route = this.#router.resolve(role, {
 				...effectiveRouteOptions,
 				unavailableProfileIds: unavailable,
 			});
-			if (
-				!this.#budgetLedger.checkProfileBudget(route.profileId, {
-					maxRequests: route.profile.maxRequests,
-					maxCostUsd: route.profile.maxCostUsd,
-				})
-			) {
+			// Shared execution-control entry (budget + deadline); error categories stay below.
+			const window = checkExecutionWindow({
+				kind: attempt === 0 ? "initial" : "profile_fallback",
+				startedAtMs: fallbackStartedAt,
+				maxRuntimeMs: route.profile.maxRuntimeMs,
+				canSpend: () =>
+					this.#budgetLedger.canStartExternalCall() &&
+					this.#budgetLedger.checkProfileBudget(route.profileId, {
+						maxRequests: route.profile.maxRequests,
+						maxCostUsd: route.profile.maxCostUsd,
+					}),
+			});
+			if (window.action === "stop") {
+				if (window.reason === "deadline") {
+					throw new WorkflowTimeoutError("Profile fallback deadline exhausted", {
+						role,
+						attempt,
+						elapsedMs: window.elapsedMs,
+						executionKind: window.kind,
+					});
+				}
+				const snap = this.#budgetLedger.snapshot();
 				throw new BudgetExhaustedError(
 					this.#budgetLedger.profileSnapshot(route.profileId).profileRequests,
-					this.#budgetLedger.profileSnapshot(route.profileId).profileCostUsd ?? "unknown",
-					route.profile.maxCostUsd ?? route.profile.maxRequests ?? 0,
+					this.#budgetLedger.profileSnapshot(route.profileId).profileCostUsd ?? snap.costUsd ?? "unknown",
+					route.profile.maxCostUsd ?? route.profile.maxRequests ?? snap.limitUsd,
+					{ stopReason: "budget", executionKind: window.kind, role },
 				);
 			}
 			this.#audit(route);
@@ -4096,7 +4138,31 @@ export class WorkflowEngine {
 		subject: "plan" | "implementation",
 	): Promise<{ gate: GateResultModel; modelFamily?: string } | undefined> {
 		let lastError: unknown;
+		const gateStartedAt = Date.now();
 		for (let attempt = 0; attempt < 2; attempt++) {
+			// Shared execution-control entry before each real gate model call.
+			// RuntimeAdapter still mints a fresh invocationId per launch (F1).
+			const window = checkExecutionWindow({
+				kind: attempt === 0 ? "initial" : "gate_parse_retry",
+				startedAtMs: gateStartedAt,
+				canSpend: () => this.#budgetLedger.canStartExternalCall(),
+			});
+			if (window.action === "stop") {
+				if (window.reason === "deadline") {
+					throw new WorkflowTimeoutError("Gate retry deadline exhausted", {
+						attemptId,
+						attempt,
+						elapsedMs: window.elapsedMs,
+						executionKind: window.kind,
+					});
+				}
+				const snap = this.#budgetLedger.snapshot();
+				throw new BudgetExhaustedError(snap.requests, snap.costUsd ?? "unknown", snap.limitUsd, {
+					stopReason: "budget",
+					executionKind: window.kind,
+					attemptId,
+				});
+			}
 			try {
 				const ran = await this.#runDevflowGate(workflowId, attemptId, session, signal, subject);
 				return {

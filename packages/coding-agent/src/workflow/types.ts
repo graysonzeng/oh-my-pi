@@ -795,8 +795,14 @@ export type ModelProfile = WorkflowModelProfile;
 
 export interface WorkflowAgentRequest {
 	workflowId: string;
+	/** Stage attempt id (WorkflowStore.beginAttempt) — parent of invocation identity. */
 	attemptId: string;
 	role: WorkflowRole;
+	/**
+	 * Optional pre-minted invocation id for redelivery/settlement of the same call.
+	 * Omit for new model executions — RuntimeAdapter mints a unique id per launch.
+	 */
+	invocationId?: string;
 	/** Optional pipeline review agent override (`subagent-sol` / `subagent-grok`). Not a new WorkflowRole. */
 	agent?: string;
 	pipelineKind?: "devflow";

@@ -120,14 +120,21 @@ export function buildLayeredVerificationPlan(input: BuildLayeredVerificationPlan
 
 	if (
 		input.layer === "slice_local" &&
-		(input.parentClassification === "cross_module" || input.parentClassification === "stale_context")
+		(input.parentClassification === "cross_module" ||
+			input.parentClassification === "parent_verification_required" ||
+			input.parentClassification === "scope_unknown" ||
+			input.parentClassification === "stale_context")
 	) {
 		for (const [index, command] of commands.entries()) {
 			const id = commandId(command, index);
 			const reason =
 				input.parentClassification === "stale_context"
 					? "stale_context_reread_first"
-					: "cross_module_parent_coordinates";
+					: input.parentClassification === "parent_verification_required"
+						? "parent_verification_required"
+						: input.parentClassification === "scope_unknown"
+							? "scope_unknown_parent_coordinates"
+							: "cross_module_parent_coordinates";
 			const item: LayeredCheckPlanItem = {
 				id,
 				command,

@@ -1,12 +1,55 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
 import * as path from "node:path";
+import { getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { WorkflowPolicyError } from "./errors";
 import { type CreateWorkflowOptions, type OverlaySidecar, parseOverlaySidecar } from "./overlay";
 import { isValidTransition } from "./transitions";
 import type { Artifact, Attempt, Transition, WorkflowState, WorkflowStatus } from "./types";
 
-const DB_PATH = path.join(process.cwd(), "workflow.db");
+/** Explicit workspace identity recorded in the store — never inferred from a silent move. */
+export interface WorkflowWorkspaceIdentity {
+	/** Absolute workspace cwd at open time. */
+	cwd: string;
+	/** Stable key — normalized project dir (or cwd when project root unknown). */
+	workspaceKey: string;
+}
+
+export interface WorkflowStoreOptions {
+	/** Explicit SQLite path. Overrides the agent-data default. */
+	dbPath?: string;
+	/** Agent data directory; default {@link getAgentDir}. */
+	agentDir?: string;
+	/** Workspace identity recorded in store meta. Defaults to process project dir. */
+	workspaceIdentity?: WorkflowWorkspaceIdentity;
+}
+
+/** Default durable path: `<agentDir>/workflow.db` — never `process.cwd()/workflow.db`. */
+export function defaultWorkflowDbPath(agentDir: string = getAgentDir()): string {
+	return path.join(agentDir, "workflow.db");
+}
+
+/** Resolve an explicit workspace identity for the store (no silent migrate). */
+export function resolveWorkflowWorkspaceIdentity(cwd: string = getProjectDir()): WorkflowWorkspaceIdentity {
+	const resolved = path.resolve(cwd);
+	return { cwd: resolved, workspaceKey: resolved };
+}
+
+/**
+ * Discover candidate legacy DBs without moving them.
+ * Callers must migrate explicitly — this never renames or copies.
+ */
+export function discoverLegacyWorkflowDbPaths(cwd: string = getProjectDir()): string[] {
+	const candidates = [path.join(path.resolve(cwd), "workflow.db")];
+	return candidates.filter(candidate => {
+		try {
+			return fs.existsSync(candidate) && fs.statSync(candidate).isFile();
+		} catch {
+			return false;
+		}
+	});
+}
 
 interface WorkflowRow {
 	id: string;
@@ -72,11 +115,23 @@ export interface PersistedWorkflowSnapshot {
 
 export class WorkflowStore {
 	readonly #db: Database;
+	readonly dbPath: string;
+	readonly workspaceIdentity: WorkflowWorkspaceIdentity;
 
-	constructor(dbPath = DB_PATH) {
-		this.#db = new Database(dbPath, { create: true, readwrite: true, strict: true });
+	constructor(dbPathOrOptions?: string | WorkflowStoreOptions) {
+		const options: WorkflowStoreOptions =
+			typeof dbPathOrOptions === "string" ? { dbPath: dbPathOrOptions } : (dbPathOrOptions ?? {});
+		const agentDir = options.agentDir ?? getAgentDir();
+		this.dbPath = options.dbPath ?? defaultWorkflowDbPath(agentDir);
+		this.workspaceIdentity = options.workspaceIdentity ?? resolveWorkflowWorkspaceIdentity();
+		// Ensure parent exists for agent-dir defaults (`:memory:` and absolute custom paths ok).
+		if (this.dbPath !== ":memory:" && !this.dbPath.startsWith("file:")) {
+			fs.mkdirSync(path.dirname(this.dbPath), { recursive: true, mode: 0o700 });
+		}
+		this.#db = new Database(this.dbPath, { create: true, readwrite: true, strict: true });
 		this.#db.exec("PRAGMA foreign_keys = ON;");
 		this.#initSchema();
+		this.#recordWorkspaceIdentity();
 	}
 
 	#initSchema(): void {
@@ -137,6 +192,12 @@ export class WorkflowStore {
 				created_at TEXT NOT NULL,
 				FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 			);
+
+			CREATE TABLE IF NOT EXISTS workflow_store_meta (
+				key TEXT PRIMARY KEY,
+				value TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			);
 		`);
 		// Migrate older DBs that lack budget_json / runner_owner
 		const cols = this.#db.prepare("PRAGMA table_info(workflows)").all() as Array<{ name: string }>;
@@ -155,6 +216,31 @@ export class WorkflowStore {
 		if (!cols.some(c => c.name === "owner_session_id")) {
 			this.#db.exec("ALTER TABLE workflows ADD COLUMN owner_session_id TEXT");
 		}
+	}
+
+	#recordWorkspaceIdentity(): void {
+		const now = new Date().toISOString();
+		const upsert = this.#db.prepare(
+			`INSERT INTO workflow_store_meta(key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		);
+		upsert.run("workspace.cwd", this.workspaceIdentity.cwd, now);
+		upsert.run("workspace.key", this.workspaceIdentity.workspaceKey, now);
+		upsert.run("workspace.recordedAt", now, now);
+	}
+
+	/** Read recorded workspace identity from meta (null when legacy DB predates meta). */
+	readWorkspaceIdentity(): WorkflowWorkspaceIdentity | null {
+		const row = (key: string): string | null => {
+			const found = this.#db.prepare("SELECT value FROM workflow_store_meta WHERE key = ?").get(key) as
+				| { value: string }
+				| undefined;
+			return found?.value ?? null;
+		};
+		const cwd = row("workspace.cwd");
+		const workspaceKey = row("workspace.key");
+		if (!cwd || !workspaceKey) return null;
+		return { cwd, workspaceKey };
 	}
 
 	/** Create workflow in terminal-ready `created` state with no premature attempt. */

@@ -9,6 +9,7 @@ import type { SubagentCompletionKind } from "../task/types";
 import type { ToolSession } from "../tools";
 import { withContextProviderUsage } from "./context-ledger";
 import type { BudgetInvocationSettlement, WorkflowBudgetGuard, WorkflowBudgetPort } from "./budget-ledger";
+import { prepareExecutionInvocation, type ExecutionInvocationKind } from "./execution-control";
 import {
 	BudgetExhaustedError,
 	WorkflowCancelledError,
@@ -210,9 +211,65 @@ export class RuntimeAdapter implements RuntimePort {
 		let usedCostUsd = 0;
 		const startedAt = Date.now();
 		let accumulatedUsage: Usage | undefined;
+		/** Caller-supplied id is only for redelivery of the same call — never reused on schema repair. */
+		let reuseOnce = request.invocationId?.trim() || undefined;
 
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
-			const invocationId = `${request.attemptId}:${request.role}:${attempt}`;
+			const kind: ExecutionInvocationKind = attempt === 0 ? "initial" : "schema_repair";
+			const prepared = prepareExecutionInvocation({
+				stageAttemptId: request.attemptId,
+				kind,
+				reuseIdentity:
+					kind === "initial" && reuseOnce
+						? { stageAttemptId: request.attemptId, invocationId: reuseOnce }
+						: undefined,
+				startedAtMs: startedAt,
+				maxRuntimeMs: request.profile.maxRuntimeMs,
+				canSpend: () => {
+					if (!this.#budgetPort) return true;
+					// Probe with a temporary bind using a placeholder; real bind follows on proceed.
+					if (kind === "initial" && reuseOnce) {
+						const probe = this.#budgetPort.bind({
+							workflowId: request.workflowId,
+							attemptId: request.attemptId,
+							invocationId: reuseOnce,
+							profileId: request.profile.id,
+							maxRequests: request.profile.maxRequests,
+							maxCostUsd: request.profile.maxCostUsd,
+						});
+						return probe.allowsModelCall();
+					}
+					// Fresh invocations: allow when ledger can start another external call.
+					const probeId = `probe_${request.attemptId}_${attempt}`;
+					const probe = this.#budgetPort.bind({
+						workflowId: request.workflowId,
+						attemptId: request.attemptId,
+						invocationId: probeId,
+						profileId: request.profile.id,
+						maxRequests: request.profile.maxRequests,
+						maxCostUsd: request.profile.maxCostUsd,
+					});
+					return probe.allowsModelCall();
+				},
+			});
+			reuseOnce = undefined;
+			if (prepared.action === "stop") {
+				if (prepared.reason === "deadline") {
+					throw new WorkflowTimeoutError("Workflow invocation deadline exhausted before model call", {
+						attempt,
+						elapsedMs: prepared.elapsedMs,
+						executionKind: prepared.kind,
+						stopReason: "deadline",
+					});
+				}
+				throw new BudgetExhaustedError(
+					attempt,
+					"unknown",
+					request.profile.maxCostUsd ?? request.profile.maxRequests,
+					{ stopReason: "budget", executionKind: prepared.kind },
+				);
+			}
+			const invocationId = prepared.identity.invocationId;
 			const guard = this.#budgetPort?.bind({
 				workflowId: request.workflowId,
 				attemptId: request.attemptId,
@@ -221,26 +278,16 @@ export class RuntimeAdapter implements RuntimePort {
 				maxRequests: request.profile.maxRequests,
 				maxCostUsd: request.profile.maxCostUsd,
 			});
-			if (guard && !guard.allowsModelCall()) {
-				throw new BudgetExhaustedError(
-					attempt,
-					"unknown",
-					request.profile.maxCostUsd ?? request.profile.maxRequests,
-				);
-			}
 			try {
-				// Carry remaining wall-clock budget into each schema retry invocation.
-				const elapsedMs = Date.now() - startedAt;
-				const profileMax = request.profile.maxRuntimeMs;
-				const remainingRuntime =
-					typeof profileMax === "number" && profileMax > 0 ? Math.max(1, profileMax - elapsedMs) : undefined;
+				const remainingRuntime = prepared.remainingRuntimeMs;
 				const attemptRequest =
 					remainingRuntime !== undefined
 						? {
 								...working,
+								invocationId,
 								profile: { ...working.profile, maxRuntimeMs: remainingRuntime },
 							}
-						: working;
+						: { ...working, invocationId };
 				const result = await this.#runOnce<TArtifact>(attemptRequest, {
 					schemaRetryMaxRetries: maxRetries,
 					budgetGuard: guard,
@@ -364,14 +411,8 @@ export class RuntimeAdapter implements RuntimePort {
 					);
 				}
 
-				if (guard && !guard.allowsModelCall()) {
-					throw new BudgetExhaustedError(
-						attempt + 1,
-						usageCost ?? "unknown",
-						request.profile.maxCostUsd ?? request.profile.maxRequests,
-					);
-				}
-				// Layer 2: budget check before every model retry (request / cost / runtime).
+				// Layer 2: local schema-repair budget (request / cost / runtime) before next loop
+				// prepareExecutionInvocation mints a fresh invocationId and re-checks shared ledger.
 				const budget = budgetFromProfileUsage({
 					maxRequests: Math.min(request.profile.maxRequests, maxAttempts),
 					maxCostUsd: request.profile.maxCostUsd,

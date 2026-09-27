@@ -19,7 +19,7 @@ import {
 	type ParentIntegrateDecisionEntry,
 } from "./child-delivery-evidence";
 import { inspectEvidenceHandoffContext } from "./evidence-handoff";
-import { filesOutsideScope } from "./host-terminal-check";
+import { classifyFilesAgainstScope } from "./host-terminal-check";
 import {
 	buildEvidenceHandoffObserveRecord,
 	persistEvidenceHandoffObserve,
@@ -41,6 +41,7 @@ export interface ParentDeliveryConsumeInput {
 	requiredAcceptance?: readonly string[];
 	staleEvidence?: boolean;
 	outOfScopeEdits?: boolean;
+	scopeBoundary?: "outside" | "inside" | "unknown";
 	crossModule?: boolean;
 	/** Parent-confirmed release only — never inherit child claim. */
 	writeOwnershipReleased?: boolean;
@@ -90,6 +91,7 @@ export function consumeChildDeliveryForParent(input: ParentDeliveryConsumeInput)
 		requiredAcceptance: input.requiredAcceptance,
 		staleEvidence: input.staleEvidence,
 		outOfScopeEdits: input.outOfScopeEdits,
+		scopeBoundary: input.scopeBoundary,
 		crossModule: input.crossModule,
 		writeOwnershipReleased: input.writeOwnershipReleased,
 	});
@@ -225,12 +227,14 @@ export async function settleChildDeliveryForParent(input: {
 	const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(input.cwd);
 	const fromContext = acceptanceAndFreshnessFromContext(input.spawnContext);
 	const handoff = inspectEvidenceHandoffContext(input.spawnContext).handoff;
+	const scopeBoundary = classifyFilesAgainstScope(input.delivery.codeVersion.changedFiles, handoff?.changeScope.paths);
 	return consumeChildDeliveryForParent({
 		delivery: input.delivery,
 		currentCodeVersion,
 		requiredAcceptance: fromContext.requiredAcceptance,
 		staleEvidence: fromContext.staleEvidence,
-		outOfScopeEdits: filesOutsideScope(input.delivery.codeVersion.changedFiles, handoff?.changeScope.paths),
+		outOfScopeEdits: scopeBoundary === "outside",
+		scopeBoundary,
 		writeOwnershipReleased: false,
 		episodeSessionId: episode.sessionId,
 		rootUserEntryId: episode.rootUserEntryId,

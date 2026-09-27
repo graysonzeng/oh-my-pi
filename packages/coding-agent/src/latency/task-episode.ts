@@ -48,6 +48,16 @@ export interface AcceptanceContractRef {
 	items: string[];
 	/** Optional content fingerprint of the acceptance list. */
 	fingerprint?: string;
+	/**
+	 * Explicit criterion mapping (F3). When present, command seals only prove
+	 * criteria with verification=command-check and an explicit bind.
+	 */
+	criteria?: Array<{
+		criterionId: string;
+		description: string;
+		verification: "command-check" | "review" | "manual";
+		evidenceRefs: string[];
+	}>;
 }
 
 export function episodeKey(episode: TaskEpisodeAnchor): string {
@@ -110,6 +120,34 @@ export function parseAcceptanceContractRef(value: unknown): AcceptanceContractRe
 	const out: AcceptanceContractRef = { items };
 	if (typeof value.fingerprint === "string" && value.fingerprint.trim()) {
 		out.fingerprint = value.fingerprint.trim();
+	}
+	if (Array.isArray(value.criteria)) {
+		const criteria: NonNullable<AcceptanceContractRef["criteria"]> = [];
+		for (const raw of value.criteria) {
+			if (!isRecord(raw)) continue;
+			const criterionId = typeof raw.criterionId === "string" ? raw.criterionId.trim() : "";
+			const description = typeof raw.description === "string" ? raw.description.trim() : "";
+			const verification = raw.verification;
+			if (
+				!criterionId ||
+				(verification !== "command-check" && verification !== "review" && verification !== "manual")
+			) {
+				continue;
+			}
+			const evidenceRefs = Array.isArray(raw.evidenceRefs)
+				? raw.evidenceRefs
+						.filter((ref): ref is string => typeof ref === "string")
+						.map(ref => ref.trim())
+						.filter(Boolean)
+				: [];
+			criteria.push({
+				criterionId,
+				description: description || criterionId,
+				verification,
+				evidenceRefs,
+			});
+		}
+		if (criteria.length > 0) out.criteria = criteria;
 	}
 	return out;
 }
