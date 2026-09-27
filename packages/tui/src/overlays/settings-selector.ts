@@ -956,14 +956,12 @@ export class SettingsSelectorComponent implements Component {
 
 	#getSubmenuCurrentValue(path: string, value: unknown): string {
 		const rawValue = String(value ?? "");
-		if (path === "compaction.thresholdPercent" && (rawValue === "-1" || rawValue === "")) {
-			return "default";
+		// Production soft-cap default is 60% of window with no fixed token cap.
+		if (path === "compaction.thresholdPercent") {
+			if (rawValue === "60" || rawValue === "") return "default";
 		}
-		// Production soft-cap default is 200K; UI "Default" maps to that value.
-		// Legacy usable-window behavior remains available via the "-1" option.
 		if (path === "compaction.thresholdTokens") {
-			if (rawValue === "200000" || rawValue === "") return "default";
-			if (rawValue === "-1") return "-1";
+			if (rawValue === "-1" || rawValue === "") return "default";
 		}
 		return rawValue;
 	}
@@ -1193,9 +1191,9 @@ export class SettingsSelectorComponent implements Component {
 		const currentValue = this.#context.settings.get(path);
 		const schemaType = getSettingDef(this.#context.settings.entries, path)?.schemaType;
 		if (path === "compaction.thresholdPercent" && value === "default") {
-			this.#context.settings.set(path, -1);
+			this.#context.settings.set(path, 60);
 		} else if (path === "compaction.thresholdTokens" && value === "default") {
-			this.#context.settings.set(path, 200_000);
+			this.#context.settings.set(path, -1);
 		} else if (schemaType === "record") {
 			let parsed: unknown;
 			try {
