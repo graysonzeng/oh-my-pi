@@ -23,7 +23,7 @@ Modes are usage paths, not a linear “higher is better” ladder. Provider requ
 | Task concurrency | Parallel child agents | Child lifetime | task spawn / workflow execution control |
 | Async job capacity | Background jobs | Job lifetime | `AsyncJobManager` |
 
-UI / Hub may show “waiting on which limiter”; they must not unify the locks.
+UI / Hub may show “waiting on which limiter”; they must not unify the locks. `attributeLimiterState` (`packages/coding-agent/src/latency/limiter-attribution.ts`) reports occupancy and waits **per owner** and always sets `unifiedSemaphore: false`.
 
 ## Exit / revoke matrix (verification targets)
 

@@ -12,5 +12,7 @@ export * from "./messages";
 export * from "./off-backend";
 export * from "./resolve";
 export * from "./runtime";
+export * from "./sharpshooter-transfer";
+export * from "./transfer-cli";
 export * from "./transfer-types";
 export * from "./types";

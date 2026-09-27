@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	actionableHubItems,
+	formatAgentActionNeeds,
 	formatHubActionQueue,
 	projectHubActionQueue,
 } from "@oh-my-pi/pi-tui/overlays/agent-hub-action-queue";
@@ -46,5 +47,21 @@ describe("hub action queue (D6)", () => {
 		const queue = projectHubActionQueue([ref({ id: "dead", status: "aborted" })]);
 		expect(queue.some(i => i.kind === "blocked_or_no_progress" && i.agentId === "dead")).toBe(true);
 		expect(queue.some(i => i.kind === "running_or_handled" && i.agentId === "dead")).toBe(false);
+	});
+
+	it("inspector Needs me lines stay scoped to one agent and drop running_or_handled", () => {
+		const refs = [
+			ref({ id: "Main", kind: "main", status: "running" }),
+			ref({ id: "worker-1", status: "idle" }),
+			ref({ id: "worker-2", status: "running" }),
+		];
+		const queue = projectHubActionQueue(refs, {
+			pendingDecisionAgentIds: ["Main"],
+			pendingAuthAgentIds: ["worker-1"],
+		});
+		const mainNeeds = formatAgentActionNeeds(queue, "Main");
+		expect(mainNeeds).toEqual(["[need_decision] Needs a decision (options / impact)"]);
+		expect(formatAgentActionNeeds(queue, "worker-2")).toEqual([]);
+		expect(formatAgentActionNeeds(queue, "worker-1").some(line => line.includes("need_auth"))).toBe(true);
 	});
 });

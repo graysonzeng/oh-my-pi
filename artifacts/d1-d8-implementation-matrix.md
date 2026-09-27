@@ -35,7 +35,8 @@ Labels: **已有且验证** / **本次实现** / **条件不满足暂缓**
 | D5 | Evidence-backed thinning (warnings + candidates) | 本次实现 | Warnings fix + `docs/thin-harness-candidates.md`; **no module deletion** without caller proof |
 | D5 | Delete duplicate global flow / forwarders | 条件不满足暂缓 | Needs full call-graph + behavioral proof per plan §9.3 |
 | D6 | Hub action queue projection | 本次实现 | `tui/.../agent-hub-action-queue.ts` + `test/agent-hub-action-queue.test.ts` + `docs/agent-hub.md` |
-| D6 | Full Hub overlay paint of action queue | 条件不满足暂缓 | Projection API ready; live TUI paint not wired this round (no interactive TUI session in CI) |
+| D6 | Inspector **Needs me** paint | 本次实现 | `agent-hub.ts` + `formatAgentActionNeeds`; optional `actionHints` on overlay deps |
+| D6 | Live Hub TUI session / interactive paint | 条件不满足暂缓 / **未验证** | No interactive TUI session in this environment |
 | F1/F2/F3/F6 thin-orch | Batch1 already on tip | 已有且验证 | PR #35 / tests `thin-orch-f{1,2,3,6}-*` |
 
 ## Phase D
@@ -52,7 +53,9 @@ Labels: **已有且验证** / **本次实现** / **条件不满足暂缓**
 |---|---|---|---|
 | D4 | MemoryBackend transfer types | 本次实现 | `memory-backend/transfer-types.ts` optional methods on `MemoryBackend` |
 | D4 | Local backend export/preview/import | 本次实现 | `local-transfer.ts` + `local-backend` wiring; tests round-trip + scope conflict + dedupe |
-| D4 | Second backend full traverse seam | 条件不满足暂缓 | `off` declares unsupported; hindsight/mnemopi/sharpshooter lack reliable full traverse without remote/auth — not expanded |
+| D4 | `/memory export` / import-preview / import-apply | 本次实现 | ACP + TUI CommandController; `transfer-cli.ts`; off backend reports unsupported |
+| D4 | Second backend full traverse seam (sharpshooter) | 本次实现 | `sharpshooter-transfer.ts` walks architecture/product/style.md; omits queue/state/lock; apply needs `replaceSystemArtifacts` |
+| D4 | hindsight / mnemopi full migrate | 条件不满足暂缓 | Remote/auth traverse not available this round |
 | D4 | Entry delete | 条件不满足暂缓 | Explicit unsupported; must not fake via `clear` |
 
 ## Phase F
@@ -64,6 +67,7 @@ Labels: **已有且验证** / **本次实现** / **条件不满足暂缓**
 | D7 | Live browser/desktop platform matrix | 条件不满足暂缓 / **未验证** | No target desktop/browser session in this environment |
 | D7 | `read_only` not sandbox | 已有且验证 | `docs/computer-use.md` + existing computer approval tests |
 | D8 | Lifecycle docs / rate-limit separation | 本次实现 | `docs/background-lifecycle-modes.md` |
+| D8 | Limiter-attribution fixture | 本次实现 | `latency/limiter-attribution.ts` + tests; provider ≠ task ≠ job; `unifiedSemaphore` always false |
 | D8 | Cross-process daemon | 条件不满足暂缓 | Explicitly out of scope — no new permanent service |
 
 ## Defaults / safety (must hold)
@@ -74,21 +78,21 @@ Labels: **已有且验证** / **本次实现** / **条件不满足暂缓**
 | `goal.hostGate.noProgressPolicy` default false | Held |
 | No second evidence schema / task ledger / Dreaming / unified semaphore | Held |
 | No auto-publish/merge; CHANGELOG not edited | Held |
-| Provider / task / job rate limits not merged | Documented in D8 |
+| Provider / task / job rate limits not merged | Documented in D8 + `attributeLimiterState` fixture |
 
 ## Offline verify (this environment)
 
 ```text
 bun test acceptance-coverage-matrix no-progress rule-source-diagnosis
-         agent-hub-action-queue local-transfer computer-coordinate-boundary
-         subagent-report (+ host-gate / goal-complete when natives built)
-→ 71 pass / 0 fail
+         agent-hub-action-queue local-transfer transfer-cli sharpshooter-transfer
+         limiter-attribution computer-coordinate-boundary
+         subagent-report memory-command acp-builtins (+ host-gate / goal-complete when natives built)
 ```
 
 ## Unverified / residual risk
 
-- Live Hub TUI action-queue UX (projection only).
+- Live Hub TUI session (inspector Needs me is wired; interactive session not run here).
 - Live computer-use platforms (Wayland/macOS/Win) beyond fixture + existing native reject-before-capture.
 - Paid/live A/B and production coverage statistics on real user sessions.
-- Cross-backend memory migrate (non-local).
+- Cross-backend memory migrate (hindsight / mnemopi).
 - Full rule/prompt deletion thinning pending call-graph evidence.

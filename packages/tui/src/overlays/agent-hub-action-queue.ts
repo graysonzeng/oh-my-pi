@@ -166,3 +166,10 @@ export function formatHubActionQueue(items: readonly HubActionItem[]): string {
 	];
 	return lines.join("\n");
 }
+
+/** Compact inspector line for one agent's actionable items (TUI sanitization happens at render). */
+export function formatAgentActionNeeds(items: readonly HubActionItem[], agentId: string): string[] {
+	return actionableHubItems(items)
+		.filter(item => item.agentId === agentId)
+		.map(item => `[${item.kind}] ${item.summary}`);
+}

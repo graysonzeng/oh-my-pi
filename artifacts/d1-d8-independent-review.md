@@ -13,11 +13,17 @@ Reviewer stance: adversarial pass after implementation, before draft PR.
 
 ## Residual risks (not bugs)
 
-- Hub action queue is a projection API; overlay paint not wired — mark 暂缓.
-- Live computer platforms / paid A/B / non-local memory migrate — 未验证 / 暂缓 per matrix.
+- Live Hub TUI session still 未验证; inspector Needs me is wired from the projection.
+- Live computer platforms / paid A/B / hindsight+mnemopi migrate — 未验证 / 暂缓 per matrix.
 - `diagnoseRuleSources` winner heuristic is best-effort over capability snapshots; does not change load order.
+
+## Follow-up increment (this turn)
+
+- ACP `/memory` transfer uses top-level import (no `await import`).
+- TUI CommandController handles export / import-preview / import-apply.
+- Sharpshooter second seam + transfer CLI helpers.
+- D8 `attributeLimiterState` keeps provider / task / job owners separate.
 
 ## Verify rerun after fixes
 
-`bun test` focused suite (coverage, no-progress, rule diagnosis, hub queue, local-transfer, coordinate fixtures, subagent-report): **60 pass / 0 fail**.
-`bun run check:types` in coding-agent: **clean**.
+Focused suite rerun after this increment (see matrix). `bun run check:types` in coding-agent must stay clean.
