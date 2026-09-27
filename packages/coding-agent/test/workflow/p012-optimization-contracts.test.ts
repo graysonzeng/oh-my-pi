@@ -245,14 +245,16 @@ describe("P1 stage handoff", () => {
 		expect(h.bytesBeforeHandoff).toBeGreaterThan(h.bytesAfterHandoff);
 	});
 
-	it("clampSummary enforces 500-char cap without model calls", () => {
-		const long = "x".repeat(600);
-		const clamped = clampSummary(long);
-		expect(clamped.length).toBe(STAGE_HANDOFF_SUMMARY_MAX);
+	it("reassembles a blocking goal longer than the summary cap", () => {
+		const long = `GOAL-${"x".repeat(600)}-END`;
 		const plan = samplePlan();
 		plan.summary = long;
 		const handoff = buildPlannerToImplementerHandoff({ plan });
-		expect(handoff.preservedItems.every(p => p.summary.length <= STAGE_HANDOFF_SUMMARY_MAX)).toBe(true);
+		const goal = handoff.preservedItems
+			.filter(item => item.summary.startsWith("goal:") || (item.shardIndex ?? 0) > 0)
+			.sort((a, b) => (a.shardIndex ?? 1) - (b.shardIndex ?? 1));
+		expect(goal.map(item => item.summary).join("")).toContain(long);
+		expect(goal.every(item => item.summary.length <= STAGE_HANDOFF_SUMMARY_MAX)).toBe(true);
 	});
 });
 

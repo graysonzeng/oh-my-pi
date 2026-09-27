@@ -37,7 +37,6 @@ import {
 	buildChildDeliveryEvidenceFromExecutorFacts,
 	classifyChildResultForParentIntegrate,
 	extractChildDeliveryEvidence,
-	extractHostTerminalChecksFromExecutorResult,
 	type ParentIntegrateDecision,
 } from "./child-delivery-evidence";
 import {
@@ -45,7 +44,9 @@ import {
 	inspectEvidenceHandoffContext,
 	prepareSubagentContext,
 } from "./evidence-handoff";
+import { bindHostSealsToAcceptance, readHostTerminalSeal, type HostTerminalSeal } from "./host-terminal-check";
 import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
+import type { WorkflowBudgetGuard } from "../workflow/budget-ledger";
 import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
@@ -171,7 +172,11 @@ export interface StructuredSubagentRequest {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	signal?: AbortSignal;
 	onResponse?: SimpleStreamOptions["onResponse"];
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Preserve the workflow's exact selected identity; no executor fallback or prewalk. */
 	strictModelIdentity?: boolean;
+	budgetGuard?: WorkflowBudgetGuard;
+	providerChargeKeys?: string[];
 	onProgress?: (progress: AgentProgress) => void;
 	/**
 	 * When set, subagent tools are restricted to this allowlist (workflow scoped write/read policies).
@@ -615,7 +620,10 @@ function buildExecutorOptions(
 		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
 		onResponse: request.onResponse,
+		onPayload: request.onPayload,
 		strictModelIdentity: request.strictModelIdentity,
+		budgetGuard: request.budgetGuard,
+		providerChargeKeys: request.providerChargeKeys,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
@@ -887,14 +895,25 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		// proven without terminal receipts. Acceptance ids come from the dispatch
 		// handoff / caller outputSchema priority (user outputSchema wins upstream).
 		let deliveryEvidence = extractedDelivery;
-		if (!deliveryEvidence) {
-			const hasPatch = Boolean(result.patchPath) || (result.nestedPatchPaths?.length ?? 0) > 0;
-			const hasStructured =
-				hasValidStructuredOutput ||
-				(result.structuredOutput?.data !== undefined && result.structuredOutput.data !== null);
-			if (hasPatch || (completedRun && hasStructured)) {
-				const workspaceVersion = await resolveCurrentWorkspaceCodeVersion(request.session.cwd);
-				const changedFiles = new Set<string>();
+		const hasPatch = Boolean(result.patchPath) || (result.nestedPatchPaths?.length ?? 0) > 0;
+		const hasStructured =
+			hasValidStructuredOutput ||
+			(result.structuredOutput?.data !== undefined && result.structuredOutput.data !== null);
+		if (hasPatch || (completedRun && hasStructured) || extractedDelivery || result.extractedToolData?.bash?.length) {
+			const workspaceVersion = await resolveCurrentWorkspaceCodeVersion(request.session.cwd);
+			const fromHandoff = inspectEvidenceHandoffContext(request.context);
+			const hostSeals = (result.extractedToolData?.bash ?? [])
+				.map(hostSeal => readHostTerminalSeal({ hostSeal }))
+				.filter((seal): seal is HostTerminalSeal => seal !== null)
+				.filter(seal => seal.codeVersion === workspaceVersion);
+			const hostTerminal = bindHostSealsToAcceptance({
+				seals: hostSeals,
+				acceptanceIds: fromHandoff.handoff?.acceptance ?? [],
+				verificationCommands: fromHandoff.handoff?.verificationOwnership.commands,
+				currentCodeVersion: workspaceVersion,
+			});
+			if (workspaceVersion && (hasPatch || completedRun)) {
+				const changedFiles = new Set(hostSeals.flatMap(seal => seal.changedFiles ?? []));
 				for (const patchPath of [
 					...(result.patchPath ? [result.patchPath] : []),
 					...(result.nestedPatchPaths ?? []),
@@ -903,35 +922,38 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 						const patchText = await Bun.file(patchPath).text();
 						for (const file of parsePatchTouchedFiles(patchText)) changedFiles.add(file);
 					} catch {
-						// Fall back to the artifact path only when patch bytes are unreadable.
-						changedFiles.add(patchPath);
+						// A patch path is not a changed source path. Missing bytes do not prove scope.
 					}
 				}
-				const fromHandoff = inspectEvidenceHandoffContext(request.context);
-				const hostTerminal = extractHostTerminalChecksFromExecutorResult(result);
 				const hostById = new Map(hostTerminal.map(check => [check.id, check] as const));
 				const acceptanceItems = (fromHandoff.handoff?.acceptance ?? []).map(id => {
 					const host = hostById.get(id);
 					return {
 						id,
-						// Host terminal receipt may seal; without it stay explicitly unproven.
 						claimedProven: host ? true : (false as const),
 						evidenceLocations: host?.evidenceLocation ? [host.evidenceLocation] : ([] as string[]),
 					};
 				});
+				const ownership = fromHandoff.handoff?.verificationOwnership;
+				const declaredChecks = ownership?.commands ?? [];
+				const checksNotRun = declaredChecks
+					.filter(command => !hostSeals.some(seal => seal.command === command.trim()))
+					.map(id => ({
+						id,
+						reason: ownership?.owner === "worker" ? "worker_check_not_run" : "parent_owns_verify",
+					}));
 				deliveryEvidence = buildChildDeliveryEvidenceFromExecutorFacts({
-					codeVersion: {
-						version: workspaceVersion || `unresolved:${result.id}`,
-						changedFiles: [...changedFiles],
-					},
+					codeVersion: { version: workspaceVersion, changedFiles: [...changedFiles] },
 					acceptanceItems,
-					terminalChecksPassed: hostTerminal.length > 0 ? hostTerminal : undefined,
+					terminalChecksPassed: hostTerminal,
 					writeOwnershipReleased: false,
 					finishOwner: "original_worker",
 					checksNotRun:
-						hostTerminal.length > 0
-							? undefined
-							: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
+						checksNotRun.length > 0
+							? checksNotRun
+							: hostTerminal.length > 0
+								? []
+								: [{ id: "parent_acceptance", reason: "parent owns final acceptance" }],
 				});
 			}
 		}

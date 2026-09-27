@@ -10,7 +10,16 @@ import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import { FinalVerifyStage } from "../../src/workflow/stages/final-verify";
 import type { ReviewFindingV1 } from "../../src/workflow/types";
-import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	materializeSamplePatch,
+	passVerifier,
+	planArtifact,
+	realTempWorkspace,
+	reviewArtifact,
+	scriptedRunner,
+} from "./helpers";
 
 const finding = (
 	overrides: Partial<ReviewFindingV1> & Pick<ReviewFindingV1, "id" | "confidence" | "priority">,
@@ -26,15 +35,19 @@ const finding = (
 describe("WorkflowEngine policy bounds regressions", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
+	// Real VCS workspace so repair-count and finding gates are not missing-evidence loops.
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
 
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-bounds-"));
+		workspace = await realTempWorkspace();
 	});
 
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	it("forceUnlock clears stale runner lock so resume can continue without cancel", async () => {
@@ -46,7 +59,7 @@ describe("WorkflowEngine policy bounds regressions", () => {
 
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
 					plan: planArtifact(),
@@ -55,14 +68,14 @@ describe("WorkflowEngine policy bounds regressions", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 		});
 
 		// Without forceUnlock, exclusive claim fails
-		await expect(engine.resume(id, { singleStep: true, session: fakeSession() })).rejects.toBeInstanceOf(
-			WorkflowPolicyError,
-		);
+		await expect(
+			engine.resume(id, { singleStep: true, session: fakeSession({ cwd: workspace.cwd }) }),
+		).rejects.toBeInstanceOf(WorkflowPolicyError);
 		expect((await engine.getState(id))?.status).toBe("planning");
 
 		// forceUnlock does not terminal-cancel
@@ -74,7 +87,11 @@ describe("WorkflowEngine policy bounds regressions", () => {
 		await store.transitionWorkflow(id2, "created", "planning", "go");
 		const s2 = await store.getCurrentState(id2);
 		await store.claimRunner(id2, "another-dead-owner", s2!.version);
-		const stepped = await engine.resume(id2, { singleStep: true, session: fakeSession(), forceUnlock: true });
+		const stepped = await engine.resume(id2, {
+			singleStep: true,
+			session: fakeSession({ cwd: workspace.cwd }),
+			forceUnlock: true,
+		});
 		expect(stepped.state.status).not.toBe("cancelled");
 		expect(["planning", "plan_review", "implementing", "implementation_verify"]).toContain(stepped.state.status);
 	});
@@ -85,6 +102,7 @@ describe("WorkflowEngine policy bounds regressions", () => {
 		const openFinding = finding({ id: "f-repair", priority: "P1", confidence: 0.99 });
 
 		const ledger = new BudgetLedger({ limitUsd: 100, maxRepairCycles: 1 });
+		const session = fakeSession({ cwd: workspace.cwd });
 		const engine = new WorkflowEngine({
 			store,
 			budgetLedger: ledger,
@@ -106,15 +124,15 @@ describe("WorkflowEngine policy bounds regressions", () => {
 					},
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session,
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "bounded repair" });
 		let lastError: unknown;
 		try {
-			await engine.run(workflowId);
+			await engine.run(workflowId, session);
 		} catch (error) {
 			lastError = error;
 		}
@@ -170,14 +188,14 @@ describe("WorkflowEngine policy bounds regressions", () => {
 					},
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "three repairs" });
 		try {
-			await engine.run(workflowId);
+			await engine.run(workflowId, fakeSession({ cwd: workspace.cwd }));
 		} catch {
 			// budget stop expected after bound
 		}
@@ -187,27 +205,32 @@ describe("WorkflowEngine policy bounds regressions", () => {
 	});
 
 	it("final_verify ignores open P1 findings below confidence threshold", async () => {
-		const stage = new FinalVerifyStage(passVerifier());
+		const patchPath = await materializeSamplePatch(workspace.cwd);
+		const stage = new FinalVerifyStage(passVerifier(workspace.cwd));
 		// Engine passes only findings marked blocking=true (confidence/priority already applied at intake).
 		const advisory = finding({ id: "low", priority: "P1", confidence: 0.2, status: "open", blocking: false });
 		const blocking = finding({ id: "high", priority: "P1", confidence: 0.9, status: "open", blocking: true });
+		const implementation = implArtifact({ patchPath, branchName: undefined });
 
 		const advisoryPass = await stage.execute({
 			workflowId: "wf",
 			attemptId: "att-low",
-			commands: [],
+			commands: ["git diff --check"],
 			openFindings: [advisory],
-			implementation: implArtifact({ branchName: "wf/x", patchPath: undefined }),
+			implementation,
+			cwd: workspace.cwd,
 		});
 		expect(advisoryPass.passed).toBe(true);
 		expect(advisoryPass.checks.some(c => c.id === "unresolved-findings")).toBe(false);
+		expect(advisoryPass.checks.some(c => c.status === "passed")).toBe(true);
 
 		const blockingFail = await stage.execute({
 			workflowId: "wf",
 			attemptId: "att-high",
-			commands: [],
+			commands: ["git diff --check"],
 			openFindings: [blocking],
-			implementation: implArtifact({ branchName: "wf/x", patchPath: undefined }),
+			implementation,
+			cwd: workspace.cwd,
 		});
 		expect(blockingFail.passed).toBe(false);
 		expect(blockingFail.checks.some(c => c.id === "unresolved-findings")).toBe(true);
@@ -215,6 +238,7 @@ describe("WorkflowEngine policy bounds regressions", () => {
 
 	it("engine final_verify path treats low-confidence open findings as non-blocking", async () => {
 		const lowFinding = finding({ id: "advisory", priority: "P1", confidence: 0.15 });
+		const session = fakeSession({ cwd: workspace.cwd });
 		const engine = new WorkflowEngine({
 			store,
 			config: { confidenceThreshold: 0.6 },
@@ -227,13 +251,13 @@ describe("WorkflowEngine policy bounds regressions", () => {
 					codeReview: reviewArtifact("approved", "implementation", [lowFinding]),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session,
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "advisory finding" });
-		const result = await engine.run(workflowId);
+		const result = await engine.run(workflowId, session);
 		expect(result.state.status).toBe("completed");
 	});
 
@@ -265,13 +289,13 @@ describe("WorkflowEngine policy bounds regressions", () => {
 					}),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "do not complete with open blocking P2" });
-		await engine.run(workflowId).catch(() => {});
+		await engine.run(workflowId, fakeSession({ cwd: workspace.cwd })).catch(() => {});
 		const finalState = await engine.getState(workflowId);
 		expect(finalState?.status).toBe("blocked");
 	});
@@ -306,9 +330,9 @@ describe("WorkflowEngine policy bounds regressions", () => {
 						}),
 					}),
 				),
-				verifier: passVerifier(),
+				verifier: passVerifier(workspace.cwd),
 				artifactStore: new ArtifactStore(artifactDir),
-				session: fakeSession(),
+				session: fakeSession({ cwd: workspace.cwd }),
 			});
 
 		let fileStore = new WorkflowStore(dbPath);
@@ -318,14 +342,14 @@ describe("WorkflowEngine policy bounds regressions", () => {
 		for (let i = 0; i < 20; i++) {
 			const status = (await engine1.getState(workflowId))?.status;
 			if (status === "repairing") break;
-			await engine1.resume(workflowId, { singleStep: true });
+			await engine1.resume(workflowId, { singleStep: true, session: fakeSession({ cwd: workspace.cwd }) });
 		}
 		expect((await engine1.getState(workflowId))?.status).toBe("repairing");
 		fileStore.close();
 
 		fileStore = new WorkflowStore(dbPath);
 		const engine2 = mk(fileStore);
-		await engine2.resume(workflowId).catch(() => {});
+		await engine2.resume(workflowId, { session: fakeSession({ cwd: workspace.cwd }) }).catch(() => {});
 		const finalState = await engine2.getState(workflowId);
 		expect(finalState?.status).toBe("blocked");
 		expect(finalState?.status).not.toBe("completed");
@@ -362,13 +386,13 @@ describe("WorkflowEngine policy bounds regressions", () => {
 					},
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "plan loop" });
-		const result = await engine.run(workflowId);
+		const result = await engine.run(workflowId, fakeSession({ cwd: workspace.cwd }));
 		expect(result.state.status).toBe("blocked");
 		// At most maxPlanCycles rejections before block (2)
 		expect(planReviews).toBeLessThanOrEqual(2);
@@ -405,9 +429,9 @@ describe("WorkflowEngine policy bounds regressions", () => {
 						},
 					}),
 				),
-				verifier: passVerifier(),
+				verifier: passVerifier(workspace.cwd),
 				artifactStore: new ArtifactStore(artifactDir),
-				session: fakeSession(),
+				session: fakeSession({ cwd: workspace.cwd }),
 			});
 
 		const workflowId = await mk().startWorkflow({ request: "cross-engine plan bound" });
@@ -415,7 +439,7 @@ describe("WorkflowEngine policy bounds regressions", () => {
 		for (let i = 0; i < 8; i++) {
 			const state = await store.getCurrentState(workflowId);
 			if (!state || ["blocked", "failed", "cancelled", "completed"].includes(state.status)) break;
-			await mk().resume(workflowId, { singleStep: true, session: fakeSession() });
+			await mk().resume(workflowId, { singleStep: true, session: fakeSession({ cwd: workspace.cwd }) });
 		}
 		const final = await store.getCurrentState(workflowId);
 		expect(final?.status).toBe("blocked");
@@ -425,17 +449,17 @@ describe("WorkflowEngine policy bounds regressions", () => {
 	it("cancel finishes open attempts (no permanent in_progress)", async () => {
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
 					plan: planArtifact(),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 		});
 		const workflowId = await engine.startWorkflow({ request: "cancel attempt" });
-		await engine.resume(workflowId, { singleStep: true, session: fakeSession() }); // created→planning start or run planning
+		await engine.resume(workflowId, { singleStep: true, session: fakeSession({ cwd: workspace.cwd }) }); // created→planning start or run planning
 		// Force an open attempt then cancel
 		const mid = await store.getCurrentState(workflowId);
 		if (mid && mid.status !== "cancelled") {

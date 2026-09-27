@@ -1,3 +1,4 @@
+import type { BudgetInvocationSettlement, WorkflowBudgetGuard, WorkflowBudgetPort } from "./budget-ledger";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ModelFactsSource } from "../model-policy/adapters";
 import type {
@@ -363,6 +364,8 @@ export interface VerificationWorkspaceBinding {
 	headId: string;
 	/** sha256 of proven HEAD plus dirty and untracked content. Not a guess. */
 	contentSha256: string;
+	/** Paths observed in the same VCS capture, for host-owned delivery scope evidence. */
+	changedFiles?: string[];
 }
 
 export interface VerificationCodeState {
@@ -417,7 +420,11 @@ export type StageHandoffItemKind = "plan" | "finding" | "patch" | "verification"
 export interface StageHandoffPreservedItem {
 	kind: StageHandoffItemKind;
 	artifactId: string;
-	/** Compact deterministic summary; ≤500 characters. */
+	/**
+	 * Deterministic extract. Non-blocking items may be clamped to 500 characters.
+	 * Blocking acceptance, verification, and findings are complete or explicitly
+	 * sharded — a 500-character clamp is not their only copy.
+	 */
 	summary: string;
 	/** UTF-8 byte length of `summary`. */
 	bytes: number;
@@ -426,6 +433,9 @@ export interface StageHandoffPreservedItem {
 	 * (blocking findings, patch refs, failed verification, etc.).
 	 */
 	blocking: boolean;
+	/** 1-based shard index when one logical item was split to stay recoverable. */
+	shardIndex?: number;
+	shardCount?: number;
 }
 
 /**
@@ -455,8 +465,14 @@ export interface StageHandoffArtifactRef {
 	artifactId: string;
 	/** UTF-8 byte length of full stored content. */
 	bytes: number;
-	/** Loadable recovery URI (e.g. artifact://workflowId/art_….json). */
+	/**
+	 * Loadable recovery URI. Production workflow refs are absolute `file://` URLs
+	 * of the stored artifact file — the read tool already resolves those.
+	 * Session spill ids stay `artifact://<digits>`.
+	 */
 	recoveryUri: string;
+	/** SHA-256 of the stored body. Loaders must reject a mismatch. */
+	contentSha256?: string;
 }
 
 export type WorkflowRole = "planner" | "plan_reviewer" | "plan_arbitrator" | "implementer" | "code_reviewer" | "repair";
@@ -936,6 +952,16 @@ export interface RuntimePort {
 	buildRequest(request: WorkflowAgentRequest): WorkflowAgentRequest;
 	run<TArtifact = unknown>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>>;
 	mergeCapturedChanges?: CapturedChangesMerger;
+	/**
+	 * Optional shared-budget hook. Engine sets it once; stages do not each thread a ledger.
+	 * Absent on fakes that do not bill.
+	 */
+	setBudgetPort?(port: WorkflowBudgetPort | undefined): void;
+	/**
+	 * Non-consuming settlement metadata for one attempt. Charge keys stay in the ledger snapshot.
+	 * Multiple gate, arbitration, and fallback invocations remain listed; nothing is deleted.
+	 */
+	takeBudgetSettlement?(attemptId: string): readonly BudgetInvocationSettlement[];
 }
 
 /** Port used by verify stages — deterministic commands only. */
@@ -972,6 +998,8 @@ export interface WorkflowAvailabilityProbeRequest {
 	session: ToolSession;
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	/** Shared budget guard for this physical probe. Absent probes stay unbilled by the adapter. */
+	budgetGuard?: WorkflowBudgetGuard;
 }
 
 /** Outcome of one physical probe before per-profile expansion. */

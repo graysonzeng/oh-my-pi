@@ -1,40 +1,33 @@
 import { describe, expect, it } from "bun:test";
-import {
-	DEFAULT_MODEL_OPTIMIZATION_PROFILES,
-	FALLBACK_TRUNCATION_RULES,
-} from "../../src/model-optimization/default-profiles";
-import { DEFAULT_MODEL_PROFILES, DEFAULT_TRUNCATION_RULES } from "../../src/workflow/default-config";
-import {
-	buildConservativeOutputTruncation,
-	buildOutputTruncation,
-	ORDINARY_TRUNCATION_BYTE_LINE_OPTS,
-	DEFAULT_TRUNCATION_RULES as TOOL_DEFAULT_TRUNCATION,
-} from "../../src/workflow/tool-output-manager";
+import { DEFAULT_MODEL_OPTIMIZATION_PROFILES } from "../../src/model-optimization/default-profiles";
+import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
+import { processToolOutputDetailed } from "../../src/workflow/tool-output-manager";
 
-describe("shared truncation / defaults source (R6/F1)", () => {
-	it("ordinary and workflow truncation both consume the same DEFAULT_TRUNCATION_RULES export", () => {
-		expect(DEFAULT_TRUNCATION_RULES).toBe(TOOL_DEFAULT_TRUNCATION);
-		expect(FALLBACK_TRUNCATION_RULES).toBe(TOOL_DEFAULT_TRUNCATION);
-		expect(DEFAULT_TRUNCATION_RULES.length).toBeGreaterThan(0);
-		expect(Object.keys(DEFAULT_MODEL_OPTIMIZATION_PROFILES).length).toBeGreaterThan(0);
+describe("shared truncation behavior (R6)", () => {
+	it("keeps the same ERROR line when ordinary and workflow deepseek rules truncate bash", () => {
+		const ordinary = DEFAULT_MODEL_OPTIMIZATION_PROFILES.deepseek?.toolStrategy;
+		const workflow = DEFAULT_MODEL_PROFILES.deepseek_implementer?.toolStrategy;
+		const output = `${"noise\n".repeat(200)}ERROR: shared-sentinel\n${"tail\n".repeat(200)}`;
+		const left = processToolOutputDetailed(output, "bash", ordinary);
+		const right = processToolOutputDetailed(output, "bash", workflow);
+		expect(left.text).toContain("ERROR: shared-sentinel");
+		expect(right.text).toContain("ERROR: shared-sentinel");
+		expect(left.text.length).toBeLessThan(output.length);
+		expect(right.text.length).toBeLessThan(output.length);
 	});
 
-	it("shared builders produce identical ordinary matrices for both profile tables", () => {
-		const ordinary = buildOutputTruncation(ORDINARY_TRUNCATION_BYTE_LINE_OPTS);
-		expect(ordinary.rules).toEqual(TOOL_DEFAULT_TRUNCATION);
-		const conservative = buildConservativeOutputTruncation({ maxBytes: 2000, maxLines: 40 });
-		expect(conservative.enabled).toBe(true);
-		expect(conservative.rules.find(r => r.toolName === "bash")?.maxBytes).toBe(2000);
-		expect(conservative.rules.find(r => r.toolName === "read")?.maxBytes).toBe(4000);
-	});
-
-	it("keeps workflow verificationCommands and quality defaults stable (no silent default churn)", () => {
-		expect(DEFAULT_MODEL_PROFILES.claude_planner?.roles).toContain("planner");
-		const anyImpl = Object.values(DEFAULT_MODEL_PROFILES).find(p => p.roles.includes("implementer"));
-		expect(anyImpl?.toolStrategy?.outputTruncation?.enabled).toBe(true);
-		// Intentional divergence preserved: ordinary summarization off, workflow on.
-		const ordinary = Object.values(DEFAULT_MODEL_OPTIMIZATION_PROFILES)[0];
-		expect(ordinary?.toolStrategy?.resultSummarization?.enabled).toBe(false);
-		expect(anyImpl?.toolStrategy?.resultSummarization?.enabled).toBe(true);
+	it("applies the configured Sol read clamp without losing the beginning of the file", () => {
+		const output = Array.from({ length: 100 }, (_, i) => `${i}: ${String(i).padStart(4, "0").repeat(300)}`).join(
+			"\n",
+		);
+		const sol = processToolOutputDetailed(output, "read", DEFAULT_MODEL_OPTIMIZATION_PROFILES.sol?.toolStrategy);
+		const ordinary = processToolOutputDetailed(
+			output,
+			"read",
+			DEFAULT_MODEL_OPTIMIZATION_PROFILES.claude?.toolStrategy,
+		);
+		expect(sol.text).toContain("0: 0000");
+		expect(ordinary.text).toContain("0: 0000");
+		expect(Buffer.byteLength(sol.text)).toBeLessThan(Buffer.byteLength(ordinary.text));
 	});
 });

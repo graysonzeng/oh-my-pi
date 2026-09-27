@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { TodoPhase } from "../tools/todo";
+import { type HostTerminalSeal, readHostTerminalSeal } from "../task/host-terminal-check";
 import type { Goal } from "./state";
 
 /** Shipped test/lint/typecheck invocations — not the bare word "test". */
@@ -17,6 +18,7 @@ export type GoalSettleToolRecord = {
 	resultText: string;
 	isError: boolean;
 	unpaired: boolean;
+	hostSeal?: HostTerminalSeal;
 };
 
 export type GoalNominationOutcome = "none" | "nominated" | "rejected" | "accepted" | "stale";
@@ -35,6 +37,10 @@ export type GoalCompletionSettleSnapshot = {
 	};
 	todos: Array<{ phase: string; content: string; status: string }>;
 	messages: AgentMessage[];
+	/** Content identity of the tree being accepted. Empty refuses verification. */
+	currentCodeVersion?: string;
+	/** Host-minted seals already checked against the process trust store. */
+	hostReceipts?: HostTerminalSeal[];
 };
 
 export type GoalHostGateDecision = {
@@ -68,12 +74,13 @@ export function toolInvocationText(record: GoalSettleToolRecord): string {
  * (and equivalent shell) invocations with a verification-shaped command count.
  */
 export function hasSuccessfulVerification(snapshot: GoalCompletionSettleSnapshot): boolean {
-	return snapshot.tools.some(record => {
-		if (record.unpaired || record.isError) return false;
-		// Eval text containing "bun test" etc. is not a shipped verification run.
-		if (record.name !== "bash") return false;
-		return commandLooksLikeVerification(toolInvocationText(record));
-	});
+	const current = snapshot.currentCodeVersion?.trim() ?? "";
+	if (!current) return false;
+	const receipts = [
+		...(snapshot.hostReceipts ?? []),
+		...snapshot.tools.flatMap(record => (record.hostSeal ? [record.hostSeal] : [])),
+	];
+	return receipts.some(seal => seal.codeVersion === current && readHostTerminalSeal({ hostSeal: seal }) !== null);
 }
 
 export function hasOpenTodos(snapshot: GoalCompletionSettleSnapshot): boolean {
@@ -146,6 +153,8 @@ export function buildGoalCompletionSettleSnapshot(input: {
 	goal: Pick<Goal, "id" | "hostGate">;
 	nominationOutcome?: GoalNominationOutcome;
 	excludeToolCallIds?: Iterable<string>;
+	currentCodeVersion?: string;
+	hostReceipts?: HostTerminalSeal[];
 }): GoalCompletionSettleSnapshot {
 	const settleMessages = settleTurnMessages(input.messages);
 	const excludeToolCallIds = new Set(input.excludeToolCallIds ?? []);
@@ -166,6 +175,7 @@ export function buildGoalCompletionSettleSnapshot(input: {
 			seen.add(call.id);
 			const result = resultsById.get(call.id);
 			const resolved = resultText(result);
+			const hostSeal = result && !resolved.isError ? (readHostTerminalSeal(result.details) ?? undefined) : undefined;
 			if (excludeToolCallIds.has(call.id)) continue;
 			const op = call.arguments && typeof call.arguments === "object" ? call.arguments.op : undefined;
 			if (call.name === "goal" && op === "complete" && resolved.unpaired) continue;
@@ -176,6 +186,7 @@ export function buildGoalCompletionSettleSnapshot(input: {
 				resultText: resolved.text,
 				isError: resolved.isError,
 				unpaired: resolved.unpaired,
+				...(hostSeal ? { hostSeal } : {}),
 			});
 		}
 	}
@@ -194,6 +205,8 @@ export function buildGoalCompletionSettleSnapshot(input: {
 		},
 		todos: flattenTodoSnapshot(input.todos),
 		messages: settleMessages,
+		currentCodeVersion: input.currentCodeVersion,
+		hostReceipts: input.hostReceipts,
 	};
 }
 

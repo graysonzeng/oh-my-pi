@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { expandPath } from "../../src/tools/path-utils";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { ContextBuilder } from "../../src/workflow/context-builder";
 import { WorkflowEngine } from "../../src/workflow/engine";
@@ -21,6 +22,7 @@ import {
 	STAGE_HANDOFF_SUMMARY_MAX,
 	selectBlockingFindings,
 	serializeStageHandoff,
+	stageHandoffContentFingerprint,
 	syntheticArtifactRef,
 } from "../../src/workflow/stage-handoff";
 import type {
@@ -33,8 +35,10 @@ import type {
 import {
 	fakeSession,
 	implArtifact,
+	materializeSamplePatch,
 	passVerifier,
 	planArtifact,
+	realTempWorkspace,
 	reviewArtifact,
 	SAMPLE_PATCH,
 	scriptedRunner,
@@ -150,6 +154,20 @@ function failedVerification(): VerificationArtifactV1 {
 	};
 }
 
+/**
+ * Recovery bodies are JSON artifacts except persisted patches, which hold raw
+ * diff text. Assert JSON bodies parse to an object; never pin the URI scheme.
+ */
+function recoveredKind(content: string, label: string): unknown {
+	const trimmed = content.trim();
+	if (!trimmed.startsWith("{")) return undefined;
+	const parsed: unknown = JSON.parse(trimmed);
+	if (typeof parsed !== "object" || parsed === null) {
+		throw new Error(`recovered artifact is not a JSON object: ${label}`);
+	}
+	return "kind" in parsed ? parsed.kind : undefined;
+}
+
 describe("stage handoff contract (shipped builders)", () => {
 	it("extracts correct preserved kinds per edge with real source byte sizes", () => {
 		const plan = fullPlan();
@@ -206,15 +224,35 @@ describe("stage handoff contract (shipped builders)", () => {
 		// No network / model side effects — pure function double-call equality is the proof.
 	});
 
-	it("caps every summary at 500 characters", () => {
+	it("reassembles blocking goal and acceptance past 500 characters", () => {
 		const plan = fullPlan();
-		plan.summary = "S".repeat(800);
-		plan.assumptions = ["A".repeat(800)];
+		const longAcceptance = `ACCEPT-${"A".repeat(800)}-END`;
+		plan.summary = `GOAL-${"S".repeat(800)}-END`;
+		plan.acceptanceCriteria = [longAcceptance];
 		const handoff = buildPlannerToImplementerHandoff({ plan });
-		for (const item of handoff.preservedItems) {
-			expect(item.summary.length).toBeLessThanOrEqual(STAGE_HANDOFF_SUMMARY_MAX);
-			expect(item.bytes).toBe(Buffer.byteLength(item.summary, "utf-8"));
-		}
+		const joined = handoff.preservedItems.map(item => item.summary).join("");
+		expect(joined).toContain(plan.summary);
+		expect(joined).toContain(longAcceptance);
+		expect(handoff.preservedItems.every(item => item.summary.length <= STAGE_HANDOFF_SUMMARY_MAX)).toBe(true);
+		expect(handoff.preservedItems.some(item => (item.shardCount ?? 1) > 1)).toBe(true);
+	});
+
+	it("changes the fingerprint when only shard index changes", () => {
+		const plan = fullPlan();
+		plan.summary = `GOAL-${"S".repeat(800)}-END`;
+		const handoff = buildPlannerToImplementerHandoff({ plan });
+		expect(handoff.preservedItems.some(item => (item.shardCount ?? 1) > 1)).toBe(true);
+		const { contentFingerprint: _ignored, ...base } = handoff;
+		const flipped = {
+			...base,
+			preservedItems: base.preservedItems.map(item =>
+				item.shardIndex === undefined
+					? item
+					: { ...item, shardIndex: (item.shardCount ?? 1) - item.shardIndex + 1 },
+			),
+		};
+		expect(stageHandoffContentFingerprint(base)).toBe(handoff.contentFingerprint);
+		expect(stageHandoffContentFingerprint(flipped)).not.toBe(handoff.contentFingerprint);
 	});
 
 	it("keep-all degrade preserves all source recovery URIs", () => {
@@ -325,21 +363,24 @@ describe("stage handoff engine integration", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
 	let engine: WorkflowEngine;
+	// Real VCS workspace so verification identity is host-captured (R1).
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
+	let patchFile: string;
 
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "stage-handoff-eng-"));
-		const patchFile = path.join(artifactDir, "impl.patch");
-		await Bun.write(patchFile, SAMPLE_PATCH);
+		workspace = await realTempWorkspace();
+		patchFile = await materializeSamplePatch(workspace.cwd, "impl.patch");
 	});
 
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	it("happy path plan→implement→review emits handoffs with recovery URIs", async () => {
-		const patchFile = path.join(artifactDir, "impl.patch");
 		const seenContexts: string[] = [];
 		engine = new WorkflowEngine({
 			store,
@@ -352,13 +393,13 @@ describe("stage handoff engine integration", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				})(request);
 			}),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "ship" });
-		const result = await engine.run(workflowId, fakeSession({ cwd: artifactDir }));
+		const result = await engine.run(workflowId, fakeSession({ cwd: workspace.cwd }));
 		expect(result.state.status).toBe("completed");
 
 		const artifacts = await store.listArtifacts(workflowId);
@@ -384,10 +425,14 @@ describe("stage handoff engine integration", () => {
 		for (const body of bodies) {
 			expect(body.kind).toBe(STAGE_HANDOFF_KIND);
 			for (const uri of body.recoveryUris) {
-				if (!uri.startsWith("artifact://")) continue;
-				const rel = uri.slice("artifact://".length);
-				const loaded = await fsStore.load(rel);
+				// Production emits absolute file:// URLs resolved by expandPath.
+				const expanded = expandPath(uri);
+				expect(path.isAbsolute(expanded)).toBe(true);
+				const relativePath = path.relative(artifactDir, expanded);
+				const loaded = await fsStore.load(relativePath);
 				expect(loaded).not.toBeNull();
+				expect(loaded!.content?.length).toBeGreaterThan(0);
+				recoveredKind(loaded!.content!, relativePath);
 			}
 		}
 
@@ -396,7 +441,6 @@ describe("stage handoff engine integration", () => {
 	});
 
 	it("repair path keeps blocking findings visible in next-stage context", async () => {
-		const patchFile = path.join(artifactDir, "impl.patch");
 		const seenContexts: string[] = [];
 		engine = new WorkflowEngine({
 			store,
@@ -424,14 +468,14 @@ describe("stage handoff engine integration", () => {
 					repair: { ...implArtifact(), patchPath: patchFile, addressedStepIds: ["f-block"] },
 				})(request);
 			}),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 			config: { maxRepairCycles: 3 },
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "fix" });
-		await engine.run(workflowId, fakeSession({ cwd: artifactDir })).catch(() => {});
+		await engine.run(workflowId, fakeSession({ cwd: workspace.cwd })).catch(() => {});
 
 		const artifacts = await store.listArtifacts(workflowId);
 		const fsStore = new ArtifactStore(artifactDir);
@@ -472,14 +516,14 @@ describe("stage handoff engine integration", () => {
 					]),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 			config: { maxPlanCycles: 1 },
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "blocked plan" });
-		await engine.run(workflowId, fakeSession({ cwd: artifactDir })).catch(() => {});
+		await engine.run(workflowId, fakeSession({ cwd: workspace.cwd })).catch(() => {});
 
 		const artifacts = await store.listArtifacts(workflowId);
 		const handoffs = artifacts.filter(a => a.kind === "stage-handoff");
@@ -497,18 +541,23 @@ describe("stage handoff resume hydration", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
 	let dbPath: string;
+	// Real VCS workspace so verification identity is host-captured (R1).
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
+	let patchFile: string;
 
 	beforeEach(async () => {
 		dbPath = path.join(os.tmpdir(), `wf-handoff-resume-${crypto.randomUUID()}.db`);
 		store = new WorkflowStore(dbPath);
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "stage-handoff-resume-"));
-		await Bun.write(path.join(artifactDir, "impl.patch"), SAMPLE_PATCH);
+		workspace = await realTempWorkspace();
+		patchFile = await materializeSamplePatch(workspace.cwd, "impl.patch");
 	});
 
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
 		await fs.rm(dbPath, { force: true });
+		await workspace.cleanup();
 	});
 
 	function makeEngine(s: WorkflowStore, patchFile: string): WorkflowEngine {
@@ -541,9 +590,9 @@ describe("stage handoff resume hydration", () => {
 					},
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 			config: { maxRepairCycles: 3 },
 		});
 	}
@@ -560,22 +609,21 @@ describe("stage handoff resume hydration", () => {
 	}
 
 	it("post-resume handoff recoveryUris load via ArtifactStore (no synthetic workflowId/plan fallbacks)", async () => {
-		const patchFile = path.join(artifactDir, "impl.patch");
 		const engine1 = makeEngine(store, patchFile);
 		const workflowId = await engine1.startWorkflow({ request: "resume handoff" });
 
 		// singleStep: created→planning, planning→plan_review, plan_review→implementing
 		await engine1.resume(workflowId, {
 			singleStep: true,
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 		}); // created → planning
 		await engine1.resume(workflowId, {
 			singleStep: true,
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 		}); // planning execute → plan_review
 		await engine1.resume(workflowId, {
 			singleStep: true,
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 		}); // plan_review execute → implementing
 		expect((await engine1.getState(workflowId))?.status).toBe("implementing");
 
@@ -585,7 +633,7 @@ describe("stage handoff resume hydration", () => {
 		const engine2 = makeEngine(store, patchFile);
 		await engine2.resume(workflowId, {
 			singleStep: true,
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 		}); // implementing: builds planner→implementer handoff from hydrated refs
 
 		const afterImpl = await loadHandoffs(workflowId);
@@ -593,17 +641,21 @@ describe("stage handoff resume hydration", () => {
 		expect(planHandoff).toBeDefined();
 
 		const fsStore = new ArtifactStore(artifactDir);
-		// Must not use synthetic fallbacks like artifact://{workflowId}/plan
+		// Recovery URIs are production file:// URLs resolved via expandPath, not synthetic labels.
+		const planRecoveredKinds: unknown[] = [];
 		for (const uri of planHandoff!.recoveryUris) {
-			expect(uri.startsWith("artifact://")).toBe(true);
+			const expanded = expandPath(uri);
+			expect(path.isAbsolute(expanded)).toBe(true);
+			const rel = path.relative(artifactDir, expanded);
 			// Real store paths: {workflowId}/art_{uuid}.json — not bare kind labels
-			expect(uri).toMatch(/\/art_[0-9a-f-]+\.json$/i);
-			expect(uri).not.toMatch(/\/(plan|implementation|review|verification)$/);
-			const rel = uri.slice("artifact://".length);
+			expect(rel).toMatch(/art_[0-9a-f-]+\.json$/i);
+			expect(rel).not.toMatch(/\/(plan|implementation|review|verification)$/);
 			const loaded = await fsStore.load(rel);
 			expect(loaded).not.toBeNull();
 			expect(loaded!.content?.length).toBeGreaterThan(0);
+			planRecoveredKinds.push(recoveredKind(loaded!.content!, rel));
 		}
+		expect(planRecoveredKinds).toContain("plan");
 		// omitted ids must match real stored art_* ids (path basenames), not synthetic labels
 		for (const id of planHandoff!.omittedArtifactIds) {
 			expect(id.startsWith("art_")).toBe(true);
@@ -617,7 +669,7 @@ describe("stage handoff resume hydration", () => {
 		expect((await engine2.getState(workflowId))?.status).toBe("implementation_verify");
 		await engine2.resume(workflowId, {
 			singleStep: true,
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 		}); // verification → code_review
 		expect((await engine2.getState(workflowId))?.status).toBe("code_review");
 
@@ -627,19 +679,23 @@ describe("stage handoff resume hydration", () => {
 		const engine3 = makeEngine(store, patchFile);
 		await engine3.resume(workflowId, {
 			singleStep: true,
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 		}); // code_review: implement→review handoff (+ real patch artifact) → repairing
 
 		const afterReview = await loadHandoffs(workflowId);
 		const implHandoff = afterReview.find(h => h.fromStage === "implementing" && h.toStage === "code_review");
 		expect(implHandoff).toBeDefined();
+		const implRecoveredKinds: unknown[] = [];
 		for (const uri of implHandoff!.recoveryUris) {
-			expect(uri.startsWith("artifact://")).toBe(true);
-			expect(uri).toMatch(/\/art_[0-9a-f-]+\.json$/i);
-			const rel = uri.slice("artifact://".length);
+			const expanded = expandPath(uri);
+			expect(path.isAbsolute(expanded)).toBe(true);
+			const rel = path.relative(artifactDir, expanded);
+			expect(rel).toMatch(/art_[0-9a-f-]+\.json$/i);
 			const loaded = await fsStore.load(rel);
 			expect(loaded).not.toBeNull();
+			implRecoveredKinds.push(recoveredKind(loaded!.content!, rel));
 		}
+		expect(implRecoveredKinds).toContain("implementation");
 		// Patch ref must use real content bytes (≥ SAMPLE_PATCH length), not path-string length
 		const patchMeta = (await store.listArtifacts(workflowId)).find(a => a.kind === "patch");
 		expect(patchMeta).toBeDefined();
@@ -657,7 +713,7 @@ describe("stage handoff resume hydration", () => {
 		await engine4
 			.resume(workflowId, {
 				singleStep: true,
-				session: fakeSession({ cwd: artifactDir }),
+				session: fakeSession({ cwd: workspace.cwd }),
 			})
 			.catch(() => {});
 
@@ -666,9 +722,14 @@ describe("stage handoff resume hydration", () => {
 		expect(repairHandoff).toBeDefined();
 		expect(repairHandoff!.preservedItems.some(p => p.blocking && p.summary.includes("f-block"))).toBe(true);
 		for (const uri of repairHandoff!.recoveryUris) {
-			expect(uri).toMatch(/\/art_[0-9a-f-]+\.json$/i);
-			const rel = uri.slice("artifact://".length);
-			expect(await fsStore.load(rel)).not.toBeNull();
+			const expanded = expandPath(uri);
+			expect(path.isAbsolute(expanded)).toBe(true);
+			const rel = path.relative(artifactDir, expanded);
+			expect(rel).toMatch(/art_[0-9a-f-]+\.json$/i);
+			const loaded = await fsStore.load(rel);
+			expect(loaded).not.toBeNull();
+			expect(loaded!.content?.length).toBeGreaterThan(0);
+			recoveredKind(loaded!.content!, rel);
 		}
 		for (const id of repairHandoff!.omittedArtifactIds) {
 			expect(id.startsWith("art_")).toBe(true);

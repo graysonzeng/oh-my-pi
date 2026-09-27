@@ -19,9 +19,10 @@ import {
 	rolesMissingProfiles,
 	sortAvailabilityCandidates,
 } from "./availability-candidates";
-import { WorkflowCancelledError, WorkflowPolicyError } from "./errors";
+import { BudgetExhaustedError, WorkflowCancelledError, WorkflowPolicyError } from "./errors";
 import type { ModelRouter } from "./model-router";
 import { redactSecretsInText } from "./secret-redact";
+import type { WorkflowBudgetGuard, WorkflowBudgetPort } from "./budget-ledger";
 import type {
 	AvailabilityScopeStatus,
 	ModelProfile,
@@ -77,6 +78,11 @@ export interface RunAvailabilityPreflightOptions {
 	 * Pass a fresh registry in tests for isolation.
 	 */
 	credentialRouteUnavailable?: CredentialRouteUnavailableRegistry;
+	/**
+	 * Shared workflow budget. One physical probe reserves one invocation after local
+	 * validation inside the adapter. Omitted probes are not billed here.
+	 */
+	budgetPort?: WorkflowBudgetPort;
 }
 
 /**
@@ -197,6 +203,14 @@ export async function runAvailabilityPreflight(
 	try {
 		await mapPool(groupEntries, maxConcurrency, async ([key, group]) => {
 			const head = group[0]!;
+			const budgetGuard = options.budgetPort?.bind({
+				workflowId: options.workflowId,
+				attemptId: invocationId,
+				invocationId: `${invocationId}:${key}`,
+				profileId: head.profile.id,
+				maxRequests: head.profile.maxRequests,
+				maxCostUsd: head.profile.maxCostUsd,
+			});
 			const result = await runPhysicalProbe({
 				port: options.port,
 				profile: head.profile,
@@ -205,6 +219,7 @@ export async function runAvailabilityPreflight(
 				callerSignal: options.signal,
 				overallSignal: overallController.signal,
 				perTargetTimeoutMs,
+				budgetGuard,
 			});
 			probeByKey.set(key, {
 				...result,
@@ -326,6 +341,7 @@ async function runPhysicalProbe(options: {
 	callerSignal?: AbortSignal;
 	overallSignal: AbortSignal;
 	perTargetTimeoutMs: number;
+	budgetGuard?: WorkflowBudgetGuard;
 }): Promise<WorkflowAvailabilityProbeResult> {
 	if (options.callerSignal?.aborted) throw new WorkflowCancelledError("Availability preflight cancelled");
 	if (options.overallSignal.aborted) return timeoutProbeResult("availability overall timeout");
@@ -365,10 +381,12 @@ async function runPhysicalProbe(options: {
 				session: options.session,
 				signal,
 				timeoutMs: options.perTargetTimeoutMs,
+				budgetGuard: options.budgetGuard,
 			}),
 			aborted,
 		]);
 	} catch (error) {
+		if (error instanceof BudgetExhaustedError) throw error;
 		if (options.callerSignal?.aborted) throw new WorkflowCancelledError("Availability preflight cancelled");
 		if (options.overallSignal.aborted || targetController.signal.aborted) {
 			return timeoutProbeResult(

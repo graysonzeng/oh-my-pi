@@ -562,20 +562,6 @@ export function processToolOutput(
 	return processToolOutputDetailed(output, toolName, toolStrategy, args, artifact).text;
 }
 
-/** Default smart truncation rules used by quality-first ordinary profiles. */
-export const DEFAULT_TRUNCATION_RULES: ToolOutputTruncationRule[] = [
-	{
-		toolName: "bash",
-		strategy: "smart",
-		maxBytes: 4000,
-		maxLines: 80,
-		preservePatterns: ["ERROR", "FAIL", "Exception", "Traceback"],
-	},
-	{ toolName: "read", strategy: "smart", maxBytes: 8000, maxLines: 160 },
-	{ toolName: "grep", strategy: "head", maxBytes: 8000, maxLines: 120 },
-	{ toolName: "*", strategy: "head", maxBytes: 4000, maxLines: 80 },
-];
-
 /** Shared failure-signal preserve list for bash smart truncation. */
 export const BASH_ERROR_PRESERVE_PATTERNS = ["ERROR", "FAIL", "Exception", "Traceback"] as const;
 
@@ -620,6 +606,10 @@ export const ORDINARY_TRUNCATION_BYTE_LINE_OPTS: TruncationByteLineOpts = {
 	starBytes: 4000,
 	starLines: 80,
 };
+/** Default smart truncation rules used by quality-first ordinary profiles. */
+export const DEFAULT_TRUNCATION_RULES: ToolOutputTruncationRule[] = buildTruncationRules(
+	ORDINARY_TRUNCATION_BYTE_LINE_OPTS,
+);
 
 /** Enabled truncation config from a byte/line matrix. */
 export function buildOutputTruncation(opts: TruncationByteLineOpts): {

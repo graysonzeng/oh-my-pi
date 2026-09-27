@@ -20,6 +20,7 @@ import {
 	materializeSamplePatch,
 	passVerifier,
 	planArtifact,
+	realTempWorkspace,
 	reviewArtifact,
 } from "./helpers";
 
@@ -136,37 +137,43 @@ function engineWith(
 	store: WorkflowStore,
 	artifactDir: string,
 	runner: StructuredRunner,
+	cwd: string,
 	profiles?: Record<string, ModelProfile>,
 ) {
 	return new WorkflowEngine({
 		store,
 		...(profiles ? { config: { profiles } } : {}),
 		adapter: new RuntimeAdapter(runner),
-		verifier: passVerifier(),
+		verifier: passVerifier(cwd),
 		artifactStore: new ArtifactStore(artifactDir),
-		session: fakeSession(),
+		session: fakeSession({ cwd }),
 	});
 }
 
 describe("WorkflowEngine implementer chain with session-model last resort", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
+	// Real VCS workspace so verification identity is host-captured, not an empty green.
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
 
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-fallback-"));
+		workspace = await realTempWorkspace();
 	});
 
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	it("routes grok → astra → deepseek → session model across retryable failures", async () => {
 		const seen: string[] = [];
-		const engine = engineWith(store, artifactDir, chainRunner({ failCount: 3, seen }));
+		const session = fakeSession({ cwd: workspace.cwd, getActiveModelString: () => SESSION_MODEL });
+		const engine = engineWith(store, artifactDir, chainRunner({ failCount: 3, seen }), workspace.cwd);
 		const id = await engine.startWorkflow({ request: "chain fallback" });
-		const result = await engine.run(id, fakeSession({ getActiveModelString: () => SESSION_MODEL }));
+		const result = await engine.run(id, session);
 		expect(result.state.status).toBe("completed");
 		// One retryable failure per static candidate, then the session model succeeds.
 		expect(seen).toEqual(["grok-4.6", "gpt-6-astra", "deepseek-v4-flash", SESSION_MODEL]);
@@ -183,9 +190,10 @@ describe("WorkflowEngine implementer chain with session-model last resort", () =
 			Object.entries(DEFAULT_MODEL_PROFILES).filter(([id]) => id !== "grok_implementer"),
 		);
 		const seen: string[] = [];
-		const engine = engineWith(store, artifactDir, chainRunner({ failCount: 2, seen }), profiles);
+		const session = fakeSession({ cwd: workspace.cwd, getActiveModelString: () => SESSION_MODEL });
+		const engine = engineWith(store, artifactDir, chainRunner({ failCount: 2, seen }), workspace.cwd, profiles);
 		const id = await engine.startWorkflow({ request: "truncated primary" });
-		const result = await engine.run(id, fakeSession({ getActiveModelString: () => SESSION_MODEL }));
+		const result = await engine.run(id, session);
 		expect(result.state.status).toBe("completed");
 		expect(seen).toEqual(["gpt-6-astra", "deepseek-v4-flash", SESSION_MODEL]);
 		const main = result.routingAudit.find(a => a.profileId === SESSION_FALLBACK_PROFILE_ID);
@@ -195,11 +203,11 @@ describe("WorkflowEngine implementer chain with session-model last resort", () =
 
 	it("does not fall back when no session model selector exists", async () => {
 		const seen: string[] = [];
-		const engine = engineWith(store, artifactDir, chainRunner({ failCount: 99, seen }));
+		const engine = engineWith(store, artifactDir, chainRunner({ failCount: 99, seen }), workspace.cwd);
 		const id = await engine.startWorkflow({ request: "no session model" });
 		// No dynamic profile is registered: the three static candidates exhaust and the
 		// last candidate's retryable error surfaces — no invented session-model route.
-		await expect(engine.run(id, fakeSession())).rejects.toThrow(/transient provider failure/);
+		await expect(engine.run(id, fakeSession({ cwd: workspace.cwd }))).rejects.toThrow(/transient provider failure/);
 		expect(seen).toEqual(["grok-4.6", "gpt-6-astra", "deepseek-v4-flash"]);
 		expect(engine.routingAudit.some(a => a.profileId === SESSION_FALLBACK_PROFILE_ID)).toBe(false);
 	});

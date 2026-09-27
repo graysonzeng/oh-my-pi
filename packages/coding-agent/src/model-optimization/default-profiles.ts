@@ -6,7 +6,6 @@
 import {
 	buildConservativeOutputTruncation,
 	buildOutputTruncation,
-	DEFAULT_TRUNCATION_RULES,
 	ORDINARY_TRUNCATION_BYTE_LINE_OPTS,
 } from "../workflow/tool-output-manager";
 import {
@@ -18,11 +17,6 @@ import {
 
 /** Ordinary coding-session defaults from historical hit-rate simulation. */
 const ORDINARY_TRUNCATION = buildOutputTruncation(ORDINARY_TRUNCATION_BYTE_LINE_OPTS);
-
-/** DeepSeek / Sol / other small-context families keep the tighter clamps. */
-function conservativeTruncation(opts: { maxBytes: number; maxLines: number }): SessionToolStrategy["outputTruncation"] {
-	return buildConservativeOutputTruncation(opts);
-}
 
 function toolStrategy(opts?: {
 	maxConcurrent?: number;
@@ -111,7 +105,7 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		// Shared baseline only; no Grok prompt inheritance or guessed step-by-step.
 		toolStrategy: toolStrategy({
 			maxConcurrent: 3,
-			truncation: conservativeTruncation({ maxBytes: 1500, maxLines: 30 }),
+			truncation: buildConservativeOutputTruncation({ maxBytes: 1500, maxLines: 30 }),
 		}),
 		contextStrategy: contextStrategy({ targetUtilization: 0.8, keepRecentN: 5 }),
 	},
@@ -147,14 +141,11 @@ export const DEFAULT_MODEL_OPTIMIZATION_PROFILES: Record<string, ModelOptimizati
 		// More conservative visible tool output for the slow/review class.
 		toolStrategy: toolStrategy({
 			maxConcurrent: 4,
-			truncation: conservativeTruncation({ maxBytes: 2000, maxLines: 40 }),
+			truncation: buildConservativeOutputTruncation({ maxBytes: 2000, maxLines: 40 }),
 		}),
 		contextStrategy: contextStrategy({ targetUtilization: 0.7, keepRecentN: 8 }),
 	},
 };
-
-/** Fallback truncation rules when a profile has none (should not happen for built-ins). */
-export const FALLBACK_TRUNCATION_RULES = DEFAULT_TRUNCATION_RULES;
 
 export function listDefaultModelOptimizationProfiles(): ModelOptimizationProfile[] {
 	return Object.values(DEFAULT_MODEL_OPTIMIZATION_PROFILES);

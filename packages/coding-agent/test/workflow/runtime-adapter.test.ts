@@ -6,6 +6,8 @@ import * as path from "node:path";
 import { ArtifactManager } from "../../src/session/artifacts";
 import type { ContextEntry } from "../../src/workflow/context-ledger";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
+import { BudgetLedger, createWorkflowBudgetPort } from "../../src/workflow/budget-ledger";
+import { BudgetExhaustedError } from "../../src/workflow/errors";
 import {
 	RuntimeAdapter,
 	type StructuredRunner,
@@ -734,5 +736,106 @@ describe("RuntimeAdapter", () => {
 			layer1Success: true,
 			finalStatus: "repaired_layer1",
 		});
+	});
+	it("does not call the runner again when schema repair fails after a captured patch", async () => {
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async request => {
+			calls += 1;
+			await request.onPayload?.({ call: calls }, undefined);
+			return {
+				result: {
+					id: "raw",
+					structuredOutput: { status: "invalid", error: "not json" },
+					rawOutput: "not-json",
+					patchPath: "patches/captured.patch",
+					exitCode: 1,
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.1 },
+					},
+				},
+			};
+		});
+		const ledger = new BudgetLedger({ limitUsd: 10, maxRequests: 5 });
+		adapter.setBudgetPort(createWorkflowBudgetPort(ledger));
+		await expect(
+			adapter.run(
+				baseRequest(undefined, {
+					profile: {
+						...baseRequest().profile,
+						maxRequests: 5,
+						outputStrategy: {
+							retryOnSchemaViolation: { enabled: true, maxRetries: 2, includeErrorInRetry: true },
+						},
+					},
+				}),
+			),
+		).rejects.toThrow(/captured_write_schema_unrepairable/);
+		expect(calls).toBe(1);
+		expect(adapter.takeBudgetSettlement("att_1").some(row => row.settled)).toBe(true);
+		expect(ledger.snapshot().requests).toBe(1);
+		expect(ledger.snapshot().providerRequests).toBe(1);
+		expect(ledger.snapshot().knownCostLowerBoundUsd).toBe(0.1);
+	});
+
+	it("does not launch the runner when the shared budget is already exhausted", async () => {
+		let calls = 0;
+		const adapter = new RuntimeAdapter(async () => {
+			calls += 1;
+			return okResult({ ok: true });
+		});
+		const ledger = new BudgetLedger({ limitUsd: 0.1, maxRequests: 5 });
+		ledger.recordRequest({
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.1 },
+		});
+		adapter.setBudgetPort(createWorkflowBudgetPort(ledger));
+		await expect(adapter.run(baseRequest())).rejects.toBeInstanceOf(BudgetExhaustedError);
+		expect(calls).toBe(0);
+	});
+
+	it("keeps an unknown charge when the provider throws after onPayload and later usage does not double count", async () => {
+		const adapter = new RuntimeAdapter(async request => {
+			await request.onPayload?.({ call: 1 }, undefined);
+			throw new Error("provider boom");
+		});
+		const ledger = new BudgetLedger({ limitUsd: 10, maxRequests: 2 });
+		adapter.setBudgetPort(createWorkflowBudgetPort(ledger));
+		await expect(adapter.run(baseRequest())).rejects.toThrow(/provider boom/);
+		expect(ledger.snapshot().requests).toBe(1);
+		expect(ledger.snapshot().providerRequests).toBe(1);
+		expect(ledger.snapshot().unknownCostRequestCount).toBeGreaterThan(0);
+		const provider = ledger.snapshot().charges?.find(charge => charge.unit === "provider");
+		expect(provider?.key).toBeString();
+		ledger.recordCharge({
+			idempotencyKey: provider?.key ?? "",
+			workflowId: "wf_1",
+			attemptId: "att_1",
+			invocationId: provider?.invocationId,
+			profileId: "grok_implementer",
+			unit: "provider",
+			launched: true,
+			settlesCost: true,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0.2, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.2 },
+			},
+		});
+		expect(ledger.snapshot().requests).toBe(1);
+		expect(ledger.snapshot().providerRequests).toBe(1);
+		expect(ledger.snapshot().knownCostLowerBoundUsd).toBe(0.2);
+		expect(ledger.snapshot().unknownCostRequestCount).toBe(0);
 	});
 });

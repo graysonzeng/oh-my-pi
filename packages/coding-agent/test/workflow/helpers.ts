@@ -1,3 +1,6 @@
+import { $ } from "bun";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
 import { Settings } from "../../src/config/settings";
@@ -45,6 +48,31 @@ export async function materializeSamplePatch(cwd: string, relativePath = "patche
 	const full = path.isAbsolute(relativePath) ? relativePath : path.join(cwd, relativePath);
 	await Bun.write(full, SAMPLE_PATCH);
 	return full;
+}
+/**
+ * Temporary git repo with one baseline commit. Not `os.tmpdir()` itself.
+ * Caller must `cleanup()` in `finally` / `afterEach`. Idempotent; does not throw.
+ */
+export interface RealTempWorkspace {
+	cwd: string;
+	cleanup: () => Promise<void>;
+}
+
+export async function realTempWorkspace(): Promise<RealTempWorkspace> {
+	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wf-verify-"));
+	const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+	await $`git init -b main`.cwd(cwd).env(env).quiet();
+	await $`git config user.email fixture@example.invalid`.cwd(cwd).env(env).quiet();
+	await $`git config user.name Fixture`.cwd(cwd).env(env).quiet();
+	await Bun.write(path.join(cwd, "seed.txt"), "seed\n");
+	await $`git add seed.txt`.cwd(cwd).env(env).quiet();
+	await $`git -c user.name=Fixture -c user.email=fixture@example.invalid commit -m baseline`.cwd(cwd).env(env).quiet();
+	return {
+		cwd,
+		cleanup: async () => {
+			await fs.rm(cwd, { recursive: true, force: true }).catch(() => undefined);
+		},
+	};
 }
 
 export function planArtifact(overrides: Partial<PlanArtifactV1> = {}): PlanArtifactV1 {
@@ -375,8 +403,9 @@ export function scriptedRunner(script: {
 	};
 }
 
-export function passVerifier(): VerifierPort {
+export function passVerifier(cwd?: string): VerifierPort {
 	return {
+		...(cwd ? { workspaceCwd: () => cwd } : {}),
 		async verify(artifact, _commands) {
 			const result: VerificationArtifactV1 = {
 				kind: "verification",

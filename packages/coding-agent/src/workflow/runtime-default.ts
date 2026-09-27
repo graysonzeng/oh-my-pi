@@ -93,7 +93,10 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 		retainArtifacts: isolationRequested || request.retainArtifacts === true,
 		allowedTools: request.allowedTools,
 		onResponse: request.onResponse,
+		onPayload: request.onPayload,
 		strictModelIdentity: request.strictModelIdentity,
+		budgetGuard: request.budgetGuard,
+		providerChargeKeys: request.providerChargeKeys,
 		shadowReview: request.shadowReview,
 	});
 
@@ -118,6 +121,7 @@ const productionRunner: StructuredRunner = async (request: StructuredRunnerReque
 			resolvedModel: result.result.resolvedModel,
 			toolCalls: result.result.toolCalls,
 			completionKind: result.result.completionKind,
+			providerRequests: result.result.providerRequests,
 		},
 		changesApplied: result.changesApplied,
 		mergeSummary: result.mergeSummary,

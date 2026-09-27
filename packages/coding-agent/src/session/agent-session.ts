@@ -247,6 +247,7 @@ import {
 	type AcceptanceAuthority,
 	type TaskAttemptIdentity,
 } from "../latency/task-episode";
+import { collectTrustedHostSeals } from "../task/host-terminal-check";
 import { resolveCurrentWorkspaceCodeVersion } from "../task/workspace-code-version";
 import {
 	RUNTIME_BUILD_IDENTITY_CUSTOM_TYPE,
@@ -5303,7 +5304,7 @@ export class AgentSession implements SettingsScope {
 				if (!saved?.id) return visibleText;
 				artifactRef = saved.id.startsWith("artifact://") ? saved.id : `artifact://${saved.id}`;
 				// Fresh write of the same bytes — trust returned identity; skip redundant re-read.
-				if (saved.contentSha256 === immutableSha256) {
+				if (saved.byteCount === Buffer.byteLength(originalText) && saved.contentSha256 === immutableSha256) {
 					this.#readDedupeArtifacts.set(readViewKey.key, { artifactRef, immutableSha256 });
 					return visibleText;
 				}
@@ -6033,6 +6034,12 @@ export class AgentSession implements SettingsScope {
 		this.beginDispose();
 		for (const id of this.#hiddenNextTurnScheduler.unsettledNonterminals()) {
 			this.#settleHiddenDelivery(id, "disposed");
+		}
+		try {
+			const fingerprint = await resolveCurrentWorkspaceCodeVersion(this.sessionManager.getCwd());
+			if (fingerprint) this.setWorkspaceCodeFingerprint(fingerprint);
+		} catch {
+			// VCS unavailable — leave prior fingerprint; missing stay unbound.
 		}
 		const exitKind = this.#recordSessionExit(options.reason ?? "dispose");
 		this.#evaluateLatencyRolloutAtSessionEnd(exitKind);
@@ -13548,6 +13555,7 @@ export class AgentSession implements SettingsScope {
 		if (!state?.enabled || state.goal.status !== "active") return false;
 		if (cfgGoalHostGateEnabled.get(this.settings) === false) return false;
 		if (cfgGoalHostGateFalseCompletion.get(this.settings) === false) return false;
+		const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(this.sessionManager.getCwd());
 		const snapshot = buildGoalCompletionSettleSnapshot({
 			turnId: this.#goalRuntime.currentTurnId() ?? `turn-${this.#goalTurnCounter}`,
 			generation: this.#promptGeneration,
@@ -13555,6 +13563,8 @@ export class AgentSession implements SettingsScope {
 			messages: this.agent.state.messages,
 			todos: this.getTodoPhases(),
 			goal: state.goal,
+			currentCodeVersion,
+			hostReceipts: collectTrustedHostSeals(this.agent.state.messages),
 		});
 		if (!looksLikeFalseCompletion(snapshot)) return false;
 		const nextStep = falseCompletionNextStep(snapshot);

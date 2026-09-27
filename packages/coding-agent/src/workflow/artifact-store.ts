@@ -30,10 +30,27 @@ export class ArtifactStore {
 	): Promise<Artifact> {
 		const id = `art_${randomUUID()}`;
 		const content = artifact.content;
-		const sha256 = artifact.sha256 ?? this.computeSha256(content);
+		const expectedBytes = Buffer.byteLength(content, "utf-8");
 		const relativePath = artifact.relativePath || path.join(artifact.workflowId, `${id}.json`);
 		const filePath = path.join(this.#baseDir, relativePath);
-		await Bun.write(filePath, content);
+		const written = await Bun.write(filePath, content);
+		if (written !== expectedBytes) {
+			await fs.rm(filePath, { force: true }).catch(() => undefined);
+			throw new ArtifactIntegrityError("artifact_write_incomplete", {
+				relativePath,
+				expectedBytes,
+				writtenBytes: written,
+			});
+		}
+		const sha256 = this.computeSha256(content);
+		if (artifact.sha256 && artifact.sha256 !== sha256) {
+			await fs.rm(filePath, { force: true }).catch(() => undefined);
+			throw new ArtifactIntegrityError("artifact_hash_mismatch", {
+				relativePath,
+				expectedSha256: artifact.sha256,
+				actualSha256: sha256,
+			});
+		}
 		return {
 			id,
 			workflowId: artifact.workflowId,

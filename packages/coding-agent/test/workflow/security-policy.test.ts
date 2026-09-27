@@ -158,17 +158,19 @@ describe("Workflow security policy regressions", () => {
 
 	it("implementation verify fails when patch path is missing on disk", async () => {
 		const stage = new ImplementationVerifyStage(new Verifier({ cwd: process.cwd() }));
-		const result = await stage.execute({
-			workflowId: "wf",
-			attemptId: "att",
-			implementation: implArtifact({
-				patchPath: "/tmp/definitely-missing-workflow-patch.patch",
-				branchName: undefined,
-				changedFiles: ["src/fake.ts"],
+		const missing = "/tmp/definitely-missing-workflow-patch.patch";
+		// A declared patch that is not on disk is rejected, not sealed as an empty green.
+		await expect(
+			stage.execute({
+				workflowId: "wf",
+				attemptId: "att",
+				implementation: implArtifact({
+					patchPath: missing,
+					branchName: undefined,
+					changedFiles: ["src/fake.ts"],
+				}),
+				commands: ["bun test"],
 			}),
-			commands: ["bun test"],
-		});
-		expect(result.passed).toBe(false);
-		expect(result.checks.some(c => c.id === "isolation-artifact")).toBe(true);
+		).rejects.toThrow(`verification patch evidence missing: ${missing}`);
 	});
 });

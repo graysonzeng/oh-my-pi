@@ -14,7 +14,15 @@ import type {
 	WorkflowAvailabilityProbeResult,
 	WorkflowRole,
 } from "../../src/workflow/types";
-import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	passVerifier,
+	planArtifact,
+	realTempWorkspace,
+	reviewArtifact,
+	scriptedRunner,
+} from "./helpers";
 
 function testProfile(id: string, roles: WorkflowRole[], modelPattern: string): ModelProfile {
 	return {
@@ -68,7 +76,7 @@ describe("WorkflowEngine availability lifecycle", () => {
 		await fs.rm(artifactDir, { recursive: true, force: true });
 	});
 
-	function makeEngine(profiles: ModelProfile[]) {
+	function makeEngine(profiles: ModelProfile[], cwd?: string) {
 		return new WorkflowEngine({
 			store,
 			router: new ModelRouter(profiles),
@@ -86,9 +94,9 @@ describe("WorkflowEngine availability lifecycle", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession(cwd ? { cwd } : {}),
 			availability,
 		});
 	}
@@ -159,34 +167,43 @@ describe("WorkflowEngine availability lifecycle", () => {
 	});
 
 	it("resume(singleStep=false) probes all reachable required+conditional profiles", async () => {
-		const profiles = [
-			testProfile("planner_a", ["planner"], "m-planner"),
-			testProfile("reviewer_a", ["plan_reviewer"], "m-plan-review"),
-			testProfile("impl_a", ["implementer"], "m-impl"),
-			testProfile("code_a", ["code_reviewer"], "m-code"),
-			testProfile("repair_a", ["repair"], "m-repair"),
-		];
-		const engine = makeEngine(profiles);
-		const { workflowId } = await engine.start({ request: "full resume" });
-		// Advance to planning so full resume will execute stages; preflight at planning.
-		await engine.resume(workflowId, { singleStep: true, session: fakeSession() });
-		probeLog.length = 0;
+		// Full resume runs verification to completed, so identity must be host-captured (R1).
+		const workspace = await realTempWorkspace();
+		try {
+			const profiles = [
+				testProfile("planner_a", ["planner"], "m-planner"),
+				testProfile("reviewer_a", ["plan_reviewer"], "m-plan-review"),
+				testProfile("impl_a", ["implementer"], "m-impl"),
+				testProfile("code_a", ["code_reviewer"], "m-code"),
+				testProfile("repair_a", ["repair"], "m-repair"),
+			];
+			const engine = makeEngine(profiles, workspace.cwd);
+			const { workflowId } = await engine.start({ request: "full resume" });
+			// Advance to planning so full resume will execute stages; preflight at planning.
+			await engine.resume(workflowId, { singleStep: true, session: fakeSession({ cwd: workspace.cwd }) });
+			probeLog.length = 0;
 
-		const result = await engine.resume(workflowId, { singleStep: false, session: fakeSession() });
-		expect(result.availability?.scope).toBe("full");
-		const roles = new Set(result.availability?.profiles.map(p => p.role) ?? []);
-		expect(roles.has("planner")).toBe(true);
-		expect(roles.has("plan_reviewer")).toBe(true);
-		expect(roles.has("implementer")).toBe(true);
-		expect(roles.has("code_reviewer")).toBe(true);
-		expect(roles.has("repair")).toBe(true);
-		// repair is conditional
-		const repair = result.availability?.profiles.find(p => p.role === "repair");
-		expect(repair?.requirement).toBe("conditional");
-		// planner required
-		const planner = result.availability?.profiles.find(p => p.role === "planner");
-		expect(planner?.requirement).toBe("required");
-		expect(result.state.status).toBe("completed");
+			const result = await engine.resume(workflowId, {
+				singleStep: false,
+				session: fakeSession({ cwd: workspace.cwd }),
+			});
+			expect(result.availability?.scope).toBe("full");
+			const roles = new Set(result.availability?.profiles.map(p => p.role) ?? []);
+			expect(roles.has("planner")).toBe(true);
+			expect(roles.has("plan_reviewer")).toBe(true);
+			expect(roles.has("implementer")).toBe(true);
+			expect(roles.has("code_reviewer")).toBe(true);
+			expect(roles.has("repair")).toBe(true);
+			// repair is conditional
+			const repair = result.availability?.profiles.find(p => p.role === "repair");
+			expect(repair?.requirement).toBe("conditional");
+			// planner required
+			const planner = result.availability?.profiles.find(p => p.role === "planner");
+			expect(planner?.requirement).toBe("required");
+			expect(result.state.status).toBe("completed");
+		} finally {
+			await workspace.cleanup();
+		}
 	});
 
 	it("caller abort during preflight cancels probes without creating a stage failure or attempt", async () => {

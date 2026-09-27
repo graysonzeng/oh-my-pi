@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,34 +15,37 @@ describe("artifact save identity (R5/E3/E4)", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("returns reusable contentSha256 from save so callers need not re-hash immediately", async () => {
+	it("returns sha and byteCount only after the written file matches the body", async () => {
 		const manager = new ArtifactManager(dir);
 		const body = "identical-read-bytes-for-dedupe\n".repeat(20);
-		const expected = new Bun.CryptoHasher("sha256").update(body).digest("hex");
 		const saved = await manager.saveWithIdentity(body, "read");
-		expect(saved.id).toMatch(/^\d+$/);
-		expect(saved.contentSha256).toBe(expected);
+		expect(saved.byteCount).toBe(Buffer.byteLength(body, "utf-8"));
+		expect(saved.contentSha256).toBe(new Bun.CryptoHasher("sha256").update(body).digest("hex"));
 		const onDisk = await Bun.file((await manager.getPath(saved.id))!).text();
-		expect(onDisk).toBe(body);
-		// Second save of same bytes gets a new id but identical content identity.
+		expect(Buffer.byteLength(onDisk, "utf-8")).toBe(saved.byteCount);
+		expect(new Bun.CryptoHasher("sha256").update(onDisk).digest("hex")).toBe(saved.contentSha256);
 		const again = await manager.saveWithIdentity(body, "read");
 		expect(again.id).not.toBe(saved.id);
 		expect(again.contentSha256).toBe(saved.contentSha256);
+		expect(again.byteCount).toBe(saved.byteCount);
 	});
 
-	it("records fewer re-reads when trusting returned identity after a fresh write", async () => {
+	it("does not issue identity when the staged write is shorter than the body", async () => {
 		const manager = new ArtifactManager(dir);
-		const body = "measure-reread-avoidance\n";
-		let reads = 0;
-		const saved = await manager.saveWithIdentity(body, "read");
-		// Path under test: trust returned sha (0 re-reads) vs verify-by-reread (1+).
-		const trustedMatch = saved.contentSha256 === new Bun.CryptoHasher("sha256").update(body).digest("hex");
-		expect(trustedMatch).toBe(true);
-		if (!trustedMatch) {
-			reads += 1;
-			const text = await Bun.file((await manager.getPath(saved.id))!).text();
-			expect(new Bun.CryptoHasher("sha256").update(text).digest("hex")).toBe(saved.contentSha256);
+		const body = "short-write-must-not-attest\n";
+		const originalWrite = Bun.write;
+		const writeSpy = spyOn(Bun, "write").mockImplementation(async destination => {
+			await originalWrite(destination, body.slice(0, 4));
+			return 4;
+		});
+		try {
+			await expect(manager.saveWithIdentity(body, "read")).rejects.toThrow(
+				/incomplete|identity refused|size mismatch/i,
+			);
+			const files = await manager.listFiles();
+			expect(files.filter(name => name.endsWith(".log"))).toEqual([]);
+		} finally {
+			writeSpy.mockRestore();
 		}
-		expect(reads).toBe(0);
 	});
 });

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { BudgetLedger } from "../../src/workflow/budget-ledger";
+import { BudgetLedger, createWorkflowBudgetPort } from "../../src/workflow/budget-ledger";
+import { BudgetExhaustedError } from "../../src/workflow/errors";
 
 describe("BudgetLedger", () => {
 	let ledger: BudgetLedger;
@@ -205,5 +206,108 @@ describe("BudgetLedger", () => {
 			cost: { input: 0.3, output: 0.3, cacheRead: 0, cacheWrite: 0, total: 0.6 },
 		});
 		expect(await costLedger.checkPreStage()).toBe(false);
+	});
+
+	it("reset clears spend but keeps constructor limits including a zero request cap", () => {
+		const led = new BudgetLedger({ limitUsd: 1, maxRequests: 0 });
+		led.recordRequest(undefined, "p1");
+		led.reset();
+		const snap = led.snapshot();
+		expect(snap.limitUsd).toBe(1);
+		expect(snap.requests).toBe(0);
+		expect(snap.costKnown).toBe(true);
+		expect(led.canStartExternalCall()).toBe(false);
+	});
+
+	it("marks a missing snapshot as unknown coverage instead of known zero", () => {
+		const led = new BudgetLedger({ limitUsd: 5 });
+		led.markUnrecordedCoverage();
+		const snap = led.snapshot();
+		expect(snap.costKnown).toBe(false);
+		expect(snap.costUsd).toBeNull();
+		expect(snap.unknownCostRequestCount).toBeGreaterThanOrEqual(1);
+		expect(snap.knownCostLowerBoundUsd).toBe(0);
+	});
+
+	it("does not turn a legacy unknown numeric total into a known zero", () => {
+		const led = new BudgetLedger({ limitUsd: 5 });
+		led.restore({ costKnown: false, costUsd: 0, requests: 3 });
+		const snap = led.snapshot();
+		expect(snap.costKnown).toBe(false);
+		expect(snap.costUsd).toBeNull();
+		expect(snap.requests).toBe(3);
+	});
+
+	it("upgrades one unknown provider charge without counting it twice", () => {
+		const led = new BudgetLedger({ limitUsd: 10 });
+		const charge = {
+			idempotencyKey: "wf:att:inv:ord:1",
+			workflowId: "wf",
+			attemptId: "att",
+			invocationId: "inv",
+			profileId: "p1",
+			unit: "provider" as const,
+			launched: true,
+			settlesCost: true,
+		};
+		led.recordCharge({ ...charge, usage: null });
+		led.recordCharge({
+			...charge,
+			usage: {
+				input: 2,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3,
+				cost: { input: 0.2, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.2 },
+			},
+		});
+		const snap = led.snapshot();
+		expect(snap.providerRequests).toBe(1);
+		expect(snap.requests).toBe(0);
+		expect(snap.knownCostLowerBoundUsd).toBe(0.2);
+		expect(snap.unknownCostRequestCount).toBe(0);
+		expect(snap.costKnown).toBe(true);
+		expect(led.hasCharge(charge.idempotencyKey)).toBe(true);
+	});
+
+	it("does not count a local precheck that never launched", () => {
+		const led = new BudgetLedger({ limitUsd: 10 });
+		led.recordCharge({
+			idempotencyKey: "local",
+			unit: "invocation",
+			launched: false,
+			settlesCost: true,
+		});
+		expect(led.snapshot().requests).toBe(0);
+		expect(led.snapshot().unknownCostRequestCount).toBe(0);
+	});
+});
+
+describe("workflow budget port reservation", () => {
+	it("reserves maxRequests on the first provider handoff and keeps later turns on the same invocation", () => {
+		const ledger = new BudgetLedger({ limitUsd: 10, maxRequests: 1 });
+		const port = createWorkflowBudgetPort(ledger);
+		const first = port.bind({
+			workflowId: "wf",
+			attemptId: "att",
+			invocationId: "left",
+			profileId: "grok_implementer",
+			maxRequests: 1,
+		});
+		const second = port.bind({
+			workflowId: "wf",
+			attemptId: "att",
+			invocationId: "right",
+			profileId: "grok_implementer",
+			maxRequests: 1,
+		});
+		first.beforeProviderRequest({ ordinal: 1 });
+		expect(() => second.beforeProviderRequest({ ordinal: 1 })).toThrow(BudgetExhaustedError);
+		first.beforeProviderRequest({ ordinal: 2 });
+		const snap = ledger.snapshot();
+		expect(snap.requests).toBe(1);
+		expect(snap.providerRequests).toBe(2);
+		expect(snap.unknownCostRequestCount).toBe(2);
 	});
 });

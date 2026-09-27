@@ -269,7 +269,7 @@ function makeEngine(options: {
 		store: options.store,
 		config: options.config,
 		adapter: new RuntimeAdapter(options.runner, options.merger),
-		verifier: options.verifier ?? passVerifier(),
+		verifier: options.verifier ?? passVerifier(options.session.cwd),
 		artifactStore: options.artifactStore,
 		session: options.session,
 		availability: options.availability,
@@ -667,10 +667,12 @@ describe("WorkflowEngine quality routes", () => {
 	});
 
 	it("runs implementation verification deterministically without another model invocation", async () => {
+		await initializeGitFixture(cwd);
 		const patchPath = path.join(artifactDir, "legacy.patch");
 		const modelCalls: string[] = [];
 		let verifierCalls = 0;
 		const verifier: VerifierPort = {
+			workspaceCwd: () => cwd,
 			async verify(artifact) {
 				verifierCalls += 1;
 				const result: VerificationArtifactV1 = {

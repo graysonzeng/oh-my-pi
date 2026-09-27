@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "../../src/config/settings";
 import { abortRegisteredWorkflow, registerWorkflowAbort } from "../../src/workflow/abort-registry";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { DEFAULT_MODEL_PROFILES } from "../../src/workflow/default-config";
@@ -10,13 +11,26 @@ import { WorkflowPolicyError } from "../../src/workflow/errors";
 import { RuntimeAdapter, wrapSessionForWorkflowIsolation } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import { RepairStage } from "../../src/workflow/stages/repair";
-import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	materializeSamplePatch,
+	passVerifier,
+	planArtifact,
+	realTempWorkspace,
+	reviewArtifact,
+	scriptedRunner,
+	type RealTempWorkspace,
+} from "./helpers";
 
 describe("P1 production blockers", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
+	let workspace: RealTempWorkspace;
 
 	beforeEach(async () => {
+		workspace = await realTempWorkspace();
+		await materializeSamplePatch(workspace.cwd);
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-p1-"));
 	});
@@ -24,17 +38,20 @@ describe("P1 production blockers", () => {
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
-	it("wrapSessionForWorkflowIsolation upgrades task.isolation.mode none → auto", () => {
-		const session = fakeSession({
-			settings: {
-				get: (key: string) => (key === "task.isolation.mode" ? "none" : undefined),
-				set: () => {},
-			} as never,
-		});
+	it("keeps isolation local while inherited model roles remain live and callable", () => {
+		const settings = Settings.isolated({ "task.isolation.enabled": false });
+		const session = fakeSession({ settings });
 		const wrapped = wrapSessionForWorkflowIsolation(session, true);
-		expect(String(wrapped.settings.get("task.isolation.mode" as never))).toBe("auto");
+		settings.setModelRole("default", "fixture/first");
+		expect(wrapped.settings.getModelRoles()).toEqual(settings.getModelRoles());
+		settings.setModelRole("default", "fixture/updated");
+		expect(wrapped.settings.getModelRoles()).toEqual(settings.getModelRoles());
+		expect(wrapped.settings.get("task.isolation.enabled")).toBe(true);
+		expect(settings.get("task.isolation.enabled")).toBe(false);
+		expect(wrapped.settings.get("workflow.enabled")).toBe(settings.get("workflow.enabled"));
 	});
 
 	it("adapter fails when changesApplied is false under isolation apply", async () => {
@@ -57,7 +74,7 @@ describe("P1 production blockers", () => {
 				role: "implementer",
 				profile: DEFAULT_MODEL_PROFILES.grok_implementer,
 				assignment: "impl",
-				session: fakeSession(),
+				session: fakeSession({ cwd: workspace.cwd }),
 				isolation: { requested: true, merge: "patch", apply: true },
 			}),
 		).rejects.toMatchObject({ details: expect.objectContaining({}) });
@@ -85,7 +102,7 @@ describe("P1 production blockers", () => {
 			findings: [],
 			assignment: "Repair findings: f1, f2",
 			context: "ctx",
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 		expect(result.artifact.addressedStepIds).toEqual([]);
 		expect(result.artifact.unresolved).toEqual(["f1", "f2"]);
@@ -102,7 +119,7 @@ describe("P1 production blockers", () => {
 		const arts = new ArtifactStore(artifactDir);
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
 					plan: planArtifact({ summary: "token=abcdefghijklmnop" }),
@@ -111,7 +128,7 @@ describe("P1 production blockers", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: arts,
 		});
 		const id = await engine.startWorkflow({ request: "redact" });
@@ -135,9 +152,9 @@ describe("P1 production blockers", () => {
 	it("write-stage crash does not auto-replay implement", async () => {
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 			adapter: new RuntimeAdapter(scriptedRunner({ plan: planArtifact() })),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 		});
 		const id = await engine.startWorkflow({ request: "crash" });
@@ -154,7 +171,7 @@ describe("P1 production blockers", () => {
 		await expect(
 			engine.resume(id, {
 				singleStep: true,
-				session: fakeSession(),
+				session: fakeSession({ cwd: workspace.cwd }),
 				forceUnlock: true,
 			}),
 		).rejects.toMatchObject({ message: expect.stringMatching(/write_stage_interrupted|interrupted/i) });
@@ -166,7 +183,7 @@ describe("P1 production blockers", () => {
 	it("persists routing audit and attempt profile id", async () => {
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
 					plan: planArtifact(),
@@ -175,7 +192,7 @@ describe("P1 production blockers", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 		});
 		const id = await engine.startWorkflow({ request: "audit" });
@@ -186,53 +203,36 @@ describe("P1 production blockers", () => {
 		expect(attempts.some(a => Boolean(a.modelProfileId))).toBe(true);
 	});
 
-	it("engine verifier defaults to session.cwd", async () => {
-		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "wf-cwd-"));
-		const session = fakeSession({ cwd: tmp });
-		const spawnedCwd: string[] = [];
+	it("runs the real verifier commands in session.cwd", async () => {
+		const marker = `cwd-marker-${crypto.randomUUID()}`;
+		await Bun.write(path.join(workspace.cwd, marker), "verify from this checkout\n");
+		const command = `test -f ${marker}`;
 		const engine = new WorkflowEngine({
 			store,
-			session,
+			session: fakeSession({ cwd: workspace.cwd }),
+			config: { verificationCommands: [command] },
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
-					plan: planArtifact(),
+					plan: planArtifact({ verificationCommands: [command] }),
 					planReview: reviewArtifact("approved", "plan"),
 					implement: implArtifact(),
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: {
-				async verify(a, commands) {
-					spawnedCwd.push(tmp); // session cwd should be used by engine wiring in production
-					return {
-						kind: "verification",
-						passed: true,
-						checks: commands.map((c, i) => ({
-							id: `c${i}`,
-							command: c,
-							status: "passed" as const,
-							summary: "ok",
-						})),
-						schemaVersion: 1 as const,
-						workflowId: a.workflowId,
-						attemptId: a.attemptId,
-						stage: a.stage,
-						createdAt: new Date().toISOString(),
-					};
-				},
-			},
 			artifactStore: new ArtifactStore(artifactDir),
 		});
 		const id = await engine.startWorkflow({ request: "cwd" });
-		await engine.run(id);
-		expect(session.cwd).toBe(tmp);
-		await fs.rm(tmp, { recursive: true, force: true });
+		const result = await engine.run(id);
+		expect(result.state.status).toBe("completed");
+		expect(result.verification?.checks.some(check => check.command === command && check.status === "passed")).toBe(
+			true,
+		);
 	});
 
 	it("accumulates runtime toolCalls into the budget ledger snapshot", async () => {
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 			adapter: new RuntimeAdapter(
 				scriptedRunner({
 					plan: planArtifact(),
@@ -241,7 +241,7 @@ describe("P1 production blockers", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 		});
 		const id = await engine.startWorkflow({ request: "toolcalls" });

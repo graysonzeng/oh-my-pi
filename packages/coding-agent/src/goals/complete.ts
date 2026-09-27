@@ -2,6 +2,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
+import { collectTrustedHostSeals, type HostTerminalSeal } from "../task/host-terminal-check";
+import { resolveCurrentWorkspaceCodeVersion } from "../task/workspace-code-version";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import * as evaluator from "./evaluator";
 import {
@@ -50,6 +52,7 @@ export function snapshotForComplete(
 	runtime: GoalRuntime,
 	goal: Goal,
 	excludeToolCallIds?: Iterable<string>,
+	identity?: { currentCodeVersion?: string; hostReceipts?: HostTerminalSeal[] },
 ): GoalCompletionSettleSnapshot {
 	const messages = settleTurnMessages(session.snapshotConsultContext?.().messages ?? []);
 	const assistant = latestAssistant(messages);
@@ -68,6 +71,8 @@ export function snapshotForComplete(
 			},
 			todos: flattenTodoSnapshot(session.getTodoPhases?.()),
 			messages,
+			currentCodeVersion: identity?.currentCodeVersion,
+			hostReceipts: identity?.hostReceipts,
 		};
 	}
 	return buildGoalCompletionSettleSnapshot({
@@ -79,6 +84,8 @@ export function snapshotForComplete(
 		goal,
 		nominationOutcome: "nominated",
 		excludeToolCallIds,
+		currentCodeVersion: identity?.currentCodeVersion,
+		hostReceipts: identity?.hostReceipts,
 	});
 }
 
@@ -120,7 +127,12 @@ export async function executeGoalComplete(
 	const generation = runtime.currentGeneration();
 	const nominated = await runtime.nominateComplete({ nominationId, turnId, generation });
 	const goal = nominated.goal;
-	const snapshot = snapshotForComplete(session, runtime, goal, toolCallId ? [toolCallId] : undefined);
+	const history = session.snapshotConsultContext?.().messages ?? [];
+	const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(session.cwd);
+	const snapshot = snapshotForComplete(session, runtime, goal, toolCallId ? [toolCallId] : undefined, {
+		currentCodeVersion,
+		hostReceipts: collectTrustedHostSeals(history),
+	});
 	const host = evaluateGoalHostGate(snapshot);
 
 	if (nominated.shared) {

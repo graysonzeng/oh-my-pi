@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 /**
  * Deterministic stage-boundary role-aware handoff from typed workflow artifacts.
  * Does not call a model; does not delete source artifacts.
@@ -45,47 +48,124 @@ function utf8Bytes(text: string): number {
 	return Buffer.byteLength(text, "utf-8");
 }
 
-function stableJson(value: unknown): string {
-	return JSON.stringify(value);
+/** Synthetic unit-test scheme. Not a filesystem path the read tool can open. */
+const SYNTHETIC_RECOVERY_PREFIX = "file://workflow-artifact/";
+
+/** True for the unit-test scheme, never for an ArtifactStore file URL. */
+export function isSyntheticRecoveryUri(uri: string): boolean {
+	return uri.startsWith(SYNTHETIC_RECOVERY_PREFIX);
 }
 
 /** Build a synthetic ref when engine has not yet wired storage ids (unit tests). */
 export function syntheticArtifactRef(artifactId: string, content: unknown): StageHandoffArtifactRef {
 	const body = typeof content === "string" ? content : stableJson(content);
+	const contentSha256 = sha256Hex(body);
 	return {
 		artifactId,
 		bytes: utf8Bytes(body),
-		recoveryUri: `artifact://${artifactId}`,
+		recoveryUri: `${SYNTHETIC_RECOVERY_PREFIX}${encodeURIComponent(artifactId)}#sha256=${contentSha256}`,
+		contentSha256,
 	};
+}
+
+/**
+ * Absolute file URL for a workflow artifact already written under ArtifactStore.
+ * The read tool strips `file://` via expandPath — that is the production resolver.
+ */
+export function fileRecoveryUri(absolutePath: string): string {
+	return pathToFileURL(path.resolve(absolutePath)).href;
+}
+
+/**
+ * Proven only when the ref is a real file URL, the file is readable, and its
+ * bytes and sha256 match. Synthetic `file://workflow-artifact/` refs are not proven.
+ */
+export function isProvenPersistedRef(ref: StageHandoffArtifactRef | null | undefined): ref is StageHandoffArtifactRef {
+	if (!ref?.recoveryUri || !ref.contentSha256) return false;
+	if (!/^[a-f0-9]{64}$/i.test(ref.contentSha256)) return false;
+	if (isSyntheticRecoveryUri(ref.recoveryUri)) return false;
+	let filePath: string;
+	try {
+		filePath = fileURLToPath(ref.recoveryUri);
+	} catch {
+		return false;
+	}
+	if (!path.isAbsolute(filePath)) return false;
+	try {
+		const body = fs.readFileSync(filePath, "utf8");
+		if (ref.bytes > 0 && Buffer.byteLength(body, "utf-8") !== ref.bytes) return false;
+		return sha256Hex(body) === ref.contentSha256;
+	} catch {
+		return false;
+	}
+}
+
+function stableJson(value: unknown): string {
+	return JSON.stringify(value);
 }
 
 function sortPreserved(items: StageHandoffPreservedItem[]): StageHandoffPreservedItem[] {
 	return [...items].sort((a, b) => {
 		const k = a.kind.localeCompare(b.kind);
 		if (k !== 0) return k;
-		const id = a.artifactId.localeCompare(b.artifactId);
-		if (id !== 0) return id;
-		return a.summary.localeCompare(b.summary);
+		// Stable sort keeps each source field's shards contiguous and in their original order.
+		return a.artifactId.localeCompare(b.artifactId);
 	});
 }
 
+/**
+ * Blocking extracts must keep every character. Over the summary cap they shard;
+ * each shard names its index so a reader can reassemble without guessing.
+ */
 function preservedItem(
 	kind: StageHandoffItemKind,
 	artifactId: string,
 	summaryRaw: string,
 	blocking: boolean,
-): StageHandoffPreservedItem {
-	const summary = clampSummary(summaryRaw);
-	return {
-		kind,
-		artifactId,
-		summary,
-		bytes: utf8Bytes(summary),
-		blocking,
-	};
+): StageHandoffPreservedItem[] {
+	if (!blocking) {
+		const summary = clampSummary(summaryRaw);
+		return [
+			{
+				kind,
+				artifactId,
+				summary,
+				bytes: utf8Bytes(summary),
+				blocking,
+			},
+		];
+	}
+	if (summaryRaw.length <= STAGE_HANDOFF_SUMMARY_MAX) {
+		return [
+			{
+				kind,
+				artifactId,
+				summary: summaryRaw,
+				bytes: utf8Bytes(summaryRaw),
+				blocking: true,
+			},
+		];
+	}
+	const shards: StageHandoffPreservedItem[] = [];
+	const chunk = STAGE_HANDOFF_SUMMARY_MAX;
+	const shardCount = Math.ceil(summaryRaw.length / chunk);
+	for (let index = 0; index < shardCount; index++) {
+		const summary = summaryRaw.slice(index * chunk, (index + 1) * chunk);
+		shards.push({
+			kind,
+			artifactId,
+			summary,
+			bytes: utf8Bytes(summary),
+			blocking: true,
+			shardIndex: index + 1,
+			shardCount,
+		});
+	}
+	return shards;
 }
 
-function canonicalFingerprint(handoff: Omit<StageHandoffV1, "contentFingerprint">): string {
+/** sha256 of the canonical handoff payload. Includes shard index and count. */
+export function stageHandoffContentFingerprint(handoff: Omit<StageHandoffV1, "contentFingerprint">): string {
 	const canonical = {
 		kind: handoff.kind,
 		fromStage: handoff.fromStage,
@@ -96,6 +176,8 @@ function canonicalFingerprint(handoff: Omit<StageHandoffV1, "contentFingerprint"
 			summary: p.summary,
 			bytes: p.bytes,
 			blocking: p.blocking,
+			shardIndex: p.shardIndex ?? null,
+			shardCount: p.shardCount ?? null,
 		})),
 		omittedArtifactIds: handoff.omittedArtifactIds,
 		recoveryUris: handoff.recoveryUris,
@@ -133,7 +215,7 @@ function finalize(input: {
 	};
 	return {
 		...base,
-		contentFingerprint: canonicalFingerprint(base),
+		contentFingerprint: stageHandoffContentFingerprint(base),
 	};
 }
 
@@ -160,20 +242,25 @@ export function buildPlannerToImplementerHandoff(input: {
 	const planRef = defaultRef(input.planRef, `${input.plan.workflowId}/plan`, input.plan);
 	const plan = input.plan;
 	const items: StageHandoffPreservedItem[] = [
-		preservedItem("plan", planRef.artifactId, `goal: ${plan.summary}`, true),
-		preservedItem("plan", planRef.artifactId, `constraints: ${stableJson(plan.assumptions)}`, true),
-		preservedItem("plan", planRef.artifactId, `non_goals: ${stableJson(plan.nonGoals)}`, true),
-		preservedItem("plan", planRef.artifactId, `affected_files: ${stableJson(plan.affectedFiles)}`, true),
-		preservedItem("plan", planRef.artifactId, `acceptance: ${stableJson(plan.acceptanceCriteria)}`, true),
-		preservedItem(
+		...preservedItem("plan", planRef.artifactId, `goal: ${plan.summary}`, true),
+		...preservedItem("plan", planRef.artifactId, `constraints: ${stableJson(plan.assumptions)}`, true),
+		...preservedItem("plan", planRef.artifactId, `non_goals: ${stableJson(plan.nonGoals)}`, true),
+		...preservedItem("plan", planRef.artifactId, `affected_files: ${stableJson(plan.affectedFiles)}`, true),
+		...preservedItem("plan", planRef.artifactId, `acceptance: ${stableJson(plan.acceptanceCriteria)}`, true),
+		...preservedItem(
 			"plan",
 			planRef.artifactId,
 			`verification_commands: ${stableJson(plan.verificationCommands)}`,
 			true,
 		),
-		preservedItem("plan", planRef.artifactId, `risks: ${stableJson(plan.risks)}`, false),
-		preservedItem("plan", planRef.artifactId, `rollback: ${stableJson(plan.rollback)}`, false),
-		preservedItem("plan", planRef.artifactId, `implementation_steps: ${stableJson(plan.implementationSteps)}`, true),
+		...preservedItem("plan", planRef.artifactId, `risks: ${stableJson(plan.risks)}`, false),
+		...preservedItem("plan", planRef.artifactId, `rollback: ${stableJson(plan.rollback)}`, false),
+		...preservedItem(
+			"plan",
+			planRef.artifactId,
+			`implementation_steps: ${stableJson(plan.implementationSteps)}`,
+			true,
+		),
 	];
 
 	const sources: StageHandoffArtifactRef[] = [planRef];
@@ -183,8 +270,8 @@ export function buildPlannerToImplementerHandoff(input: {
 		const reviewRef = defaultRef(input.planReviewRef, `${input.planReview.workflowId}/plan_review`, input.planReview);
 		sources.push(reviewRef);
 		items.push(
-			preservedItem("plan", reviewRef.artifactId, `decision: ${input.planReview.decision}`, true),
-			preservedItem(
+			...preservedItem("plan", reviewRef.artifactId, `decision: ${input.planReview.decision}`, true),
+			...preservedItem(
 				"finding",
 				reviewRef.artifactId,
 				`open_findings: ${stableJson(
@@ -231,11 +318,11 @@ export function buildImplementerToReviewerHandoff(input: {
 	const impl = input.implementation;
 	const implRef = defaultRef(input.implRef, `${impl.workflowId}/implementation`, impl);
 	const items: StageHandoffPreservedItem[] = [
-		preservedItem("patch", implRef.artifactId, `implementation.summary: ${impl.summary}`, true),
-		preservedItem("patch", implRef.artifactId, `changed_files: ${stableJson(impl.changedFiles)}`, true),
-		preservedItem("patch", implRef.artifactId, `commands_run: ${stableJson(impl.commandsRun)}`, true),
-		preservedItem("patch", implRef.artifactId, `unresolved: ${stableJson(impl.unresolved)}`, true),
-		preservedItem("patch", implRef.artifactId, `addressed_step_ids: ${stableJson(impl.addressedStepIds)}`, false),
+		...preservedItem("patch", implRef.artifactId, `implementation.summary: ${impl.summary}`, true),
+		...preservedItem("patch", implRef.artifactId, `changed_files: ${stableJson(impl.changedFiles)}`, true),
+		...preservedItem("patch", implRef.artifactId, `commands_run: ${stableJson(impl.commandsRun)}`, true),
+		...preservedItem("patch", implRef.artifactId, `unresolved: ${stableJson(impl.unresolved)}`, true),
+		...preservedItem("patch", implRef.artifactId, `addressed_step_ids: ${stableJson(impl.addressedStepIds)}`, false),
 	];
 
 	const sources: StageHandoffArtifactRef[] = [implRef];
@@ -243,18 +330,18 @@ export function buildImplementerToReviewerHandoff(input: {
 
 	const patchRef =
 		input.patchRef ??
-		(impl.patchPath
+		(impl.patchPath && path.isAbsolute(impl.patchPath)
 			? {
 					artifactId: `${impl.workflowId}/patch`,
 					bytes: utf8Bytes(impl.patchPath),
-					recoveryUri: impl.patchPath.startsWith("file://") ? impl.patchPath : `file://${impl.patchPath}`,
+					recoveryUri: fileRecoveryUri(impl.patchPath),
 				}
 			: undefined);
 	if (patchRef || impl.patchPath) {
 		const ref = patchRef ?? syntheticArtifactRef(`${impl.workflowId}/patch`, impl.patchPath ?? "");
 		if (!sources.some(s => s.artifactId === ref.artifactId)) sources.push(ref);
 		items.push(
-			preservedItem(
+			...preservedItem(
 				"patch",
 				ref.artifactId,
 				`patch: ${stableJson({ path: impl.patchPath ?? null, branch: impl.branchName ?? null })}`,
@@ -268,7 +355,7 @@ export function buildImplementerToReviewerHandoff(input: {
 		sources.push(planRef);
 		omittedIds.push(planRef.artifactId);
 		items.push(
-			preservedItem(
+			...preservedItem(
 				"plan",
 				planRef.artifactId,
 				`plan.ref: ${stableJson({ summary: input.plan.summary, acceptance: input.plan.acceptanceCriteria })}`,
@@ -287,8 +374,8 @@ export function buildImplementerToReviewerHandoff(input: {
 		omittedIds.push(vRef.artifactId);
 		const failed = input.verification.checks.filter(c => c.status === "failed");
 		items.push(
-			preservedItem("verification", vRef.artifactId, `verification.passed: ${input.verification.passed}`, true),
-			preservedItem("verification", vRef.artifactId, `verification.failed_checks: ${stableJson(failed)}`, true),
+			...preservedItem("verification", vRef.artifactId, `verification.passed: ${input.verification.passed}`, true),
+			...preservedItem("verification", vRef.artifactId, `verification.failed_checks: ${stableJson(failed)}`, true),
 		);
 	}
 
@@ -337,12 +424,12 @@ export function buildReviewerToRepairHandoff(input: {
 	const keepList = mustKeep.length > 0 ? mustKeep : blockingFindings;
 
 	const items: StageHandoffPreservedItem[] = [
-		preservedItem("finding", reviewRef.artifactId, `review.decision: ${review.decision}`, true),
+		...preservedItem("finding", reviewRef.artifactId, `review.decision: ${review.decision}`, true),
 	];
 
 	for (const f of keepList) {
 		items.push(
-			preservedItem(
+			...preservedItem(
 				"finding",
 				reviewRef.artifactId,
 				`blocking_finding: ${stableJson({
@@ -366,7 +453,7 @@ export function buildReviewerToRepairHandoff(input: {
 	);
 	if (openNonBlocking.length > 0) {
 		items.push(
-			preservedItem(
+			...preservedItem(
 				"finding",
 				reviewRef.artifactId,
 				`open_nonblocking_ids: ${stableJson(openNonBlocking.map(f => f.id))}`,
@@ -396,7 +483,9 @@ export function buildReviewerToRepairHandoff(input: {
 		omittedIds.push(vRef.artifactId);
 		const failed = input.verification.checks.filter(c => c.status === "failed");
 		if (failed.length > 0 || !input.verification.passed) {
-			items.push(preservedItem("verification", vRef.artifactId, `verification.failed: ${stableJson(failed)}`, true));
+			items.push(
+				...preservedItem("verification", vRef.artifactId, `verification.failed: ${stableJson(failed)}`, true),
+			);
 		}
 		// Passed checks are omitted from preserved (noise).
 	}
@@ -410,13 +499,13 @@ export function buildReviewerToRepairHandoff(input: {
 		sources.push(implRef);
 		omittedIds.push(implRef.artifactId);
 		items.push(
-			preservedItem(
+			...preservedItem(
 				"patch",
 				implRef.artifactId,
 				`implementation.changed_files: ${stableJson(input.implementation.changedFiles)}`,
 				true,
 			),
-			preservedItem(
+			...preservedItem(
 				"patch",
 				implRef.artifactId,
 				`implementation.unresolved: ${stableJson(input.implementation.unresolved)}`,
@@ -427,7 +516,7 @@ export function buildReviewerToRepairHandoff(input: {
 
 	if (input.repairHistory?.length) {
 		items.push(
-			preservedItem("finding", reviewRef.artifactId, `repair_history: ${stableJson(input.repairHistory)}`, true),
+			...preservedItem("finding", reviewRef.artifactId, `repair_history: ${stableJson(input.repairHistory)}`, true),
 		);
 	}
 
@@ -472,7 +561,7 @@ export function buildKeepAllHandoff(input: {
 	toStage: WorkflowStatus;
 	sources: StageHandoffArtifactRef[];
 }): StageHandoffV1 {
-	const items = input.sources.map(s =>
+	const items = input.sources.flatMap(s =>
 		preservedItem("plan", s.artifactId, `keep_all: full source ${s.recoveryUri} (${s.bytes} bytes)`, true),
 	);
 	return finalize({

@@ -3,7 +3,9 @@
  *
  * Extends existing parent-final receipts + session usage — does not invent a
  * second telemetry platform. Missing signals stay null / "unknown"; never
- * zero-fill. Ordinary vs workflow cohorts stay separated.
+ * zero-fill. Exact cost totals stay null while any included price is unknown;
+ * observed prices accumulate in the lower-bound fields instead. Ordinary vs
+ * workflow cohorts stay separated.
  */
 import { resolveSubagentPerformanceClass } from "../task/review-performance";
 import { unionChildIntervalMs, type ParentFinalVerificationObservation } from "./parent-final-verification";
@@ -24,7 +26,18 @@ export interface DeliveryUsageSlice {
 	output: number | null;
 	cacheRead: number | null;
 	cacheWrite: number | null;
+	/**
+	 * Exact priced total for this slice. Null when any included request lacks a
+	 * trustworthy price (missing usage, unpriced row, or zero-cost error).
+	 * Never a partial sum, and never $0 for "no usage".
+	 */
 	costTotal: number | null;
+	/**
+	 * Sum of trustworthy observed prices. Null when none were observed — unlike
+	 * the top-level report lower bound, absence is not $0. Keeps accumulating
+	 * after an unknown request. Not the total when {@link costTotal} is null.
+	 */
+	knownCostLowerBoundUsd: number | null;
 }
 
 export interface DeliveryCycleCounts {
@@ -40,7 +53,11 @@ export interface DeliveryCycleCounts {
 	verify: number | null;
 }
 
-/** Cost attributed to spawn completion kinds. Null when no priced usage in that bucket. */
+/**
+ * Trustworthy prices by spawn completion kind. Null when that bucket has no
+ * complete priced usage. Incomplete sessions and zero-cost errors stay null;
+ * partial dollars stay in the lower bound, not here.
+ */
 export interface AttemptCostByCompletionKind {
 	completed: number | null;
 	timeout: number | null;
@@ -89,15 +106,24 @@ export interface DeliveryCostCohortSummary {
 	 * totalAttemptCost ÷ acceptedTaskCount.
 	 * Null when acceptedTaskCount is 0, any task lacks priced attempt cost, or
 	 * attempt-cost coverage is incomplete — never understate by treating missing
-	 * costs as $0 in the numerator.
+	 * costs as $0. The partial sum is {@link knownAttemptCostLowerBoundUsd}, not
+	 * this ratio's numerator.
 	 */
 	costPerAcceptedTask: number | null;
 	/**
-	 * Sum of priced attempt costs across tasks in this cohort.
-	 * Null when no task has priced usage; partial sums are still reported here
-	 * but {@link costPerAcceptedTask} stays null until coverage is complete.
+	 * Exact sum of attempt costs across tasks in this cohort.
+	 * Null when the cohort is empty, any task lacks complete trustworthy prices,
+	 * or no trustworthy price was observed. Partial sums used to be reported
+	 * here; they now live only in {@link knownAttemptCostLowerBoundUsd}.
 	 */
 	totalAttemptCost: number | null;
+	/**
+	 * Sum of trustworthy observed attempt prices across tasks in this cohort.
+	 * Null when no task observed a trustworthy price — missing usage is not $0.
+	 * Keeps accumulating after an unknown request or an incomplete sibling.
+	 * Equals {@link totalAttemptCost} only when attempt-cost coverage is complete.
+	 */
+	knownAttemptCostLowerBoundUsd: number | null;
 	/**
 	 * Share of tasks whose first parent-final was passed among tasks with a
 	 * known first-delivery outcome. Null when no known outcomes.
@@ -170,6 +196,12 @@ function addPresent(sum: number | null, value: number | null): number | null {
 	return (sum ?? 0) + value;
 }
 
+/** Trustworthy observed price. Missing usage and zero-cost errors are unknown, not $0. */
+function observedPrice(request: { costTotal: number | null; isError: boolean }): number | null {
+	if (request.costTotal === null || (request.costTotal === 0 && request.isError)) return null;
+	return request.costTotal;
+}
+
 function percentile(sorted: number[], p: number): number | null {
 	if (sorted.length === 0) return null;
 	return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))]!;
@@ -182,7 +214,14 @@ function summarizeMs(values: number[]): PercentileSummary | null {
 }
 
 function emptyUsage(): DeliveryUsageSlice {
-	return { input: null, output: null, cacheRead: null, cacheWrite: null, costTotal: null };
+	return {
+		input: null,
+		output: null,
+		cacheRead: null,
+		cacheWrite: null,
+		costTotal: null,
+		knownCostLowerBoundUsd: null,
+	};
 }
 
 function emptyAttemptCost(): AttemptCostByCompletionKind {
@@ -222,13 +261,16 @@ function sumUsage(
 		into.output = addPresent(into.output, request.output);
 		into.cacheRead = addPresent(into.cacheRead, request.cacheRead);
 		into.cacheWrite = addPresent(into.cacheWrite, request.cacheWrite);
-		into.costTotal = addPresent(into.costTotal, request.costTotal);
-		if (request.costTotal === null) {
+		// Do not copy partial prices into costTotal. The caller publishes an exact
+		// total only after every folded transcript is complete.
+		const price = observedPrice(request);
+		if (price === null) {
 			costComplete = false;
 			sawMissingPrice = true;
+			if (request.costTotal === 0 && request.isError) zeroCostErrorRequests += 1;
 		} else {
 			sawPriced = true;
-			if (request.costTotal === 0 && request.isError) zeroCostErrorRequests += 1;
+			into.knownCostLowerBoundUsd = addPresent(into.knownCostLowerBoundUsd, price);
 		}
 	}
 	if (requests.length === 0) {
@@ -259,10 +301,16 @@ function priceProvenanceOf(args: {
 
 function sessionCost(session: ParsedSession): number | null {
 	let cost: number | null = null;
+	let complete = session.usageRequests.length > 0;
 	for (const request of session.usageRequests) {
-		cost = addPresent(cost, request.costTotal);
+		const price = observedPrice(request);
+		if (price === null) {
+			complete = false;
+			continue;
+		}
+		cost = addPresent(cost, price);
 	}
-	return cost;
+	return complete ? cost : null;
 }
 
 function fileWallMs(session: ParsedSession): number | null {
@@ -529,7 +577,7 @@ function mergeAttemptCost(into: AttemptCostByCompletionKind, from: AttemptCostBy
 	into.unknown = addPresent(into.unknown, from.unknown);
 }
 
-function qualityFromSession(parent: ParsedSession): {
+export function qualityFromSession(parent: ParsedSession): {
 	falseAccept: boolean | "unknown";
 	missedDefect: boolean | "unknown";
 } {
@@ -550,6 +598,7 @@ function emptyCohortSummary(): DeliveryCostCohortSummary {
 		acceptedTaskCount: 0,
 		costPerAcceptedTask: null,
 		totalAttemptCost: null,
+		knownAttemptCostLowerBoundUsd: null,
 		firstPassRate: null,
 		falseAccept: "unknown",
 		missedDefects: "unknown",
@@ -622,8 +671,14 @@ function summarizeCohort(tasks: readonly DeliveryCostTaskObservation[]): Deliver
 		summary.usage.output = addPresent(summary.usage.output, task.usage.output);
 		summary.usage.cacheRead = addPresent(summary.usage.cacheRead, task.usage.cacheRead);
 		summary.usage.cacheWrite = addPresent(summary.usage.cacheWrite, task.usage.cacheWrite);
-		summary.usage.costTotal = addPresent(summary.usage.costTotal, task.usage.costTotal);
-		summary.totalAttemptCost = addPresent(summary.totalAttemptCost, task.usage.costTotal);
+		summary.usage.knownCostLowerBoundUsd = addPresent(
+			summary.usage.knownCostLowerBoundUsd,
+			task.usage.knownCostLowerBoundUsd,
+		);
+		summary.knownAttemptCostLowerBoundUsd = addPresent(
+			summary.knownAttemptCostLowerBoundUsd,
+			task.usage.knownCostLowerBoundUsd,
+		);
 		mergeAttemptCost(summary.attemptCostByKind, task.attemptCostByKind);
 
 		if (task.e2eMs !== null) e2e.push(task.e2eMs);
@@ -650,12 +705,15 @@ function summarizeCohort(tasks: readonly DeliveryCostTaskObservation[]): Deliver
 		fix: summarizeMs(fix),
 		verify: summarizeMs(verify),
 	};
-	// Gate the headline ratio on complete attempt-cost coverage. A partial sum
+	// Exact cohort totals only when every task is fully priced. A partial sum
 	// over acceptedTaskCount would understate cost by treating missing prices as $0.
-	const attemptCostComplete =
-		summary.taskCount > 0 && summary.coverage.attemptCost.unknown === 0 && summary.totalAttemptCost !== null;
-	if (summary.acceptedTaskCount > 0 && attemptCostComplete) {
-		summary.costPerAcceptedTask = summary.totalAttemptCost! / summary.acceptedTaskCount;
+	const attemptCostComplete = summary.taskCount > 0 && summary.coverage.attemptCost.unknown === 0;
+	if (attemptCostComplete) {
+		summary.usage.costTotal = summary.usage.knownCostLowerBoundUsd;
+		summary.totalAttemptCost = summary.knownAttemptCostLowerBoundUsd;
+	}
+	if (summary.acceptedTaskCount > 0 && attemptCostComplete && summary.totalAttemptCost !== null) {
+		summary.costPerAcceptedTask = summary.totalAttemptCost / summary.acceptedTaskCount;
 	} else {
 		summary.costPerAcceptedTask = null;
 	}
@@ -699,6 +757,8 @@ export function observeDeliveryCostTask(args: {
 	};
 	fold(parent, true);
 	for (const child of children) fold(child, false);
+	// Exact total only when every folded transcript is fully priced.
+	usage.costTotal = costComplete ? usage.knownCostLowerBoundUsd : null;
 	const quality = qualityFromSession(parent);
 	const sorted = sortedVerifications(verifications);
 	const last = sorted.length > 0 ? sorted[sorted.length - 1]! : undefined;
@@ -857,6 +917,8 @@ export function formatDeliveryCostBaselineReport(report: DeliveryCostBaselineRep
 		`input=${u.input} output=${u.output} cacheRead=${u.cacheRead} cacheWrite=${u.cacheWrite} costTotal=${u.costTotal}`;
 	const fmtCohort = (name: string, c: DeliveryCostCohortSummary): string[] => [
 		`${name}: tasks=${c.taskCount} accepted=${c.acceptedTaskCount} costPerAccepted=${c.costPerAcceptedTask} totalAttemptCost=${c.totalAttemptCost}`,
+		`  knownAttemptCostLowerBoundUsd=${c.knownAttemptCostLowerBoundUsd}`,
+		`  knownCostLowerBoundUsd=${c.usage.knownCostLowerBoundUsd}`,
 		`  firstPassRate=${c.firstPassRate} falseAccept=${c.falseAccept} missedDefects=${c.missedDefects}`,
 		`  e2eMs=${fmtPct(c.e2eMs)} parentWaitMs=${fmtPct(c.parentWaitMs)} parentIntegrateMs=${fmtPct(c.parentIntegrateMs)} childTaskMs=${fmtPct(c.childTaskMs)}`,
 		`  cycles investigate=${fmtPct(c.cyclesAfterFirstDelivery.investigate)} fix=${fmtPct(c.cyclesAfterFirstDelivery.fix)} verify=${fmtPct(c.cyclesAfterFirstDelivery.verify)}`,

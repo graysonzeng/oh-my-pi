@@ -8,6 +8,7 @@ import type { ImplementationArtifactV1, VerificationArtifactV1, VerifierPort } f
 import {
 	buildVerificationCodeState,
 	captureVerificationWorkspace,
+	executedWorkspaceStillMatches,
 	resolveVerificationPatchEvidence,
 	sealWorkflowVerifierResult,
 	verificationExecutionCwd,
@@ -163,7 +164,22 @@ export class ImplementationVerifyStage {
 			}
 		}
 
-		return sealWorkflowVerifierResult(result, {
+		const stable = await executedWorkspaceStillMatches(workspace, input.signal);
+		const verified: VerificationArtifactV1 = stable
+			? result
+			: {
+					...result,
+					passed: false,
+					checks: [
+						...result.checks,
+						{
+							id: "workspace-identity",
+							status: "failed",
+							summary: "Verification workspace identity missing or changed during execution",
+						},
+					],
+				};
+		return sealWorkflowVerifierResult(verified, {
 			commands: input.commands,
 			codeState,
 			scope,

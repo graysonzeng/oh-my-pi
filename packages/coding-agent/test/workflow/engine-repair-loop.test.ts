@@ -9,7 +9,15 @@ import { WorkflowEngine } from "../../src/workflow/engine";
 import { RuntimeAdapter, type StructuredRunner } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import type { ModelProfile, WorkflowRole } from "../../src/workflow/types";
-import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	passVerifier,
+	planArtifact,
+	realTempWorkspace,
+	reviewArtifact,
+	scriptedRunner,
+} from "./helpers";
 
 function strictProfile(id: string, role: WorkflowRole, base: ModelProfile, modelPattern: string): ModelProfile {
 	return {
@@ -118,15 +126,19 @@ function strictRepairRunner(
 describe("WorkflowEngine repair loop", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
+	// Real VCS workspace so verify/repair do not treat a missing tree as a green.
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
 
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-repair-"));
+		workspace = await realTempWorkspace();
 	});
 
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	it("enters repair on code-review findings then can complete", async () => {
@@ -141,6 +153,7 @@ describe("WorkflowEngine repair loop", () => {
 			explanation: "fix it",
 			suggestedOwner: "implementer" as const,
 		};
+		const session = fakeSession({ cwd: workspace.cwd });
 		const engine = new WorkflowEngine({
 			store,
 			adapter: new RuntimeAdapter(
@@ -158,19 +171,20 @@ describe("WorkflowEngine repair loop", () => {
 					repair: implArtifact({ addressedStepIds: ["f1"], summary: "repaired" }),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session,
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "repair path" });
-		const result = await engine.run(workflowId);
+		const result = await engine.run(workflowId, session);
 		expect(result.state.status).toBe("completed");
 		expect(reviews).toBeGreaterThanOrEqual(1);
 	});
 
 	it("verification failure enters repair", async () => {
 		let verifyCalls = 0;
+		const session = fakeSession({ cwd: workspace.cwd });
 		const engine = new WorkflowEngine({
 			store,
 			adapter: new RuntimeAdapter(
@@ -183,6 +197,7 @@ describe("WorkflowEngine repair loop", () => {
 				}),
 			),
 			verifier: {
+				workspaceCwd: () => workspace.cwd,
 				async verify(a) {
 					verifyCalls += 1;
 					// first impl verify fails, later ones pass
@@ -200,7 +215,7 @@ describe("WorkflowEngine repair loop", () => {
 				},
 			},
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session,
 		});
 
 		const workflowId = await engine.startWorkflow({ request: "verify fail" });
@@ -208,18 +223,19 @@ describe("WorkflowEngine repair loop", () => {
 		for (let i = 0; i < 6; i++) {
 			const s = await engine.getState(workflowId);
 			if (s && ["repairing", "completed", "blocked", "failed"].includes(s.status)) break;
-			await engine.resume(workflowId, { singleStep: true });
+			await engine.resume(workflowId, { singleStep: true, session });
 		}
 		const state = await engine.getState(workflowId);
 		expect(state?.status).toBe("repairing");
+		expect(verifyCalls).toBeGreaterThanOrEqual(1);
 	});
 	it("completes a strict final-verify no-op while preserving the validated patch", async () => {
 		const mergeCalls: string[] = [];
 		const reviewerCalls: string[] = [];
 		const repairAssignments: string[] = [];
-		const session = fakeSession({ cwd: artifactDir });
+		const session = fakeSession({ cwd: workspace.cwd });
 		const adapter = new RuntimeAdapter(
-			strictRepairRunner(artifactDir, true, reviewerCalls, repairAssignments),
+			strictRepairRunner(workspace.cwd, true, reviewerCalls, repairAssignments),
 			async request => {
 				mergeCalls.push(request.attemptId);
 				const content = await Promise.all(
@@ -239,7 +255,7 @@ describe("WorkflowEngine repair loop", () => {
 			store,
 			config: { profiles: strictRepairProfiles() },
 			adapter,
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			session,
 		});
@@ -262,8 +278,8 @@ describe("WorkflowEngine repair loop", () => {
 
 	it("fails closed when an empty strict repair patch omits the no-op declaration", async () => {
 		const mergeCalls: string[] = [];
-		const session = fakeSession({ cwd: artifactDir });
-		const adapter = new RuntimeAdapter(strictRepairRunner(artifactDir, false), async request => {
+		const session = fakeSession({ cwd: workspace.cwd });
+		const adapter = new RuntimeAdapter(strictRepairRunner(workspace.cwd, false), async request => {
 			mergeCalls.push(request.attemptId);
 			const content = await Promise.all(
 				request.patches.map(async patch => {
@@ -281,7 +297,7 @@ describe("WorkflowEngine repair loop", () => {
 			store,
 			config: { profiles: strictRepairProfiles() },
 			adapter,
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			session,
 		});

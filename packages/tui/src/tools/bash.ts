@@ -53,6 +53,17 @@ export interface BashToolDetails {
 		jobId: string;
 		type: "bash";
 	};
+	/** Host-minted verification receipt. Absent unless this process sealed the command. */
+	hostSeal?: {
+		id: string;
+		command: string;
+		cwd: string;
+		codeVersion: string;
+		evidenceLocation: string;
+		executor: "host_bash";
+		trustId: string;
+		captureMs?: number;
+	};
 }
 
 function escapeBashEnvValueForDisplay(value: unknown): string {

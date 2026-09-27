@@ -13,6 +13,7 @@ import plannerPrompt from "../prompts/workflow/planner.md" with { type: "text" }
 import repairPrompt from "../prompts/workflow/repair.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import type { WorkflowToolOptimization } from "../tools/workflow-session-fields";
+import { cfgTaskIsolationEnabled } from "../task/settings";
 import {
 	buildContextLedger,
 	type ContextArtifactAdapter,
@@ -312,25 +313,18 @@ export function injectWorkflowPrompt(
 }
 
 /**
- * When workflow write stages request isolation but global task.isolation.mode is "none",
- * override to "auto" so production workflow is not dead on open.
+ * Enable task isolation locally when a workflow write stage requests it.
+ * The caller's global isolation preference is never mutated.
+ *
+ * Use the supported overlay so every method retains its private-field receiver,
+ * parent settings remain live, and the isolation override stays local.
  */
 export function wrapSessionForWorkflowIsolation(session: ToolSession, isolationRequested: boolean): ToolSession {
 	if (!isolationRequested) return session;
 	const settings = session.settings;
 	if (!settings?.get) return session;
-	const current = settings.get("task.isolation.mode" as never) as string | undefined;
-	if (current && current !== "none") return session;
-	return {
-		...session,
-		settings: {
-			...settings,
-			get: (key: never) => {
-				if ((key as string) === "task.isolation.mode") return "auto";
-				return settings.get(key);
-			},
-		} as ToolSession["settings"],
-	};
+	if (cfgTaskIsolationEnabled.get(settings)) return session;
+	return { ...session, settings: settings.overlay({ "task.isolation.enabled": true }) };
 }
 
 /** Provider-neutral prepared invocation shared by embedded and CLI adapters. */

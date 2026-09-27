@@ -1,6 +1,8 @@
 import * as ai from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resolveModelOverride } from "../config/model-resolver";
 import availabilityProbePrompt from "../prompts/workflow/availability-probe.hbs.md" with { type: "text" };
+import { BudgetExhaustedError } from "./errors";
 import {
 	assertStrictRuntimeIdentity,
 	buildRuntimeIdentityReceipt,
@@ -52,6 +54,7 @@ export class EmbeddedWorkflowAvailabilityPort implements WorkflowAvailabilityPor
 		try {
 			return await this.#sessionProbe(request, controller.signal);
 		} catch (error) {
+			if (error instanceof BudgetExhaustedError) throw error;
 			const latencyMs = performance.now() - started;
 			const message = error instanceof Error ? error.message : String(error);
 			const kind = request.signal?.aborted ? "cancelled" : timedOut ? "timeout" : classifyProbeError(message, false);
@@ -99,23 +102,47 @@ async function probeSessionModel(
 	}
 	const prompt = availabilityProbePrompt.trim();
 	const identityCollector = new ProviderIdentityCollector();
-	const response = await ai.completeSimple(
-		model,
-		{
-			systemPrompt: [prompt],
-			messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-		},
-		{
-			apiKey: registry.resolver(model, sessionId),
-			maxTokens: 16,
-			disableReasoning: true,
-			signal,
-			fetch: request.session.fetch,
-			cwd: request.session.cwd,
-			serviceTier: ai.resolveModelServiceTier(request.session.getServiceTierByFamily?.(), model),
-			onResponse: identityCollector.onResponse,
-		},
-	);
+	const launchKey = request.budgetGuard?.beforeProviderRequest({
+		ordinal: 1,
+		providerRequestId: `${model.provider}/${model.id}`,
+	});
+	let response: AssistantMessage;
+	try {
+		response = await ai.completeSimple(
+			model,
+			{
+				systemPrompt: [prompt],
+				messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+			},
+			{
+				apiKey: registry.resolver(model, sessionId),
+				maxTokens: 16,
+				disableReasoning: true,
+				signal,
+				fetch: request.session.fetch,
+				cwd: request.session.cwd,
+				serviceTier: ai.resolveModelServiceTier(request.session.getServiceTierByFamily?.(), model),
+				onResponse: identityCollector.onResponse,
+			},
+		);
+	} catch (error) {
+		request.budgetGuard?.finishInvocation({
+			launched: launchKey !== undefined,
+			providerRequests: launchKey ? 1 : 0,
+		});
+		throw error;
+	}
+	if (launchKey) {
+		request.budgetGuard?.settleProviderUsage({
+			idempotencyKey: launchKey,
+			usage: response.usage,
+			launched: true,
+		});
+		request.budgetGuard?.finishInvocation({
+			launched: true,
+			providerRequests: 1,
+		});
+	}
 	const latencyMs = performance.now() - started;
 	const identityReceipt = buildRuntimeIdentityReceipt(
 		request.profile,

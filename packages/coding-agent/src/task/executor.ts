@@ -103,6 +103,8 @@ import {
 } from "./review-performance";
 import { assembleSubagentSystemPrompt } from "./subagent-prompt";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { readHostTerminalSeal } from "./host-terminal-check";
+import type { WorkflowBudgetGuard } from "../workflow/budget-ledger";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentActivityPhase,
@@ -564,7 +566,11 @@ export interface ExecutorOptions {
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	onResponse?: SimpleStreamOptions["onResponse"];
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Freeze the selected identity and forbid executor model fallback/prewalk. */
 	strictModelIdentity?: boolean;
+	budgetGuard?: WorkflowBudgetGuard;
+	providerChargeKeys?: string[];
 	/**
 	 * Epochs (ms, `Date.now()`) bracketing the concurrency-semaphore wait:
 	 * `invokedAt` is stamped at the spawn boundary before `acquire()`,
@@ -1246,6 +1252,8 @@ interface RunMonitorArgs {
 	onYieldAccepted?: () => void;
 	/** Performance class for 75% advisory wrap-up; omitted disables the timer. */
 	performanceClass?: SubagentPerformanceClass;
+	budgetGuard?: WorkflowBudgetGuard;
+	providerChargeKeys?: string[];
 }
 
 /**
@@ -1273,6 +1281,8 @@ interface SubagentRunMonitor {
 	budgetLimitExceeded(): boolean;
 	/** True once the soft-budget stop fired: the free-running turn was aborted and the run is being driven to a forced final yield. */
 	budgetStopRequested(): boolean;
+	/** Shared budget blocked a follow-up prompt. Does not abort the session or drop pending delivery. */
+	noteSharedBudgetStop(): void;
 	/** Resolves when the budget-stop session abort has settled (immediately when no stop fired). */
 	waitForBudgetStop(): Promise<void>;
 	/**
@@ -1534,6 +1544,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				})
 			: Promise.resolve();
 	};
+	const noteSharedBudgetStop = () => {
+		if (budgetStopRequested || abortSent || resolved) return;
+		budgetStopRequested = true;
+		progress.reviewMetrics?.checkpoints.push({
+			atMs: Date.now() - startTime,
+			requests: progress.requests,
+			kind: "soft_budget",
+		});
+	};
 
 	const failWithError = (message: string) => {
 		terminalError ??= message;
@@ -1591,7 +1610,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		void Promise.resolve()
 			.then(() => {
 				if (resolved || abortSent || budgetStopRequested || terminalYieldCommitted || yieldCallPending) return;
-				return steerSession.sendUserMessage(notice, { deliverAs: "steer" });
+				return steerSession.sendUserMessage(notice, { deliverAs: "steer", attribution: "agent" });
 			})
 			.catch(err => {
 				logger.warn(logLabel, {
@@ -1838,19 +1857,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		}
 		if (!softRequestBudgetNotice || budgetSteerSent || progress.requests < softRequestBudget) return;
 		budgetSteerSent = true;
-		const steerSession = activeSession;
-		if (!steerSession) return;
-		// Build the notice now (the count at crossing time), but send behind an
-		// async boundary: a synchronously-throwing send must never take down
-		// event processing (which escalates to terminate).
-		const notice = buildBudgetNotice(progress.requests, softRequestBudget);
-		void Promise.resolve()
-			.then(() => steerSession.sendUserMessage(notice, { deliverAs: "steer", attribution: "agent" }))
-			.catch(err => {
-				logger.warn("Subagent budget steer failed", {
-					error: err instanceof Error ? err.message : String(err),
-				});
-			});
+		sendWrapUpNotice(buildBudgetNotice(progress.requests, softRequestBudget), "Subagent budget steer failed");
 	};
 
 	const noteActivity = (phase: AgentActivityPhase, atMs: number): void => {
@@ -2027,6 +2034,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							requestAbort("terminate");
 						}
 					}
+				}
+				if (event.toolName === "bash") {
+					const seal = readHostTerminalSeal(event.result?.details);
+					if (seal) recordExtractedToolData("bash", seal);
 				}
 				if (event.toolName === "yield") {
 					if (event.isError && !abortSent) {
@@ -2232,6 +2243,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// Extract and accumulate usage (prefer message.usage, fallback to event.usage)
 				const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
 				const messageUsage = getMessageUsage(event.message) || eventUsage;
+				const chargeKey = role === "assistant" ? args.providerChargeKeys?.shift() : undefined;
 				if (isRecord(messageUsage)) {
 					// Only count assistant messages (not tool results, etc.)
 					if (role === "assistant") {
@@ -2251,6 +2263,30 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							accumulatedUsage.cost.cacheWrite += getNumberField(costRecord, "cacheWrite") ?? 0;
 							accumulatedUsage.cost.total += getNumberField(costRecord, "total") ?? 0;
 							progress.cost = accumulatedUsage.cost.total;
+						}
+						if (args.budgetGuard && chargeKey) {
+							const turnTotal = costRecord ? getNumberField(costRecord, "total") : undefined;
+							args.budgetGuard.settleProviderUsage({
+								idempotencyKey: chargeKey,
+								launched: true,
+								usage:
+									turnTotal === undefined || costRecord === undefined
+										? null
+										: {
+												input: getNumberField(messageUsage, "input") ?? 0,
+												output: getNumberField(messageUsage, "output") ?? 0,
+												cacheRead: getNumberField(messageUsage, "cacheRead") ?? 0,
+												cacheWrite: getNumberField(messageUsage, "cacheWrite") ?? 0,
+												totalTokens: getNumberField(messageUsage, "totalTokens") ?? 0,
+												cost: {
+													input: getNumberField(costRecord, "input") ?? 0,
+													output: getNumberField(costRecord, "output") ?? 0,
+													cacheRead: getNumberField(costRecord, "cacheRead") ?? 0,
+													cacheWrite: getNumberField(costRecord, "cacheWrite") ?? 0,
+													total: turnTotal,
+												},
+											},
+							});
 						}
 					}
 					// Accumulate tokens for progress display
@@ -2412,6 +2448,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			budgetLimitExceeded ||
 			budgetStopRequested,
 		budgetStopRequested: () => budgetStopRequested,
+		noteSharedBudgetStop,
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
 		hasFreshResponseAfterAsync: () => freshResponseAfterAsync,
@@ -2516,6 +2553,7 @@ async function driveSessionToYield(
 	task: string,
 	requireYieldTool = false,
 	onPromptBusy?: () => Promise<void>,
+	budgetGuard?: { allowsModelCall(): boolean },
 ): Promise<DriveOutcome> {
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
@@ -2673,6 +2711,7 @@ async function driveSessionToYield(
 		// injected turns just multiply the failure noise; the teardown reap
 		// still cancels and awaits their jobs before worktree capture.
 		let asyncPendingNoticeSent = false;
+		const sharedFollowUpBlocked = () => Boolean(budgetGuard && !budgetGuard.allowsModelCall());
 		while (!abortSignal.aborted) {
 			if (!monitor.yieldCalled()) {
 				const lastAssistant = session.getLastAssistantMessage();
@@ -2682,10 +2721,13 @@ async function driveSessionToYield(
 				const pendingAsync = typeof session.hasPendingAsyncWork === "function" && session.hasPendingAsyncWork();
 				const demandYield = requireYieldTool || monitor.budgetStopRequested();
 				if (demandYield || lastHasToolCall) {
-					await runYieldLadder();
-					// Ladder exhausted / terminal model error: classified below
-					// (missing yield, or stale yield when one was invalidated).
-					if (!monitor.yieldCalled()) break;
+					if (sharedFollowUpBlocked()) {
+						monitor.noteSharedBudgetStop();
+						if (!pendingAsync && !session.hasPendingAsyncWork()) break;
+					} else {
+						await runYieldLadder();
+						if (!monitor.yieldCalled()) break;
+					}
 				} else if (!pendingAsync) {
 					break;
 				}
@@ -2706,20 +2748,20 @@ async function driveSessionToYield(
 						multiple: running.length > 1,
 						jobs,
 					});
-					try {
-						await awaitAbortable(session.prompt(notice, { attribution: "agent", synthetic: true }));
-						await awaitAbortable(session.waitForIdle());
-					} catch (err) {
-						if (abortSignal.aborted || err instanceof ToolAbortError) throw err;
-						// A failed notice turn must not kill the run — fall through
-						// to the passive settle below.
-						logger.warn("Subagent async-pending notice failed", {
-							error: err instanceof Error ? err.message : String(err),
-						});
+					if (sharedFollowUpBlocked()) {
+						monitor.noteSharedBudgetStop();
+					} else {
+						try {
+							await awaitAbortable(session.prompt(notice, { attribution: "agent", synthetic: true }));
+							await awaitAbortable(session.waitForIdle());
+						} catch (err) {
+							if (abortSignal.aborted || err instanceof ToolAbortError) throw err;
+							logger.warn("Subagent async-pending notice failed", {
+								error: err instanceof Error ? err.message : String(err),
+							});
+						}
+						continue;
 					}
-					// Re-evaluate: the notice turn may have cancelled, watched, or
-					// absorbed the jobs — or already re-yielded.
-					continue;
 				}
 			}
 			await awaitAbortable(session.settleAsyncWork());
@@ -2757,9 +2799,15 @@ async function driveSessionToYield(
 		// A budget-stopped run that still produced no yield is a budget abort:
 		// surface the precise reason instead of a generic missing-yield failure.
 		if (!monitor.yieldCalled() && monitor.budgetStopRequested() && !aborted) {
-			aborted = true;
-			abortReasonText ??= monitor.resolveAbortReasonText();
-			exitCode = 1;
+			const pendingText =
+				monitor.finalAssistantText()?.trim() ||
+				monitor.rawOutput().trim() ||
+				monitor.lastAssistantSalvageText()?.trim();
+			if (!pendingText) {
+				aborted = true;
+				abortReasonText ??= monitor.resolveAbortReasonText();
+				exitCode = 1;
+			}
 		}
 
 		// A recorded yield that async-result deliveries superseded is stale.
@@ -3063,6 +3111,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		durationMs: Date.now() - args.startTime,
 		tokens: progress.tokens,
 		requests: progress.requests,
+		providerRequests: progress.requests,
 		toolCalls: progress.toolCount,
 		contextTokens: progress.contextTokens,
 		contextWindow: progress.contextWindow,
@@ -3648,6 +3697,8 @@ export interface FollowUpTurnOptions {
 	softRequestBudget?: number;
 	performanceClass?: SubagentPerformanceClass;
 	settings?: Settings;
+	budgetGuard?: WorkflowBudgetGuard;
+	providerChargeKeys?: string[];
 }
 
 /**
@@ -3741,6 +3792,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudgetNotice: budgets.softRequestBudgetNotice,
 		maxRuntimeMs: budgets.maxRuntimeMs,
 		performanceClass,
+		budgetGuard: options.budgetGuard,
+		providerChargeKeys: options.providerChargeKeys,
 	});
 
 	const startedPayload = {
@@ -3769,19 +3822,26 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// then reinstall and reattach for the retry.
 	let attemptUnsubscribe = monitor.attach(session);
 	try {
-		outcome = await driveSessionToYield(session, monitor, message, requireYieldTool, async () => {
-			attemptUnsubscribe();
-			logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
-			await session.setWorkPoolYieldItems([]);
-			if (signal) {
-				await untilAborted(signal, () => session.waitForIdle());
-			} else {
-				await session.waitForIdle();
-			}
-			resetYieldTurnState(session.getToolByName("yield"));
-			await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-			attemptUnsubscribe = monitor.attach(session);
-		});
+		outcome = await driveSessionToYield(
+			session,
+			monitor,
+			message,
+			requireYieldTool,
+			async () => {
+				attemptUnsubscribe();
+				logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
+				await session.setWorkPoolYieldItems([]);
+				if (signal) {
+					await untilAborted(signal, () => session.waitForIdle());
+				} else {
+					await session.waitForIdle();
+				}
+				resetYieldTurnState(session.getToolByName("yield"));
+				await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+				attemptUnsubscribe = monitor.attach(session);
+			},
+			options.budgetGuard,
+		);
 		if (monitor.yieldCalled()) {
 			// A follow-up turn's accepted yield is the run's final result too:
 			// terminalize the ref here, not just on the initial run (#11079).
@@ -3991,6 +4051,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		performanceClass,
+		budgetGuard: options.budgetGuard,
+		providerChargeKeys: options.providerChargeKeys,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -4422,6 +4484,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					firstChatDispatchAt ??= performance.now();
 				},
 				onResponse: options.onResponse,
+				onPayload: options.onPayload,
 				// Workflow prepare installs these on the parent session; createTools
 				// must see them on the child ToolSession (argumentAliases / processResult).
 				workflowToolOptimization: options.workflowToolOptimization,
@@ -4713,7 +4776,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (shadowJobId) session.asyncJobManager?.resumeDeliveries([shadowJobId]);
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToYield(session, monitor, task, requireYieldTool);
+			const outcome = await driveSessionToYield(
+				session,
+				monitor,
+				task,
+				requireYieldTool,
+				undefined,
+				options.budgetGuard,
+			);
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.
@@ -4893,7 +4963,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		};
 	};
 
-	const done = await runSubagent();
+	let done: Awaited<ReturnType<typeof runSubagent>>;
+	try {
+		done = await runSubagent();
+	} catch (error) {
+		if (error && typeof error === "object") {
+			const observed = error as { providerRequests?: number; usage?: unknown };
+			if (observed.providerRequests === undefined) observed.providerRequests = progress.requests;
+			if (observed.usage === undefined && monitor.hasUsage()) observed.usage = monitor.accumulatedUsage;
+		}
+		throw error;
+	}
 	monitor.finish();
 
 	const result = await finalizeRunResult({

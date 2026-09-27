@@ -27,6 +27,19 @@ function sanitizeToolType(toolType: string): string {
 }
 
 /**
+ * Content identity issued only after a confirmed write.
+ * Callers reuse this instead of re-reading and re-hashing the same bytes.
+ */
+export interface ArtifactContentIdentity {
+	/** Numeric session id (`"0"`), not an `artifact://` URI. */
+	id: string;
+	/** sha256 hex of the bytes that were confirmed present. */
+	contentSha256: string;
+	/** UTF-8 byte length of those confirmed bytes. */
+	byteCount: number;
+}
+
+/**
  * Persist an artifact only when the filesystem confirms the complete payload is
  * readable, then swap it into place atomically.
  *
@@ -158,12 +171,21 @@ export class ArtifactManager {
 	/**
 	 * Save content and return a reusable content identity so callers need not
 	 * re-read + re-hash immediately after a successful write.
+	 *
+	 * Identity is issued only after `writeArtifact` confirms the UTF-8 byte count.
+	 * That write already checks staged size and readability before rename. The
+	 * returned hash is of those confirmed bytes; a second full-file read is not
+	 * required to trust the identity. A short or failed write throws and yields none.
 	 */
-	async saveWithIdentity(content: string, toolType: string): Promise<{ id: string; contentSha256: string }> {
+	async saveWithIdentity(content: string, toolType: string): Promise<ArtifactContentIdentity> {
 		const { id, path: filePath } = await this.allocatePath(toolType);
+		const byteCount = await writeArtifact(filePath, content);
+		const expected = Buffer.byteLength(content, "utf-8");
+		if (byteCount !== expected) {
+			throw new Error(`Artifact identity refused: wrote ${byteCount} of ${expected} bytes`);
+		}
 		const contentSha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
-		await writeArtifact(filePath, content);
-		return { id, contentSha256 };
+		return { id, contentSha256, byteCount };
 	}
 
 	/**

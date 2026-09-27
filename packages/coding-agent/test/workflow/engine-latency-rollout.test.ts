@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Settings } from "../../src/config/settings";
+import { Settings } from "../../src/config/settings";
 import {
 	type buildLatencyRolloutDecision,
 	emptyLatencyArms,
@@ -21,7 +21,16 @@ import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
-import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	passVerifier,
+	planArtifact,
+	type RealTempWorkspace,
+	realTempWorkspace,
+	reviewArtifact,
+	scriptedRunner,
+} from "./helpers";
 
 /**
  * Production quality-stop wiring: a workflow that reaches a terminal state with active arms
@@ -31,20 +40,16 @@ import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, 
  */
 
 function latencySession(
+	cwd: string,
 	settingsOverride: Record<string, unknown>,
 	opts: { fired?: LatencyArmId[]; invalidated?: () => void } = {},
 ): ToolSession {
-	const settings = {
-		get: (key: string): unknown => settingsOverride[key],
-		set: () => {},
-		override: (key: string, value: unknown): void => {
-			settingsOverride[key] = value;
-		},
-	} as unknown as Settings;
+	const settings = Settings.isolated(settingsOverride);
 	const fired = new Set<LatencyArmId>(opts.fired ?? []);
-	const base = fakeSession({ settings });
+	const base = fakeSession({ cwd, settings });
 	return {
 		...base,
+		cwd,
 		settings,
 		getLatencyArmSnapshot: () =>
 			freezeLatencyArmSnapshot({
@@ -89,6 +94,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
 	let cwd: string;
+	let workspace: RealTempWorkspace;
 	let artifactStore: ArtifactStore;
 	let cohortFile: string;
 	let cohortStore: LatencyRolloutCohortStore;
@@ -96,7 +102,8 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-latency-rollout-arts-"));
-		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "wf-latency-rollout-cwd-"));
+		workspace = await realTempWorkspace();
+		cwd = workspace.cwd;
 		artifactStore = new ArtifactStore(artifactDir);
 		cohortFile = path.join(artifactDir, "cohort.jsonl");
 		cohortStore = new LatencyRolloutCohortStore(cohortFile);
@@ -107,7 +114,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
-		await fs.rm(cwd, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	function makeEngine(session: ToolSession): WorkflowEngine {
@@ -120,7 +127,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 		return new WorkflowEngine({
 			store,
 			adapter: new RuntimeAdapter(runner),
-			verifier: passVerifier(),
+			verifier: passVerifier(cwd),
 			artifactStore,
 			latencyCohortStore: cohortStore,
 			session,
@@ -132,7 +139,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 			"modelOptimization.enabled": true,
 			"latency.arms.readDedupe": true,
 		};
-		const session = latencySession(overrides);
+		const session = latencySession(cwd, overrides);
 		const engine = makeEngine(session);
 		const workflowId = await engine.startWorkflow({
 			request: "clean run",
@@ -149,7 +156,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 		expect(decision.attributionKnown).toBe(true);
 		expect(decision.observed.completion).toBe(true);
 		// No stop → no rollback override.
-		expect(overrides["latency.arms.readDedupe"]).toBe(true);
+		expect(session.settings.get("latency.arms.readDedupe")).toBe(true);
 		// The run itself was recorded into the cohort.
 		const recorded = cohortStore.readAll();
 		expect(recorded.some(o => o.key === "combined:context_optimization+read_dedupe" && o.completed)).toBe(true);
@@ -163,7 +170,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 		let invalidated = 0;
 		// Only context_optimization actually engaged during this run (e.g. the read
 		// dedupe path never rewrote a read result).
-		const session = latencySession(overrides, {
+		const session = latencySession(cwd, overrides, {
 			fired: ["context_optimization"],
 			invalidated: () => (invalidated += 1),
 		});
@@ -199,7 +206,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 		const engine = new WorkflowEngine({
 			store,
 			adapter: new RuntimeAdapter(runner),
-			verifier: passVerifier(),
+			verifier: passVerifier(cwd),
 			artifactStore,
 			latencyCohortStore: cohortStore,
 			session,
@@ -218,8 +225,8 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 		expect(decision.decision.reason).toBe("p0p1_escape");
 		// Causal rollback: only the fired arm is disabled; the dormant arm stays on.
 		expect(decision.disabledArms).toEqual(["context_optimization"]);
-		expect(overrides["modelOptimization.enabled"]).toBe(false);
-		expect(overrides["latency.arms.readDedupe"]).toBe(true);
+		expect(session.settings.get("modelOptimization.enabled")).toBe(false);
+		expect(session.settings.get("latency.arms.readDedupe")).toBe(true);
 		// The frozen snapshot was invalidated so subsequent lookups re-read live settings.
 		expect(invalidated).toBe(1);
 	});
@@ -238,7 +245,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 			"modelOptimization.enabled": true,
 			"latency.arms.readDedupe": true,
 		};
-		const session = latencySession(overrides, { fired: ["context_optimization", "read_dedupe"] });
+		const session = latencySession(cwd, overrides, { fired: ["context_optimization", "read_dedupe"] });
 		const engine = makeEngine(session);
 		const workflowId = await engine.startWorkflow({
 			request: "cohort run",
@@ -253,7 +260,7 @@ describe("WorkflowEngine latency rollout decision at terminal", () => {
 		expect(decision.decision.stop).toBe(true);
 		expect(["completion_drop", "cost_breach"]).toContain(decision.decision.reason ?? "");
 		expect(decision.disabledArms).toEqual(["context_optimization", "read_dedupe"]);
-		expect(overrides["modelOptimization.enabled"]).toBe(false);
-		expect(overrides["latency.arms.readDedupe"]).toBe(false);
+		expect(session.settings.get("modelOptimization.enabled")).toBe(false);
+		expect(session.settings.get("latency.arms.readDedupe")).toBe(false);
 	});
 });

@@ -37,6 +37,8 @@ import {
 	implArtifact,
 	passVerifier,
 	planArtifact,
+	planReviewArtifactV2,
+	realTempWorkspace,
 	reviewArtifact,
 	SAMPLE_PATCH,
 	scriptedRunner,
@@ -202,10 +204,12 @@ describe("P1 engine stage-handoff + scope-metrics production path", () => {
 	let artifactDir: string;
 	let engine: WorkflowEngine;
 	let patchFile: string;
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
 
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-p012-"));
+		workspace = await realTempWorkspace();
 		patchFile = path.join(artifactDir, "impl.patch");
 		await Bun.write(patchFile, SAMPLE_PATCH);
 
@@ -213,11 +217,16 @@ describe("P1 engine stage-handoff + scope-metrics production path", () => {
 		engine = new WorkflowEngine({
 			store,
 			adapter: new RuntimeAdapter(async request => {
-				if (request.context) seenContexts.push(request.context);
+				if (request.workflowRole === "implementer" && request.context) seenContexts.push(request.context);
 				// Delegate to scripted path by reusing helper shape
 				return scriptedRunner({
-					plan: planArtifact(),
-					planReview: reviewArtifact("approved", "plan"),
+					plan: planArtifact({ acceptanceCriteria: ["must-keep-acceptance-once"] }),
+					planReview: planReviewArtifactV2(
+						"approved",
+						[],
+						{},
+						{ request: "ship feature", constraints: "hard-constraint-keep-rollback" },
+					),
 					implement: {
 						...implArtifact(),
 						// Real patch evidence path (absolute so scope can read it)
@@ -228,9 +237,9 @@ describe("P1 engine stage-handoff + scope-metrics production path", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				})(request);
 			}),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 		// Stash for assertion after run
 		(engine as unknown as { __seenContexts: string[] }).__seenContexts = seenContexts;
@@ -239,11 +248,15 @@ describe("P1 engine stage-handoff + scope-metrics production path", () => {
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	it("persists stage-handoff + scope-metrics and injects handoff into implementer context", async () => {
-		const workflowId = await engine.startWorkflow({ request: "ship feature" });
-		const result = await engine.run(workflowId, fakeSession({ cwd: artifactDir }));
+		const workflowId = await engine.startWorkflow({
+			request: "ship feature",
+			constraints: "hard-constraint-keep-rollback",
+		});
+		const result = await engine.run(workflowId, fakeSession({ cwd: workspace.cwd }));
 		expect(result.state.status).toBe("completed");
 
 		const artifacts = await store.listArtifacts(workflowId);
@@ -292,10 +305,11 @@ describe("P1 engine stage-handoff + scope-metrics production path", () => {
 		expect(["adhered", "warning", "violation", "indeterminate"]).toContain(scope.status);
 
 		const contexts = (engine as unknown as { __seenContexts: string[] }).__seenContexts;
-		const implementerCtx = contexts.find(c => c.includes("Stage handoff (planner→implementer)"));
+		const implementerCtx = contexts[0];
 		expect(implementerCtx).toBeDefined();
-		expect(implementerCtx).toContain("goal:");
-		expect(implementerCtx).toContain("preservedItems");
+		// Acceptance and the user hard constraint stay in the consumer prompt, once.
+		expect(implementerCtx!.split("must-keep-acceptance-once").length - 1).toBe(1);
+		expect(implementerCtx!.split("hard-constraint-keep-rollback").length - 1).toBe(1);
 
 		const promptReceipt = artifacts.find(a => a.kind === "prompt-assembly-receipt");
 		expect(promptReceipt).toBeDefined();
@@ -306,10 +320,12 @@ describe("P1 reviewer→repair handoff on production path", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
 	let engine: WorkflowEngine;
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
 
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-p012-repair-"));
+		workspace = await realTempWorkspace();
 		const patchFile = path.join(artifactDir, "impl.patch");
 		await Bun.write(patchFile, SAMPLE_PATCH);
 		const seenContexts: string[] = [];
@@ -317,10 +333,15 @@ describe("P1 reviewer→repair handoff on production path", () => {
 		engine = new WorkflowEngine({
 			store,
 			adapter: new RuntimeAdapter(async request => {
-				if (request.context) seenContexts.push(request.context);
+				if (request.workflowRole === "repair" && request.context) seenContexts.push(request.context);
 				return scriptedRunner({
-					plan: planArtifact(),
-					planReview: reviewArtifact("approved", "plan"),
+					plan: planArtifact({ acceptanceCriteria: ["repair-acceptance-once"] }),
+					planReview: planReviewArtifactV2(
+						"approved",
+						[],
+						{},
+						{ request: "fix bugs", constraints: "hard-constraint-keep-rollback" },
+					),
 					implement: { ...implArtifact(), patchPath: patchFile },
 					codeReview: reviewArtifact("changes_requested", "implementation", [
 						{
@@ -338,9 +359,9 @@ describe("P1 reviewer→repair handoff on production path", () => {
 					repair: { ...implArtifact(), patchPath: patchFile, addressedStepIds: ["f1"] },
 				})(request);
 			}),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession({ cwd: artifactDir }),
+			session: fakeSession({ cwd: workspace.cwd }),
 			config: { maxRepairCycles: 2 },
 		});
 		(engine as unknown as { __seenContexts: string[] }).__seenContexts = seenContexts;
@@ -349,12 +370,16 @@ describe("P1 reviewer→repair handoff on production path", () => {
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	it("persists reviewer→repair handoff and injects into repair context", async () => {
-		const workflowId = await engine.startWorkflow({ request: "fix bugs" });
+		const workflowId = await engine.startWorkflow({
+			request: "fix bugs",
+			constraints: "hard-constraint-keep-rollback",
+		});
 		// May complete or re-enter verify; either way repair stage should run once with handoff.
-		await engine.run(workflowId, fakeSession({ cwd: artifactDir })).catch(() => {
+		await engine.run(workflowId, fakeSession({ cwd: workspace.cwd })).catch(() => {
 			// budget/repair loops may end blocked — handoff evidence still required
 		});
 
@@ -380,8 +405,12 @@ describe("P1 reviewer→repair handoff on production path", () => {
 		).toBe(true);
 
 		const contexts = (engine as unknown as { __seenContexts: string[] }).__seenContexts;
-		expect(contexts.some(c => c.includes("Stage handoff (reviewer→repair)"))).toBe(true);
-		expect(contexts.some(c => c.includes("blocking_finding") && c.includes("f1"))).toBe(true);
+		const repairCtx = contexts[0];
+		expect(repairCtx).toBeDefined();
+		expect(repairCtx).toContain("hard-constraint-keep-rollback");
+		expect(repairCtx!.split("repair-acceptance-once").length - 1).toBe(1);
+		expect(repairCtx).toContain("f1");
+		expect(repairCtx).toContain("bug");
 	});
 });
 

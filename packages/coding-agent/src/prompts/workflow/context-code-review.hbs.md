@@ -1,5 +1,7 @@
+{{knownSource}}
 ## Plan
 {{planJson}}
+{{planRecovery}}
 
 ## Implementation summary
 {{implementationSummary}}

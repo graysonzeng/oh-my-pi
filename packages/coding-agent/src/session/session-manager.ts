@@ -29,7 +29,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
-import { ArtifactManager } from "./artifacts";
+import { type ArtifactContentIdentity, ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
@@ -2959,21 +2959,24 @@ export class SessionManager {
 
 	/**
 	 * Persist artifact bytes and return content identity for reuse (read dedupe).
-	 * Callers that just wrote known bytes can skip an immediate re-read verify.
+	 * Identity is issued only after the write's byte count is confirmed.
 	 */
-	async saveArtifactWithIdentity(
-		content: string,
-		toolType: string,
-	): Promise<{ id: string; contentSha256: string } | undefined> {
+	async saveArtifactWithIdentity(content: string, toolType: string): Promise<ArtifactContentIdentity | undefined> {
 		const manager = this.#artifactManagerForSession();
 		if (manager) return manager.saveWithIdentity(content, toolType);
 
 		// Non-persistent session: keep an in-memory copy so spill truncation works.
 		this.#inMemoryArtifacts ??= new Map();
 		const id = String(this.#inMemoryArtifactCounter++);
-		const contentSha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+		const byteCount = Buffer.byteLength(content, "utf-8");
 		this.#inMemoryArtifacts.set(id, content);
-		return { id, contentSha256 };
+		const stored = this.#inMemoryArtifacts.get(id);
+		if (stored !== content || Buffer.byteLength(stored, "utf-8") !== byteCount) {
+			this.#inMemoryArtifacts.delete(id);
+			return undefined;
+		}
+		const contentSha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+		return { id, contentSha256, byteCount };
 	}
 
 	async getArtifactPath(id: string): Promise<string | null> {

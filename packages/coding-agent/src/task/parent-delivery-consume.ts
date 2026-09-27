@@ -7,8 +7,9 @@
  *
  * `done_valid` / integrate-eligible ≠ final parent acceptance.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { resolveEpisodeRootFromBranch } from "../latency/task-episode";
+import { fingerprintStable } from "../latency/stable-serialize";
 import {
 	bindParentIntegrateDecisionEntry,
 	PARENT_INTEGRATE_DECISION_CUSTOM_TYPE,
@@ -18,6 +19,7 @@ import {
 	type ParentIntegrateDecisionEntry,
 } from "./child-delivery-evidence";
 import { inspectEvidenceHandoffContext } from "./evidence-handoff";
+import { filesOutsideScope } from "./host-terminal-check";
 import {
 	buildEvidenceHandoffObserveRecord,
 	persistEvidenceHandoffObserve,
@@ -29,6 +31,7 @@ export type ParentDeliveryConsumeSink = EvidenceHandoffObservePersistSink & {
 	getSessionId?: () => string;
 	getBranch?: () => readonly { id: string; type: string; message?: { role?: string } }[];
 	getLeafId?: () => string | null | undefined;
+	getEntries?: () => readonly { id: string; type: string; customType?: string; data?: unknown }[];
 };
 
 export interface ParentDeliveryConsumeInput {
@@ -101,6 +104,27 @@ export function consumeChildDeliveryForParent(input: ParentDeliveryConsumeInput)
 		workspaceVersion: decision.boundToWorkspaceVersion,
 	});
 
+	entry.eventId = fingerprintStable({
+		prefix: input.eventIdPrefix ?? "consume",
+		episode: entry.episode,
+		taskToolCallId: entry.taskToolCallId,
+		jobId: entry.jobId,
+		agentId: entry.agentId,
+		workspaceVersion: entry.workspaceVersion,
+		classification: entry.classification,
+		action: entry.action,
+		reasons: entry.reasons,
+	});
+	const existing = input.sink
+		.getEntries?.()
+		.find(
+			candidate =>
+				candidate.type === "custom" &&
+				candidate.customType === PARENT_INTEGRATE_DECISION_CUSTOM_TYPE &&
+				isRecord(candidate.data) &&
+				candidate.data.eventId === entry.eventId,
+		);
+	if (existing) return { decision, entry, entryId: existing.id };
 	const entryId = input.sink.appendCustomEntry(PARENT_INTEGRATE_DECISION_CUSTOM_TYPE, entry);
 	const observe = input.observe !== false;
 	const prefix = input.eventIdPrefix?.trim() || `consume:${entryId}`;
@@ -200,11 +224,13 @@ export async function settleChildDeliveryForParent(input: {
 	// Never fall back to the child's package version — empty stays fail-closed stale.
 	const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(input.cwd);
 	const fromContext = acceptanceAndFreshnessFromContext(input.spawnContext);
+	const handoff = inspectEvidenceHandoffContext(input.spawnContext).handoff;
 	return consumeChildDeliveryForParent({
 		delivery: input.delivery,
 		currentCodeVersion,
 		requiredAcceptance: fromContext.requiredAcceptance,
 		staleEvidence: fromContext.staleEvidence,
+		outOfScopeEdits: filesOutsideScope(input.delivery.codeVersion.changedFiles, handoff?.changeScope.paths),
 		writeOwnershipReleased: false,
 		episodeSessionId: episode.sessionId,
 		rootUserEntryId: episode.rootUserEntryId,

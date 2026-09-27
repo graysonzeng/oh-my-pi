@@ -15,6 +15,13 @@ function sink() {
 		},
 		getSessionId: () => "sess-1",
 		getBranch: () => [{ id: "u1", type: "message", message: { role: "user" } }],
+		getEntries: () =>
+			entries.map((entry, index) => ({
+				id: `id-${index + 1}`,
+				type: "custom",
+				customType: entry.type,
+				data: entry.details,
+			})),
 	};
 }
 
@@ -73,5 +80,32 @@ describe("shared parent settle path (R2/B4)", () => {
 		});
 		expect(result.entry.kind).toBe(PARENT_INTEGRATE_DECISION_CUSTOM_TYPE);
 		expect(result.entry.finalAccepted).toBe(false);
+	});
+	it("does not append a second decision for replay, but records a changed workspace decision", () => {
+		const s = sink();
+		const delivery = buildChildDeliveryEvidenceFromExecutorFacts({
+			codeVersion: { version: "content:one", changedFiles: ["a.ts"] },
+			acceptanceItems: [{ id: "check", claimedProven: false }],
+			checksNotRun: [{ id: "check", reason: "parent_owns_verify" }],
+		});
+		const input = {
+			delivery,
+			currentCodeVersion: "content:one",
+			requiredAcceptance: ["check"],
+			episodeSessionId: "parent",
+			rootUserEntryId: "u",
+			agentId: "child",
+			sink: s,
+			eventIdPrefix: "task:replay",
+		};
+		const first = consumeChildDeliveryForParent(input);
+		const replay = consumeChildDeliveryForParent(input);
+		expect(first.decision.action).toBe("parent_coordinate");
+		expect(replay.entryId).toBe(first.entryId);
+		expect(s.entries.filter(entry => entry.type === PARENT_INTEGRATE_DECISION_CUSTOM_TYPE)).toHaveLength(1);
+		const changed = consumeChildDeliveryForParent({ ...input, currentCodeVersion: "content:two" });
+		expect(changed.decision.action).toBe("reread_then_decide");
+		expect(changed.entryId).not.toBe(first.entryId);
+		expect(s.entries.filter(entry => entry.type === PARENT_INTEGRATE_DECISION_CUSTOM_TYPE)).toHaveLength(2);
 	});
 });

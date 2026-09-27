@@ -434,8 +434,16 @@ export async function captureVerificationWorkspace(
 		vcs: repository.kind(),
 		root,
 		headId: provenHead,
+		changedFiles: [
+			...new Set([
+				...parsePatchTouchedFiles(worktreeDiff),
+				...parsePatchTouchedFiles(stagedDiff ?? ""),
+				...untracked,
+			]),
+		].sort(),
 		contentSha256: sha256Hex(
 			JSON.stringify({
+				cwd: resolved,
 				headId: provenHead,
 				worktreeDiffSha256: sha256Hex(worktreeDiff),
 				stagedDiffSha256: stagedDiff === null ? null : sha256Hex(stagedDiff),
@@ -656,7 +664,8 @@ export function isValidDeliveryEvidence(artifact: VerificationArtifactV1 | null 
 	if (validity.owner === "worker" || validity.executor === "worker") return false;
 	if (validity.owner !== "workflow_verifier" && validity.owner !== "parent") return false;
 	if (validity.executor !== "workflow_verifier" && validity.executor !== "parent") return false;
-	// A copied fingerprint over rewritten patch identity is not a seal.
+	// Command text and a copied fingerprint are not a seal of the executed tree.
+	if (!validity.codeState.workspace?.contentSha256) return false;
 	if (!codeStateIsConsistent(validity.codeState)) return false;
 	return true;
 }
@@ -702,6 +711,24 @@ export function assessVerificationReuse(input: {
 		return { reusable: false, reason: "scope_mismatch" };
 	}
 	return { reusable: true, reason: "reusable" };
+}
+/**
+ * True only when a second capture of the executed directory still matches the
+ * before-capture. Missing identity is not a match.
+ */
+export async function executedWorkspaceStillMatches(
+	before: VerificationWorkspaceBinding | undefined,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	if (!before?.contentSha256 || !before.cwd) return false;
+	const after = await captureVerificationWorkspace(before.cwd, signal);
+	if (!after?.contentSha256) return false;
+	return (
+		after.contentSha256 === before.contentSha256 &&
+		after.cwd === before.cwd &&
+		after.headId === before.headId &&
+		after.root === before.root
+	);
 }
 
 /**

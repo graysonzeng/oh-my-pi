@@ -1,5 +1,7 @@
+{{knownSource}}
 ## Plan
 {{planJson}}
+{{planRecovery}}
 
 ## Findings to address (by id)
 {{findings}}

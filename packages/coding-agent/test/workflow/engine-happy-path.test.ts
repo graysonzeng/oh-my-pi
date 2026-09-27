@@ -9,16 +9,27 @@ import { WorkflowEngine } from "../../src/workflow/engine";
 import { assertSupportedModelProfile } from "../../src/workflow/model-profile-registry";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
-import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	passVerifier,
+	planArtifact,
+	realTempWorkspace,
+	reviewArtifact,
+	scriptedRunner,
+} from "./helpers";
 
 describe("WorkflowEngine happy path", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
 	let engine: WorkflowEngine;
+	// Real VCS workspace so verification identity is host-captured (R1).
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
 
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-happy-"));
+		workspace = await realTempWorkspace();
 		engine = new WorkflowEngine({
 			store,
 			adapter: new RuntimeAdapter(
@@ -29,15 +40,16 @@ describe("WorkflowEngine happy path", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 	});
 
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	it("starts a workflow without invoking a provider", async () => {
@@ -47,7 +59,7 @@ describe("WorkflowEngine happy path", () => {
 
 	it("runs full accepted path to completed", async () => {
 		const workflowId = await engine.startWorkflow({ request: "ship feature" });
-		const result = await engine.run(workflowId, fakeSession());
+		const result = await engine.run(workflowId, fakeSession({ cwd: workspace.cwd }));
 		expect(result.state.status).toBe("completed");
 		expect(result.plan?.kind).toBe("plan");
 		expect(result.implementation?.patchPath).toBe("patches/x.patch");
@@ -56,7 +68,7 @@ describe("WorkflowEngine happy path", () => {
 
 	it("writes parent_final_verification receipt on final_verify for offline e2e association", async () => {
 		const sessionManager = SessionManager.inMemory();
-		const session = fakeSession({ sessionManager });
+		const session = fakeSession({ sessionManager, cwd: workspace.cwd });
 		const workflowId = await engine.startWorkflow({ request: "ship with receipt" });
 		const result = await engine.run(workflowId, session);
 		expect(result.state.status).toBe("completed");

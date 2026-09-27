@@ -14,6 +14,7 @@ import {
 	DELIVERY_QUALITY_OUTCOME_MESSAGE_TYPE,
 	formatDeliveryCostBaselineReport,
 	parseDeliveryQualityOutcomeDetails,
+	qualityFromSession,
 	type DeliveryQualityOutcomeObservation,
 } from "./delivery-cost-baseline";
 import {
@@ -82,6 +83,9 @@ export interface SubagentBaselineReport {
 		cacheRead: number | null;
 		cacheWrite: number | null;
 		costTotal: number | null;
+		/** Sum of observed prices; not the total when costCoverage.unknown is nonzero. */
+		knownCostLowerBoundUsd: number;
+		costCoverage: CoverageCount;
 	};
 	models: Record<string, number>;
 	spawnEfforts: Record<string, number>;
@@ -816,6 +820,10 @@ export function parseSessionRecords(records: readonly unknown[], filePath: strin
 			if (typeof raw.id === "string" && raw.id) session.id = raw.id;
 			if (typeof raw.parentSession === "string" && raw.parentSession) {
 				session.parentSessionHeader = raw.parentSession;
+				// Custom CLI roots need the same nested-child convention; a flat fork is still a parent.
+				if (path.basename(path.dirname(filePath)) === path.basename(raw.parentSession, ".jsonl")) {
+					session.isSubagent = true;
+				}
 			}
 			continue;
 		}
@@ -1207,6 +1215,7 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 	let usageCacheRead: number | null = null;
 	let usageCacheWrite: number | null = null;
 	let usageCost: number | null = null;
+	const costCoverage = emptyCoverage();
 
 	const childrenByParent = new Map<string, ParsedSession[]>();
 	let unlinkedChildCount = 0;
@@ -1232,13 +1241,15 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 			cover(coverage.ttft, request.ttftMs !== null);
 			cover(coverage.generation, request.generationMs !== null);
 			cover(coverage.cache, request.cacheRead !== null && request.cacheWrite !== null);
+			const pricedCost = request.costTotal === 0 && request.isError ? null : request.costTotal;
+			cover(costCoverage, pricedCost !== null);
 			if (request.ttftMs !== null) ttftSamples.push(request.ttftMs);
 			if (request.generationMs !== null) generationSamples.push(request.generationMs);
 			usageInput = addPresent(usageInput, request.input);
 			usageOutput = addPresent(usageOutput, request.output);
 			usageCacheRead = addPresent(usageCacheRead, request.cacheRead);
 			usageCacheWrite = addPresent(usageCacheWrite, request.cacheWrite);
-			usageCost = addPresent(usageCost, request.costTotal);
+			usageCost = addPresent(usageCost, pricedCost);
 		}
 		const scope = parentOf(session, byPath, byId)?.path ?? session.path;
 		for (const call of session.toolCalls) {
@@ -1298,7 +1309,7 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 		}
 
 		const verification = parent.parentFinalVerifications[parent.parentFinalVerifications.length - 1];
-		if (!verification) {
+		if (!verification || (verification.v !== undefined && verification.authority === undefined)) {
 			parentFinalUnknown++;
 			cover(coverage.parentFinalVerification, false);
 			continue;
@@ -1371,7 +1382,7 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 		}
 	}
 
-	for (const session of sessions) {
+	for (const session of parents) {
 		const outcomes = session.qualityOutcomes;
 		if (!outcomes || outcomes.length === 0) {
 			cover(qualityCoverage, false);
@@ -1380,8 +1391,8 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 			continue;
 		}
 		cover(qualityCoverage, true);
-		// Latest labeled outcome wins per session — never invent from final_verify alone.
-		const latest = outcomes[outcomes.length - 1]!;
+		// Partial labels amend independent fields; child completion is not final delivery quality.
+		const latest = qualityFromSession(session);
 		if (latest.falseAccept === true) qualityFalse.true++;
 		else if (latest.falseAccept === false) qualityFalse.false++;
 		else qualityFalse.unknown++;
@@ -1447,7 +1458,9 @@ export function buildSubagentBaselineReport(sessions: readonly ParsedSession[]):
 			output: usageOutput,
 			cacheRead: usageCacheRead,
 			cacheWrite: usageCacheWrite,
-			costTotal: usageCost,
+			costTotal: costCoverage.unknown > 0 ? null : usageCost,
+			knownCostLowerBoundUsd: usageCost ?? 0,
+			costCoverage,
 		},
 		models,
 		spawnEfforts,

@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { $ } from "bun";
+import { Settings } from "../../src/config/settings";
 import { LATENCY_ARM_IDS, LATENCY_ARM_SETTINGS, type LatencyArmId } from "../../src/latency/arms";
 import { buildMechanicalClass } from "../../src/latency/mechanical-class";
 import type { ToolSession } from "../../src/tools";
@@ -390,28 +392,35 @@ function fakeSession(
 		live?: Partial<Record<LatencyArmId, boolean>>;
 	},
 ): ToolSession {
-	const settings = {
-		get: (key: string): unknown => {
-			if (key === "task.maxConcurrency" && exposeMaxConcurrency) return maxConcurrency;
-			for (const arm of LATENCY_ARM_IDS) {
-				if (key === LATENCY_ARM_SETTINGS[arm]) return latency?.live?.[arm];
-			}
-			return undefined;
-		},
-		set: () => {},
-	};
+	// Registered settings always return a finite value. The engine maps a missing or
+	// non-finite concurrency read to unlimited (0); express both fixture modes as that sentinel.
+	const concurrency = !exposeMaxConcurrency || !Number.isFinite(maxConcurrency) ? 0 : maxConcurrency;
+	const baseOverrides: Record<string, unknown> = { "task.maxConcurrency": concurrency };
+	for (const arm of LATENCY_ARM_IDS) baseOverrides[LATENCY_ARM_SETTINGS[arm]] = false;
+	const base = Settings.isolated(baseOverrides);
+	const liveOverrides: Record<string, unknown> = {};
+	if (latency?.live) {
+		for (const arm of LATENCY_ARM_IDS) {
+			const value = latency.live[arm];
+			if (typeof value === "boolean") liveOverrides[LATENCY_ARM_SETTINGS[arm]] = value;
+		}
+	}
+	const settings = Object.keys(liveOverrides).length > 0 ? base.overlay(liveOverrides) : base;
 	return {
 		cwd,
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: settings as unknown as ToolSession["settings"],
+		settings,
 		...(latency?.frozen ? { isLatencyArmEnabled: (arm: LatencyArmId) => latency.frozen?.[arm] === true } : {}),
 	};
 }
 
-function passVerifier(): VerifierPort {
+function passVerifier(cwd?: string): VerifierPort {
 	return {
+		// Stages fingerprint the tree `verify` executes in; without this the R1
+		// workspace identity is unknown and delivery evidence is rejected.
+		...(cwd ? { workspaceCwd: () => cwd } : {}),
 		async verify(artifact) {
 			return {
 				kind: "verification",
@@ -506,7 +515,7 @@ describe("WorkflowEngine work-package execution", () => {
 			store,
 			config,
 			adapter: new RuntimeAdapter(runner, merger),
-			verifier: passVerifier(),
+			verifier: passVerifier(cwd),
 			artifactStore,
 			session: fakeSession(cwd, maxConcurrency),
 			availability: config ? availableProfiles() : undefined,
@@ -1011,41 +1020,37 @@ describe("WorkflowEngine work-package execution", () => {
 		}
 	});
 
-	it("routes missing and non-finite maxConcurrency through the unbounded work-package contract", async () => {
-		for (const testCase of [
-			{ label: "missing", session: fakeSession(cwd, 1, false) },
-			{ label: "non-finite", session: fakeSession(cwd, Number.POSITIVE_INFINITY) },
-		]) {
-			const packages: WorkPackageV1[] = [
-				{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
-				{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
-			];
-			const mergeCalls: CapturedChangesMergeRequest[] = [];
-			let wholePlanCalls = 0;
-			let packageStarts = 0;
-			const runner = scriptedRunner({
-				plan: makePlan(packages),
-				planReview: makeReview("plan"),
-				implement: async (_request, packageId) => {
-					if (!packageId) {
-						wholePlanCalls += 1;
-						return makeImplementation("patches/whole-plan.patch", ["src/a.ts", "src/b.ts"]);
-					}
-					packageStarts += 1;
-					return makeImplementation(`patches/${testCase.label}-${packageId}.patch`, [`src/${packageId}.ts`]);
-				},
-				codeReview: makeReview("implementation"),
-			});
-			const engine = makeEngine(runner, combinedMerger(mergeCalls), 2);
-			const workflowId = await engine.startWorkflow({ request: `unbounded ${testCase.label}` });
-			const run = engine.run(workflowId, testCase.session);
-			const result = await run;
+	it("routes unlimited task.maxConcurrency through the work-package contract", async () => {
+		// Real Settings cannot omit a registered number or store Infinity. 0 is the unlimited
+		// sentinel the engine already uses for a missing or non-finite read.
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		let wholePlanCalls = 0;
+		let packageStarts = 0;
+		const runner = scriptedRunner({
+			plan: makePlan(packages),
+			planReview: makeReview("plan"),
+			implement: async (_request, packageId) => {
+				if (!packageId) {
+					wholePlanCalls += 1;
+					return makeImplementation("patches/whole-plan.patch", ["src/a.ts", "src/b.ts"]);
+				}
+				packageStarts += 1;
+				return makeImplementation(`patches/unlimited-${packageId}.patch`, [`src/${packageId}.ts`]);
+			},
+			codeReview: makeReview("implementation"),
+		});
+		const engine = makeEngine(runner, combinedMerger(mergeCalls), 2);
+		const workflowId = await engine.startWorkflow({ request: "unbounded unlimited" });
+		const result = await engine.run(workflowId, fakeSession(cwd, 0));
 
-			expect(result.state.status).toBe("completed");
-			expect(wholePlanCalls).toBe(0);
-			expect(packageStarts).toBe(2);
-			expect(mergeCalls).toHaveLength(1);
-		}
+		expect(result.state.status).toBe("completed");
+		expect(wholePlanCalls).toBe(0);
+		expect(packageStarts).toBe(2);
+		expect(mergeCalls).toHaveLength(1);
 	});
 
 	it("does not merge strict packages when one runtime identity mismatches", async () => {
@@ -1301,6 +1306,165 @@ describe("WorkflowEngine work-package execution", () => {
 		expect(result.workPackageState?.packages.find(workPackage => workPackage.id === "a")?.identityReceipt).toEqual(
 			persistedReceipt,
 		);
+	});
+
+	it("keeps the newer work-package payload when a delayed older revision is written later", async () => {
+		store.close();
+		const dbPath = path.join(artifactDir, "revision-order.sqlite");
+		store = new WorkflowStore(dbPath);
+		const packages: WorkPackageV1[] = [
+			{ id: "a", assignment: "Capture A", paths: ["src/a.ts"], dependsOn: [] },
+			{ id: "b", assignment: "Capture B", paths: ["src/b.ts"], dependsOn: [] },
+		];
+		const persistedReceipt = strictPackageReceipt();
+		const captureEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async () => makeImplementation("patches/unexpected.patch", ["src/a.ts"]),
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			undefined,
+			2,
+			strictPackageConfig(),
+		);
+		const workflowId = await captureEngine.startWorkflow({
+			request: "resume ignores delayed older package revision",
+			qualityTier: "balanced",
+		});
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		await captureEngine.resume(workflowId, { singleStep: true });
+		expect((await captureEngine.getState(workflowId))?.status).toBe("implementing");
+		const implementingState = await captureEngine.getState(workflowId);
+		const staleAttemptId = await store.beginAttempt(
+			workflowId,
+			"implementing",
+			undefined,
+			implementingState!.version,
+		);
+		const captured = await executeWorkPackagePlan({
+			workflowId,
+			attemptId: staleAttemptId,
+			cwd,
+			plan: {
+				packages: [packages[0]!],
+				waves: [[packages[0]!]],
+				mergeOrder: ["a"],
+				maxConcurrency: 2,
+			},
+			execute: async workPackage => {
+				const patchPath = "patches/captured-a.patch";
+				await writePatchFile(cwd, patchPath, workPackage.paths);
+				return {
+					artifact: makeImplementation(patchPath, workPackage.paths, "captured A"),
+					identityReceipt: persistedReceipt,
+					modelFamily: persistedReceipt.modelFamily ?? undefined,
+				};
+			},
+			persist: state => persistPackageState(workflowId, staleAttemptId, state),
+		});
+		const newerState: WorkPackageStateArtifactV1 = {
+			...captured,
+			attemptId: staleAttemptId,
+			revision: captured.revision + 1,
+			createdAt: new Date().toISOString(),
+			packages: [...captured.packages, { ...packages[1]!, status: "pending" }],
+			merge: { status: "pending", order: ["a", "b"], summary: "newer payload" },
+		};
+		expect(newerState.revision).toBeGreaterThan(1);
+		await persistPackageState(workflowId, staleAttemptId, newerState);
+		const delayedOlder: WorkPackageStateArtifactV1 = {
+			kind: "work-package-state",
+			schemaVersion: 1,
+			workflowId,
+			attemptId: staleAttemptId,
+			stage: "implementing",
+			createdAt: new Date().toISOString(),
+			revision: 1,
+			mode: "capture_then_apply",
+			packages: packages.map(workPackage => ({ ...workPackage, status: "pending" })),
+			merge: { status: "pending", order: ["a", "b"], summary: "delayed older revision" },
+		};
+		await persistPackageState(workflowId, staleAttemptId, delayedOlder);
+		let delayedSha: string | undefined;
+		for (const meta of await store.listArtifacts(workflowId)) {
+			if (meta.kind !== "work-package-state") continue;
+			const loaded = await artifactStore.load(meta.relativePath, meta.sha256);
+			if (!loaded?.content) continue;
+			const parsed = JSON.parse(loaded.content) as WorkPackageStateArtifactV1;
+			if (parsed.merge.summary === "delayed older revision") delayedSha = meta.sha256;
+		}
+		if (!delayedSha) throw new Error("missing delayed work-package state");
+		store.close();
+		try {
+			const db = new Database(dbPath, { create: true });
+			db.prepare("UPDATE artifacts SET created_at = ? WHERE kind = ?").run(
+				"2000-01-01T00:00:00.000Z",
+				"work-package-state",
+			);
+			const stamped = db
+				.prepare("UPDATE artifacts SET created_at = ? WHERE sha256 = ?")
+				.run("2099-01-01T00:00:00.000Z", delayedSha);
+			db.close();
+			if (stamped.changes !== 1) throw new Error("failed to stamp delayed work-package revision");
+		} finally {
+			store = new WorkflowStore(dbPath);
+		}
+		const rows = await Promise.all(
+			(await store.listArtifacts(workflowId))
+				.filter(meta => meta.kind === "work-package-state")
+				.map(async meta => {
+					const loaded = await artifactStore.load(meta.relativePath, meta.sha256);
+					if (!loaded?.content) throw new Error("missing persisted work-package state");
+					const parsed = JSON.parse(loaded.content) as WorkPackageStateArtifactV1;
+					return { createdAt: meta.createdAt, revision: parsed.revision, summary: parsed.merge.summary };
+				}),
+		);
+		const latestFile = rows.at(-1);
+		expect(latestFile?.revision).toBe(1);
+		expect(latestFile?.summary).toBe("delayed older revision");
+		expect(rows.some(row => row.revision === newerState.revision && row.createdAt < latestFile!.createdAt)).toBe(
+			true,
+		);
+
+		const resumedPackageCalls: string[] = [];
+		const mergeCalls: CapturedChangesMergeRequest[] = [];
+		const resumeEngine = makeEngine(
+			scriptedRunner({
+				plan: makePlan(packages),
+				planReview: makeReview("plan"),
+				implement: async (_request, packageId) => {
+					if (!packageId) return makeImplementation("patches/whole-plan.patch", ["src/a.ts"]);
+					resumedPackageCalls.push(packageId);
+					return makeImplementation(
+						`patches/resumed-${packageId}.patch`,
+						[`src/${packageId}.ts`],
+						`resumed ${packageId}`,
+					);
+				},
+				codeReview: makeReview("implementation"),
+				identityMode: () => "valid",
+			}),
+			combinedMerger(mergeCalls),
+			2,
+			strictPackageConfig(),
+		);
+
+		const result = await resumeEngine.resume(workflowId, { forceUnlock: true });
+
+		expect(result.state.status).toBe("completed");
+		expect(resumedPackageCalls).toEqual(["b"]);
+		expect(
+			result.workPackageState?.packages.find(workPackage => workPackage.id === "a")?.implementation?.summary,
+		).toBe("captured A");
+		expect(result.workPackageState?.packages.find(workPackage => workPackage.id === "a")?.identityReceipt).toEqual(
+			persistedReceipt,
+		);
+		expect(result.workPackageState?.revision).toBeGreaterThan(newerState.revision);
+		expect(mergeCalls).toHaveLength(1);
+		expect(mergeCalls[0]?.patches.map(patch => patch.packageId)).toEqual(["a", "b"]);
 	});
 
 	it("rejects reusable receipts that are not bound to the selected implementer profile", async () => {

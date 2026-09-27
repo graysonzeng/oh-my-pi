@@ -393,7 +393,7 @@ describe("verification ownership & result validity", () => {
 			commands: ["bun check"],
 			codeState: unproven,
 		});
-		expect(isValidDeliveryEvidence(sealed)).toBe(true);
+		expect(isValidDeliveryEvidence(sealed)).toBe(false);
 		expect(
 			assessVerificationReuse({
 				prior: sealed,

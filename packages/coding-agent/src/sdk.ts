@@ -865,6 +865,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Provider response observer composed with extension after-provider hooks. */
 	onResponse?: SimpleStreamOptions["onResponse"];
+	/** Host provider-request guard, composed after extension payload transforms. */
+	onPayload?: SimpleStreamOptions["onPayload"];
 
 	/**
 	 * Fired once, when the agent loop hands its first request to the provider
@@ -4334,7 +4336,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		};
 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
-			return await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
+			const transformed = await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
+			if (!options.onPayload) return transformed;
+			return (await options.onPayload(transformed ?? payload, model, signal)) ?? transformed;
 		};
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model, signal) => {
 			await options.onResponse?.(response, model, signal);

@@ -60,7 +60,7 @@ import {
 	runAvailabilityPreflight,
 	skippedAvailabilityReport,
 } from "./availability-preflight";
-import { BudgetLedger, type BudgetSnapshot } from "./budget-ledger";
+import { BudgetLedger, createWorkflowBudgetPort, type BudgetSnapshot, type WorkflowBudgetPort } from "./budget-ledger";
 import { ContextBuilder } from "./context-builder";
 import { getDefaultConfig, type WorkflowDefaultConfig } from "./default-config";
 import {
@@ -74,7 +74,7 @@ import {
 import { FindingTracker } from "./finding-tracker";
 import { gateAdapter } from "./gate-adapter";
 import { derivePlanReviewArtifactV2, deriveReviewArtifact, stampGateResultArtifact } from "./gate-derive";
-import { isNonRetryableGateError } from "./gate-retry";
+import { classifyGateError } from "./gate-retry";
 import { assertStrictRuntimeIdentity } from "./identity-receipt";
 import { GateResultJsonSchema } from "./json-schemas";
 import {
@@ -126,6 +126,7 @@ import {
 	buildKeepAllHandoff,
 	buildPlannerToImplementerHandoff,
 	buildReviewerToRepairHandoff,
+	fileRecoveryUri,
 } from "./stage-handoff";
 import { CodeReviewStage } from "./stages/code-review";
 import { FinalVerifyStage } from "./stages/final-verify";
@@ -184,7 +185,6 @@ import {
 	buildWorkPackageExecutionPlan,
 	executeWorkPackagePlan,
 	renderWorkPackageAssignment,
-	WorkPackageExecutionError,
 	withWorkPackageMerge,
 	withWorkPackageMergePrepared,
 	workPackagesToConcurrencyDeclaration,
@@ -400,6 +400,88 @@ export interface WorkflowRunResult {
 	overlayReason?: string;
 }
 
+const RESUME_DECISION_KINDS: Readonly<Record<string, true>> = {
+	plan: true,
+	review: true,
+	implementation: true,
+	verification: true,
+	patch: true,
+	"findings-state": true,
+	"work-package-state": true,
+	"scope-metrics": true,
+	"runtime-evidence": true,
+	"quality-route-snapshot": true,
+	"plan-review-control-state": true,
+	"plan-review-route-selection": true,
+	[REQUIREMENTS_SNAPSHOT_KIND]: true,
+	[AUTHOR_RESPONSES_KIND]: true,
+};
+
+// Revisioned work-package/review-control records are selected by their payload
+// revision/updatedAt during hydration, not by file-write completion order.
+const RESUME_CUMULATIVE_KINDS: Readonly<Record<string, true>> = {
+	plan: true,
+	implementation: true,
+	patch: true,
+	"findings-state": true,
+	"scope-metrics": true,
+	"plan-review-route-selection": true,
+	[AUTHOR_RESPONSES_KIND]: true,
+};
+
+/** Reconstructed decision state and disposable caches for exactly one workflow. */
+interface WorkflowRunSnapshot {
+	activeWorkflowId?: string;
+	findingTracker: FindingTracker;
+	routingAudit: Array<Record<string, unknown>>;
+	routingAuditPersistedThrough: number;
+	lastAvailability?: WorkflowAvailabilityReport;
+	qualityRouteSnapshot?: QualityRouteSnapshotV1;
+	qualityRouteArtifactPersisted: boolean;
+	preflightUnavailableReasons: Record<string, string>;
+	plan?: PlanArtifactV1;
+	planReview?: PlanReviewArtifact;
+	implementation?: ImplementationArtifactV1;
+	verification?: VerificationArtifactV1;
+	codeReview?: ReviewArtifactV1;
+	finalVerification?: VerificationArtifactV1;
+	workPackageState?: WorkPackageStateArtifactV1;
+	planArtifactRef?: StageHandoffArtifactRef;
+	planArtifactSha256?: string;
+	planReviewArtifactRef?: StageHandoffArtifactRef;
+	implementationArtifactRef?: StageHandoffArtifactRef;
+	verificationArtifactRef?: StageHandoffArtifactRef;
+	codeReviewArtifactRef?: StageHandoffArtifactRef;
+	patchArtifactRef?: StageHandoffArtifactRef;
+	plannerProfileId?: string;
+	plannerVendor?: string;
+	implementerVendor?: string;
+	plannerModelFamily?: string;
+	implementerModelFamily?: string;
+	planReviewerIdentity?: PlanReviewerIdentity;
+	planReviewerRouteSelectionRef?: StageHandoffArtifactRef;
+	planReviewControl?: PlanReviewControlStateV1;
+	requirementsSnapshot?: RequirementsSnapshotV1;
+	requirementsSnapshotRef?: StageHandoffArtifactRef;
+	authorResponses?: AuthorResponseV1[];
+	authorResponsesPriorFindings?: Array<Pick<ReviewFindingV1, "id" | "priority">>;
+	authorResponsesArtifactRef?: StageHandoffArtifactRef;
+	planCycles: number;
+	lastRouteProfileId?: string;
+	lastScopeMetrics?: ScopeMetricsV1;
+}
+
+function emptyRunSnapshot(): WorkflowRunSnapshot {
+	return {
+		findingTracker: new FindingTracker(),
+		routingAudit: [],
+		routingAuditPersistedThrough: 0,
+		qualityRouteArtifactPersisted: false,
+		preflightUnavailableReasons: {},
+		planCycles: 0,
+	};
+}
+
 /**
  * Deterministic multi-stage workflow engine.
  * Models return artifacts only; this class owns transitions, budget, cancel, and resume.
@@ -409,7 +491,7 @@ export class WorkflowEngine {
 	#router: ModelRouter;
 	readonly #configuredRouter: ModelRouter;
 	readonly #budgetLedger: BudgetLedger;
-	#findingTracker: FindingTracker;
+	readonly #budgetPort: WorkflowBudgetPort;
 	readonly #adapter: RuntimePort;
 	readonly #availability: WorkflowAvailabilityPort | undefined;
 	readonly #verifier: VerifierPort;
@@ -418,57 +500,19 @@ export class WorkflowEngine {
 	readonly #contextBuilder = new ContextBuilder();
 	readonly #session: ToolSession | undefined;
 	readonly #config: WorkflowDefaultConfig;
-	readonly #routingAudit: Array<Record<string, unknown>> = [];
 	readonly #runnerOwnerId = `runner_${randomUUID()}`;
 	/** When true, dispose() closes the store (tool-owned ephemeral engines). */
 	readonly #ownsStore: boolean;
 	#controller: AbortController | undefined;
 	/** Active abort signal for the current run/resume (may be overridden per resume call). */
 	#signal: AbortSignal | undefined;
-	/** Last preflight report from start/resume (for tool surfacing / tests). */
-	#lastAvailability: WorkflowAvailabilityReport | undefined;
-	#qualityRouteSnapshot: QualityRouteSnapshotV1 | undefined;
-	#qualityRouteArtifactPersisted = false;
+	readonly #initialSignal: AbortSignal | undefined;
 	/** Workflows whose latency rollout decision is already persisted (terminal evaluated once). */
 	readonly #latencyRolloutPersisted = new Set<string>();
-	#preflightUnavailableReasons: Record<string, string> = {};
 	readonly #providerHealthBreaker: ProviderHealthBreaker;
 	readonly #pipelineAuditor: PipelineAuditor | undefined;
 
-	// In-memory artifact cache for the current process (also persisted to store)
-	#plan: PlanArtifactV1 | undefined;
-	#planReview: PlanReviewArtifact | undefined;
-	#implementation: ImplementationArtifactV1 | undefined;
-	#verification: VerificationArtifactV1 | undefined;
-	#codeReview: ReviewArtifactV1 | undefined;
-	#finalVerification: VerificationArtifactV1 | undefined;
-	#workPackageState: WorkPackageStateArtifactV1 | undefined;
-	/** Durable refs for stage-handoff sizing / recovery (source artifacts never deleted). */
-	#planArtifactRef: StageHandoffArtifactRef | undefined;
-	#planArtifactSha256: string | undefined;
-	#planReviewArtifactRef: StageHandoffArtifactRef | undefined;
-	#implementationArtifactRef: StageHandoffArtifactRef | undefined;
-	#verificationArtifactRef: StageHandoffArtifactRef | undefined;
-	#codeReviewArtifactRef: StageHandoffArtifactRef | undefined;
-	/** Real patch content persisted for implement→review handoff recovery. */
-	#patchArtifactRef: StageHandoffArtifactRef | undefined;
-	#plannerProfileId: string | undefined;
-	#plannerVendor: string | undefined;
-	#implementerVendor: string | undefined;
-	#plannerModelFamily: string | undefined;
-	#implementerModelFamily: string | undefined;
-	#planReviewerIdentity: PlanReviewerIdentity | undefined;
-	#planReviewerRouteSelectionRef: StageHandoffArtifactRef | undefined;
-	#planReviewControl: PlanReviewControlStateV1 | undefined;
-	#requirementsSnapshot: RequirementsSnapshotV1 | undefined;
-	#requirementsSnapshotRef: StageHandoffArtifactRef | undefined;
-	#authorResponses: AuthorResponseV1[] | undefined;
-	#authorResponsesPriorFindings: Array<Pick<ReviewFindingV1, "id" | "priority">> | undefined;
-	#authorResponsesArtifactRef: StageHandoffArtifactRef | undefined;
-	#planCycles = 0;
-	#lastRouteProfileId: string | undefined;
-	#activeWorkflowId: string | undefined;
-	#lastScopeMetrics: ScopeMetricsV1 | undefined;
+	#run: WorkflowRunSnapshot = emptyRunSnapshot();
 
 	constructor(options: WorkflowEngineOptions = {}) {
 		this.#ownsStore = options.ownsStore ?? options.store === undefined;
@@ -500,6 +544,7 @@ export class WorkflowEngine {
 		this.#availability = options.availability;
 		this.#session = options.session;
 		this.#signal = options.signal;
+		this.#initialSignal = options.signal;
 		const cwd = options.session?.cwd ?? process.cwd();
 		// Configured verification commands must be on the verifier allowlist (exact match).
 		this.#verifier =
@@ -523,7 +568,9 @@ export class WorkflowEngine {
 				limitUsd: this.#config.maxBudgetUsd,
 				maxRepairCycles: this.#config.maxRepairCycles,
 			});
-		this.#findingTracker = options.findingTracker ?? new FindingTracker();
+		this.#budgetPort = createWorkflowBudgetPort(this.#budgetLedger);
+		this.#adapter.setBudgetPort?.(this.#budgetPort);
+		this.#run.findingTracker = options.findingTracker ?? new FindingTracker();
 		this.#artifactStore = options.artifactStore ?? new ArtifactStore();
 		this.#pipelineAuditor = options.pipelineAuditor;
 	}
@@ -564,6 +611,9 @@ export class WorkflowEngine {
 		if (requestedTier !== undefined && requestedTier !== "balanced" && requestedTier !== "critical") {
 			throw new WorkflowPolicyError("unknown_quality_tier", { qualityTier: requestedTier });
 		}
+		this.#resetRunSnapshot();
+		this.#budgetLedger.reset();
+		this.#signal = this.#initialSignal;
 		const qualityRoutesConfigured = Object.keys(this.#config.qualityRoutes).length > 0;
 		let persistedRequest: WorkflowRequest | Record<string, unknown> = request;
 		let routeSnapshot: QualityRouteSnapshotV1 | undefined;
@@ -608,24 +658,13 @@ export class WorkflowEngine {
 					}
 				: createOpts;
 		const workflowId = await this.#store.createWorkflow(persistedRequest, policy, resolvedCreateOpts);
-		// Fresh workflow on this engine — do not carry prior routing audit / persist cursor.
-		this.#routingAudit.length = 0;
-		this.#routingAuditPersistedThrough = 0;
-		this.#activeWorkflowId = workflowId;
-		this.#workPackageState = undefined;
-		this.#planArtifactRef = undefined;
-		this.#implementationArtifactRef = undefined;
-		this.#verificationArtifactRef = undefined;
-		this.#codeReviewArtifactRef = undefined;
-		this.#patchArtifactRef = undefined;
-		this.#requirementsSnapshot = undefined;
-		this.#requirementsSnapshotRef = undefined;
+		this.#run.activeWorkflowId = workflowId;
 		await this.#store.saveBudgetTotals(
 			workflowId,
 			this.#budgetLedger.snapshot() as unknown as Record<string, unknown>,
 		);
 		const persistedAvailability = { ...availability, workflowId };
-		this.#lastAvailability = persistedAvailability;
+		this.#run.lastAvailability = persistedAvailability;
 		return { workflowId, availability: persistedAvailability };
 	}
 
@@ -643,7 +682,7 @@ export class WorkflowEngine {
 
 	/** Most recent preflight report from start/resume on this engine instance. */
 	getLastAvailabilityReport(): WorkflowAvailabilityReport | undefined {
-		return this.#lastAvailability;
+		return this.#run.lastAvailability;
 	}
 
 	async findActiveDeliveryWorkflow(ownerSessionId: string): Promise<WorkflowState | null> {
@@ -948,60 +987,22 @@ export class WorkflowEngine {
 			if (TERMINAL.has(fresh.state.status)) {
 				throw new WorkflowPolicyError("cannot_resume_terminal", { status: fresh.state.status });
 			}
+			this.#resetRunSnapshot(workflowId);
+			this.#budgetLedger.reset();
 			this.#activateQualityRouteFromPolicy(fresh.state.policyJson, this.#qualityRouteExpected(fresh));
 			if (fresh.budgetTotals) {
 				this.#budgetLedger.restore(fresh.budgetTotals as Partial<BudgetSnapshot>);
+			} else {
+				this.#budgetLedger.markUnrecordedCoverage();
 			}
 			// Rebuild plan-cycle count from durable transitions (survives new Engine instances).
-			this.#planCycles = fresh.transitions.filter(
+			this.#run.planCycles = fresh.transitions.filter(
 				t => t.fromStatus === "plan_review" && t.toStatus === "planning",
 			).length;
-			// Reset mutable stage caches / observe state then hydrate from the
-			// post-claim snapshot. Artifact refs + work-package state must not
-			// leak across resumes (G1); hydrate reloads what this snapshot stores.
-			// Routing audit is cleared only when switching workflows on the same
-			// engine — same-workflow singleStep resumes keep cumulative audit.
-			if (this.#activeWorkflowId !== undefined && this.#activeWorkflowId !== workflowId) {
-				this.#routingAudit.length = 0;
-				this.#routingAuditPersistedThrough = 0;
-			}
-			this.#activeWorkflowId = workflowId;
-			this.#plan = undefined;
-			this.#planReview = undefined;
-			this.#planReviewControl = undefined;
-			this.#planArtifactRef = undefined;
-			this.#planArtifactSha256 = undefined;
-			this.#planReviewArtifactRef = undefined;
-			this.#planReviewerIdentity = undefined;
-			this.#planReviewerRouteSelectionRef = undefined;
-			this.#requirementsSnapshot = undefined;
-			this.#requirementsSnapshotRef = undefined;
-			this.#authorResponses = undefined;
-			this.#authorResponsesPriorFindings = undefined;
-			this.#authorResponsesArtifactRef = undefined;
-			this.#implementation = undefined;
-			this.#implementationArtifactRef = undefined;
-			this.#verification = undefined;
-			this.#verificationArtifactRef = undefined;
-			this.#finalVerification = undefined;
-			this.#codeReview = undefined;
-			this.#codeReviewArtifactRef = undefined;
-			this.#patchArtifactRef = undefined;
-			this.#workPackageState = undefined;
-			this.#plannerProfileId = undefined;
-			this.#plannerVendor = undefined;
-			this.#implementerVendor = undefined;
-			this.#plannerModelFamily = undefined;
-			this.#implementerModelFamily = undefined;
-			this.#lastRouteProfileId = undefined;
-			this.#lastScopeMetrics = undefined;
-			this.#findingTracker = new FindingTracker();
 			await this.#hydrateArtifacts(fresh);
-			const hydratedPlanReviewControl = this.#planReviewControl as PlanReviewControlStateV1 | undefined;
-			if (hydratedPlanReviewControl) this.#planCycles = hydratedPlanReviewControl.planRejectionCount;
-			if (options.signal) {
-				this.#signal = options.signal;
-			}
+			const hydratedPlanReviewControl = this.#run.planReviewControl as PlanReviewControlStateV1 | undefined;
+			if (hydratedPlanReviewControl) this.#run.planCycles = hydratedPlanReviewControl.planRejectionCount;
+			this.#signal = options.signal ?? this.#initialSignal;
 			// runLoop must not re-claim; pass alreadyClaimed via singleStep loop path.
 			return await this.#runLoop(workflowId, options.session ?? this.#session, options.singleStep === true, {
 				alreadyClaimed: true,
@@ -1025,13 +1026,13 @@ export class WorkflowEngine {
 	): Promise<WorkflowRunResult> {
 		this.#activateQualityRouteFromPolicy((await this.#requireState(workflowId)).policyJson);
 		this.#syncSessionFallbackProfile(session);
-		this.#controller = new AbortController();
-		registerWorkflowAbort(workflowId, this.#controller, this.#controller);
+		const controller = new AbortController();
+		this.#controller = controller;
+		registerWorkflowAbort(workflowId, controller, controller);
 		const parentSignal = this.#signal;
-		if (parentSignal) {
-			if (parentSignal.aborted) this.#controller.abort();
-			else parentSignal.addEventListener("abort", () => this.#controller?.abort(), { once: true });
-		}
+		const abortFromParent = () => controller.abort();
+		if (parentSignal?.aborted) controller.abort();
+		else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
 
 		let steps = 0;
 		const maxSteps = singleStep ? 1 : 32;
@@ -1069,7 +1070,7 @@ export class WorkflowEngine {
 					state = await this.#requireState(workflowId);
 
 					// Availability preflight before any stage attempt or model work.
-					if (!preflightDone) {
+					if (!preflightDone && (await this.#budgetLedger.checkPreStage())) {
 						preflightDone = true;
 						availability = await this.#runPreflight({
 							workflowId,
@@ -1078,9 +1079,9 @@ export class WorkflowEngine {
 							singleStep,
 							session,
 							signal: this.#controller.signal,
-							failClosed: this.#qualityRouteSnapshot !== undefined,
+							failClosed: this.#run.qualityRouteSnapshot !== undefined,
 						});
-						this.#lastAvailability = availability;
+						this.#run.lastAvailability = availability;
 					}
 
 					// Advance created → planning without budget/provider (no external call)
@@ -1196,7 +1197,7 @@ export class WorkflowEngine {
 					}
 
 					const afterStage = await this.#requireState(workflowId);
-					if (afterStage.status === "plan_review" && this.#planReviewControl?.substate === "awaiting_human") {
+					if (afterStage.status === "plan_review" && this.#run.planReviewControl?.substate === "awaiting_human") {
 						break;
 					}
 					if (isAwaitingGrill(afterStage.overlaySidecar)) {
@@ -1222,22 +1223,36 @@ export class WorkflowEngine {
 			const awaitingGrill = isAwaitingGrill(finalState.overlaySidecar);
 			return {
 				state: finalState,
-				plan: this.#plan,
-				planReview: this.#planReview,
-				implementation: this.#implementation,
-				verification: this.#verification,
-				codeReview: this.#codeReview,
-				finalVerification: this.#finalVerification,
-				workPackageState: this.#workPackageState,
-				routingAudit: [...this.#routingAudit],
-				availability: availability ?? this.#lastAvailability,
+				plan: this.#run.plan,
+				planReview: this.#run.planReview,
+				implementation: this.#run.implementation,
+				verification: this.#run.verification,
+				codeReview: this.#run.codeReview,
+				finalVerification: this.#run.finalVerification,
+				workPackageState: this.#run.workPackageState,
+				routingAudit: [...this.#run.routingAudit],
+				availability: availability ?? this.#run.lastAvailability,
 				stepsExecuted: steps,
 				maxStepsReached: steps >= maxSteps && !TERMINAL.has(finalState.status) && !awaitingGrill,
 				awaitingGrill,
 				overlayReason: overlayReason(finalState.overlaySidecar),
 			};
 		} finally {
-			unregisterWorkflowAbort(workflowId, this.#controller);
+			parentSignal?.removeEventListener("abort", abortFromParent);
+			unregisterWorkflowAbort(workflowId, controller);
+			if (this.#controller === controller) this.#controller = undefined;
+		}
+	}
+
+	#resetRunSnapshot(workflowId?: string): void {
+		const previous = this.#run;
+		this.#run = emptyRunSnapshot();
+		this.#run.activeWorkflowId = workflowId;
+		this.#router = new ModelRouter(this.#configuredRouter.list());
+		// Only same-workflow audit entries survive a step boundary; decision state is rehydrated.
+		if (workflowId !== undefined && previous.activeWorkflowId === workflowId) {
+			this.#run.routingAudit = previous.routingAudit;
+			this.#run.routingAuditPersistedThrough = previous.routingAuditPersistedThrough;
 		}
 	}
 
@@ -1254,7 +1269,7 @@ export class WorkflowEngine {
 
 	#activateQualityRoute(snapshot: QualityRouteSnapshotV1): void {
 		const verified = verifyQualityRouteSnapshot(snapshot);
-		this.#qualityRouteSnapshot = verified;
+		this.#run.qualityRouteSnapshot = verified;
 		this.#router = new ModelRouter(qualityRouteProfiles(verified));
 	}
 
@@ -1265,8 +1280,8 @@ export class WorkflowEngine {
 			if (qualityRouteExpected || policy.qualityRouteRequired === true) {
 				throw new WorkflowPolicyError("quality_route_snapshot_missing");
 			}
-			this.#qualityRouteSnapshot = undefined;
-			this.#router = this.#configuredRouter;
+			this.#run.qualityRouteSnapshot = undefined;
+			this.#router = new ModelRouter(this.#configuredRouter.list());
 			return;
 		}
 		if (policy.degradedMode !== false) {
@@ -1278,9 +1293,9 @@ export class WorkflowEngine {
 	}
 
 	async #persistQualityRouteSnapshot(workflowId: string, attemptId: string): Promise<void> {
-		if (!this.#qualityRouteSnapshot || this.#qualityRouteArtifactPersisted) return;
-		await this.#persistArtifact(workflowId, attemptId, "quality-route-snapshot", this.#qualityRouteSnapshot);
-		this.#qualityRouteArtifactPersisted = true;
+		if (!this.#run.qualityRouteSnapshot || this.#run.qualityRouteArtifactPersisted) return;
+		await this.#persistArtifact(workflowId, attemptId, "quality-route-snapshot", this.#run.qualityRouteSnapshot);
+		this.#run.qualityRouteArtifactPersisted = true;
 	}
 
 	/**
@@ -1308,7 +1323,7 @@ export class WorkflowEngine {
 				},
 			});
 		const budget = this.#budgetLedger.snapshot();
-		const openP0P1 = this.#findingTracker
+		const openP0P1 = this.#run.findingTracker
 			.getOpen()
 			.filter(finding => finding.priority === "P0" || finding.priority === "P1").length;
 		const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
@@ -1404,6 +1419,10 @@ export class WorkflowEngine {
 			});
 		}
 
+		if (!(await this.#budgetLedger.checkPreStage())) {
+			const budget = this.#budgetLedger.snapshot();
+			throw new BudgetExhaustedError(budget.requests, budget.costUsd ?? "unknown", budget.limitUsd);
+		}
 		const report = await runAvailabilityPreflight({
 			port: this.#availability,
 			router: this.#router,
@@ -1413,18 +1432,27 @@ export class WorkflowEngine {
 			singleStep: options.singleStep,
 			session: options.session,
 			signal: options.signal,
+			budgetPort: this.#budgetPort,
 			providerHealthBreaker: isLatencyArmEnabled(options.session, "provider_health_breaker")
 				? this.#providerHealthBreaker
 				: undefined,
 		});
-		this.#preflightUnavailableReasons = {};
+		this.#run.preflightUnavailableReasons = {};
 		for (const row of report.profiles) {
 			if (row.status !== "available" && !isDiagnosticAvailabilityTimeout(row)) {
-				this.#preflightUnavailableReasons[row.profileId] = [row.errorKind, row.errorSummary]
+				this.#run.preflightUnavailableReasons[row.profileId] = [row.errorKind, row.errorSummary]
 					.filter((part): part is string => Boolean(part))
 					.join(":");
 			}
-			if (row.source === "live") this.#budgetLedger.recordRequest(row.usage, row.profileId);
+			if (
+				row.source === "live" &&
+				(row.usage !== undefined || row.status === "available") &&
+				!this.#budgetPort
+					.invocationSettlements(report.invocationId)
+					.some(settlement => settlement.profileId === row.profileId && settlement.settled)
+			) {
+				this.#budgetLedger.recordRequest(row.usage, row.profileId);
+			}
 		}
 		if (options.persistBudget !== false) {
 			await this.#store.saveBudgetTotals(
@@ -1437,7 +1465,7 @@ export class WorkflowEngine {
 	}
 
 	async #executeCurrentStage(workflowId: string, state: WorkflowState, session: ToolSession): Promise<void> {
-		this.#activeWorkflowId = workflowId;
+		this.#run.activeWorkflowId = workflowId;
 		const signal = this.#controller?.signal;
 		const policy = this.#parsePolicy(state.policyJson);
 		const request = this.#parseRequest(state.requestJson);
@@ -1469,12 +1497,12 @@ export class WorkflowEngine {
 					resolvedToolPolicyId,
 					completionKind,
 				} = await this.#withProfileFallback("planner", {}, async profile => {
-					this.#plannerProfileId = profile.id;
-					this.#plannerVendor = profile.vendor;
+					this.#run.plannerProfileId = profile.id;
+					this.#run.plannerVendor = profile.vendor;
 					const context = await this.#buildStageContext(
 						this.#contextBuilder.buildPlanContext({
 							request,
-							priorReview: this.#planReview,
+							priorReview: this.#run.planReview,
 							constraints: request.constraints,
 							grillAnswers: state.overlaySidecar?.grill.answers,
 						}),
@@ -1491,57 +1519,57 @@ export class WorkflowEngine {
 						signal,
 					});
 				});
-				this.#plannerModelFamily = modelFamily;
-				this.#plan = plan;
-				this.#planArtifactRef = await this.#persistArtifact(workflowId, attemptId, "plan", plan);
-				const wasReplan = this.#planReviewControl?.substate === "awaiting_replan";
-				if (wasReplan && this.#planReview) {
-					const validation = validateAuthorResponses(plan.authorResponses, this.#planReview.findings);
+				this.#run.plannerModelFamily = modelFamily;
+				this.#run.plan = plan;
+				this.#run.planArtifactRef = await this.#persistArtifact(workflowId, attemptId, "plan", plan);
+				const wasReplan = this.#run.planReviewControl?.substate === "awaiting_replan";
+				if (wasReplan && this.#run.planReview) {
+					const validation = validateAuthorResponses(plan.authorResponses, this.#run.planReview.findings);
 					if (!validation.ok) {
 						throw new WorkflowPolicyError(validation.reason ?? "author_responses_invalid", {
 							workflowId,
 							attemptId,
-							priorReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
+							priorReviewArtifactRef: this.#run.planReviewArtifactRef?.artifactId ?? null,
 						});
 					}
-					this.#authorResponses = validation.responses;
-					this.#authorResponsesPriorFindings = this.#planReview.findings.map(finding => ({
+					this.#run.authorResponses = validation.responses;
+					this.#run.authorResponsesPriorFindings = this.#run.planReview.findings.map(finding => ({
 						id: finding.id,
 						priority: finding.priority,
 					}));
 					const authorResponsesArtifact = buildAuthorResponsesArtifact({
 						workflowId,
 						attemptId,
-						priorReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
-						priorFindings: this.#planReview.findings,
+						priorReviewArtifactRef: this.#run.planReviewArtifactRef?.artifactId ?? null,
+						priorFindings: this.#run.planReview.findings,
 						responses: validation.responses,
 					});
-					this.#authorResponsesArtifactRef = await this.#persistArtifact(
+					this.#run.authorResponsesArtifactRef = await this.#persistArtifact(
 						workflowId,
 						attemptId,
 						AUTHOR_RESPONSES_KIND,
 						authorResponsesArtifact,
 					);
 				} else if (!wasReplan) {
-					this.#authorResponses = undefined;
-					this.#authorResponsesPriorFindings = undefined;
-					this.#authorResponsesArtifactRef = undefined;
+					this.#run.authorResponses = undefined;
+					this.#run.authorResponsesPriorFindings = undefined;
+					this.#run.authorResponsesArtifactRef = undefined;
 				}
-				this.#planReviewControl = {
+				this.#run.planReviewControl = {
 					schemaVersion: 1,
 					kind: "plan_review_control_state",
 					substate: wasReplan ? "rereview" : "initial_review",
-					reviewRound: wasReplan ? 2 : (this.#planReviewControl?.reviewRound ?? 1),
-					planRejectionCount: this.#planReviewControl?.planRejectionCount ?? 0,
-					arbitrationCycles: this.#planReviewControl?.arbitrationCycles ?? 0,
+					reviewRound: wasReplan ? 2 : (this.#run.planReviewControl?.reviewRound ?? 1),
+					planRejectionCount: this.#run.planReviewControl?.planRejectionCount ?? 0,
+					arbitrationCycles: this.#run.planReviewControl?.arbitrationCycles ?? 0,
 					arbitrationTrigger: null,
-					arbitrationAttemptId: this.#planReviewControl?.arbitrationAttemptId ?? null,
-					arbitrationAttemptPhase: this.#planReviewControl?.arbitrationAttemptPhase ?? null,
-					reviewSchemaCohort: this.#planReviewControl?.reviewSchemaCohort ?? "v2",
-					latestPlanArtifactRef: this.#planArtifactRef.artifactId,
-					latestReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
-					authorResponsesArtifactRef: this.#authorResponsesArtifactRef?.artifactId ?? null,
-					routeSelectionReceiptRef: this.#planReviewControl?.routeSelectionReceiptRef ?? null,
+					arbitrationAttemptId: this.#run.planReviewControl?.arbitrationAttemptId ?? null,
+					arbitrationAttemptPhase: this.#run.planReviewControl?.arbitrationAttemptPhase ?? null,
+					reviewSchemaCohort: this.#run.planReviewControl?.reviewSchemaCohort ?? "v2",
+					latestPlanArtifactRef: this.#run.planArtifactRef.artifactId,
+					latestReviewArtifactRef: this.#run.planReviewArtifactRef?.artifactId ?? null,
+					authorResponsesArtifactRef: this.#run.authorResponsesArtifactRef?.artifactId ?? null,
+					routeSelectionReceiptRef: this.#run.planReviewControl?.routeSelectionReceiptRef ?? null,
 					humanRequestReason: null,
 					updatedAt: new Date().toISOString(),
 				};
@@ -1567,16 +1595,16 @@ export class WorkflowEngine {
 				return;
 			}
 			case "plan_review": {
-				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
+				if (!this.#run.plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
 				if (state.pipelineKind === "devflow") {
 					await this.#executeDevflowPlanReview(workflowId, attemptId, state, session, signal, request);
 					return;
 				}
 				await this.#ensureRequirementsSnapshot(workflowId, attemptId, request);
 
-				if (!this.#planReviewControl) {
-					const rejectionCount = this.#planCycles;
-					this.#planReviewControl = {
+				if (!this.#run.planReviewControl) {
+					const rejectionCount = this.#run.planCycles;
+					this.#run.planReviewControl = {
 						schemaVersion: 1,
 						kind: "plan_review_control_state",
 						substate: rejectionCount > 0 ? "rereview" : "initial_review",
@@ -1588,8 +1616,8 @@ export class WorkflowEngine {
 						arbitrationAttemptPhase: null,
 						// New workflows start on V2; legacy resumes hydrate cohort before this path.
 						reviewSchemaCohort: "v2",
-						latestPlanArtifactRef: this.#planArtifactRef?.artifactId ?? null,
-						latestReviewArtifactRef: this.#planReviewArtifactRef?.artifactId ?? null,
+						latestPlanArtifactRef: this.#run.planArtifactRef?.artifactId ?? null,
+						latestReviewArtifactRef: this.#run.planReviewArtifactRef?.artifactId ?? null,
 						authorResponsesArtifactRef: null,
 						routeSelectionReceiptRef: null,
 						humanRequestReason: null,
@@ -1598,7 +1626,7 @@ export class WorkflowEngine {
 					// Persist cohort before the first external review call (HIGH-10).
 					await this.#persistPlanReviewControl(workflowId, attemptId);
 				}
-				const control = this.#planReviewControl;
+				const control = this.#run.planReviewControl;
 				if (control.substate === "awaiting_human") {
 					await this.#setPlanReviewAwaitingHuman(
 						workflowId,
@@ -1611,14 +1639,14 @@ export class WorkflowEngine {
 					const trustedArbitration = this.#trustedArbitrationReview(control);
 					if (trustedArbitration) {
 						// Artifact already persisted; finish the transition without another model call.
-						this.#planReview = trustedArbitration;
+						this.#run.planReview = trustedArbitration;
 						if (control.arbitrationAttemptPhase !== "completed" || control.arbitrationCycles !== 1) {
-							this.#planReviewControl = {
+							this.#run.planReviewControl = {
 								...control,
 								arbitrationCycles: 1,
 								arbitrationAttemptPhase: "completed",
 								latestReviewArtifactRef:
-									this.#planReviewArtifactRef?.artifactId ?? control.latestReviewArtifactRef,
+									this.#run.planReviewArtifactRef?.artifactId ?? control.latestReviewArtifactRef,
 								updatedAt: new Date().toISOString(),
 							};
 							await this.#persistPlanReviewControl(workflowId, attemptId);
@@ -1648,11 +1676,11 @@ export class WorkflowEngine {
 				const reviewKind = control.reviewRound === 2 ? "rereview" : "initial";
 				const requirementsSnapshot = await this.#requireRequirementsSnapshot(workflowId, attemptId, request);
 				// Rereview requires a previously attested pin — never re-resolve from config alone.
-				if (reviewKind === "rereview" && !this.#planReviewerIdentity) {
+				if (reviewKind === "rereview" && !this.#run.planReviewerIdentity) {
 					await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "plan_reviewer_identity_unavailable");
 					return;
 				}
-				const pinnedReviewer = this.#planReviewerIdentity?.profileId;
+				const pinnedReviewer = this.#run.planReviewerIdentity?.profileId;
 				const executeReview = async (profile: ModelProfile, assignment: string) =>
 					new PlanReviewStage(this.#adapter).execute({
 						workflowId,
@@ -1661,24 +1689,25 @@ export class WorkflowEngine {
 						assignment,
 						context: await this.#buildStageContext(
 							this.#contextBuilder.buildPlanReviewContext(
-								this.#plan!,
+								this.#run.plan!,
 								resolveArtifactInclusion(profile),
-								this.#requirementsSnapshot,
+								this.#run.requirementsSnapshot,
+								this.#run.planArtifactRef,
 							),
 							profile,
 							session,
-							this.#plan?.affectedFiles.map(file => file.path),
+							this.#run.plan?.affectedFiles.map(file => file.path),
 						),
 						session,
 						signal,
 						requirementsSnapshotRef:
-							this.#requirementsSnapshotRef?.recoveryUri ?? `artifact://${workflowId}/requirements-snapshot`,
+							this.#run.requirementsSnapshotRef?.recoveryUri ?? `artifact://${workflowId}/requirements-snapshot`,
 						requirementsSnapshotSha256: requirementsSnapshot.sha256,
 						reviewKind,
 						reviewRound: control.reviewRound,
-						authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
+						authorResponses: this.#run.authorResponses ? [...this.#run.authorResponses] : [],
 						routeSelectionReceiptRef:
-							this.#planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
+							this.#run.planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
 						legacyV1: control.reviewSchemaCohort === "v1",
 					});
 				const reviewResult = pinnedReviewer
@@ -1700,9 +1729,9 @@ export class WorkflowEngine {
 					: await this.#withProfileFallback(
 							"plan_reviewer",
 							{
-								excludedProfileIds: this.#plannerProfileId ? [this.#plannerProfileId] : [],
-								avoidVendor: this.#plannerVendor,
-								avoidModelFamily: this.#plannerModelFamily,
+								excludedProfileIds: this.#run.plannerProfileId ? [this.#run.plannerProfileId] : [],
+								avoidVendor: this.#run.plannerVendor,
+								avoidModelFamily: this.#run.plannerModelFamily,
 							},
 							async profile => {
 								const result = await executeReview(profile, "Review the plan for correctness and feasibility");
@@ -1713,7 +1742,7 @@ export class WorkflowEngine {
 										reason: "missing_attested_runtime_identity",
 									});
 								}
-								this.#planReviewerIdentity = pinned;
+								this.#run.planReviewerIdentity = pinned;
 								const routeSelection: PlanReviewRouteSelectionV1 = {
 									schemaVersion: 1,
 									kind: "plan_review_route_selection",
@@ -1724,10 +1753,10 @@ export class WorkflowEngine {
 									attestedProvider: pinned.provider,
 									attestedModel: pinned.model,
 									exactMatch: pinned.exactMatch,
-									snapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
+									snapshotFingerprint: this.#run.qualityRouteSnapshot?.fingerprint ?? null,
 									createdAt: new Date().toISOString(),
 								};
-								this.#planReviewerRouteSelectionRef = await this.#persistArtifact(
+								this.#run.planReviewerRouteSelectionRef = await this.#persistArtifact(
 									workflowId,
 									attemptId,
 									"plan-review-route-selection",
@@ -1755,30 +1784,30 @@ export class WorkflowEngine {
 				const review = isV2Review
 					? {
 							...rawReview,
-							authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
+							authorResponses: this.#run.authorResponses ? [...this.#run.authorResponses] : [],
 							triggerReason: derivePlanReviewTrigger(rawReview),
 							routeSelectionReceiptRef:
-								this.#planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
+								this.#run.planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
 							cleanContextReceiptRef: null,
 							specEvidenceReceiptRef: null,
 						}
 					: rawReview;
-				this.#planReview = review;
-				this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
+				this.#run.planReview = review;
+				this.#run.planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
 				const nextRejectionCount =
 					review.decision === "changes_requested" ? control.planRejectionCount + 1 : control.planRejectionCount;
 				const hasMissingAuthority =
 					isV2Review && review.schemaVersion === 2 && review.findings.some(f => f.basis === "missing_authority");
 				const triggerReason: PlanReviewTriggerReasonV1 | null =
 					isV2Review && review.schemaVersion === 2 ? review.triggerReason : null;
-				this.#planReviewControl = {
+				this.#run.planReviewControl = {
 					...control,
-					latestPlanArtifactRef: this.#planArtifactRef?.artifactId ?? control.latestPlanArtifactRef,
-					latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
+					latestPlanArtifactRef: this.#run.planArtifactRef?.artifactId ?? control.latestPlanArtifactRef,
+					latestReviewArtifactRef: this.#run.planReviewArtifactRef.artifactId,
 					authorResponsesArtifactRef:
-						this.#authorResponsesArtifactRef?.artifactId ?? control.authorResponsesArtifactRef,
+						this.#run.authorResponsesArtifactRef?.artifactId ?? control.authorResponsesArtifactRef,
 					routeSelectionReceiptRef:
-						this.#planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
+						this.#run.planReviewerRouteSelectionRef?.artifactId ?? control.routeSelectionReceiptRef,
 					planRejectionCount: nextRejectionCount,
 					updatedAt: new Date().toISOString(),
 				};
@@ -1808,11 +1837,11 @@ export class WorkflowEngine {
 					review.decision === "changes_requested" && nextRejectionCount >= this.#config.maxPlanCycles;
 				const authorRejectEvidence =
 					maxCyclesHit &&
-					hasMaxCyclesAuthorReject(this.#authorResponses ?? [], this.#authorResponsesPriorFindings ?? []);
+					hasMaxCyclesAuthorReject(this.#run.authorResponses ?? [], this.#run.authorResponsesPriorFindings ?? []);
 				const triggerArbitration =
 					triggerReason === "contradiction" || triggerReason === "suspicious_pass" || authorRejectEvidence;
 				if (maxCyclesHit && !triggerArbitration) {
-					this.#planCycles = nextRejectionCount;
+					this.#run.planCycles = nextRejectionCount;
 					await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "max_plan_cycles_exceeded");
 					return;
 				}
@@ -1821,16 +1850,16 @@ export class WorkflowEngine {
 						triggerReason === "contradiction" || triggerReason === "suspicious_pass"
 							? triggerReason
 							: "max_cycles_author_reject";
-					if (this.#planReviewControl.arbitrationCycles >= 1) {
+					if (this.#run.planReviewControl.arbitrationCycles >= 1) {
 						await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "maximum arbitration cycles reached");
 						return;
 					}
-					this.#planCycles = nextRejectionCount;
+					this.#run.planCycles = nextRejectionCount;
 					// HIGH-5: reserve the sole arbitration cycle before the external call.
 					// Resume with reserved+no trusted artifact fails closed (no re-pay).
 					const arbitrationAttemptId = `arb_${randomUUID()}`;
-					this.#planReviewControl = {
-						...this.#planReviewControl,
+					this.#run.planReviewControl = {
+						...this.#run.planReviewControl,
 						substate: "arbitration",
 						arbitrationCycles: 1,
 						planRejectionCount: nextRejectionCount,
@@ -1849,9 +1878,9 @@ export class WorkflowEngine {
 						arbitrationTrigger,
 					);
 					if (!arbitration) {
-						if (this.#planReviewControl) {
-							this.#planReviewControl = {
-								...this.#planReviewControl,
+						if (this.#run.planReviewControl) {
+							this.#run.planReviewControl = {
+								...this.#run.planReviewControl,
 								arbitrationAttemptPhase: "failed_closed",
 								updatedAt: new Date().toISOString(),
 							};
@@ -1878,16 +1907,16 @@ export class WorkflowEngine {
 				const next = getNextStage("plan_review", review.decision);
 				if (!next) throw new WorkflowPolicyError("invalid_review_decision", { decision: review.decision });
 				if (review.decision === "changes_requested") {
-					this.#planCycles = nextRejectionCount;
-					this.#planReviewControl = {
-						...this.#planReviewControl,
+					this.#run.planCycles = nextRejectionCount;
+					this.#run.planReviewControl = {
+						...this.#run.planReviewControl,
 						substate: "awaiting_replan",
 						updatedAt: new Date().toISOString(),
 					};
 					await this.#persistPlanReviewControl(workflowId, attemptId);
 				} else {
-					this.#planReviewControl = {
-						...this.#planReviewControl,
+					this.#run.planReviewControl = {
+						...this.#run.planReviewControl,
 						substate: reviewKind === "rereview" ? "rereview" : "initial_review",
 						arbitrationTrigger: null,
 						updatedAt: new Date().toISOString(),
@@ -1905,7 +1934,7 @@ export class WorkflowEngine {
 				return;
 			}
 			case "implementing": {
-				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
+				if (!this.#run.plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
 				// Deterministic planner→implementer handoff (success path into implement only).
 				const plannerHandoff = await this.#buildAndPersistHandoff(
 					workflowId,
@@ -1914,12 +1943,12 @@ export class WorkflowEngine {
 					"implementing",
 					() =>
 						buildPlannerToImplementerHandoff({
-							plan: this.#plan!,
-							planReview: this.#planReview,
-							planRef: this.#planArtifactRef,
-							planReviewRef: this.#planReviewArtifactRef,
+							plan: this.#run.plan!,
+							planReview: this.#run.planReview,
+							planRef: this.#run.planArtifactRef,
+							planReviewRef: this.#run.planReviewArtifactRef,
 						}),
-					[this.#planArtifactRef, this.#planReviewArtifactRef],
+					[this.#run.planArtifactRef, this.#run.planReviewArtifactRef],
 				);
 				const execution = await this.#executeImplementation(
 					workflowId,
@@ -1930,11 +1959,11 @@ export class WorkflowEngine {
 					policy,
 				);
 				let impl = execution.artifact;
-				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, impl);
+				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#run.plan, impl);
 				if (!execution.usageRecorded) {
 					await this.#recordUsageAndProfile(workflowId, attemptId, execution.usage, {
 						...execution.evidence,
-						scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
+						scopeMetricsKind: this.#run.lastScopeMetrics ? "scope-metrics" : undefined,
 					});
 				}
 				if (!execution.writeCommitted) {
@@ -1948,8 +1977,8 @@ export class WorkflowEngine {
 						signal,
 					});
 				}
-				this.#implementation = impl;
-				this.#implementationArtifactRef = await this.#persistArtifact(
+				this.#run.implementation = impl;
+				this.#run.implementationArtifactRef = await this.#persistArtifact(
 					workflowId,
 					attemptId,
 					"implementation",
@@ -1960,13 +1989,14 @@ export class WorkflowEngine {
 				return;
 			}
 			case "implementation_verify": {
-				if (!this.#implementation) throw new WorkflowPolicyError("missing_implementation_artifact", { workflowId });
+				if (!this.#run.implementation)
+					throw new WorkflowPolicyError("missing_implementation_artifact", { workflowId });
 				// Only trusted configured commands — never trust model-proposed verificationCommands alone.
-				const commands = this.#trustedVerificationCommands(this.#plan?.verificationCommands);
+				const commands = this.#trustedVerificationCommands(this.#run.plan?.verificationCommands);
 				const verification = await new ImplementationVerifyStage(this.#verifier).execute({
 					workflowId,
 					attemptId,
-					implementation: this.#implementation,
+					implementation: this.#run.implementation,
 					commands,
 					forbiddenPaths: this.#config.forbiddenPaths,
 					signal,
@@ -1974,8 +2004,8 @@ export class WorkflowEngine {
 					cwd,
 					observeSink: session.sessionManager,
 				});
-				this.#verification = verification;
-				this.#verificationArtifactRef = await this.#persistArtifact(
+				this.#run.verification = verification;
+				this.#run.verificationArtifactRef = await this.#persistArtifact(
 					workflowId,
 					attemptId,
 					"verification",
@@ -1995,7 +2025,7 @@ export class WorkflowEngine {
 				return;
 			}
 			case "code_review": {
-				if (!this.#plan || !this.#implementation) {
+				if (!this.#run.plan || !this.#run.implementation) {
 					throw new WorkflowPolicyError("missing_artifacts_for_code_review", { workflowId });
 				}
 				if (state.pipelineKind === "devflow") {
@@ -2006,7 +2036,7 @@ export class WorkflowEngine {
 				const patchRef = await this.#ensurePatchArtifactRef(
 					workflowId,
 					attemptId,
-					this.#implementation.patchPath,
+					this.#run.implementation.patchPath,
 					cwd,
 				);
 				const reviewerHandoff = await this.#buildAndPersistHandoff(
@@ -2016,15 +2046,20 @@ export class WorkflowEngine {
 					"code_review",
 					() =>
 						buildImplementerToReviewerHandoff({
-							implementation: this.#implementation!,
-							plan: this.#plan,
-							verification: this.#verification,
-							implRef: this.#implementationArtifactRef,
-							planRef: this.#planArtifactRef,
-							verificationRef: this.#verificationArtifactRef,
+							implementation: this.#run.implementation!,
+							plan: this.#run.plan,
+							verification: this.#run.verification,
+							implRef: this.#run.implementationArtifactRef,
+							planRef: this.#run.planArtifactRef,
+							verificationRef: this.#run.verificationArtifactRef,
 							patchRef,
 						}),
-					[this.#implementationArtifactRef, this.#planArtifactRef, this.#verificationArtifactRef, patchRef],
+					[
+						this.#run.implementationArtifactRef,
+						this.#run.planArtifactRef,
+						this.#run.verificationArtifactRef,
+						patchRef,
+					],
 				);
 				const {
 					artifact: review,
@@ -2042,10 +2077,10 @@ export class WorkflowEngine {
 				} = await this.#withProfileFallback(
 					"code_reviewer",
 					{
-						implementerVendor: this.#implementerVendor ?? this.#implementation.provider,
-						implementerModelFamily: this.#implementerModelFamily,
+						implementerVendor: this.#run.implementerVendor ?? this.#run.implementation.provider,
+						implementerModelFamily: this.#run.implementerModelFamily,
 						requireIndependentReview: policy.requireIndependentReview !== false,
-						degradedMode: this.#qualityRouteSnapshot
+						degradedMode: this.#run.qualityRouteSnapshot
 							? false
 							: Boolean(policy.degradedMode) || this.#config.degradedMode,
 					},
@@ -2058,16 +2093,18 @@ export class WorkflowEngine {
 							assignment: "Independent code review of the implementation",
 							context: await this.#buildStageContext(
 								this.#contextBuilder.buildCodeReviewContext({
-									plan: this.#plan!,
-									implementation: this.#implementation!,
-									verification: this.#verification,
+									plan: this.#run.plan!,
+									implementation: this.#run.implementation!,
+									verification: this.#run.verification,
 									inclusion: resolveArtifactInclusion(profile),
+									planRef: this.#run.planArtifactRef,
+									requirementsSnapshot: this.#run.requirementsSnapshot,
 								}),
 								profile,
 								session,
 								[
-									...(this.#plan?.affectedFiles.map(f => f.path) ?? []),
-									...(this.#implementation?.changedFiles ?? []),
+									...(this.#run.plan?.affectedFiles.map(f => f.path) ?? []),
+									...(this.#run.implementation?.changedFiles ?? []),
 								],
 								reviewerHandoff,
 							),
@@ -2077,13 +2114,13 @@ export class WorkflowEngine {
 						});
 					},
 				);
-				this.#codeReview = review;
+				this.#run.codeReview = review;
 				for (const f of review.findings) {
 					const blocking = FindingTracker.computeBlockingDisposition(f, review, this.#config.confidenceThreshold);
 					f.blocking = blocking;
-					this.#findingTracker.add(f, { blocking });
+					this.#run.findingTracker.add(f, { blocking });
 				}
-				this.#codeReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
+				this.#run.codeReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", review);
 				await this.#persistFindingsState(workflowId, attemptId);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					promptAssemblyReceipt,
@@ -2111,11 +2148,12 @@ export class WorkflowEngine {
 				return;
 			}
 			case "repairing": {
-				if (!this.#plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
-				const open = this.#findingTracker.getOpen();
+				if (!this.#run.plan) throw new WorkflowPolicyError("missing_plan_artifact", { workflowId });
+				const open = this.#run.findingTracker.getOpen();
 				if (
-					this.#workPackageState?.stage === "repairing" &&
-					(this.#workPackageState.merge.status === "prepared" || this.#workPackageState.merge.status === "applied")
+					this.#run.workPackageState?.stage === "repairing" &&
+					(this.#run.workPackageState.merge.status === "prepared" ||
+						this.#run.workPackageState.merge.status === "applied")
 				) {
 					const recovered = await this.#recoverAppliedWorkPackageImplementation(
 						workflowId,
@@ -2127,7 +2165,7 @@ export class WorkflowEngine {
 					for (const finding of open) {
 						if (recoveredFingerprints.has(finding.fingerprint)) continue;
 						recoveredFingerprints.add(finding.fingerprint);
-						this.#findingTracker.recordRepairCycle(finding.fingerprint);
+						this.#run.findingTracker.recordRepairCycle(finding.fingerprint);
 					}
 					await this.#completeRepairStage(workflowId, attemptId, fresh, recovered.artifact, open);
 					return;
@@ -2152,8 +2190,8 @@ export class WorkflowEngine {
 				for (const f of open) {
 					if (seenFingerprints.has(f.fingerprint)) continue;
 					seenFingerprints.add(f.fingerprint);
-					const esc = this.#findingTracker.recordRepairCycle(f.fingerprint);
-					if (esc === "block" || this.#findingTracker.shouldBlock()) {
+					const esc = this.#run.findingTracker.recordRepairCycle(f.fingerprint);
+					if (esc === "block" || this.#run.findingTracker.shouldBlock()) {
 						await this.#store.completeAttemptAndTransition({
 							workflowId,
 							attemptId,
@@ -2176,7 +2214,7 @@ export class WorkflowEngine {
 						: []),
 				].join("\n\n");
 				const primary = open[0];
-				const repairHandoff = this.#codeReview
+				const repairHandoff = this.#run.codeReview
 					? await this.#buildAndPersistHandoff(
 							workflowId,
 							attemptId,
@@ -2186,19 +2224,23 @@ export class WorkflowEngine {
 								const repairHistory = open.map(f => ({
 									findingId: f.id,
 									fingerprint: FindingTracker.fingerprint(f),
-									cycles: this.#findingTracker.cycleCount(FindingTracker.fingerprint(f)),
+									cycles: this.#run.findingTracker.cycleCount(FindingTracker.fingerprint(f)),
 								}));
 								return buildReviewerToRepairHandoff({
-									review: this.#codeReview!,
-									verification: this.#verification,
-									implementation: this.#implementation,
+									review: this.#run.codeReview!,
+									verification: this.#run.verification,
+									implementation: this.#run.implementation,
 									repairHistory,
-									reviewRef: this.#codeReviewArtifactRef,
-									verificationRef: this.#verificationArtifactRef,
-									implRef: this.#implementationArtifactRef,
+									reviewRef: this.#run.codeReviewArtifactRef,
+									verificationRef: this.#run.verificationArtifactRef,
+									implRef: this.#run.implementationArtifactRef,
 								});
 							},
-							[this.#codeReviewArtifactRef, this.#verificationArtifactRef, this.#implementationArtifactRef],
+							[
+								this.#run.codeReviewArtifactRef,
+								this.#run.verificationArtifactRef,
+								this.#run.implementationArtifactRef,
+							],
 						)
 					: undefined;
 				// Treatment receipt: a mechanical repair was routed with static split engaged.
@@ -2222,8 +2264,8 @@ export class WorkflowEngine {
 					"repair",
 					{
 						finding: primary,
-						findingTracker: this.#findingTracker,
-						preferReasoningRepair: primary ? this.#findingTracker.needsReasoningRepair(primary) : false,
+						findingTracker: this.#run.findingTracker,
+						preferReasoningRepair: primary ? this.#run.findingTracker.needsReasoningRepair(primary) : false,
 						mechanicalClass: parseWorkflowMechanicalClass(policy.mechanicalClass) ?? undefined,
 						roleStaticSplitEnabled,
 					},
@@ -2237,19 +2279,21 @@ export class WorkflowEngine {
 							assignment: repairAssignment,
 							context: await this.#buildStageContext(
 								this.#contextBuilder.buildRepairContext({
-									plan: this.#plan!,
+									plan: this.#run.plan!,
 									findings: open,
 									// Prefer the latest final_verify failure when repairing after completion-gate/scope regressions.
-									verification: this.#finalVerification ?? this.#verification,
-									implementation: this.#implementation,
-									reviewExplanation: this.#codeReview?.explanation ?? this.#planReview?.explanation,
+									verification: this.#run.finalVerification ?? this.#run.verification,
+									implementation: this.#run.implementation,
+									reviewExplanation: this.#run.codeReview?.explanation ?? this.#run.planReview?.explanation,
 									inclusion: resolveArtifactInclusion(profile),
+									planRef: this.#run.planArtifactRef,
+									requirementsSnapshot: this.#run.requirementsSnapshot,
 								}),
 								profile,
 								session,
 								[
-									...(this.#plan?.affectedFiles.map(f => f.path) ?? []),
-									...(this.#implementation?.changedFiles ?? []),
+									...(this.#run.plan?.affectedFiles.map(f => f.path) ?? []),
+									...(this.#run.implementation?.changedFiles ?? []),
 									...open.map(f => f.file).filter((p): p is string => Boolean(p)),
 								],
 								repairHandoff,
@@ -2260,7 +2304,7 @@ export class WorkflowEngine {
 						}),
 				);
 				// Build the cumulative candidate without mutating durable workflow state before validation/merge.
-				const previous = this.#implementation;
+				const previous = this.#run.implementation;
 				const strictRepairNoOp = await this.#canAcceptStrictRepairNoOp({
 					repaired,
 					previous,
@@ -2289,7 +2333,7 @@ export class WorkflowEngine {
 						]),
 					],
 				};
-				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#plan, candidateImplementation);
+				await this.#persistScopeMetrics(workflowId, attemptId, cwd, this.#run.plan, candidateImplementation);
 				await this.#recordUsageAndProfile(workflowId, attemptId, usage, {
 					resolvedProvider,
 					resolvedModel,
@@ -2301,7 +2345,7 @@ export class WorkflowEngine {
 					optimizationReceipts,
 					resolvedToolPolicyId,
 					completionKind,
-					scopeMetricsKind: this.#lastScopeMetrics ? "scope-metrics" : undefined,
+					scopeMetricsKind: this.#run.lastScopeMetrics ? "scope-metrics" : undefined,
 				});
 				if (strictRepairNoOp) {
 					const profile = this.#router.list().find(candidate => candidate.id === repaired.modelProfileId);
@@ -2324,26 +2368,26 @@ export class WorkflowEngine {
 					});
 				}
 				await this.#completeRepairStage(workflowId, attemptId, fresh, candidateImplementation, open, {
-					modelFamily: strictRepairNoOp ? this.#implementerModelFamily : modelFamily,
+					modelFamily: strictRepairNoOp ? this.#run.implementerModelFamily : modelFamily,
 				});
 				return;
 			}
 			case "final_verify": {
-				const commands = this.#trustedVerificationCommands(this.#plan?.verificationCommands);
-				const openFindings = this.#findingTracker.getOpen().filter(f => f.blocking === true);
+				const commands = this.#trustedVerificationCommands(this.#run.plan?.verificationCommands);
+				const openFindings = this.#run.findingTracker.getOpen().filter(f => f.blocking === true);
 				const verification = await new FinalVerifyStage(this.#verifier).execute({
 					workflowId,
 					attemptId,
 					commands,
 					forbiddenPaths: this.#config.forbiddenPaths,
-					implementation: this.#implementation,
+					implementation: this.#run.implementation,
 					openFindings,
-					scopeStatus: this.#lastScopeMetrics?.status,
+					scopeStatus: this.#run.lastScopeMetrics?.status,
 					signal,
 					timeoutMs: this.#config.verificationTimeoutMs,
 					cwd,
 					// Reuse sealed implementation_verify greens only when code state + commands still match.
-					priorVerification: this.#verification,
+					priorVerification: this.#run.verification,
 					observeSink: session.sessionManager,
 				});
 				const deliveryOk = isValidDeliveryEvidence(verification);
@@ -2363,7 +2407,7 @@ export class WorkflowEngine {
 									},
 								],
 							};
-				this.#finalVerification = effectiveVerification;
+				this.#run.finalVerification = effectiveVerification;
 				await this.#persistArtifact(workflowId, attemptId, "verification", effectiveVerification);
 				// Explicit parent-acceptance receipt for offline e2e association.
 				// Normal stage transitions alone must not imply verification.
@@ -2385,7 +2429,7 @@ export class WorkflowEngine {
 						: null;
 					// Never invent a user-entry id from workflowId — leave episode
 					// null (unattributed) when the branch has no user message root.
-					const acceptanceContract = buildAcceptanceContractRef(this.#plan?.acceptanceCriteria ?? []);
+					const acceptanceContract = buildAcceptanceContractRef(this.#run.plan?.acceptanceCriteria ?? []);
 					const validityCode = effectiveVerification.validity?.codeState;
 					session.sessionManager?.appendCustomEntry(
 						PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
@@ -2455,7 +2499,7 @@ export class WorkflowEngine {
 
 	#requiresRepairNoOpDeclaration(open: readonly ReviewFindingV1[]): boolean {
 		if (open.some(finding => finding.blocking === true)) return false;
-		const finalVerification = this.#finalVerification;
+		const finalVerification = this.#run.finalVerification;
 		if (!finalVerification || finalVerification.passed) return false;
 		const failedChecks = finalVerification.checks.filter(check => check.status === "failed");
 		if (failedChecks.length !== 1 || failedChecks[0].id !== "completion-gate") return false;
@@ -2490,42 +2534,46 @@ export class WorkflowEngine {
 		open: readonly ReviewFindingV1[],
 		evidence?: { modelFamily?: string | null },
 	): Promise<void> {
-		this.#implementation = implementation;
+		this.#run.implementation = implementation;
 		// Repair mutates code under test — prior greens are stale and must not be reused.
 		// Persist the invalidated seal so resume cannot reload a pre-repair green as valid.
-		if (this.#verification) {
-			this.#verification = invalidateVerificationResult(this.#verification, "repair_applied", "repair_applied");
-			this.#verificationArtifactRef = await this.#persistArtifact(
+		if (this.#run.verification) {
+			this.#run.verification = invalidateVerificationResult(
+				this.#run.verification,
+				"repair_applied",
+				"repair_applied",
+			);
+			this.#run.verificationArtifactRef = await this.#persistArtifact(
 				workflowId,
 				attemptId,
 				"verification",
-				this.#verification,
+				this.#run.verification,
 			);
 		}
-		if (this.#finalVerification) {
-			this.#finalVerification = invalidateVerificationResult(
-				this.#finalVerification,
+		if (this.#run.finalVerification) {
+			this.#run.finalVerification = invalidateVerificationResult(
+				this.#run.finalVerification,
 				"repair_applied",
 				"repair_applied",
 			);
-			await this.#persistArtifact(workflowId, attemptId, "verification", this.#finalVerification);
+			await this.#persistArtifact(workflowId, attemptId, "verification", this.#run.finalVerification);
 		}
 		// Latest write author must drive independent-review exclusion after repair.
-		if (implementation.provider) this.#implementerVendor = implementation.provider;
-		if (evidence?.modelFamily) this.#implementerModelFamily = evidence.modelFamily;
+		if (implementation.provider) this.#run.implementerVendor = implementation.provider;
+		if (evidence?.modelFamily) this.#run.implementerModelFamily = evidence.modelFamily;
 		else if (implementation.modelProfileId) {
 			const profile = this.#router.list().find(p => p.id === implementation.modelProfileId);
-			if (profile?.vendor) this.#implementerVendor = profile.vendor;
+			if (profile?.vendor) this.#run.implementerVendor = profile.vendor;
 		}
 		const resolvedIds = new Set(implementation.addressedStepIds);
 		for (const id of open.map(finding => finding.id)) {
-			if (resolvedIds.has(id)) this.#findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
+			if (resolvedIds.has(id)) this.#run.findingTracker.resolve(id, "resolved", [`repair:${attemptId}`]);
 		}
-		this.#implementationArtifactRef = await this.#persistArtifact(
+		this.#run.implementationArtifactRef = await this.#persistArtifact(
 			workflowId,
 			attemptId,
 			"implementation",
-			this.#implementation,
+			this.#run.implementation,
 		);
 		await this.#persistFindingsState(workflowId, attemptId);
 		this.#budgetLedger.recordRepairCycle();
@@ -2548,8 +2596,9 @@ export class WorkflowEngine {
 		evidence?: WorkflowRuntimeEvidence;
 	}> {
 		if (
-			this.#workPackageState?.stage === "implementing" &&
-			(this.#workPackageState.merge.status === "prepared" || this.#workPackageState.merge.status === "applied")
+			this.#run.workPackageState?.stage === "implementing" &&
+			(this.#run.workPackageState.merge.status === "prepared" ||
+				this.#run.workPackageState.merge.status === "applied")
 		) {
 			return this.#recoverAppliedWorkPackageImplementation(workflowId, attemptId, session.cwd, "implementing");
 		}
@@ -2574,33 +2623,33 @@ export class WorkflowEngine {
 					throw new WorkflowPolicyError("concurrency_declaration_invalid", { errors: validation.errors });
 				}
 				// Bind declaration scope to the approved plan artifact when available.
-				if (this.#planArtifactSha256 && candidate.scopeArtifactSha256 !== this.#planArtifactSha256) {
+				if (this.#run.planArtifactSha256 && candidate.scopeArtifactSha256 !== this.#run.planArtifactSha256) {
 					throw new WorkflowPolicyError("concurrency_declaration_invalid", {
 						reason: "scope_artifact_sha256_mismatch",
-						expected: this.#planArtifactSha256,
+						expected: this.#run.planArtifactSha256,
 						actual: candidate.scopeArtifactSha256,
 					});
 				}
 				if (
-					this.#planArtifactRef?.artifactId &&
+					this.#run.planArtifactRef?.artifactId &&
 					candidate.scopeArtifactRef &&
-					candidate.scopeArtifactRef !== this.#planArtifactRef.artifactId &&
-					candidate.scopeArtifactRef !== this.#planArtifactRef.recoveryUri
+					candidate.scopeArtifactRef !== this.#run.planArtifactRef.artifactId &&
+					candidate.scopeArtifactRef !== this.#run.planArtifactRef.recoveryUri
 				) {
 					throw new WorkflowPolicyError("concurrency_declaration_invalid", {
 						reason: "scope_artifact_ref_mismatch",
-						expected: this.#planArtifactRef.artifactId,
+						expected: this.#run.planArtifactRef.artifactId,
 						actual: candidate.scopeArtifactRef,
 					});
 				}
 				concurrencyDeclaration = candidate;
-			} else if (this.#plan?.workPackages) {
-				const generated = workPackagesToConcurrencyDeclaration(this.#plan.workPackages, {
+			} else if (this.#run.plan?.workPackages) {
+				const generated = workPackagesToConcurrencyDeclaration(this.#run.plan.workPackages, {
 					declarationId: `${workflowId}:work-packages`,
 					ownerId: workflowId,
 					maxConcurrency: 0,
-					scopeArtifactRef: this.#planArtifactRef?.artifactId ?? `${workflowId}:plan`,
-					scopeArtifactSha256: this.#planArtifactSha256 ?? "0".repeat(64),
+					scopeArtifactRef: this.#run.planArtifactRef?.artifactId ?? `${workflowId}:plan`,
+					scopeArtifactSha256: this.#run.planArtifactSha256 ?? "0".repeat(64),
 				});
 				if (generated) {
 					const validation = validateConcurrencyDeclaration(generated, { knownFieldsOnly: true });
@@ -2621,7 +2670,7 @@ export class WorkflowEngine {
 					})
 				: taskMaxConcurrency;
 		const mergeCapturedChanges = this.#adapter.mergeCapturedChanges;
-		let packageInput = this.#plan?.workPackages;
+		let packageInput = this.#run.plan?.workPackages;
 		if (concurrencyDeclaration && executionArmEnabled) {
 			// Treatment receipt: the declaration was lowered onto the work-package runtime.
 			session.markLatencyArmFired?.("concurrency_execution");
@@ -2660,13 +2709,13 @@ export class WorkflowEngine {
 		const implementerRoute = {
 			mechanicalClass:
 				parseWorkflowMechanicalClass(policy.mechanicalClass) ??
-				classifyPlanMechanicalImplementer(this.#plan) ??
+				classifyPlanMechanicalImplementer(this.#run.plan) ??
 				undefined,
-			preferVeryComplexImplementer: isVeryComplexImplementerPlan(this.#plan),
+			preferVeryComplexImplementer: isVeryComplexImplementerPlan(this.#run.plan),
 		};
 		if (!mergeCapturedChanges || !packagePlan) {
 			const result = await this.#withProfileFallback("implementer", implementerRoute, async profile => {
-				this.#implementerVendor = profile.vendor;
+				this.#run.implementerVendor = profile.vendor;
 				return new ImplementStage(this.#adapter).execute({
 					workflowId,
 					attemptId,
@@ -2674,13 +2723,14 @@ export class WorkflowEngine {
 					assignment: "Implement the approved plan in isolation",
 					context: await this.#buildStageContext(
 						this.#contextBuilder.buildImplementContext(
-							this.#plan!,
-							this.#planReview,
+							this.#run.plan!,
+							this.#run.planReview,
 							resolveArtifactInclusion(profile),
+							{ planRef: this.#run.planArtifactRef, requirementsSnapshot: this.#run.requirementsSnapshot },
 						),
 						profile,
 						session,
-						this.#plan?.affectedFiles.map(file => file.path),
+						this.#run.plan?.affectedFiles.map(file => file.path),
 						plannerHandoff,
 					),
 					session,
@@ -2688,7 +2738,7 @@ export class WorkflowEngine {
 					isolation: this.#config.isolation,
 				});
 			});
-			this.#implementerModelFamily = result.modelFamily;
+			this.#run.implementerModelFamily = result.modelFamily;
 			return {
 				artifact: result.artifact,
 				usageRecorded: false,
@@ -2710,15 +2760,17 @@ export class WorkflowEngine {
 		}
 
 		let profileAttempt = 0;
-		const resumableStatePresent = this.#workPackageState !== undefined;
+		const resumableStatePresent = this.#run.workPackageState !== undefined;
 		const completed = await this.#withProfileFallback("implementer", implementerRoute, async (profile, route) => {
-			this.#implementerVendor = profile.vendor;
+			this.#run.implementerVendor = profile.vendor;
 			const reuseSucceeded = profileAttempt === 0 && resumableStatePresent;
 			profileAttempt += 1;
 			const profileBudget = this.#budgetLedger.profileSnapshot(profile.id);
 			const plannedRequests = reuseSucceeded
 				? packagePlan.packages.filter(workPackage => {
-						const previous = this.#workPackageState?.packages.find(candidate => candidate.id === workPackage.id);
+						const previous = this.#run.workPackageState?.packages.find(
+							candidate => candidate.id === workPackage.id,
+						);
 						return previous?.status !== "succeeded";
 					}).length
 				: packagePlan.packages.length;
@@ -2737,7 +2789,7 @@ export class WorkflowEngine {
 				attemptId,
 				cwd: session.cwd,
 				plan: packagePlan,
-				priorState: this.#workPackageState,
+				priorState: this.#run.workPackageState,
 				reuseSucceeded,
 				signal,
 				execute: async (workPackage, invocationAttemptId, workerSignal) => {
@@ -2748,9 +2800,10 @@ export class WorkflowEngine {
 						assignment: renderWorkPackageAssignment(workPackage),
 						context: await this.#buildStageContext(
 							this.#contextBuilder.buildImplementContext(
-								this.#plan!,
-								this.#planReview,
+								this.#run.plan!,
+								this.#run.planReview,
 								resolveArtifactInclusion(profile),
+								{ planRef: this.#run.planArtifactRef, requirementsSnapshot: this.#run.requirementsSnapshot },
 							),
 							profile,
 							session,
@@ -2788,7 +2841,7 @@ export class WorkflowEngine {
 		for (const execution of completedExecutions) {
 			this.#assertStrictWriteIdentity(completed.profile, execution.identityReceipt);
 		}
-		this.#implementerModelFamily =
+		this.#run.implementerModelFamily =
 			completedExecutions
 				.map(execution => execution.modelFamily ?? execution.identityReceipt?.modelFamily)
 				.find((family): family is string => typeof family === "string") ?? completed.routeModelFamily;
@@ -2799,7 +2852,7 @@ export class WorkflowEngine {
 			if (!patchPath) throw new WorkflowPolicyError("work_package_patch_missing_before_merge", { packageId });
 			return { packageId, patchPath };
 		});
-		await this.#persistWorkPackageScopeMetrics(workflowId, attemptId, session.cwd, this.#plan!, patches);
+		await this.#persistWorkPackageScopeMetrics(workflowId, attemptId, session.cwd, this.#run.plan!, patches);
 		this.#assertStrictWriteScope(completed.profile);
 		const outputPatchPath = path.join(
 			this.#artifactStore.baseDir,
@@ -2841,7 +2894,7 @@ export class WorkflowEngine {
 		usageRecorded: boolean;
 		writeCommitted: boolean;
 	}> {
-		let state = this.#workPackageState;
+		let state = this.#run.workPackageState;
 		if (
 			!state ||
 			state.stage !== expectedStage ||
@@ -2913,11 +2966,11 @@ export class WorkflowEngine {
 			artifact = aggregateWorkPackageImplementations({ workflowId, attemptId, profile, state, merge });
 		}
 		if (expectedStage === "implementing") {
-			this.#implementerVendor = profile.vendor;
-			this.#implementerModelFamily =
+			this.#run.implementerVendor = profile.vendor;
+			this.#run.implementerModelFamily =
 				state.packages
 					.map(execution => execution.modelFamily ?? execution.identityReceipt?.modelFamily)
-					.find((family): family is string => typeof family === "string") ?? this.#implementerModelFamily;
+					.find((family): family is string => typeof family === "string") ?? this.#run.implementerModelFamily;
 		}
 		return { artifact, usageRecorded: true, writeCommitted: true };
 	}
@@ -2949,7 +3002,7 @@ export class WorkflowEngine {
 			attemptId: options.attemptId,
 			stage: options.artifact.stage,
 			createdAt: new Date().toISOString(),
-			revision: this.#workPackageState?.revision ?? 0,
+			revision: this.#run.workPackageState?.revision ?? 0,
 			mode: "capture_then_apply",
 			packages: [
 				{
@@ -3068,7 +3121,7 @@ export class WorkflowEngine {
 		patches: readonly { packageId: string; patchPath: string }[];
 		outputPatchPath: string;
 	}): Promise<WorkPackageStateArtifactV1> {
-		const scopeStatus = this.#lastScopeMetrics?.status;
+		const scopeStatus = this.#run.lastScopeMetrics?.status;
 		if (scopeStatus !== "adhered") {
 			throw new WorkflowPolicyError("strict_write_scope_not_approved", { scopeStatus: scopeStatus ?? "missing" });
 		}
@@ -3266,11 +3319,11 @@ export class WorkflowEngine {
 
 	#assertStrictWriteScope(profile: ModelProfile): void {
 		if (!profile.strictIdentity) return;
-		if (this.#lastScopeMetrics?.status !== "adhered") {
+		if (this.#run.lastScopeMetrics?.status !== "adhered") {
 			throw new WorkflowPolicyError("strict_write_scope_not_approved", {
 				profileId: profile.id,
-				scopeStatus: this.#lastScopeMetrics?.status ?? "missing",
-				scopeFindings: this.#lastScopeMetrics?.scopeCreepFindings ?? [],
+				scopeStatus: this.#run.lastScopeMetrics?.status ?? "missing",
+				scopeFindings: this.#run.lastScopeMetrics?.scopeCreepFindings ?? [],
 			});
 		}
 	}
@@ -3310,7 +3363,7 @@ export class WorkflowEngine {
 			forbiddenFiles: this.#config.forbiddenPaths ?? [],
 			changedFiles: [...changedFiles],
 		});
-		this.#lastScopeMetrics = metrics;
+		this.#run.lastScopeMetrics = metrics;
 		await this.#persistArtifact(workflowId, attemptId, "scope-metrics", metrics);
 	}
 
@@ -3321,7 +3374,7 @@ export class WorkflowEngine {
 	): Promise<void> {
 		const persisted = structuredClone(state);
 		await this.#persistArtifact(workflowId, attemptId, "work-package-state", persisted);
-		this.#workPackageState = persisted;
+		this.#run.workPackageState = persisted;
 	}
 
 	/**
@@ -3335,7 +3388,11 @@ export class WorkflowEngine {
 		relevantFiles?: string[],
 		handoff?: StageHandoffV1 | null,
 	): Promise<string> {
-		const withHandoff = this.#contextBuilder.appendStageHandoff(base, handoff);
+		const withHandoff = this.#contextBuilder.appendStageHandoff(base, handoff, {
+			stage: handoff?.toStage,
+			requirementsSnapshot: this.#run.requirementsSnapshot,
+			planRef: this.#run.planArtifactRef,
+		});
 		return this.#contextBuilder.appendRepoMapIfEnabled(withHandoff, {
 			cwd: session.cwd,
 			contextStrategy: profile.contextStrategy,
@@ -3398,7 +3455,7 @@ export class WorkflowEngine {
 			// Intentionally do NOT fall back to impl.changedFiles (model self-report).
 		}
 
-		this.#lastScopeMetrics = metrics;
+		this.#run.lastScopeMetrics = metrics;
 		await this.#persistArtifact(workflowId, attemptId, "scope-metrics", metrics);
 	}
 
@@ -3430,10 +3487,10 @@ export class WorkflowEngine {
 	 * work-package identity checks and artifact hydrate.
 	 */
 	#syncSessionFallbackProfile(session: ToolSession | undefined): void {
-		if (this.#qualityRouteSnapshot) return;
+		if (this.#run.qualityRouteSnapshot) return;
 		const fallback = sessionFallbackImplementerProfile(session);
 		if (!fallback) return;
-		this.#configuredRouter.register(fallback);
+		this.#router.register(fallback);
 	}
 
 	async #withPinnedProfile<T>(
@@ -3442,10 +3499,10 @@ export class WorkflowEngine {
 		run: (profile: ModelProfile, route: RoutingDecision) => Promise<T>,
 		reason: string,
 	): Promise<T> {
-		if (this.#preflightUnavailableReasons[profileId]) {
+		if (this.#run.preflightUnavailableReasons[profileId]) {
 			throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", {
 				profileId,
-				reason: this.#preflightUnavailableReasons[profileId],
+				reason: this.#run.preflightUnavailableReasons[profileId],
 			});
 		}
 		const profile = this.#router
@@ -3460,10 +3517,10 @@ export class WorkflowEngine {
 			vendor: profile.vendor,
 			reason,
 			degraded: false,
-			qualityTier: this.#qualityRouteSnapshot?.qualityTier,
-			snapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint,
+			qualityTier: this.#run.qualityRouteSnapshot?.qualityTier,
+			snapshotFingerprint: this.#run.qualityRouteSnapshot?.fingerprint,
 			candidateProfileIds: [profileId],
-			modelFamily: this.#planReviewerIdentity?.modelFamily,
+			modelFamily: this.#run.planReviewerIdentity?.modelFamily,
 			identityProvenance: "configured",
 		};
 		this.#audit(route);
@@ -3471,7 +3528,7 @@ export class WorkflowEngine {
 	}
 
 	#assertPlanReviewerIdentity(profile: ModelProfile, result: PlanReviewStageResult): void {
-		const expected = this.#planReviewerIdentity;
+		const expected = this.#run.planReviewerIdentity;
 		if (!expected) {
 			throw new WorkflowPolicyError("plan_reviewer_identity_unavailable", {
 				profileId: profile.id,
@@ -3510,10 +3567,10 @@ export class WorkflowEngine {
 		let route: RoutingDecision;
 		try {
 			route = this.#router.resolvePlanArbitrator({
-				avoidModelFamilies: [this.#plannerModelFamily, this.#planReviewerIdentity?.modelFamily].filter(
+				avoidModelFamilies: [this.#run.plannerModelFamily, this.#run.planReviewerIdentity?.modelFamily].filter(
 					(family): family is string => Boolean(family),
 				),
-				unavailableProfileIds: Object.keys(this.#preflightUnavailableReasons),
+				unavailableProfileIds: Object.keys(this.#run.preflightUnavailableReasons),
 				allowDegradedFallback: policy.planArbitratorAllowDegradedFallback === true,
 			});
 		} catch (error) {
@@ -3552,24 +3609,25 @@ export class WorkflowEngine {
 			assignment: "Arbitrate the bounded plan-review disagreement",
 			context: await this.#buildStageContext(
 				`${this.#contextBuilder.buildPlanReviewContext(
-					this.#plan!,
+					this.#run.plan!,
 					resolveArtifactInclusion(route.profile),
-					this.#requirementsSnapshot,
-				)}\n\nLatest review to arbitrate:\n${JSON.stringify(this.#planReview)}\n\nAuthor responses:\n${JSON.stringify(this.#authorResponses ?? [])}\n\nArbitration trigger: ${triggerReason}`,
+					this.#run.requirementsSnapshot,
+					this.#run.planArtifactRef,
+				)}\n\nLatest review to arbitrate:\n${JSON.stringify(this.#run.planReview)}\n\nAuthor responses:\n${JSON.stringify(this.#run.authorResponses ?? [])}\n\nArbitration trigger: ${triggerReason}`,
 				route.profile,
 				session,
-				this.#plan?.affectedFiles.map(file => file.path),
+				this.#run.plan?.affectedFiles.map(file => file.path),
 			),
 			session,
 			signal,
 			requirementsSnapshotRef:
-				this.#requirementsSnapshotRef?.recoveryUri ?? `artifact://${workflowId}/requirements-snapshot`,
+				this.#run.requirementsSnapshotRef?.recoveryUri ?? `artifact://${workflowId}/requirements-snapshot`,
 			requirementsSnapshotSha256: requirementsSnapshot.sha256,
 			reviewKind: "arbitration",
 			reviewRound: 2,
-			authorResponses: this.#authorResponses ? [...this.#authorResponses] : [],
+			authorResponses: this.#run.authorResponses ? [...this.#run.authorResponses] : [],
 			triggerReason,
-			routeSelectionReceiptRef: this.#planReviewControl?.routeSelectionReceiptRef ?? null,
+			routeSelectionReceiptRef: this.#run.planReviewControl?.routeSelectionReceiptRef ?? null,
 		});
 	}
 
@@ -3582,22 +3640,22 @@ export class WorkflowEngine {
 		routeOptions: RouteOptions,
 		run: (profile: ModelProfile, route: RoutingDecision) => Promise<T>,
 	): Promise<T> {
-		const preferredProfileIds = qualityRouteProfileIds(this.#qualityRouteSnapshot, role);
+		const preferredProfileIds = qualityRouteProfileIds(this.#run.qualityRouteSnapshot, role);
 		const unavailable = new Set<string>([
-			...Object.keys(this.#preflightUnavailableReasons),
+			...Object.keys(this.#run.preflightUnavailableReasons),
 			...(routeOptions.unavailableProfileIds ?? []),
 		]);
 		const unavailableReasons: Record<string, string> = {
-			...this.#preflightUnavailableReasons,
+			...this.#run.preflightUnavailableReasons,
 			...routeOptions.unavailableReasons,
 		};
 		const effectiveRouteOptions: RouteOptions = {
 			...routeOptions,
-			...(this.#qualityRouteSnapshot
+			...(this.#run.qualityRouteSnapshot
 				? {
 						preferredProfileIds,
-						qualityTier: this.#qualityRouteSnapshot.qualityTier,
-						snapshotFingerprint: this.#qualityRouteSnapshot.fingerprint,
+						qualityTier: this.#run.qualityRouteSnapshot.qualityTier,
+						snapshotFingerprint: this.#run.qualityRouteSnapshot.fingerprint,
 						degradedMode: false,
 					}
 				: {}),
@@ -3611,7 +3669,7 @@ export class WorkflowEngine {
 			preferredProfileIds?.length ??
 			Math.max(1, this.#router.list().filter(p => p.roles.includes(role) && !unavailable.has(p.id)).length);
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
-			if (attempt > 0 && !(await this.#budgetLedger.checkPreRetry())) {
+			if (!(await this.#budgetLedger.checkPreRetry())) {
 				const snap = this.#budgetLedger.snapshot();
 				throw new BudgetExhaustedError(snap.requests, snap.costUsd ?? "unknown", snap.limitUsd);
 			}
@@ -3636,18 +3694,14 @@ export class WorkflowEngine {
 				return await run(route.profile, route);
 			} catch (error) {
 				lastError = error;
-				const failedRequests = error instanceof WorkPackageExecutionError ? Math.max(1, error.failedRequests) : 1;
-				for (let index = 0; index < failedRequests; index++) {
-					this.#budgetLedger.recordRequest(undefined, route.profileId);
-				}
 				const kind = error instanceof WorkflowError ? error.kind : "";
 				const retryableKinds = route.profile.retryPolicy?.retryableErrorKinds ?? [];
 				const kindOk =
 					this.#isRetryableProviderError(error) || (typeof kind === "string" && retryableKinds.includes(kind));
 				if (attempt < maxAttempts - 1 && kindOk) {
-					if (this.#activeWorkflowId) {
+					if (this.#run.activeWorkflowId) {
 						try {
-							await this.#persistAbortCompletionKind(this.#activeWorkflowId, error);
+							await this.#persistAbortCompletionKind(this.#run.activeWorkflowId, error);
 						} catch {
 							// Evidence persist must not block a retryable profile fallback.
 						}
@@ -3661,10 +3715,10 @@ export class WorkflowEngine {
 				// Credential/identity exhaustion → blocked; other last-candidate errors surface as-is
 				// (quality routes always block; legacy routes only block auth/quota/identity).
 				const credentialKind = kind === "authentication" || kind === "quota" || kind === "identity_mismatch";
-				if (kindOk && (this.#qualityRouteSnapshot || credentialKind)) {
+				if (kindOk && (this.#run.qualityRouteSnapshot || credentialKind)) {
 					throw new WorkflowPolicyError("quality_route_candidates_exhausted", {
 						role,
-						qualityTier: this.#qualityRouteSnapshot?.qualityTier,
+						qualityTier: this.#run.qualityRouteSnapshot?.qualityTier,
 						lastProfileId: route.profileId,
 						lastErrorKind: kind || "runtime_error",
 					});
@@ -3688,7 +3742,7 @@ export class WorkflowEngine {
 			);
 			if (open) {
 				const writeStage = stage === "implementing" || stage === "repairing";
-				const packageState = writeStage ? this.#workPackageState : undefined;
+				const packageState = writeStage ? this.#run.workPackageState : undefined;
 				const resumablePackageCapture =
 					packageState?.mode === "capture_then_apply" && packageState.merge.status === "pending";
 				const recoverablePreparedMerge =
@@ -3759,7 +3813,7 @@ export class WorkflowEngine {
 		attemptId: string,
 		request: WorkflowRequest,
 	): Promise<RequirementsSnapshotV1> {
-		if (this.#requirementsSnapshot) return this.#requirementsSnapshot;
+		if (this.#run.requirementsSnapshot) return this.#run.requirementsSnapshot;
 		const snapshot = buildRequirementsSnapshot({ workflowId, request });
 		if (snapshot.requirements.length === 0) {
 			throw new WorkflowPolicyError("requirements_snapshot_empty", {
@@ -3767,8 +3821,8 @@ export class WorkflowEngine {
 				hint: "WorkflowRequest must include a non-empty request or constraints",
 			});
 		}
-		this.#requirementsSnapshot = snapshot;
-		this.#requirementsSnapshotRef = await this.#persistArtifact(
+		this.#run.requirementsSnapshot = snapshot;
+		this.#run.requirementsSnapshotRef = await this.#persistArtifact(
 			workflowId,
 			attemptId,
 			REQUIREMENTS_SNAPSHOT_KIND,
@@ -3783,9 +3837,9 @@ export class WorkflowEngine {
 		request: WorkflowRequest,
 	): Promise<RequirementsSnapshotV1> {
 		const snapshot = await this.#ensureRequirementsSnapshot(workflowId, attemptId, request);
-		if (!this.#requirementsSnapshotRef) {
+		if (!this.#run.requirementsSnapshotRef) {
 			// Hydrated body without a durable ref: re-persist under the current attempt.
-			this.#requirementsSnapshotRef = await this.#persistArtifact(
+			this.#run.requirementsSnapshotRef = await this.#persistArtifact(
 				workflowId,
 				attemptId,
 				REQUIREMENTS_SNAPSHOT_KIND,
@@ -3796,22 +3850,22 @@ export class WorkflowEngine {
 	}
 
 	async #persistPlanReviewControl(workflowId: string, attemptId: string): Promise<void> {
-		if (!this.#planReviewControl) return;
-		await this.#persistArtifact(workflowId, attemptId, "plan-review-control-state", this.#planReviewControl);
+		if (!this.#run.planReviewControl) return;
+		await this.#persistArtifact(workflowId, attemptId, "plan-review-control-state", this.#run.planReviewControl);
 	}
 
 	/** True when the hydrated plan review is a trusted arbitration decision for this control. */
 	#trustedArbitrationReview(
 		control: PlanReviewControlStateV1,
 	): Extract<PlanReviewArtifact, { schemaVersion: 2 }> | null {
-		const review = this.#planReview;
+		const review = this.#run.planReview;
 		if (review?.schemaVersion !== 2 || review.reviewKind !== "arbitration") return null;
 		if (review.decision !== "approved" && review.decision !== "blocked") return null;
 		// Prefer explicit control pointer when present; otherwise accept the hydrated arbitration review.
 		if (
 			control.latestReviewArtifactRef &&
-			this.#planReviewArtifactRef?.artifactId &&
-			control.latestReviewArtifactRef !== this.#planReviewArtifactRef.artifactId
+			this.#run.planReviewArtifactRef?.artifactId &&
+			control.latestReviewArtifactRef !== this.#run.planReviewArtifactRef.artifactId
 		) {
 			return null;
 		}
@@ -3830,15 +3884,15 @@ export class WorkflowEngine {
 		arbitration: PlanReviewStageResult,
 	): Promise<void> {
 		const artifact = arbitration.artifact;
-		this.#planReview = artifact;
-		this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", artifact);
-		if (this.#planReviewControl) {
-			this.#planReviewControl = {
-				...this.#planReviewControl,
+		this.#run.planReview = artifact;
+		this.#run.planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", artifact);
+		if (this.#run.planReviewControl) {
+			this.#run.planReviewControl = {
+				...this.#run.planReviewControl,
 				arbitrationCycles: 1,
 				arbitrationAttemptPhase: "completed",
-				arbitrationAttemptId: this.#planReviewControl.arbitrationAttemptId ?? `arb_${randomUUID()}`,
-				latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
+				arbitrationAttemptId: this.#run.planReviewControl.arbitrationAttemptId ?? `arb_${randomUUID()}`,
+				latestReviewArtifactRef: this.#run.planReviewArtifactRef.artifactId,
 				updatedAt: new Date().toISOString(),
 			};
 		}
@@ -3856,7 +3910,7 @@ export class WorkflowEngine {
 		});
 		await this.#persistPlanReviewControl(workflowId, attemptId);
 		if (artifact.schemaVersion === 2 && artifact.decision === "approved") {
-			const snapshot = this.#requirementsSnapshot;
+			const snapshot = this.#run.requirementsSnapshot;
 			if (!snapshot) {
 				await this.#setPlanReviewAwaitingHuman(workflowId, attemptId, "requirements_snapshot_missing");
 				return;
@@ -3887,9 +3941,9 @@ export class WorkflowEngine {
 	 * while preserving control state (substate awaiting_human + humanRequestReason).
 	 */
 	async #setPlanReviewAwaitingHuman(workflowId: string, attemptId: string, reason: string): Promise<void> {
-		if (!this.#planReviewControl) return;
-		this.#planReviewControl = {
-			...this.#planReviewControl,
+		if (!this.#run.planReviewControl) return;
+		this.#run.planReviewControl = {
+			...this.#run.planReviewControl,
 			substate: "awaiting_human",
 			humanRequestReason: reason,
 			updatedAt: new Date().toISOString(),
@@ -3920,7 +3974,7 @@ export class WorkflowEngine {
 			? await this.#pipelineAuditor({
 					kind: "plan",
 					request: request.request,
-					planSummary: this.#plan?.summary,
+					planSummary: this.#run.plan?.summary,
 					grillAnswers: sidecar.grill.answers,
 					signal: this.#controller?.signal,
 				})
@@ -3963,28 +4017,36 @@ export class WorkflowEngine {
 		subject: "plan" | "implementation",
 	): Promise<{ raw: unknown; modelFamily?: string; usage?: Usage }> {
 		const role = subject === "plan" ? "plan_reviewer" : "code_reviewer";
-		const authorFamily = subject === "plan" ? this.#plannerModelFamily : this.#implementerModelFamily;
+		const authorFamily = subject === "plan" ? this.#run.plannerModelFamily : this.#run.implementerModelFamily;
 		const assignment = gateReviewAdapterPrompt.trim();
 		const ran = await this.#withProfileFallback(role, {}, async profile => {
 			const builtContext =
 				subject === "plan"
 					? await this.#buildStageContext(
-							this.#contextBuilder.buildPlanReviewContext(this.#plan!, undefined, this.#requirementsSnapshot),
+							this.#contextBuilder.buildPlanReviewContext(
+								this.#run.plan!,
+								resolveArtifactInclusion(profile),
+								this.#run.requirementsSnapshot,
+								this.#run.planArtifactRef,
+							),
 							profile,
 							session,
-							this.#plan?.affectedFiles.map(file => file.path),
+							this.#run.plan?.affectedFiles.map(file => file.path),
 						)
 					: await this.#buildStageContext(
 							this.#contextBuilder.buildCodeReviewContext({
-								plan: this.#plan!,
-								implementation: this.#implementation!,
-								verification: this.#verification,
+								plan: this.#run.plan!,
+								implementation: this.#run.implementation!,
+								verification: this.#run.verification,
+								inclusion: resolveArtifactInclusion(profile),
+								planRef: this.#run.planArtifactRef,
+								requirementsSnapshot: this.#run.requirementsSnapshot,
 							}),
 							profile,
 							session,
 							[
-								...(this.#plan?.affectedFiles.map(file => file.path) ?? []),
-								...(this.#implementation?.changedFiles ?? []),
+								...(this.#run.plan?.affectedFiles.map(file => file.path) ?? []),
+								...(this.#run.implementation?.changedFiles ?? []),
 							],
 						);
 			const result = await this.#adapter.run<unknown>({
@@ -4056,7 +4118,7 @@ export class WorkflowEngine {
 				}
 				// Gate retry is only for recoverable parse/schema failures — do not
 				// re-run the whole gate for budget, identity, policy, or config errors.
-				if (isNonRetryableGateError(error)) {
+				if (classifyGateError(error) !== "retry_parse") {
 					throw error;
 				}
 				lastError = error;
@@ -4121,31 +4183,31 @@ export class WorkflowEngine {
 				workflowId,
 				attemptId,
 				stage: "plan_review",
-				control: this.#planReviewControl,
+				control: this.#run.planReviewControl,
 				requirementsSnapshot: snapshot,
-				requirementsSnapshotRef: this.#requirementsSnapshotRef?.recoveryUri,
+				requirementsSnapshotRef: this.#run.requirementsSnapshotRef?.recoveryUri,
 			});
-			this.#planReview = derived;
-			this.#planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", derived);
+			this.#run.planReview = derived;
+			this.#run.planReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", derived);
 			if (intent === "replan_counted") {
-				const prior = this.#planReviewControl?.planRejectionCount ?? this.#planCycles;
+				const prior = this.#run.planReviewControl?.planRejectionCount ?? this.#run.planCycles;
 				const nextRejectionCount = prior + 1;
-				this.#planCycles = nextRejectionCount;
-				this.#planReviewControl = {
+				this.#run.planCycles = nextRejectionCount;
+				this.#run.planReviewControl = {
 					schemaVersion: 1,
 					kind: "plan_review_control_state",
 					substate: "awaiting_replan",
 					reviewRound: 2,
 					planRejectionCount: nextRejectionCount,
-					arbitrationCycles: this.#planReviewControl?.arbitrationCycles ?? 0,
+					arbitrationCycles: this.#run.planReviewControl?.arbitrationCycles ?? 0,
 					arbitrationTrigger: null,
-					arbitrationAttemptId: this.#planReviewControl?.arbitrationAttemptId ?? null,
-					arbitrationAttemptPhase: this.#planReviewControl?.arbitrationAttemptPhase ?? null,
+					arbitrationAttemptId: this.#run.planReviewControl?.arbitrationAttemptId ?? null,
+					arbitrationAttemptPhase: this.#run.planReviewControl?.arbitrationAttemptPhase ?? null,
 					reviewSchemaCohort: "v2",
-					latestPlanArtifactRef: this.#planArtifactRef?.artifactId ?? null,
-					latestReviewArtifactRef: this.#planReviewArtifactRef.artifactId,
-					authorResponsesArtifactRef: this.#authorResponsesArtifactRef?.artifactId ?? null,
-					routeSelectionReceiptRef: this.#planReviewControl?.routeSelectionReceiptRef ?? null,
+					latestPlanArtifactRef: this.#run.planArtifactRef?.artifactId ?? null,
+					latestReviewArtifactRef: this.#run.planReviewArtifactRef.artifactId,
+					authorResponsesArtifactRef: this.#run.authorResponsesArtifactRef?.artifactId ?? null,
+					routeSelectionReceiptRef: this.#run.planReviewControl?.routeSelectionReceiptRef ?? null,
 					humanRequestReason: null,
 					updatedAt: new Date().toISOString(),
 				};
@@ -4212,8 +4274,8 @@ export class WorkflowEngine {
 				attemptId,
 				stage: "code_review",
 			});
-			this.#codeReview = derived;
-			this.#codeReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", derived);
+			this.#run.codeReview = derived;
+			this.#run.codeReviewArtifactRef = await this.#persistArtifact(workflowId, attemptId, "review", derived);
 			const decision = derived.decision;
 			const next = getNextStage("code_review", decision);
 			if (!next) throw new WorkflowPolicyError("invalid_review_decision", { decision });
@@ -4291,7 +4353,7 @@ export class WorkflowEngine {
 			sha256: stored.sha256,
 			content,
 		});
-		if (kind === "plan") this.#planArtifactSha256 = stored.sha256;
+		if (kind === "plan") this.#run.planArtifactSha256 = stored.sha256;
 		return this.#toHandoffRef(stored);
 	}
 
@@ -4300,18 +4362,20 @@ export class WorkflowEngine {
 		return {
 			artifactId: stored.id,
 			bytes: Buffer.byteLength(content, "utf-8"),
-			recoveryUri: `artifact://${stored.relativePath}`,
+			recoveryUri: fileRecoveryUri(path.join(this.#artifactStore.baseDir, stored.relativePath)),
+			contentSha256: stored.sha256,
 		};
 	}
 
 	/** Build a durable handoff ref from sqlite meta + loaded content (resume path). */
-	#refFromMeta(meta: { id: string; relativePath: string }, content: string): StageHandoffArtifactRef {
+	#refFromMeta(meta: { id: string; relativePath: string; sha256: string }, content: string): StageHandoffArtifactRef {
 		// Prefer filesystem id encoded in relativePath so it matches ArtifactStore.store ids.
 		const fromPath = path.basename(meta.relativePath, path.extname(meta.relativePath));
 		return {
 			artifactId: fromPath || meta.id,
 			bytes: Buffer.byteLength(content, "utf-8"),
-			recoveryUri: `artifact://${meta.relativePath}`,
+			recoveryUri: fileRecoveryUri(path.join(this.#artifactStore.baseDir, meta.relativePath)),
+			contentSha256: meta.sha256,
 		};
 	}
 
@@ -4325,7 +4389,7 @@ export class WorkflowEngine {
 		patchPath: string | undefined,
 		cwd: string,
 	): Promise<StageHandoffArtifactRef | undefined> {
-		if (this.#patchArtifactRef) return this.#patchArtifactRef;
+		if (this.#run.patchArtifactRef) return this.#run.patchArtifactRef;
 		if (!patchPath) return undefined;
 		const abs = path.isAbsolute(patchPath) ? patchPath : path.join(cwd, patchPath);
 		try {
@@ -4347,8 +4411,8 @@ export class WorkflowEngine {
 				sha256: stored.sha256,
 				content,
 			});
-			this.#patchArtifactRef = this.#toHandoffRef(stored);
-			return this.#patchArtifactRef;
+			this.#run.patchArtifactRef = this.#toHandoffRef(stored);
+			return this.#run.patchArtifactRef;
 		} catch {
 			// Patch unreadable — leave undefined so builder can fall back to path-only metadata.
 			return undefined;
@@ -4368,29 +4432,32 @@ export class WorkflowEngine {
 		sourceRefs: Array<StageHandoffArtifactRef | undefined>,
 	): Promise<StageHandoffV1 | undefined> {
 		const sources = sourceRefs.filter((r): r is StageHandoffArtifactRef => Boolean(r));
+		let handoff: StageHandoffV1;
 		try {
-			const handoff = build();
-			await this.#persistArtifact(workflowId, attemptId, "stage-handoff", handoff);
-			return handoff;
+			handoff = build();
 		} catch {
-			// Keep-all degrade: do not block workflow; inject recoverable full-source handoff when possible.
+			// Source refs are already durable. Never invent a recovery reference for a failed write.
 			if (sources.length === 0) return undefined;
-			try {
-				const keepAll = buildKeepAllHandoff({ fromStage, toStage, sources });
-				await this.#persistArtifact(workflowId, attemptId, "stage-handoff", keepAll);
-				return keepAll;
-			} catch {
-				return undefined;
-			}
+			handoff = buildKeepAllHandoff({ fromStage, toStage, sources });
 		}
+		try {
+			await this.#persistArtifact(workflowId, attemptId, "stage-handoff", handoff);
+		} catch (error) {
+			logger.warn("Workflow handoff persistence failed; retaining full in-memory handoff", {
+				workflowId,
+				attemptId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return handoff;
 	}
 
 	async #persistFindingsState(workflowId: string, attemptId: string): Promise<void> {
-		const findings = this.#findingTracker.getAll().map(f => ({
+		const findings = this.#run.findingTracker.getAll().map(f => ({
 			...f,
 			// include fingerprint cycle for resume
 			fingerprint: FindingTracker.fingerprint(f),
-			repairCycles: this.#findingTracker.cycleCount(FindingTracker.fingerprint(f)),
+			repairCycles: this.#run.findingTracker.cycleCount(FindingTracker.fingerprint(f)),
 		}));
 		await this.#persistArtifact(workflowId, attemptId, "findings-state", {
 			kind: "findings-state",
@@ -4409,21 +4476,29 @@ export class WorkflowEngine {
 					>;
 			  }
 			| undefined;
+		const latest = new Map<string, Artifact>();
+		for (const meta of snapshot.artifacts) {
+			if (RESUME_CUMULATIVE_KINDS[meta.kind] === true) latest.set(meta.kind, meta);
+		}
 		// Sort so findings-state applies after review findings are loaded
-		const artifacts = [...snapshot.artifacts].sort((a, b) => {
-			if (a.kind === "findings-state") return 1;
-			if (b.kind === "findings-state") return -1;
-			return 0;
-		});
+		const artifacts = snapshot.artifacts
+			.filter(
+				meta =>
+					RESUME_DECISION_KINDS[meta.kind] === true &&
+					(RESUME_CUMULATIVE_KINDS[meta.kind] !== true || latest.get(meta.kind) === meta),
+			)
+			.sort((a, b) => Number(a.kind === "findings-state") - Number(b.kind === "findings-state"));
 		for (const meta of artifacts) {
-			// Observe-only history is not decision state — skip loading bodies on
-			// resume hydrate (G4). Status / offline paths load routing-audit on demand.
-			if (meta.kind === "routing-audit") continue;
 			const loaded = await this.#artifactStore.load(meta.relativePath, meta.sha256);
-			if (!loaded?.content) continue;
+			if (!loaded?.content) {
+				throw new WorkflowPolicyError("required_artifact_missing", {
+					kind: meta.kind,
+					relativePath: meta.relativePath,
+				});
+			}
 			// Raw patch body (not JSON) — restore handoff sizing/recovery ref for implement→review.
 			if (meta.kind === "patch") {
-				this.#patchArtifactRef = this.#refFromMeta(meta, loaded.content);
+				this.#run.patchArtifactRef = this.#refFromMeta(meta, loaded.content);
 				continue;
 			}
 			try {
@@ -4438,21 +4513,21 @@ export class WorkflowEngine {
 				if (meta.kind === "quality-route-snapshot") {
 					const verifiedArtifact = verifyQualityRouteSnapshot(parsed);
 					if (
-						!this.#qualityRouteSnapshot ||
-						verifiedArtifact.fingerprint !== this.#qualityRouteSnapshot.fingerprint
+						!this.#run.qualityRouteSnapshot ||
+						verifiedArtifact.fingerprint !== this.#run.qualityRouteSnapshot.fingerprint
 					) {
 						throw new WorkflowPolicyError("quality_route_artifact_mismatch", {
-							policyFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
+							policyFingerprint: this.#run.qualityRouteSnapshot?.fingerprint ?? null,
 							artifactFingerprint: verifiedArtifact.fingerprint,
 						});
 					}
-					this.#qualityRouteArtifactPersisted = true;
+					this.#run.qualityRouteArtifactPersisted = true;
 					continue;
 				}
 				if (meta.kind === "plan-review-control-state" || parsed.kind === "plan_review_control_state") {
 					const control = PlanReviewControlStateSchema.parse(parsed) as PlanReviewControlStateV1;
-					if (!this.#planReviewControl || control.updatedAt >= this.#planReviewControl.updatedAt) {
-						this.#planReviewControl = control;
+					if (!this.#run.planReviewControl || control.updatedAt >= this.#run.planReviewControl.updatedAt) {
+						this.#run.planReviewControl = control;
 						// Durable cohort is authoritative; do not re-infer from later review artifacts alone.
 					}
 					continue;
@@ -4464,9 +4539,9 @@ export class WorkflowEngine {
 						});
 					}
 					// First/oldest snapshot wins — never replace a frozen authority with a later rewrite.
-					if (!this.#requirementsSnapshot) {
-						this.#requirementsSnapshot = parsed;
-						this.#requirementsSnapshotRef = ref;
+					if (!this.#run.requirementsSnapshot) {
+						this.#run.requirementsSnapshot = parsed;
+						this.#run.requirementsSnapshotRef = ref;
 					}
 					continue;
 				}
@@ -4477,22 +4552,24 @@ export class WorkflowEngine {
 						});
 					}
 					// Latest author-responses artifact wins (replan may rewrite dispositions).
-					this.#authorResponses = parsed.responses;
-					this.#authorResponsesPriorFindings = parsed.priorFindings.map(finding => ({
+					this.#run.authorResponses = parsed.responses;
+					this.#run.authorResponsesPriorFindings = parsed.priorFindings.map(finding => ({
 						id: finding.id,
 						priority: finding.priority,
 					}));
-					this.#authorResponsesArtifactRef = ref;
+					this.#run.authorResponsesArtifactRef = ref;
 					continue;
 				}
 				if (parsed.kind === "plan") {
-					this.#plan = parsed as PlanArtifactV1;
-					this.#planArtifactRef = ref;
-					this.#planArtifactSha256 = meta.sha256;
+					this.#run.plan = parsed as PlanArtifactV1;
+					this.#run.planArtifactRef = ref;
+					this.#run.planArtifactSha256 = meta.sha256;
 					// Restore planner route context for plan_review diversity across Engine resume.
-					if (this.#plan.modelProfileId) this.#plannerProfileId = this.#plan.modelProfileId;
-					if (this.#plan.modelProfileId) {
-						this.#plannerVendor = this.#router.list().find(p => p.id === this.#plan?.modelProfileId)?.vendor;
+					if (this.#run.plan.modelProfileId) this.#run.plannerProfileId = this.#run.plan.modelProfileId;
+					if (this.#run.plan.modelProfileId) {
+						this.#run.plannerVendor = this.#router
+							.list()
+							.find(p => p.id === this.#run.plan?.modelProfileId)?.vendor;
 					}
 				} else if (meta.kind === "plan-review-route-selection" || parsed.kind === "plan_review_route_selection") {
 					const selection = parsed as Partial<PlanReviewRouteSelectionV1>;
@@ -4514,7 +4591,7 @@ export class WorkflowEngine {
 								: null;
 					// Resume pin only from an engine-owned attested route selection receipt.
 					if (profileId && attestedProvider && attestedModel) {
-						this.#planReviewerIdentity = {
+						this.#run.planReviewerIdentity = {
 							profileId,
 							provider: attestedProvider,
 							model: attestedModel,
@@ -4529,17 +4606,17 @@ export class WorkflowEngine {
 									? selection.exactMatch
 									: null,
 						};
-						this.#planReviewerRouteSelectionRef = ref;
+						this.#run.planReviewerRouteSelectionRef = ref;
 					}
 				} else if (parsed.kind === "review") {
 					const review = parsed as PlanReviewArtifact;
 					if (review.subject === "plan") {
-						this.#planReview = review;
-						this.#planReviewArtifactRef = ref;
+						this.#run.planReview = review;
+						this.#run.planReviewArtifactRef = ref;
 						// Do not pin from review.provider/model — those can be config/local fallbacks.
 					} else {
-						this.#codeReview = review;
-						this.#codeReviewArtifactRef = ref;
+						this.#run.codeReview = review;
+						this.#run.codeReviewArtifactRef = ref;
 					}
 					for (const f of review.findings ?? []) {
 						const blocking =
@@ -4548,39 +4625,39 @@ export class WorkflowEngine {
 									? f.blocking
 									: FindingTracker.computeBlockingDisposition(f, review, this.#config.confidenceThreshold)
 								: (f.blocking ?? false);
-						this.#findingTracker.add(f, { blocking });
+						this.#run.findingTracker.add(f, { blocking });
 					}
 				} else if (parsed.kind === "findings-state") {
 					// Defer until after the scan: each findings-state is a full cumulative snapshot.
 					// Replaying every historical snapshot would double-count repairCycles.
 					latestFindingsState = parsed;
 				} else if (meta.kind === "scope-metrics") {
-					this.#lastScopeMetrics = parsed as unknown as ScopeMetricsV1;
+					this.#run.lastScopeMetrics = parsed as unknown as ScopeMetricsV1;
 				} else if (parsed.kind === "work-package-state") {
 					const workPackageState = parsed as WorkPackageStateArtifactV1;
-					if (!this.#workPackageState || workPackageState.revision > this.#workPackageState.revision) {
-						this.#workPackageState = workPackageState;
+					if (!this.#run.workPackageState || workPackageState.revision > this.#run.workPackageState.revision) {
+						this.#run.workPackageState = workPackageState;
 					}
 				} else if (parsed.kind === "implementation") {
-					this.#implementation = parsed as ImplementationArtifactV1;
-					this.#implementationArtifactRef = ref;
-					this.#implementerVendor = this.#router
+					this.#run.implementation = parsed as ImplementationArtifactV1;
+					this.#run.implementationArtifactRef = ref;
+					this.#run.implementerVendor = this.#router
 						.list()
-						.find(p => p.id === this.#implementation?.modelProfileId)?.vendor;
+						.find(p => p.id === this.#run.implementation?.modelProfileId)?.vendor;
 				} else if (parsed.kind === "runtime-evidence" && parsed.profileId) {
 					const profile = this.#router.list().find(candidate => candidate.id === parsed.profileId);
 					if (profile?.roles.includes("planner") && parsed.modelFamily) {
-						this.#plannerModelFamily = parsed.modelFamily;
+						this.#run.plannerModelFamily = parsed.modelFamily;
 					}
 					if (profile?.roles.includes("implementer") && parsed.modelFamily) {
-						this.#implementerModelFamily = parsed.modelFamily;
+						this.#run.implementerModelFamily = parsed.modelFamily;
 					}
 				} else if (parsed.kind === "verification") {
 					const v = parsed as VerificationArtifactV1;
-					if (v.stage === "final_verify") this.#finalVerification = v;
+					if (v.stage === "final_verify") this.#run.finalVerification = v;
 					else {
-						this.#verification = v;
-						this.#verificationArtifactRef = ref;
+						this.#run.verification = v;
+						this.#run.verificationArtifactRef = ref;
 					}
 				}
 			} catch (error) {
@@ -4590,40 +4667,42 @@ export class WorkflowEngine {
 						reason: error instanceof Error ? error.message : String(error),
 					});
 				}
-				// Other corrupt artifact bodies remain non-authoritative and are ignored.
+				if (error instanceof WorkflowPolicyError) throw error;
+				throw new WorkflowPolicyError("required_artifact_invalid", {
+					kind: meta.kind,
+					relativePath: meta.relativePath,
+					reason: error instanceof Error ? error.message : String(error),
+				});
 			}
 		}
 		if (latestFindingsState) {
 			// Reset then assign from the newest cumulative snapshot only.
-			this.#findingTracker = new FindingTracker();
+			this.#run.findingTracker = new FindingTracker();
 			for (const f of latestFindingsState.findings ?? []) {
-				this.#findingTracker.add(f as ReviewFindingV1, {
+				this.#run.findingTracker.add(f as ReviewFindingV1, {
 					blocking: Boolean((f as { blocking?: boolean }).blocking),
 				});
 				const status = (f as { status?: string }).status;
 				if (status === "resolved" || status === "rejected") {
-					this.#findingTracker.resolve((f as { id: string }).id, status);
+					this.#run.findingTracker.resolve((f as { id: string }).id, status);
 				}
 				const cycles = (f as { repairCycles?: number }).repairCycles ?? 0;
 				const fp = FindingTracker.fingerprint(f as ReviewFindingV1);
-				for (let i = 0; i < cycles; i++) this.#findingTracker.recordRepairCycle(fp);
+				for (let i = 0; i < cycles; i++) this.#run.findingTracker.recordRepairCycle(fp);
 			}
 		}
 	}
 
 	#audit(route: RoutingDecision): void {
-		this.#lastRouteProfileId = route.profileId;
-		this.#routingAudit.push({ ...route, at: new Date().toISOString() });
+		this.#run.lastRouteProfileId = route.profileId;
+		this.#run.routingAudit.push({ ...route, at: new Date().toISOString() });
 	}
 
-	/** Index of last routing-audit entry already persisted for the current attempt. */
-	#routingAuditPersistedThrough = 0;
-
 	async #persistRoutingAudit(workflowId: string, attemptId: string): Promise<void> {
-		if (this.#routingAudit.length === 0) return;
-		const from = this.#routingAuditPersistedThrough;
-		if (from >= this.#routingAudit.length) return;
-		const delta = this.#routingAudit.slice(from);
+		if (this.#run.routingAudit.length === 0) return;
+		const from = this.#run.routingAuditPersistedThrough;
+		if (from >= this.#run.routingAudit.length) return;
+		const delta = this.#run.routingAudit.slice(from);
 		await this.#persistArtifact(workflowId, attemptId, "routing-audit", {
 			kind: "routing-audit",
 			schemaVersion: 1,
@@ -4632,11 +4711,11 @@ export class WorkflowEngine {
 			// Incremental append: only entries not yet written for this attempt.
 			entries: delta,
 			persistedFrom: from,
-			persistedThrough: this.#routingAudit.length,
+			persistedThrough: this.#run.routingAudit.length,
 			// Full in-memory snapshot length for recovery/debug — not re-written as body.
-			totalEntriesInMemory: this.#routingAudit.length,
+			totalEntriesInMemory: this.#run.routingAudit.length,
 		});
-		this.#routingAuditPersistedThrough = this.#routingAudit.length;
+		this.#run.routingAuditPersistedThrough = this.#run.routingAudit.length;
 	}
 
 	async #persistAbortCompletionKind(workflowId: string, error: unknown): Promise<void> {
@@ -4649,7 +4728,7 @@ export class WorkflowEngine {
 			schemaVersion: 1,
 			workflowId,
 			attemptId: state.currentAttemptId,
-			profileId: this.#lastRouteProfileId ?? null,
+			profileId: this.#run.lastRouteProfileId ?? null,
 			completionKind,
 		});
 	}
@@ -4659,9 +4738,13 @@ export class WorkflowEngine {
 		usage: unknown,
 		evidence?: WorkflowRuntimeEvidence,
 	): Promise<void> {
-		const profileId = this.#lastRouteProfileId;
+		const profileId = this.#run.lastRouteProfileId;
 		const profile = profileId ? this.#router.list().find(p => p.id === profileId) : undefined;
-		this.#budgetLedger.recordRequest(usage as never, profileId);
+		// The production adapter settles each external request, including failures, at its own boundary.
+		// Legacy injected RuntimePorts without that hook retain aggregate usage accounting.
+		if (!this.#adapter.takeBudgetSettlement?.(attemptId).some(settlement => settlement.settled)) {
+			this.#budgetLedger.recordRequest(usage as Usage | undefined, profileId);
+		}
 		if (evidence?.toolCalls && evidence.toolCalls > 0) {
 			this.#budgetLedger.recordToolCalls(evidence.toolCalls);
 		}
@@ -4679,8 +4762,8 @@ export class WorkflowEngine {
 			toolCalls: evidence?.toolCalls ?? null,
 			resolvedProvider: evidence?.resolvedProvider ?? null,
 			resolvedModel: evidence?.resolvedModel ?? null,
-			qualityTier: this.#qualityRouteSnapshot?.qualityTier ?? null,
-			routeSnapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
+			qualityTier: this.#run.qualityRouteSnapshot?.qualityTier ?? null,
+			routeSnapshotFingerprint: this.#run.qualityRouteSnapshot?.fingerprint ?? null,
 			configuredIdentity: evidence?.identityReceipt?.configured ?? null,
 			localResolution:
 				evidence?.identityReceipt?.localResolution ??
@@ -4743,8 +4826,8 @@ export class WorkflowEngine {
 				workflowId,
 				attemptId,
 				profileId,
-				qualityTier: this.#qualityRouteSnapshot?.qualityTier ?? null,
-				routeSnapshotFingerprint: this.#qualityRouteSnapshot?.fingerprint ?? null,
+				qualityTier: this.#run.qualityRouteSnapshot?.qualityTier ?? null,
+				routeSnapshotFingerprint: this.#run.qualityRouteSnapshot?.fingerprint ?? null,
 				configuredIdentity: evidence?.identityReceipt?.configured ?? null,
 				localResolution: evidence?.identityReceipt?.localResolution ?? {
 					provider: evidence?.resolvedProvider ?? null,
@@ -4823,10 +4906,10 @@ export class WorkflowEngine {
 	}
 
 	resolveFinding(findingId: string, status: "resolved" | "rejected" = "resolved"): void {
-		this.#findingTracker.resolve(findingId, status);
+		this.#run.findingTracker.resolve(findingId, status);
 	}
 
 	get routingAudit(): ReadonlyArray<Record<string, unknown>> {
-		return this.#routingAudit;
+		return this.#run.routingAudit;
 	}
 }

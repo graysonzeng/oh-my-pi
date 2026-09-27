@@ -1,25 +1,18 @@
 /**
- * D4: frozen fixture comparing assembled prompt UTF-8 bytes and tokenizer
- * estimates — not StageHandoffV1.bytesAfterHandoff (summary-field only).
+ * D4: measure the assembled final request (static role prompt + context that
+ * already carries the requirements snapshot). Not a naive handoff duplicate,
+ * and not StageHandoffV1.bytesAfterHandoff.
  */
 import { describe, expect, it } from "bun:test";
-import { Encoding, countTokens } from "@oh-my-pi/pi-natives";
+import implementerPrompt from "../../src/prompts/workflow/implementer.md" with { type: "text" };
 import { ContextBuilder } from "../../src/workflow/context-builder";
-import { estimateTokens } from "../../src/workflow/context-evictor";
+import { assemblePrompt } from "../../src/workflow/prompt-assembly";
 import { buildPlannerToImplementerHandoff } from "../../src/workflow/stage-handoff";
+import type { RequirementsSnapshotV1 } from "../../src/workflow/types";
 import { planArtifact } from "./helpers";
 
-function measureWire(text: string) {
-	const utf8Bytes = Buffer.byteLength(text, "utf-8");
-	return {
-		utf8Bytes,
-		estimateBytesDiv4: estimateTokens(text),
-		tokenizerJev: countTokens(text, Encoding.Jev),
-	};
-}
-
-describe("R4/D4 frozen wire fixture (assembly boundary)", () => {
-	it("records real byte and token deltas for deduped vs naive-duplicate handoff", async () => {
+describe("R4/D4 assembled request boundary", () => {
+	it("measures static role prompt plus snapshot context, not a naive duplicate", async () => {
 		const plan = planArtifact({
 			summary: "wire-fixture-plan-summary",
 			acceptanceCriteria: ["acceptance must stay once in the wire body", "second acceptance criterion for volume"],
@@ -30,43 +23,45 @@ describe("R4/D4 frozen wire fixture (assembly boundary)", () => {
 				dependsOn: i > 0 ? [`step-${i - 1}`] : [],
 			})),
 		});
-		const base = new ContextBuilder().buildImplementContext(plan);
-		const handoff = buildPlannerToImplementerHandoff({ plan });
-		const deduped = new ContextBuilder().appendStageHandoff(base, handoff);
-		const naiveDup = `${base}\n\n## Stage handoff\n\`\`\`json\n${JSON.stringify(handoff, null, 2)}\n\`\`\`\n`;
-
-		const baseM = measureWire(base);
-		const dedupedM = measureWire(deduped);
-		const naiveM = measureWire(naiveDup);
-
-		expect(deduped).toContain("## Approved plan");
-		expect(deduped).toContain("dedupeNote");
-		expect(dedupedM.utf8Bytes).toBeGreaterThan(baseM.utf8Bytes);
-		expect(dedupedM.utf8Bytes).toBeLessThan(naiveM.utf8Bytes);
-		expect(dedupedM.tokenizerJev).toBeLessThan(naiveM.tokenizerJev);
-		expect(dedupedM.estimateBytesDiv4).toBeLessThan(naiveM.estimateBytesDiv4);
-
-		// bytesAfterHandoff is summary-field accounting — must not be treated as wire save.
-		expect(handoff.bytesAfterHandoff).toBeLessThan(handoff.bytesBeforeHandoff);
-		expect(handoff.bytesAfterHandoff).not.toBe(naiveM.utf8Bytes - dedupedM.utf8Bytes);
-
-		// Frozen numeric report for artifacts (assert semantic shape, not exact churn).
-		const report = {
-			fixture: "planner_to_implementer_dedupe_v1",
-			base: baseM,
-			deduped: dedupedM,
-			naiveDuplicate: naiveM,
-			savedUtf8BytesVsNaive: naiveM.utf8Bytes - dedupedM.utf8Bytes,
-			savedTokenizerJevVsNaive: naiveM.tokenizerJev - dedupedM.tokenizerJev,
-			handoffObjectBytesAfter: handoff.bytesAfterHandoff,
-			handoffObjectBytesBefore: handoff.bytesBeforeHandoff,
-			note: "Wire measurement is assembled prompt UTF-8 + countTokens(Jev) + estimateTokens(bytes/4). handoff.bytesAfterHandoff is not wire.",
+		const snapshot: RequirementsSnapshotV1 = {
+			schemaVersion: 1,
+			kind: "requirements_snapshot",
+			workflowId: plan.workflowId,
+			createdAt: plan.createdAt,
+			source: { request: "ship-frozen-request-text", constraints: "hard-constraint-z" },
+			requirements: [],
+			sha256: "ab".repeat(32),
 		};
-		expect(report.savedUtf8BytesVsNaive).toBeGreaterThan(0);
-		expect(report.savedTokenizerJevVsNaive).toBeGreaterThan(0);
-		await Bun.write(
-			new URL("../../../../artifacts/r4-wire-fixture-report.json", import.meta.url).pathname,
-			`${JSON.stringify(report, null, 2)}\n`,
-		);
+		const builder = new ContextBuilder();
+		const base = builder.buildImplementContext(plan, null, undefined, { requirementsSnapshot: snapshot });
+		const handoff = buildPlannerToImplementerHandoff({ plan });
+		const context = builder.appendStageHandoff(base, handoff, {
+			stage: "implementing",
+			requirementsSnapshot: snapshot,
+		});
+		const assembled = assemblePrompt({
+			sections: [
+				{
+					id: "role_policy",
+					content: implementerPrompt,
+					stable: true,
+					source: "prompts/workflow/implementer.md",
+					authority: "system",
+				},
+				{ id: "handoff", content: context, stable: false, source: "context-builder", authority: "user" },
+			],
+			cacheObservable: false,
+		});
+
+		expect(assembled.text).toContain("acceptance must stay once in the wire body");
+		expect(assembled.text.split("acceptance must stay once in the wire body").length - 1).toBe(1);
+		expect(assembled.text).not.toContain("acceptance:");
+		expect(assembled.text.split("ship-frozen-request-text").length - 1).toBe(1);
+		expect(assembled.text).toContain("hard-constraint-z");
+		expect(assembled.text.startsWith(implementerPrompt.trim())).toBe(true);
+		expect(assembled.receipt.totalBytes).toBe(Buffer.byteLength(assembled.text, "utf-8"));
+		expect(assembled.receipt.cacheObservable).toBe(false);
+		expect(assembled.receipt.cacheReadTokens).toBeNull();
+		expect(handoff.bytesAfterHandoff).not.toBe(assembled.receipt.totalBytes);
 	});
 });

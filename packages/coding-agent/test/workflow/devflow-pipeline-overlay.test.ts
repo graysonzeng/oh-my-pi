@@ -10,7 +10,7 @@ import type { SlashCommandRuntime } from "../../src/slash-commands/types";
 import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { AVAILABILITY_ROLE_ORDER } from "../../src/workflow/availability-candidates";
 import { WorkflowEngine } from "../../src/workflow/engine";
-import { WorkflowCancelledError } from "../../src/workflow/errors";
+import { WorkflowCancelledError, WorkflowError } from "../../src/workflow/errors";
 import { gateAdapter } from "../../src/workflow/gate-adapter";
 import { derivePlanReviewArtifactV2 } from "../../src/workflow/gate-derive";
 import { GateResultJsonSchema } from "../../src/workflow/json-schemas";
@@ -26,7 +26,17 @@ import { GateParseError, parseGateResultArtifact } from "../../src/workflow/sche
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import type { WorkflowState } from "../../src/workflow/types";
 import { WorkflowTool } from "../../src/workflow/workflow-tool";
-import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	materializeSamplePatch,
+	passVerifier,
+	planArtifact,
+	realTempWorkspace,
+	reviewArtifact,
+	scriptedRunner,
+	type RealTempWorkspace,
+} from "./helpers";
 
 type GateFindingFixture = {
 	id: string;
@@ -832,8 +842,11 @@ describe("replanFromRedesign CAS", () => {
 describe("DevFlow overlay engine contracts", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
+	let workspace: RealTempWorkspace;
 
 	beforeEach(async () => {
+		workspace = await realTempWorkspace();
+		await materializeSamplePatch(workspace.cwd);
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-devflow-engine-"));
 	});
@@ -841,13 +854,14 @@ describe("DevFlow overlay engine contracts", () => {
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	function engineWith(script: Parameters<typeof scriptedRunner>[0], auditor = completeAuditor) {
 		return new WorkflowEngine({
 			store,
-			session: fakeSession(),
-			verifier: passVerifier(),
+			session: fakeSession({ cwd: workspace.cwd }),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: auditor,
 			adapter: new RuntimeAdapter(scriptedRunner(script)),
@@ -858,8 +872,8 @@ describe("DevFlow overlay engine contracts", () => {
 		let planContext = "";
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
-			verifier: passVerifier(),
+			session: fakeSession({ cwd: workspace.cwd }),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: completeAuditor,
 			adapter: new RuntimeAdapter(async request => {
@@ -887,8 +901,8 @@ describe("DevFlow overlay engine contracts", () => {
 		let gateCalls = 0;
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
-			verifier: passVerifier(),
+			session: fakeSession({ cwd: workspace.cwd }),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: completeAuditor,
 			adapter: new RuntimeAdapter(async request => {
@@ -905,6 +919,30 @@ describe("DevFlow overlay engine contracts", () => {
 		expect(result.state.status).toBe("cancelled");
 		expect(result.awaitingGrill).toBe(false);
 		expect(result.overlayReason).not.toBe("gate_parse_failed");
+	});
+
+	it("does not rerun a gate or open a parse-repair grill after a permanent provider failure", async () => {
+		let gateCalls = 0;
+		const engine = new WorkflowEngine({
+			store,
+			session: fakeSession({ cwd: workspace.cwd }),
+			artifactStore: new ArtifactStore(artifactDir),
+			pipelineAuditor: completeAuditor,
+			adapter: new RuntimeAdapter(async request => {
+				if (request.workflowRole === "plan_reviewer") {
+					gateCalls++;
+					throw new WorkflowError("provider denied the request", "provider_permanent");
+				}
+				return scriptedRunner({ plan: planArtifact() })(request);
+			}),
+		});
+		const started = await engine.start({ request: "permanent gate failure" }, {}, { pipelineKind: "devflow" });
+		await expect(engine.run(started.workflowId)).rejects.toMatchObject({ kind: "provider_permanent" });
+		expect(gateCalls).toBe(1);
+		const state = await engine.getState(started.workflowId);
+		expect(state?.status).toBe("failed");
+		expect(state?.overlaySidecar?.grill.reason).not.toBe("gate_parse_failed");
+		expect((await store.listAttempts(started.workflowId)).at(-1)?.errorKind).toBe("provider_permanent");
 	});
 
 	it("completeness auditor abort cancels instead of grilling incomplete_plan", async () => {
@@ -978,8 +1016,8 @@ describe("DevFlow overlay engine contracts", () => {
 	it("NEEDS_REVISION that exhausts maxPlanCycles is terminal blocked and cannot resume", async () => {
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
-			verifier: passVerifier(),
+			session: fakeSession({ cwd: workspace.cwd }),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: completeAuditor,
 			config: { maxPlanCycles: 1 },
@@ -1000,8 +1038,8 @@ describe("DevFlow overlay engine contracts", () => {
 		const agents: string[] = [];
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
-			verifier: passVerifier(),
+			session: fakeSession({ cwd: workspace.cwd }),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: completeAuditor,
 			adapter: new RuntimeAdapter(async request => {
@@ -1031,8 +1069,8 @@ describe("DevFlow overlay engine contracts", () => {
 		});
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
-			verifier: passVerifier(),
+			session: fakeSession({ cwd: workspace.cwd }),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			pipelineAuditor: completeAuditor,
 			adapter: new RuntimeAdapter(async request => {
@@ -1072,8 +1110,8 @@ describe("DevFlow overlay engine contracts", () => {
 	it("legacy NULL kind keeps bundled reviewer mapping and the existing graph", async () => {
 		const engine = new WorkflowEngine({
 			store,
-			session: fakeSession(),
-			verifier: passVerifier(),
+			session: fakeSession({ cwd: workspace.cwd }),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			adapter: new RuntimeAdapter(
 				scriptedRunner({

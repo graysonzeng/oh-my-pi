@@ -2,6 +2,7 @@ import type { SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
 import type { SubagentCompletionKind } from "../task/types";
 import type { ToolSession } from "../tools";
 import { withContextProviderUsage } from "./context-ledger";
+import type { BudgetInvocationSettlement, WorkflowBudgetGuard, WorkflowBudgetPort } from "./budget-ledger";
 import {
 	BudgetExhaustedError,
 	WorkflowCancelledError,
@@ -68,6 +69,12 @@ export interface StructuredRunnerRequest {
 	signal?: AbortSignal;
 	/** Provider response observer used to collect execution identity attestation. */
 	onResponse?: SimpleStreamOptions["onResponse"];
+	/** Pre-request payload hook. Adapter installs the shared budget guard here. */
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Bound shared-budget guard for this invocation. Executor forwards it; absence keeps old behavior. */
+	budgetGuard?: WorkflowBudgetGuard;
+	/** Keys from onPayload `beforeProviderRequest`, in send order. Executor settles assistant usage against these. */
+	providerChargeKeys?: string[];
 	/** Disable every inner model replacement path for exact-identity execution. */
 	strictModelIdentity?: boolean;
 	/** When true, task runtime keeps isolation artifacts for verification. */
@@ -114,6 +121,8 @@ export interface StructuredRunnerResult {
 		toolCalls?: number;
 		/** Terminal provenance forwarded from SingleResult. */
 		completionKind?: SubagentCompletionKind;
+		/** Provider HTTP turns observed by the executor. Not the maxRequests unit. */
+		providerRequests?: number;
 	};
 	/** Whether isolated changes were applied to the main worktree. null when N/A. */
 	changesApplied?: boolean | null;
@@ -159,10 +168,20 @@ export { injectWorkflowPrompt, wrapSessionForWorkflowIsolation } from "./runtime
 export class RuntimeAdapter implements RuntimePort {
 	readonly #runner: StructuredRunner;
 	readonly mergeCapturedChanges?: CapturedChangesMerger;
+	#budgetPort?: WorkflowBudgetPort;
 
 	constructor(runner: StructuredRunner, mergeCapturedChanges?: CapturedChangesMerger) {
 		this.#runner = runner;
 		this.mergeCapturedChanges = mergeCapturedChanges;
+	}
+
+	setBudgetPort(port: WorkflowBudgetPort | undefined): void {
+		this.#budgetPort = port;
+	}
+
+	/** Non-consuming. Charge keys remain in the ledger snapshot. */
+	takeBudgetSettlement(attemptId: string): readonly BudgetInvocationSettlement[] {
+		return this.#budgetPort?.invocationSettlements(attemptId) ?? [];
 	}
 
 	buildRequest(request: WorkflowAgentRequest): WorkflowAgentRequest {
@@ -187,6 +206,22 @@ export class RuntimeAdapter implements RuntimePort {
 		let accumulatedUsage: Usage | undefined;
 
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
+			const invocationId = `${request.attemptId}:${request.role}:${attempt}`;
+			const guard = this.#budgetPort?.bind({
+				workflowId: request.workflowId,
+				attemptId: request.attemptId,
+				invocationId,
+				profileId: request.profile.id,
+				maxRequests: request.profile.maxRequests,
+				maxCostUsd: request.profile.maxCostUsd,
+			});
+			if (guard && !guard.allowsModelCall()) {
+				throw new BudgetExhaustedError(
+					attempt,
+					"unknown",
+					request.profile.maxCostUsd ?? request.profile.maxRequests,
+				);
+			}
 			try {
 				// Carry remaining wall-clock budget into each schema retry invocation.
 				const elapsedMs = Date.now() - startedAt;
@@ -202,7 +237,9 @@ export class RuntimeAdapter implements RuntimePort {
 						: working;
 				const result = await this.#runOnce<TArtifact>(attemptRequest, {
 					schemaRetryMaxRetries: maxRetries,
+					budgetGuard: guard,
 				});
+				guard?.finishInvocation({ usage: result.usage as Usage | undefined, launched: true });
 				accumulatedUsage = mergeUsage(accumulatedUsage, result.usage as Usage | undefined);
 				// Layer1 deterministic success on this invocation.
 				if (result.schemaRepairReceipt) {
@@ -263,26 +300,48 @@ export class RuntimeAdapter implements RuntimePort {
 				return { ...result, usage: accumulatedUsage ?? result.usage };
 			} catch (error) {
 				const normalized = this.#normalizeError(error);
+				const details =
+					normalized instanceof WorkflowError && detailsRecord(normalized.details)
+						? normalized.details
+						: undefined;
+				guard?.finishInvocation({
+					usage: usageFromDetails(details),
+					launched: launchedFromDetails(details),
+					providerRequests: providerRequestsFromDetails(details),
+				});
+				if (capturedWrite(details)) {
+					throw new WorkflowPolicyError("captured_write_schema_unrepairable", {
+						patchPath: patchFromDetails(details),
+						changesApplied: changesAppliedFromDetails(details),
+						usage: usageFromDetails(details),
+					});
+				}
 				if (!(normalized instanceof WorkflowSchemaError)) {
 					throw normalized;
 				}
 				lastSchemaError = normalized;
-				const details = normalized.details as
+				const schemaDetails = normalized.details as
 					| { schemaRepairReceipt?: SchemaRepairReceiptV1; usage?: Usage; rawOutput?: string }
 					| undefined;
 				// Fold this invocation's L1 receipt (or synthetic failure) into multi-attempt history.
-				accumulated = mergeSchemaRepairReceipt(accumulated, details?.schemaRepairReceipt, attempt, maxRetries, {
-					modelCalls: attempt + 1,
-					finalStatus: "schema_error",
-					repaired: false,
-					fallbackError: normalized.message,
-					fallbackRaw:
-						typeof details?.rawOutput === "string" && details.rawOutput.length > 0
-							? details.rawOutput
-							: normalized.message,
-				});
-				accumulatedUsage = mergeUsage(accumulatedUsage, details?.usage);
-				const usageCost = details?.usage?.cost?.total;
+				accumulated = mergeSchemaRepairReceipt(
+					accumulated,
+					schemaDetails?.schemaRepairReceipt,
+					attempt,
+					maxRetries,
+					{
+						modelCalls: attempt + 1,
+						finalStatus: "schema_error",
+						repaired: false,
+						fallbackError: normalized.message,
+						fallbackRaw:
+							typeof schemaDetails?.rawOutput === "string" && schemaDetails.rawOutput.length > 0
+								? schemaDetails.rawOutput
+								: normalized.message,
+					},
+				);
+				accumulatedUsage = mergeUsage(accumulatedUsage, schemaDetails?.usage);
+				const usageCost = schemaDetails?.usage?.cost?.total;
 				if (typeof usageCost === "number") usedCostUsd += usageCost;
 
 				// No more additional model attempts left → Layer 4 full receipt.
@@ -299,6 +358,13 @@ export class RuntimeAdapter implements RuntimePort {
 					);
 				}
 
+				if (guard && !guard.allowsModelCall()) {
+					throw new BudgetExhaustedError(
+						attempt + 1,
+						usageCost ?? "unknown",
+						request.profile.maxCostUsd ?? request.profile.maxRequests,
+					);
+				}
 				// Layer 2: budget check before every model retry (request / cost / runtime).
 				const budget = budgetFromProfileUsage({
 					maxRequests: Math.min(request.profile.maxRequests, maxAttempts),
@@ -403,6 +469,7 @@ export class RuntimeAdapter implements RuntimePort {
 			onSchemaRepairReceipt?: (receipt: SchemaRepairReceiptV1) => void;
 			/** Profile maxRetries for receipt metadata (L1 still uses no model retry here). */
 			schemaRetryMaxRetries?: number;
+			budgetGuard?: WorkflowBudgetGuard;
 		},
 	): Promise<WorkflowAgentResult<TArtifact>> {
 		const optimizedContext = await optimizeWorkflowRequestContext(request);
@@ -412,6 +479,7 @@ export class RuntimeAdapter implements RuntimePort {
 			request.profile.outputStrategy?.schemaEnhancement?.strictMode === false ? "permissive" : "strict";
 
 		const identityCollector = new ProviderIdentityCollector();
+		let providerOrdinal = 0;
 		const mappedAgent =
 			request.agent ??
 			RuntimeAdapter.agentNameForRole(request.role, {
@@ -442,6 +510,16 @@ export class RuntimeAdapter implements RuntimePort {
 			processToolResult: prepared.processToolResult,
 			transformTools: prepared.transformTools,
 			onResponse: identityCollector.onResponse,
+			budgetGuard: hooks?.budgetGuard,
+			providerChargeKeys: hooks?.budgetGuard ? [] : undefined,
+			onPayload: hooks?.budgetGuard
+				? (payload, model, signal) => {
+						providerOrdinal += 1;
+						const key = hooks.budgetGuard?.beforeProviderRequest({ ordinal: providerOrdinal });
+						if (key) mappedRequest.providerChargeKeys?.push(key);
+						return undefined;
+					}
+				: undefined,
 			strictModelIdentity: request.profile.strictIdentity === true,
 			shadowReview:
 				request.pipelineKind === "devflow" && (request.role === "plan_reviewer" || request.role === "code_reviewer")
@@ -506,6 +584,8 @@ export class RuntimeAdapter implements RuntimePort {
 						rawOutput: body.rawOutput ?? extractInvalidRaw(body),
 						exitCode: body.exitCode,
 						usage: body.usage,
+						patchPath: body.patchPath,
+						changesApplied: result.changesApplied ?? null,
 					});
 				}
 				throw new WorkflowError(body.error, kind, { exitCode: body.exitCode });
@@ -541,6 +621,8 @@ export class RuntimeAdapter implements RuntimePort {
 							exitCode: body.exitCode,
 							usage: body.usage,
 							schemaRepairReceipt: failedReceipt,
+							patchPath: body.patchPath,
+							changesApplied: result.changesApplied ?? null,
 						},
 					);
 				}
@@ -583,6 +665,8 @@ export class RuntimeAdapter implements RuntimePort {
 						rawOutput: body.rawOutput ?? extractInvalidRaw(body),
 						usage: body.usage,
 						schemaRepairReceipt: failedReceipt,
+						patchPath: body.patchPath,
+						changesApplied: result.changesApplied ?? null,
 					},
 				);
 			}
@@ -611,7 +695,10 @@ export class RuntimeAdapter implements RuntimePort {
 				completionKind: body.completionKind,
 			};
 		} catch (error) {
-			throw this.#normalizeError(error);
+			throw this.#normalizeError(
+				error,
+				providerOrdinal > 0 ? { launched: true, providerRequests: providerOrdinal } : undefined,
+			);
 		}
 	}
 
@@ -687,22 +774,26 @@ export class RuntimeAdapter implements RuntimePort {
 		return "provider_permanent";
 	}
 
-	#normalizeError(error: unknown): WorkflowError {
-		if (error instanceof WorkflowError) return error;
+	#normalizeError(error: unknown, evidence?: { launched: boolean; providerRequests: number }): WorkflowError {
+		if (error instanceof WorkflowError) {
+			attachLaunchEvidence(error, evidence);
+			return error;
+		}
 		const message = error instanceof Error ? error.message : String(error);
 		const name = error instanceof Error ? error.name : "";
+		const details = launchDetails(evidence, { cause: error });
 		if (name === "AbortError" || /abort|cancel/i.test(message)) {
-			return new WorkflowCancelledError(message, { cause: error });
+			return new WorkflowCancelledError(message, details);
 		}
 		if (/timeout|timed out/i.test(message)) {
-			return new WorkflowTimeoutError(message, { cause: error });
+			return new WorkflowTimeoutError(message, details);
 		}
 		// Match schema-ish failures only — do not treat "invalid private field" TypeErrors as schema.
 		if (/schema|structured|invalid output/i.test(message)) {
-			return new WorkflowSchemaError(message, { cause: error });
+			return new WorkflowSchemaError(message, details);
 		}
 
-		return new WorkflowError(message, this.#classifyErrorKind(message), { cause: error });
+		return new WorkflowError(message, this.#classifyErrorKind(message), details);
 	}
 }
 
@@ -931,4 +1022,65 @@ function parseResolvedModel(value: string | undefined): { provider: string; mode
 	const thinkingSuffix = selector.lastIndexOf(":");
 	const model = thinkingSuffix > 0 ? selector.slice(0, thinkingSuffix) : selector;
 	return { provider, model };
+}
+
+function detailsRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function usageFromDetails(details: unknown): Usage | undefined {
+	if (!detailsRecord(details)) return undefined;
+	const usage = details.usage;
+	if (!usage || typeof usage !== "object") return undefined;
+	return usage as Usage;
+}
+
+function launchedFromDetails(details: Record<string, unknown> | undefined): boolean {
+	return details?.launched === true;
+}
+
+function providerRequestsFromDetails(details: Record<string, unknown> | undefined): number | undefined {
+	const value = details?.providerRequests;
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function launchDetails(
+	evidence: { launched: boolean; providerRequests: number } | undefined,
+	base: Record<string, unknown>,
+): Record<string, unknown> {
+	if (!evidence?.launched) return base;
+	return { ...base, launched: true, providerRequests: evidence.providerRequests };
+}
+
+function attachLaunchEvidence(
+	error: WorkflowError,
+	evidence: { launched: boolean; providerRequests: number } | undefined,
+): void {
+	if (!evidence?.launched) return;
+	if (detailsRecord(error.details)) {
+		error.details.launched = true;
+		if (error.details.providerRequests === undefined) error.details.providerRequests = evidence.providerRequests;
+		return;
+	}
+	Object.defineProperty(error, "details", {
+		value: { launched: true, providerRequests: evidence.providerRequests },
+		writable: true,
+		configurable: true,
+	});
+}
+
+function patchFromDetails(details: unknown): string | undefined {
+	if (!detailsRecord(details) || typeof details.patchPath !== "string" || details.patchPath.length === 0) {
+		return undefined;
+	}
+	return details.patchPath;
+}
+
+function changesAppliedFromDetails(details: unknown): boolean | null {
+	if (!detailsRecord(details)) return null;
+	return typeof details.changesApplied === "boolean" ? details.changesApplied : null;
+}
+
+function capturedWrite(details: unknown): boolean {
+	return patchFromDetails(details) !== undefined || changesAppliedFromDetails(details) === true;
 }

@@ -71,10 +71,18 @@ export function formatTaskResultSummary(
 	// "parked" status must not read as resumable.
 	const refStatus = AgentRegistry.global().get(result.id)?.status;
 	const resumable = result.aborted && !result.isolated && (refStatus === "idle" || refStatus === "parked");
+	const decision = result.parentIntegrateDecision;
+	const verificationStatus =
+		decision?.action === "integrate" && "boundToWorkspaceVersion" in decision ? "integrate_eligible" : "unverified";
 	return prompt.render(taskSummaryTemplate, {
 		agentName: result.agent,
 		id: result.id,
 		status,
+		verificationStatus,
+		pendingChecks: result.deliveryEvidence?.checksNotRun,
+		parentOwnsVerification: result.deliveryEvidence?.checksNotRun.some(
+			check => check.reason === "parent_owns_verify",
+		),
 		duration: formatDuration(options.totalDurationMs),
 		completionKind: completionKind !== "completed" ? completionKind : undefined,
 		abortReason: result.aborted ? result.abortReason : undefined,

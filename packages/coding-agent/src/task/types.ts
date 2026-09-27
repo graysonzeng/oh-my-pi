@@ -62,6 +62,8 @@ declare module "@oh-my-pi/pi-tui/tools/task" {
 		 * inputs should re-classify via `classifyChildResultForParentIntegrate`.
 		 */
 		parentIntegrateDecision?: ParentIntegrateDecision;
+		/** Provider turns observed by the executor. Not the maxRequests unit. */
+		providerRequests?: number;
 	}
 }
 

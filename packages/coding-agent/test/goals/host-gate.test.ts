@@ -119,7 +119,7 @@ describe("evaluateGoalHostGate", () => {
 			goal,
 			nominationOutcome: "nominated",
 		});
-		expect(evaluateGoalHostGate(snapshot).decision).toBe("pass");
+		expect(evaluateGoalHostGate(snapshot).reasons).toContain("missing_verification");
 	});
 
 	it("does not treat eval code that only mentions bun test as verification execution", () => {
@@ -155,13 +155,13 @@ describe("looksLikeFalseCompletion", () => {
 		const verified = buildGoalCompletionSettleSnapshot({
 			turnId: "turn-1",
 			generation: 1,
-			assistant: assistant("working", [call]),
-			messages: [assistant("working", [call]), toolResult("c1", "bash", "ok")],
+			assistant: assistant("all green"),
+			messages: [assistant("working", [call]), toolResult("c1", "bash", "ok"), assistant("all green")],
 			todos: [],
 			goal,
 			nominationOutcome: "none",
 		});
-		expect(looksLikeFalseCompletion(verified)).toBe(false);
+		expect(looksLikeFalseCompletion(verified)).toBe(true);
 	});
 
 	it("skips D3 after a complete nomination", () => {
@@ -246,7 +246,7 @@ describe("buildGoalCompletionSettleSnapshot", () => {
 		});
 		expect(snapshot.messages[0]).toMatchObject({ role: "user", content: "finish the goal" });
 		expect(snapshot.tools.map(tool => tool.id)).toEqual(["v1"]);
-		expect(evaluateGoalHostGate(snapshot).decision).toBe("pass");
+		expect(evaluateGoalHostGate(snapshot).reasons).toContain("missing_verification");
 	});
 
 	it("does not treat a generic test word as shipped verification", () => {

@@ -10,6 +10,7 @@ import type { ImplementationArtifactV1, ReviewFindingV1, VerificationArtifactV1,
 import {
 	buildVerificationCodeState,
 	captureVerificationWorkspace,
+	executedWorkspaceStillMatches,
 	projectReusedVerificationChecks,
 	resolveVerificationPatchEvidence,
 	sealWorkflowVerifierResult,
@@ -149,6 +150,20 @@ export class FinalVerifyStage {
 				scope,
 			});
 		}
+		if (!canReuse && !(await executedWorkspaceStillMatches(workspace, input.signal))) {
+			base = {
+				...base,
+				passed: false,
+				checks: [
+					...base.checks,
+					{
+						id: "workspace-identity",
+						status: "failed",
+						summary: "Verification workspace identity missing or changed during execution",
+					},
+				],
+			};
+		}
 
 		const checks = [...base.checks];
 		const openBlocking = (input.openFindings ?? []).filter(
@@ -170,6 +185,11 @@ export class FinalVerifyStage {
 			verification: {
 				passed: checks.every(c => c.status !== "failed"),
 				checks,
+			},
+			delivery: {
+				owner: "workflow_verifier",
+				executor: "workflow_verifier",
+				workspaceProven: Boolean(workspace?.contentSha256),
 			},
 			scopeStatus: input.scopeStatus,
 		});

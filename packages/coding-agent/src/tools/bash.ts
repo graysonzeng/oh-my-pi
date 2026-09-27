@@ -22,6 +22,7 @@ import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { cfgLatencyArmsBashAdvisory, cfgLatencyArmsBashBoundedInjection } from "../config/workflow-settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { beginHostTerminalSeal, finishHostTerminalSeal, type HostSealAttempt } from "../task/host-terminal-check";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesystem";
@@ -360,7 +361,8 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 	try {
 		const alloc = await session.allocateOutputArtifact?.("bash-original");
 		if (!alloc?.path || !alloc.id) return undefined;
-		await Bun.write(alloc.path, originalText);
+		const written = await Bun.write(alloc.path, originalText);
+		if (written !== Buffer.byteLength(originalText, "utf-8")) return undefined;
 		return alloc.id;
 	} catch {
 		return undefined;
@@ -823,6 +825,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			prefixNotices?: readonly string[];
 			notices?: readonly string[];
 			wallTimeMs?: number;
+			sealAttempt?: HostSealAttempt | null;
 		} = {},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -870,6 +873,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (failedExit) {
 			details.exitCode = exitCode;
+		}
+		if (options.sealAttempt && exitCode === 0 && !isTimeout && result.cancelled !== true) {
+			let artifactId = result.artifactId;
+			if (!artifactId && !result.artifactError) {
+				artifactId = await saveBashOriginalArtifact(this.session, outputText);
+			}
+			if (artifactId) {
+				const seal = await finishHostTerminalSeal(options.sealAttempt, `artifact://${artifactId}`);
+				if (seal) details.hostSeal = seal;
+			}
 		}
 
 		// Final-defense inline cap config, shared by the timeout and normal
@@ -976,6 +989,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		/** Approval tier bounding the job's URL filesystem. */
 		approvalTier: ToolTier;
 		resolvedEnv?: Record<string, string>;
+		sealAttempt?: HostSealAttempt | null;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -1044,6 +1058,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						prefixNotices: ledgerPrefixNotices,
 						notices: options.notices ?? [],
 						wallTimeMs,
+						sealAttempt: options.sealAttempt,
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -1281,6 +1296,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
 		}
 
+		const sealAttempt = virtualCwd === undefined ? await beginHostTerminalSeal(command, commandCwd) : null;
 		if (asyncRequested) {
 			if (!this.session.asyncJobManager) {
 				throw new ToolError("Async job manager unavailable for this session.");
@@ -1295,6 +1311,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				onUpdate,
 				foreground: false,
 				approvalTier,
+				sealAttempt,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -1335,6 +1352,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				onUpdate,
 				foreground: !startBackgrounded,
 				approvalTier,
+				sealAttempt,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
@@ -1534,6 +1552,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						requestedTimeoutSec,
 						notices: pendingNotices,
 						wallTimeMs: performance.now() - bridgeWallTimeStart,
+						sealAttempt,
 					});
 				}
 
@@ -1625,6 +1644,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							requestedTimeoutSec,
 							notices: pendingNotices,
 							wallTimeMs: performance.now() - bridgeWallTimeStart,
+							sealAttempt,
 						});
 					}
 
@@ -1694,6 +1714,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					requestedTimeoutSec,
 					prefixNotices: ledgerPrefixNotices,
 					notices: bridgeNotices,
+					sealAttempt,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 				});
 			} catch (error) {
@@ -1839,6 +1860,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			requestedTimeoutSec,
 			prefixNotices: ledgerPrefixNotices,
 			notices: pendingNotices,
+			sealAttempt,
 			wallTimeMs,
 		});
 	}

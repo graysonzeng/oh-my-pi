@@ -15,8 +15,10 @@ import { WorkflowStore } from "../../src/workflow/sqlite-store";
 import {
 	fakeSession,
 	implArtifact,
+	passVerifier,
 	planArtifact,
 	planReviewArtifactV2,
+	realTempWorkspace,
 	reviewArtifact,
 	scriptedRunner,
 } from "./helpers";
@@ -150,64 +152,57 @@ describe("WorkflowEngine mandatory coverage gate", () => {
 	it("allows approved plans that cover every mandatory snapshot requirement", async () => {
 		const request = "Implement mandatory coverage gate";
 		const constraints = "Must use engine-owned snapshot";
-		const engine = new WorkflowEngine({
-			store,
-			adapter: new RuntimeAdapter(
-				scriptedRunner({
-					plan: planArtifact(),
-					planReview: planReviewArtifactV2(
-						"approved",
-						[],
-						{
-							coverage: [
-								{
-									requirementId: "user:req-001",
-									source: "user_requirement",
-									mandatory: true,
-									status: "satisfied",
-									evidenceRefs: ["plan:summary"],
-									rationale: "plan addresses user request",
-								},
-								{
-									requirementId: "user:constraint-001",
-									source: "user_requirement",
-									mandatory: true,
-									status: "satisfied",
-									evidenceRefs: ["plan:rollback"],
-									rationale: "plan preserves engine-owned snapshot",
-								},
-							],
-						},
-						{ request, constraints },
-					),
-					implement: implArtifact(),
-					codeReview: reviewArtifact("approved", "implementation"),
-				}),
-			),
-			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
-			verifier: {
-				async verify(a) {
-					return {
-						kind: "verification",
-						passed: true,
-						checks: [{ id: "c", status: "passed", summary: "ok" }],
-						schemaVersion: 1,
-						workflowId: a.workflowId,
-						attemptId: a.attemptId,
-						stage: a.stage,
-						createdAt: new Date().toISOString(),
-					};
-				},
-			},
-		});
+		const workspace = await realTempWorkspace();
+		try {
+			const session = fakeSession({ cwd: workspace.cwd });
+			const engine = new WorkflowEngine({
+				store,
+				adapter: new RuntimeAdapter(
+					scriptedRunner({
+						plan: planArtifact(),
+						planReview: planReviewArtifactV2(
+							"approved",
+							[],
+							{
+								coverage: [
+									{
+										requirementId: "user:req-001",
+										source: "user_requirement",
+										mandatory: true,
+										status: "satisfied",
+										evidenceRefs: ["plan:summary"],
+										rationale: "plan addresses user request",
+									},
+									{
+										requirementId: "user:constraint-001",
+										source: "user_requirement",
+										mandatory: true,
+										status: "satisfied",
+										evidenceRefs: ["plan:rollback"],
+										rationale: "plan preserves engine-owned snapshot",
+									},
+								],
+							},
+							{ request, constraints },
+						),
+						implement: implArtifact(),
+						codeReview: reviewArtifact("approved", "implementation"),
+					}),
+				),
+				artifactStore: new ArtifactStore(artifactDir),
+				session,
+				verifier: passVerifier(workspace.cwd),
+			});
 
-		const workflowId = await engine.startWorkflow({ request, constraints });
-		const frozen = buildRequirementsSnapshot({ workflowId, request: { request, constraints } });
-		expect(frozen.requirements.map(r => r.requirementId)).toEqual(["user:req-001", "user:constraint-001"]);
+			const workflowId = await engine.startWorkflow({ request, constraints });
+			const frozen = buildRequirementsSnapshot({ workflowId, request: { request, constraints } });
+			expect(frozen.requirements.map(r => r.requirementId)).toEqual(["user:req-001", "user:constraint-001"]);
 
-		const result = await engine.run(workflowId);
-		expect(result.state.status).toBe("completed");
+			const result = await engine.run(workflowId, session);
+			expect(result.state.status).toBe("completed");
+		} finally {
+			await workspace.cleanup();
+		}
 	});
 
 	it("injects authoritative requirements into plan-review context", async () => {

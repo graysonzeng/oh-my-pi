@@ -415,7 +415,7 @@ describe("W1 episode cost attribution", () => {
 		expect(cost.workflow.costPerAcceptedTask).toBe(2.5);
 	});
 
-	it("dedupes fork/dup receipts by eventId and keeps partial sum when price missing", () => {
+	it("dedupes fork/dup receipts and keeps missing prices out of exact totals", () => {
 		const episode = { sessionId: "s-dup", rootUserEntryId: "u1" };
 		const details = buildParentFinalVerificationDetails("passed", "extension", 5_000, {
 			eventId: "same-event",
@@ -504,12 +504,14 @@ describe("W1 episode cost attribution", () => {
 		expect(session.parentFinalVerifications).toHaveLength(1);
 		const cost = buildDeliveryCostBaselineReport([session]);
 		expect(cost.ordinary.acceptedTaskCount).toBe(1);
-		expect(cost.tasks[0]?.usage.costTotal).toBe(0.5);
+		expect(cost.tasks[0]?.usage.costTotal).toBeNull();
+		expect(cost.tasks[0]?.usage.knownCostLowerBoundUsd).toBe(0.5);
 		expect(cost.tasks[0]?.attemptCostComplete).toBe(false);
 		expect(cost.tasks[0]?.priceProvenance).toBe("partial");
 		expect(cost.tasks[0]?.zeroCostErrorRequests).toBe(1);
 		expect(cost.ordinary.costPerAcceptedTask).toBeNull();
-		expect(cost.ordinary.totalAttemptCost).toBe(0.5);
+		expect(cost.ordinary.totalAttemptCost).toBeNull();
+		expect(cost.ordinary.knownAttemptCostLowerBoundUsd).toBe(0.5);
 	});
 
 	it("does not count v1 passed receipts without authority as accepted", () => {

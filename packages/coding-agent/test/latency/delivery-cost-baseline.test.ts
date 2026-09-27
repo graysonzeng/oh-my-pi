@@ -198,6 +198,16 @@ describe("delivery cost baseline", () => {
 
 		// ordinary: parent 0.05 + child 0.2 = 0.25; one accepted → 0.25
 		expect(report.ordinary.totalAttemptCost).toBeCloseTo(0.25);
+		expect(report.ordinary.usage.costTotal).toBeCloseTo(0.25);
+		expect(report.ordinary.knownAttemptCostLowerBoundUsd).toBeCloseTo(0.25);
+		expect(report.ordinary.usage.knownCostLowerBoundUsd).toBeCloseTo(0.25);
+		expect(report.tasks.find(t => t.cohort === "ordinary")?.usage.costTotal).toBeCloseTo(0.25);
+		// workflow: two parent calls 0.05 + child 0.1, fully priced → exact 0.2
+		expect(report.workflow.totalAttemptCost).toBeCloseTo(0.2);
+		expect(report.workflow.usage.costTotal).toBeCloseTo(0.2);
+		expect(report.workflow.knownAttemptCostLowerBoundUsd).toBeCloseTo(0.2);
+		expect(report.workflow.usage.knownCostLowerBoundUsd).toBeCloseTo(0.2);
+		expect(report.workflow.costPerAcceptedTask).toBeCloseTo(0.2);
 		expect(report.ordinary.costPerAcceptedTask).toBeCloseTo(0.25);
 		expect(report.ordinary.firstPassRate).toBe(1);
 		expect(report.ordinary.falseAccept).toBe("unknown");
@@ -243,6 +253,11 @@ describe("delivery cost baseline", () => {
 		const task = report.tasks[0]!;
 		expect(task.firstDeliveryAccepted).toBe("unknown");
 		expect(task.usage.costTotal).toBeNull();
+		expect(task.usage.knownCostLowerBoundUsd).toBeNull();
+		expect(task.attemptCostByKind.unknown).toBeNull();
+		expect(report.unknownCohort.knownAttemptCostLowerBoundUsd).toBeNull();
+		expect(report.unknownCohort.usage.costTotal).toBeNull();
+		expect(report.unknownCohort.usage.knownCostLowerBoundUsd).toBeNull();
 		expect(task.attemptCostByKind.timeout).toBeNull();
 		expect(task.attemptCostByKind.cancelled).toBeNull();
 	});
@@ -273,9 +288,19 @@ describe("delivery cost baseline", () => {
 		);
 		const report = buildDeliveryCostBaselineReport([parent, sibling]);
 		expect(report.workflow.acceptedTaskCount).toBe(2);
-		expect(report.workflow.totalAttemptCost).toBe(1.0);
+		expect(report.workflow.taskCount).toBe(2);
+		expect(report.workflow.totalAttemptCost).toBeNull();
+		expect(report.workflow.usage.costTotal).toBeNull();
+		expect(report.workflow.knownAttemptCostLowerBoundUsd).toBe(1);
+		expect(report.workflow.usage.knownCostLowerBoundUsd).toBe(1);
 		expect(report.workflow.coverage.attemptCost.unknown).toBeGreaterThan(0);
 		expect(report.workflow.costPerAcceptedTask).toBeNull();
+		const priced = report.tasks.find(task => task.usage.knownCostLowerBoundUsd === 1);
+		const unpriced = report.tasks.find(task => task.usage.knownCostLowerBoundUsd === null);
+		expect(priced?.usage.costTotal).toBe(1);
+		expect(priced?.attemptCostComplete).toBe(true);
+		expect(unpriced?.usage.costTotal).toBeNull();
+		expect(unpriced?.attemptCostComplete).toBe(false);
 	});
 
 	it("withholds accepted-task cost when a request within a priced session is unpriced", () => {
@@ -289,8 +314,15 @@ describe("delivery cost baseline", () => {
 			PARENT,
 		);
 		const report = buildDeliveryCostBaselineReport([parent]);
-		expect(report.workflow.totalAttemptCost).toBe(1);
-		expect(report.tasks[0]?.usage.costTotal).toBe(1);
+		expect(report.workflow.totalAttemptCost).toBeNull();
+		expect(report.workflow.knownAttemptCostLowerBoundUsd).toBe(1);
+		expect(report.workflow.usage.costTotal).toBeNull();
+		expect(report.workflow.usage.knownCostLowerBoundUsd).toBe(1);
+		expect(report.tasks[0]?.usage.costTotal).toBeNull();
+		expect(report.tasks[0]?.usage.knownCostLowerBoundUsd).toBe(1);
+		expect(report.tasks[0]?.priceProvenance).toBe("partial");
+		expect(report.tasks[0]?.attemptCostComplete).toBe(false);
+		expect(report.tasks[0]?.attemptCostByKind.unknown).toBeNull();
 		expect(report.workflow.costPerAcceptedTask).toBeNull();
 		expect(report.workflow.coverage.attemptCost).toEqual({ present: 0, unknown: 1 });
 	});
@@ -309,8 +341,13 @@ describe("delivery cost baseline", () => {
 			CHILD_A,
 		);
 		const report = buildDeliveryCostBaselineReport([parent, child]);
-		expect(report.workflow.totalAttemptCost).toBe(1);
-		expect(report.tasks[0]?.usage.costTotal).toBe(1);
+		expect(report.workflow.taskCount).toBe(1);
+		expect(report.workflow.acceptedTaskCount).toBe(1);
+		expect(report.workflow.totalAttemptCost).toBeNull();
+		expect(report.workflow.knownAttemptCostLowerBoundUsd).toBe(1);
+		expect(report.tasks[0]?.usage.costTotal).toBeNull();
+		expect(report.tasks[0]?.usage.knownCostLowerBoundUsd).toBe(1);
+		expect(report.tasks[0]?.attemptCostComplete).toBe(false);
 		expect(report.workflow.costPerAcceptedTask).toBeNull();
 		expect(report.workflow.coverage.attemptCost).toEqual({ present: 0, unknown: 1 });
 	});
@@ -520,5 +557,166 @@ describe("delivery cost baseline", () => {
 		expect(task.firstDeliveryAccepted).toBe(false);
 		expect(task.cyclesAfterFirstDelivery).toEqual({ investigate: 1, fix: 1, verify: 1 });
 		expect(task.accepted).toBe(true);
+	});
+
+	it("keeps nested exact totals null when a known price follows a missing one", () => {
+		// Failure mode: [1, missing, 2] is published as costTotal/totalAttemptCost 3,
+		// the price after the gap is dropped, or a v1 receipt without authority is accepted.
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("gap")),
+				line(assistantMsg({ ts: 1, usage: { cost: { total: 1 } } })),
+				line(assistantMsg({ ts: 2 })),
+				line(assistantMsg({ ts: 3, usage: { cost: { total: 2 } } })),
+				line({
+					type: "custom",
+					id: "pfv-gap",
+					parentId: null,
+					timestamp: "2026-09-09T10:00:00.000Z",
+					customType: "parent_final_verification",
+					data: { v: 1, status: "passed", source: "workflow" },
+				}),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildDeliveryCostBaselineReport([parent]);
+		const task = report.tasks[0]!;
+		expect(report.tasks).toHaveLength(1);
+		expect(task.accepted).toBe(false);
+		expect(task.attemptCostComplete).toBe(false);
+		expect(task.priceProvenance).toBe("partial");
+		expect(task.usage.costTotal).toBeNull();
+		expect(task.usage.knownCostLowerBoundUsd).toBe(3);
+		expect(task.attemptCostByKind.unknown).toBeNull();
+		expect(report.workflow.taskCount).toBe(1);
+		expect(report.workflow.acceptedTaskCount).toBe(0);
+		expect(report.workflow.usage.costTotal).toBeNull();
+		expect(report.workflow.usage.knownCostLowerBoundUsd).toBe(3);
+		expect(report.workflow.totalAttemptCost).toBeNull();
+		expect(report.workflow.knownAttemptCostLowerBoundUsd).toBe(3);
+		expect(report.workflow.costPerAcceptedTask).toBeNull();
+		expect(report.workflow.coverage.attemptCost).toEqual({ present: 0, unknown: 1 });
+		expect(report.ordinary.taskCount).toBe(0);
+		expect(report.ordinary.totalAttemptCost).toBeNull();
+		expect(report.ordinary.knownAttemptCostLowerBoundUsd).toBeNull();
+		expect(report.ordinary.usage.costTotal).toBeNull();
+		expect(report.unknownCohort.knownAttemptCostLowerBoundUsd).toBeNull();
+		const human = formatDeliveryCostBaselineReport(report);
+		expect(human).toContain("totalAttemptCost=null");
+		expect(human).toContain("knownAttemptCostLowerBoundUsd=3");
+		expect(human).toContain("knownCostLowerBoundUsd=3");
+	});
+
+	it("does not let a partial workflow lower bound change a fully priced ordinary cohort", () => {
+		// Failure mode: known 1 + missing + known 2 is added into the ordinary exact total,
+		// or the ordinary price is nulled because the workflow cohort is incomplete.
+		const ordinary = parseSessionJsonl(
+			[
+				line(sessionHeader("ord-known")),
+				line(assistantMsg({ ts: 1, usage: { cost: { total: 0.5 } } })),
+				line(parentFinal({ status: "passed", source: "extension", verifiedAtMs: 2000 })),
+			].join("\n"),
+			PARENT,
+		);
+		const workflow = parseSessionJsonl(
+			[
+				line(sessionHeader("wf-gap")),
+				line(assistantMsg({ ts: 1, usage: { cost: { total: 1 } } })),
+				line(assistantMsg({ ts: 2, usage: { input: 20 } })),
+				line(assistantMsg({ ts: 3, usage: { cost: { total: 2 } } })),
+				line(parentFinal({ status: "passed", source: "workflow", verifiedAtMs: 4000 })),
+			].join("\n"),
+			PARENT2,
+		);
+		const report = buildDeliveryCostBaselineReport([ordinary, workflow]);
+		expect(report.ordinary.acceptedTaskCount).toBe(1);
+		expect(report.ordinary.totalAttemptCost).toBe(0.5);
+		expect(report.ordinary.usage.costTotal).toBe(0.5);
+		expect(report.ordinary.knownAttemptCostLowerBoundUsd).toBe(0.5);
+		expect(report.ordinary.usage.knownCostLowerBoundUsd).toBe(0.5);
+		expect(report.ordinary.costPerAcceptedTask).toBe(0.5);
+		expect(report.workflow.acceptedTaskCount).toBe(1);
+		expect(report.workflow.taskCount).toBe(1);
+		expect(report.workflow.totalAttemptCost).toBeNull();
+		expect(report.workflow.usage.costTotal).toBeNull();
+		expect(report.workflow.knownAttemptCostLowerBoundUsd).toBe(3);
+		expect(report.workflow.usage.knownCostLowerBoundUsd).toBe(3);
+		expect(report.workflow.costPerAcceptedTask).toBeNull();
+		expect(report.unknownCohort.taskCount).toBe(0);
+		expect(report.unknownCohort.totalAttemptCost).toBeNull();
+		expect(report.unknownCohort.knownAttemptCostLowerBoundUsd).toBeNull();
+	});
+
+	it("does not treat a zero-priced error as a known free attempt", () => {
+		// Failure mode: an error row with cost.total 0 becomes exact $0 and a passed receipt looks free.
+		const parent = parseSessionJsonl(
+			[
+				line(sessionHeader("zero-err")),
+				line({
+					type: "message",
+					id: "a-err",
+					parentId: null,
+					timestamp: "2026-09-09T10:00:00.000Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "err" }],
+						timestamp: 1000,
+						model: "gateway/grok-4.6",
+						stopReason: "error",
+						isError: true,
+						usage: { input: 8, cost: { total: 0 } },
+					},
+				}),
+				line(parentFinal({ status: "passed", source: "extension", verifiedAtMs: 2000 })),
+			].join("\n"),
+			PARENT,
+		);
+		const report = buildDeliveryCostBaselineReport([parent]);
+		const task = report.tasks[0]!;
+		expect(task.priceProvenance).toBe("zero_cost_error");
+		expect(task.zeroCostErrorRequests).toBe(1);
+		expect(task.attemptCostComplete).toBe(false);
+		expect(task.usage.costTotal).toBeNull();
+		expect(task.usage.knownCostLowerBoundUsd).toBeNull();
+		expect(task.attemptCostByKind.unknown).toBeNull();
+		expect(report.ordinary.acceptedTaskCount).toBe(1);
+		expect(report.ordinary.totalAttemptCost).toBeNull();
+		expect(report.ordinary.knownAttemptCostLowerBoundUsd).toBeNull();
+		expect(report.ordinary.usage.costTotal).toBeNull();
+		expect(report.ordinary.usage.knownCostLowerBoundUsd).toBeNull();
+		expect(report.ordinary.costPerAcceptedTask).toBeNull();
+	});
+
+	it("keeps an observed successful zero distinct from missing usage", () => {
+		// Failure mode: no assistant usage is reported as exact $0, or a successful priced $0 is nulled.
+		const free = parseSessionJsonl(
+			[
+				line(sessionHeader("free")),
+				line(assistantMsg({ ts: 1, usage: { input: 1, cost: { total: 0 } } })),
+				line(parentFinal({ status: "passed", source: "extension", verifiedAtMs: 2000 })),
+			].join("\n"),
+			PARENT,
+		);
+		const bare = parseSessionJsonl(
+			[
+				line(sessionHeader("bare-wf")),
+				line(parentFinal({ status: "passed", source: "workflow", verifiedAtMs: 2000 })),
+			].join("\n"),
+			PARENT2,
+		);
+		const report = buildDeliveryCostBaselineReport([free, bare]);
+		expect(report.ordinary.acceptedTaskCount).toBe(1);
+		expect(report.ordinary.totalAttemptCost).toBe(0);
+		expect(report.ordinary.usage.costTotal).toBe(0);
+		expect(report.ordinary.knownAttemptCostLowerBoundUsd).toBe(0);
+		expect(report.ordinary.usage.knownCostLowerBoundUsd).toBe(0);
+		expect(report.ordinary.costPerAcceptedTask).toBe(0);
+		expect(report.tasks.find(task => task.cohort === "ordinary")?.priceProvenance).toBe("priced");
+		expect(report.workflow.acceptedTaskCount).toBe(1);
+		expect(report.workflow.totalAttemptCost).toBeNull();
+		expect(report.workflow.usage.costTotal).toBeNull();
+		expect(report.workflow.knownAttemptCostLowerBoundUsd).toBeNull();
+		expect(report.workflow.usage.knownCostLowerBoundUsd).toBeNull();
+		expect(report.workflow.costPerAcceptedTask).toBeNull();
 	});
 });

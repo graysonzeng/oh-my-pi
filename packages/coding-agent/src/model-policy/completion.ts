@@ -405,6 +405,15 @@ export interface WorkflowFinalCompletionInput {
 		passed: boolean;
 		checks: Array<{ id: string; status: string; command?: string; summary?: string }>;
 	};
+	/**
+	 * Delivery identity. Missing, worker-owned, or unproven workspace cannot complete
+	 * even when command checks look green.
+	 */
+	delivery?: {
+		owner?: string;
+		executor?: string;
+		workspaceProven?: boolean;
+	};
 	/** Existing ScopeMetrics status; violation cannot complete. */
 	scopeStatus?: ScopeStatus;
 	/** Required artifact kinds for the stage (defaults to implementation + verification). */
@@ -491,9 +500,17 @@ export function evaluateWorkflowFinalCompletion(input: WorkflowFinalCompletionIn
 		completionGateActive: true,
 	});
 
+	const delivery = input.delivery;
+	const deliveryTrusted =
+		delivery?.workspaceProven === true &&
+		(delivery.owner === "workflow_verifier" || delivery.owner === "parent") &&
+		(delivery.executor === "workflow_verifier" || delivery.executor === "parent");
+	const passed = evaluation.decision === "success" && deliveryTrusted;
 	return {
 		...evaluation,
-		passed: evaluation.decision === "success",
+		decision: passed ? "success" : evaluation.decision === "success" ? "continue" : evaluation.decision,
+		reasons: deliveryTrusted ? evaluation.reasons : [...evaluation.reasons, "delivery_unproven"],
+		passed,
 	};
 }
 

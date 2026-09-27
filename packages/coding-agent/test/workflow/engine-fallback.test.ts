@@ -15,6 +15,7 @@ import {
 	materializeSamplePatch,
 	passVerifier,
 	planArtifact,
+	realTempWorkspace,
 	reviewArtifact,
 } from "./helpers";
 
@@ -67,15 +68,19 @@ function attestRuntimeIdentity(request: StructuredRunnerRequest): string {
 describe("WorkflowEngine profile fallback", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
+	// Real VCS workspace so verification identity is host-captured (R1).
+	let workspace: { cwd: string; cleanup: () => Promise<void> };
 
 	beforeEach(async () => {
 		store = new WorkflowStore(":memory:");
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-fb-"));
+		workspace = await realTempWorkspace();
 	});
 
 	afterEach(async () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
+		await workspace.cleanup();
 	});
 
 	it("retries planning with fallback profile after retryable timeout", async () => {
@@ -84,12 +89,12 @@ describe("WorkflowEngine profile fallback", () => {
 		let planCalls = 0;
 		const seenProfiles: string[] = [];
 
-		const session = fakeSession({ cwd: artifactDir });
+		const session = fakeSession({ cwd: workspace.cwd });
 		const engine = new WorkflowEngine({
 			store,
 			router,
 			session,
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			adapter: new RuntimeAdapter(async request => {
 				// Only fail first planner call
@@ -121,7 +126,7 @@ describe("WorkflowEngine profile fallback", () => {
 					};
 				}
 				if (String(request.assignment).includes("Implement")) {
-					const patchPath = await materializeSamplePatch(artifactDir);
+					const patchPath = await materializeSamplePatch(workspace.cwd);
 					return {
 						result: {
 							id: "raw-impl",
@@ -152,12 +157,12 @@ describe("WorkflowEngine profile fallback", () => {
 		const profiles = Object.values(DEFAULT_MODEL_PROFILES);
 		const router = new ModelRouter(profiles);
 		let planCalls = 0;
-		const session = fakeSession({ cwd: artifactDir });
+		const session = fakeSession({ cwd: workspace.cwd });
 		const engine = new WorkflowEngine({
 			store,
 			router,
 			session,
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			adapter: new RuntimeAdapter(async request => {
 				if (request.workflowRole === "planner") {
@@ -187,7 +192,7 @@ describe("WorkflowEngine profile fallback", () => {
 					};
 				}
 				if (String(request.assignment).includes("Implement")) {
-					const patchPath = await materializeSamplePatch(artifactDir);
+					const patchPath = await materializeSamplePatch(workspace.cwd);
 					return {
 						result: {
 							id: "raw-impl",
@@ -224,12 +229,12 @@ describe("WorkflowEngine profile fallback", () => {
 		const profiles = Object.values(DEFAULT_MODEL_PROFILES);
 		const router = new ModelRouter(profiles);
 		let planCalls = 0;
-		const session = fakeSession({ cwd: artifactDir });
+		const session = fakeSession({ cwd: workspace.cwd });
 		const engine = new WorkflowEngine({
 			store,
 			router,
 			session,
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
 			adapter: new RuntimeAdapter(async request => {
 				if (request.workflowRole === "planner") {
@@ -257,7 +262,7 @@ describe("WorkflowEngine profile fallback", () => {
 					};
 				}
 				if (String(request.assignment).includes("Implement")) {
-					const patchPath = await materializeSamplePatch(artifactDir);
+					const patchPath = await materializeSamplePatch(workspace.cwd);
 					return {
 						result: {
 							id: "raw-impl",

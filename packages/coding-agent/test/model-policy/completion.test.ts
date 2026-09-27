@@ -182,7 +182,7 @@ describe("evaluateWorkflowFinalCompletion", () => {
 		expect(scopeFail.failedGuards).toContain("scope_must_not_violate");
 	});
 
-	it("passes only when implementation, verification, findings, and scope are clean", () => {
+	it("passes only when implementation, verification, findings, scope, and delivery identity are clean", () => {
 		const ok = evaluateWorkflowFinalCompletion({
 			implementation: { unresolved: [] },
 			openBlockingFindings: [],
@@ -190,10 +190,31 @@ describe("evaluateWorkflowFinalCompletion", () => {
 				passed: true,
 				checks: [{ id: "unit", status: "passed", command: "bun test" }],
 			},
+			delivery: { owner: "workflow_verifier", executor: "workflow_verifier", workspaceProven: true },
 			scopeStatus: "adhered",
 		});
 		expect(ok.passed).toBe(true);
 		expect(ok.decision).toBe("success");
+	});
+
+	it("rejects worker ownership and unknown workspace even when checks passed", () => {
+		const worker = evaluateWorkflowFinalCompletion({
+			implementation: { unresolved: [] },
+			openBlockingFindings: [],
+			verification: { passed: true, checks: [{ id: "unit", status: "passed" }] },
+			delivery: { owner: "worker", executor: "worker", workspaceProven: true },
+			scopeStatus: "adhered",
+		});
+		expect(worker.passed).toBe(false);
+		expect(worker.reasons).toContain("delivery_unproven");
+		const unknown = evaluateWorkflowFinalCompletion({
+			implementation: { unresolved: [] },
+			openBlockingFindings: [],
+			verification: { passed: true, checks: [{ id: "unit", status: "passed" }] },
+			scopeStatus: "adhered",
+		});
+		expect(unknown.passed).toBe(false);
+		expect(unknown.reasons).toContain("delivery_unproven");
 	});
 
 	it("rejects empty checks as missing evidence instead of auto-passing", () => {
@@ -241,6 +262,7 @@ it("ignores priorPatch metadata in implementation unresolved list", () => {
 		},
 		openBlockingFindings: [],
 		verification: { passed: true, checks: [{ id: "noop", status: "passed" }] },
+		delivery: { owner: "workflow_verifier", executor: "workflow_verifier", workspaceProven: true },
 		scopeStatus: "adhered",
 	});
 	expect(result.passed).toBe(false);
@@ -250,7 +272,9 @@ it("ignores priorPatch metadata in implementation unresolved list", () => {
 		implementation: { unresolved: ["priorPatch:/tmp/wf/patches/att_old.patch"] },
 		openBlockingFindings: [],
 		verification: { passed: true, checks: [{ id: "noop", status: "passed" }] },
+		delivery: { owner: "workflow_verifier", executor: "workflow_verifier", workspaceProven: true },
 		scopeStatus: "adhered",
 	});
+	expect(onlyPrior.failedGuards).not.toContain("unresolved_items_must_close");
 	expect(onlyPrior.passed).toBe(true);
 });

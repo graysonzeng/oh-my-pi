@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -8,6 +11,9 @@ import * as evaluator from "../../src/goals/evaluator";
 import { GoalRuntime } from "../../src/goals/runtime";
 import type { Goal, GoalModeState, GoalTokenUsage } from "../../src/goals/state";
 import type { ToolSession } from "../../src/tools";
+import { SessionManager } from "../../src/session/session-manager";
+import { BashTool } from "../../src/tools/bash";
+import { fakeSession, realTempWorkspace, type RealTempWorkspace } from "../workflow/helpers";
 
 function createUsage(): GoalTokenUsage {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -52,8 +58,12 @@ function toolResult(id: string, name: string, text: string): ToolResultMessage {
 }
 
 describe("executeGoalComplete same-turn evaluator", () => {
-	afterEach(() => {
+	let workspace: RealTempWorkspace | undefined;
+	let artifactDir: string | undefined;
+	afterEach(async () => {
 		vi.restoreAllMocks();
+		await workspace?.cleanup();
+		if (artifactDir) await fs.rm(artifactDir, { recursive: true, force: true });
 	});
 
 	it("runs one evaluator for two complete nominations in the same turn", async () => {
@@ -75,17 +85,41 @@ describe("executeGoalComplete same-turn evaluator", () => {
 		await runtime.createGoal({ objective: "Ship it" });
 		runtime.onTurnStart("turn-1", createUsage());
 
-		const verify = { type: "toolCall" as const, id: "v1", name: "bash", arguments: { command: "bun test" } };
+		workspace = await realTempWorkspace();
+		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-complete-evidence-"));
+		await Bun.write(
+			path.join(workspace.cwd, "verify.test.ts"),
+			'import { expect, test } from "bun:test"; test("workspace seed", async () => expect(await Bun.file("seed.txt").text()).toBe("seed\\n"));\n',
+		);
+		const sessionManager = SessionManager.create(workspace.cwd, artifactDir);
+		const bash = new BashTool(
+			fakeSession({
+				cwd: workspace.cwd,
+				sessionManager,
+				allocateOutputArtifact: toolType => sessionManager.allocateArtifactPath(toolType),
+			}),
+		);
+		const executed = await bash.execute("v1", { command: "bun test verify.test.ts" });
+		expect(executed.isError).not.toBe(true);
+		const verify = {
+			type: "toolCall" as const,
+			id: "v1",
+			name: "bash",
+			arguments: { command: "bun test verify.test.ts" },
+		};
 		const complete = { type: "toolCall" as const, id: "g1", name: "goal", arguments: { op: "complete" } };
 		const settleAssistant = assistant("verified", [verify, complete]);
-		const messages: AgentMessage[] = [settleAssistant, toolResult("v1", "bash", "pass")];
+		const messages: AgentMessage[] = [
+			settleAssistant,
+			{ ...toolResult("v1", "bash", "pass"), details: executed.details },
+		];
 		const session = {
 			settings: Settings.isolated({ "goal.hostGate.enabled": true }),
 			getGoalModeState: () => (state ? { ...state, goal: cloneGoal(state.goal) } : undefined),
 			getTodoPhases: () => [{ name: "Ship", tasks: [{ content: "write tests", status: "completed" }] }],
 			snapshotConsultContext: () => ({ systemPrompt: [], messages }),
 			getActiveModel: () => model,
-			cwd: process.cwd(),
+			cwd: workspace.cwd,
 		} as unknown as ToolSession;
 
 		const started = Promise.withResolvers<void>();
@@ -105,7 +139,12 @@ describe("executeGoalComplete same-turn evaluator", () => {
 		});
 
 		const first = executeGoalComplete(session, runtime, undefined, "g1");
-		await started.promise;
+		await Promise.race([
+			started.promise,
+			first.then(result => {
+				throw new Error(`Expected evaluator entry, received ${result.details.gate}`);
+			}),
+		]);
 		const second = executeGoalComplete(session, runtime, undefined, "g2");
 		await Promise.resolve();
 		expect(evaluatorSpy).toHaveBeenCalledTimes(1);

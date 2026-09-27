@@ -11,6 +11,7 @@
 
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { fingerprintStable } from "../latency/stable-serialize";
+import { readHostTerminalSeal } from "./host-terminal-check";
 
 export const CHILD_DELIVERY_EVIDENCE_KIND = "child_delivery_evidence" as const;
 export const CHILD_DELIVERY_EVIDENCE_VERSION = 1 as const;
@@ -489,28 +490,25 @@ export function classifyChildResultForParentIntegrate(input: {
 }
 
 /**
- * Host-attested terminal checks from executor-extracted tool data only.
- * Never reads free-form model JSON acceptanceProven — that stays untrusted.
- * Shape: extractedToolData.host_verification[] entries with { id, evidenceLocation }.
+ * Host-attested terminal checks from executor-extracted bash seals only.
+ * `host_verification` and model JSON cannot seal. Empty current version refuses all.
  */
-export function extractHostTerminalChecksFromExecutorResult(result: {
-	extractedToolData?: Record<string, unknown[]>;
-}): { id: string; evidenceLocation?: string }[] {
-	const rows = result.extractedToolData?.host_verification;
+export function extractHostTerminalChecksFromExecutorResult(
+	result: {
+		extractedToolData?: Record<string, unknown[]>;
+	},
+	currentCodeVersion?: string,
+): { id: string; evidenceLocation?: string }[] {
+	if (currentCodeVersion !== undefined && currentCodeVersion.trim().length === 0) return [];
+	const current = currentCodeVersion?.trim();
+	const rows = result.extractedToolData?.bash;
 	if (!Array.isArray(rows) || rows.length === 0) return [];
 	const out: { id: string; evidenceLocation?: string }[] = [];
 	for (const row of rows) {
-		if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-		const rec = row as Record<string, unknown>;
-		const id = typeof rec.id === "string" ? rec.id.trim() : "";
-		if (!id) continue;
-		const evidenceLocation =
-			typeof rec.evidenceLocation === "string" && rec.evidenceLocation.trim().length > 0
-				? rec.evidenceLocation.trim()
-				: undefined;
-		// Require a durable evidence location (log/artifact/path) — bare ids cannot seal.
-		if (!evidenceLocation) continue;
-		out.push({ id, evidenceLocation });
+		const seal = readHostTerminalSeal({ hostSeal: row });
+		if (!seal) continue;
+		if (current && seal.codeVersion !== current) continue;
+		out.push({ id: seal.id, evidenceLocation: seal.evidenceLocation });
 	}
 	return out;
 }
@@ -666,6 +664,8 @@ export function bindParentIntegrateDecisionEntry(input: {
 export interface ParentIntegrateDecisionEntry {
 	kind: "parent_integrate_decision";
 	v: 1;
+	/** Stable semantic settlement identity; absent on historical entries. */
+	eventId?: string;
 	classification: ParentIntegrateClass;
 	action: ParentIntegrateAction;
 	reasons: string[];

@@ -1,5 +1,7 @@
+{{knownSource}}
 ## Approved plan
 {{planJson}}
+{{planRecovery}}
 
 ## Acceptance criteria
 {{acceptanceCriteria}}

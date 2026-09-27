@@ -11,14 +11,27 @@ import { ArtifactStore } from "../../src/workflow/artifact-store";
 import { WorkflowEngine } from "../../src/workflow/engine";
 import { RuntimeAdapter } from "../../src/workflow/runtime-adapter";
 import { WorkflowStore } from "../../src/workflow/sqlite-store";
-import { fakeSession, implArtifact, passVerifier, planArtifact, reviewArtifact, scriptedRunner } from "./helpers";
+import {
+	fakeSession,
+	implArtifact,
+	materializeSamplePatch,
+	passVerifier,
+	planArtifact,
+	realTempWorkspace,
+	reviewArtifact,
+	scriptedRunner,
+	type RealTempWorkspace,
+} from "./helpers";
 
 describe("WorkflowEngine resume / cancel / lock", () => {
 	let store: WorkflowStore;
 	let artifactDir: string;
 	let dbPath: string;
+	let workspace: RealTempWorkspace;
 
 	beforeEach(async () => {
+		workspace = await realTempWorkspace();
+		await materializeSamplePatch(workspace.cwd);
 		dbPath = path.join(os.tmpdir(), `wf-resume-${crypto.randomUUID()}.db`);
 		store = new WorkflowStore(dbPath);
 		artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-resume-arts-"));
@@ -28,6 +41,7 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 		store.close();
 		await fs.rm(artifactDir, { recursive: true, force: true });
 		await fs.rm(dbPath, { force: true });
+		await workspace.cleanup();
 	});
 
 	it("restarts from persisted non-terminal stage and continues execution", async () => {
@@ -41,9 +55,9 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 		const workflowId = await engine.startWorkflow({ request: "resume me" });
 		await engine.resume(workflowId, { singleStep: true }); // → planning
@@ -63,9 +77,9 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 		const result = await engine2.resume(workflowId);
 		expect(result.state.status).toBe("completed");
@@ -76,7 +90,7 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 			store,
 			adapter: new RuntimeAdapter(scriptedRunner({ plan: planArtifact() })),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 		const workflowId = await engine.startWorkflow({ request: "cancel me" });
 		await engine.cancel(workflowId);
@@ -110,9 +124,9 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 		const workflowId = await engine.startWorkflow({ request: "stale attempt" });
 		// created → planning
@@ -199,9 +213,9 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 					}
 					throw new Error(`unexpected agent ${agent}`);
 				}),
-				verifier: passVerifier(),
+				verifier: passVerifier(workspace.cwd),
 				artifactStore: new ArtifactStore(artifactDir),
-				session: fakeSession(),
+				session: fakeSession({ cwd: workspace.cwd }),
 			});
 
 		const engine1 = mk(store);
@@ -232,22 +246,98 @@ describe("WorkflowEngine resume / cancel / lock", () => {
 					codeReview: reviewArtifact("approved", "implementation"),
 				}),
 			),
-			verifier: passVerifier(),
+			verifier: passVerifier(workspace.cwd),
 			artifactStore: new ArtifactStore(artifactDir),
-			session: fakeSession(),
+			session: fakeSession({ cwd: workspace.cwd }),
 		});
 		const first = await engine.startWorkflow({ request: "first workflow" });
 		await engine.resume(first, { singleStep: true });
 		await engine.resume(first, { singleStep: true });
-		expect(engine.routingAudit.length).toBeGreaterThan(0);
+		expect(engine.budgetSnapshot()).toMatchObject({ requests: 1, costKnown: true, knownCostLowerBoundUsd: 0.03 });
 
 		const second = await engine.startWorkflow({ request: "second workflow" });
 		expect(second).not.toBe(first);
-		expect(engine.routingAudit.length).toBe(0);
+		expect(engine.budgetSnapshot()).toMatchObject({ requests: 0, costKnown: true, knownCostLowerBoundUsd: 0 });
+		expect((await store.resumeFromPersistedState(second))?.budgetTotals).toMatchObject({ requests: 0 });
 
 		await engine.resume(second, { singleStep: true });
 		await engine.resume(second, { singleStep: true });
-		expect(engine.routingAudit.some(a => a.profileId)).toBe(true);
+		expect(engine.budgetSnapshot()).toMatchObject({ requests: 1, costKnown: true, knownCostLowerBoundUsd: 0.03 });
+	});
+	it("does not recover a legacy missing budget as known zero", async () => {
+		const workflowId = await store.createWorkflow({ request: "legacy workflow" }, {});
+		const engine = new WorkflowEngine({ store, artifactStore: new ArtifactStore(artifactDir) });
+		const resumed = await engine.resume(workflowId, { singleStep: true });
+		expect(resumed.state.status).toBe("planning");
+		expect(engine.budgetSnapshot()).toMatchObject({ costKnown: false, costUsd: null });
+		expect((await store.resumeFromPersistedState(workflowId))?.budgetTotals).toMatchObject({ costKnown: false });
+	});
+
+	it("rejects a corrupt latest plan rather than silently reviving the older plan", async () => {
+		const artifacts = new ArtifactStore(artifactDir);
+		let calls = 0;
+		const engine = new WorkflowEngine({
+			store,
+			artifactStore: artifacts,
+			session: fakeSession({ cwd: workspace.cwd }),
+			adapter: new RuntimeAdapter(async request => {
+				calls++;
+				return scriptedRunner({ plan: planArtifact() })(request);
+			}),
+		});
+		const workflowId = await engine.startWorkflow({ request: "recover exact plan" });
+		await engine.resume(workflowId, { singleStep: true });
+		await engine.resume(workflowId, { singleStep: true });
+		const attemptId = (await store.listAttempts(workflowId))[0]!.id;
+		const corrupt = await artifacts.store({
+			workflowId,
+			attemptId,
+			kind: "plan",
+			schemaVersion: 1,
+			relativePath: "",
+			content: "{",
+		});
+		await store.addArtifact(corrupt);
+		await expect(engine.resume(workflowId, { singleStep: true })).rejects.toThrow("required_artifact_invalid");
+		expect(calls).toBe(1);
+		expect((await store.getCurrentState(workflowId))?.runnerOwner).toBeUndefined();
+	});
+
+	it("does not load unrelated observation files while restoring planning state", async () => {
+		const artifacts = new ArtifactStore(artifactDir);
+		const engine = new WorkflowEngine({
+			store,
+			artifactStore: artifacts,
+			session: fakeSession({ cwd: workspace.cwd }),
+			adapter: new RuntimeAdapter(scriptedRunner({ plan: planArtifact() })),
+		});
+		const workflowId = await engine.startWorkflow({ request: "restore without historical observations" });
+		await engine.resume(workflowId, { singleStep: true });
+		await engine.resume(workflowId, { singleStep: true });
+		const attemptId = (await store.listAttempts(workflowId))[0]!.id;
+		const observation = await artifacts.store({
+			workflowId,
+			attemptId,
+			kind: "prompt-assembly-receipt",
+			schemaVersion: 1,
+			relativePath: "",
+			content: "{}",
+		});
+		await store.addArtifact(observation);
+		await Bun.write(path.join(artifactDir, observation.relativePath), "corrupted observation");
+		// Stop before the reviewer: a lock conflict proves hydration is not what failed.
+		const state = (await store.getCurrentState(workflowId))!;
+		await store.claimRunner(workflowId, "other-runner", state.version);
+		await expect(engine.resume(workflowId, { singleStep: true })).rejects.toThrow("runner_lock_held");
+		await store.releaseRunner(workflowId, "other-runner");
+		const restarted = new WorkflowEngine({
+			store,
+			artifactStore: artifacts,
+			session: fakeSession({ cwd: workspace.cwd }),
+			adapter: new RuntimeAdapter(scriptedRunner({ planReview: reviewArtifact("approved", "plan") })),
+		});
+		const resumed = await restarted.resume(workflowId, { singleStep: true });
+		expect(resumed.state.status).toBe("implementing");
 	});
 
 	it("abort unregister is owner-scoped under concurrent registration", () => {

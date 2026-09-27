@@ -66,13 +66,6 @@ const explicitGrokPrompt: PromptStrategy = {
 
 const ORDINARY_TRUNCATION = buildOutputTruncation(ORDINARY_TRUNCATION_BYTE_LINE_OPTS);
 
-function conservativeTruncation(opts: {
-	maxBytes: number;
-	maxLines: number;
-}): NonNullable<ToolStrategy["outputTruncation"]> {
-	return buildConservativeOutputTruncation(opts);
-}
-
 function toolStrategy(opts?: {
 	maxConcurrent?: number;
 	aliases?: Record<string, string>;
@@ -370,7 +363,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		toolStrategy: toolStrategy({
 			maxConcurrent: 8,
 			aliases: { bash: "run_command" },
-			truncation: conservativeTruncation({ maxBytes: 3500, maxLines: 80 }),
+			truncation: buildConservativeOutputTruncation({ maxBytes: 3500, maxLines: 80 }),
 		}),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
@@ -462,7 +455,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		toolStrategy: toolStrategy({
 			maxConcurrent: 8,
 			aliases: { bash: "run_command" },
-			truncation: conservativeTruncation({ maxBytes: 3500, maxLines: 80 }),
+			truncation: buildConservativeOutputTruncation({ maxBytes: 3500, maxLines: 80 }),
 		}),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.75,
@@ -622,7 +615,7 @@ const WORKFLOW_MODEL_PROFILES = {
 		promptStrategy: { ...conciseClaudePrompt, roleEmphasis: "medium" },
 		toolStrategy: toolStrategy({
 			maxConcurrent: 4,
-			truncation: conservativeTruncation({ maxBytes: 2000, maxLines: 40 }),
+			truncation: buildConservativeOutputTruncation({ maxBytes: 2000, maxLines: 40 }),
 		}),
 		contextStrategy: contextStrategy({
 			targetUtilization: 0.8,
