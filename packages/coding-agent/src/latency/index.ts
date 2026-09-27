@@ -1,4 +1,5 @@
 export * from "./active-wall";
+export * from "./acceptance-coverage-matrix";
 export * from "./arms";
 export * from "./assignment";
 export * from "./bash-attempt-ledger";

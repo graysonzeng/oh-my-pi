@@ -4,6 +4,7 @@ import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with 
 import goalFalseCompletionPrompt from "../prompts/goals/goal-false-completion.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import { applyNoProgressObservation, mergeNoProgressIntoGate, type ProgressObservationInput } from "./no-progress";
 import type {
 	GoalBudgetSteering,
 	GoalHostGateDecisionKind,
@@ -668,7 +669,16 @@ export class GoalRuntime {
 		nextStep: string;
 		blockerKey?: string;
 		reasons?: string[];
-	}): Promise<"applied" | "stale"> {
+		/**
+		 * Optional D2 no-progress update. When omitted, observation fields are
+		 * left unchanged (except non-continue clears the counter).
+		 */
+		noProgress?: {
+			policyEnabled: boolean;
+			threshold: number;
+			observation: ProgressObservationInput;
+		};
+	}): Promise<"applied" | "stale" | "paused_no_progress"> {
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
 			const gate = state?.goal.hostGate;
@@ -688,7 +698,7 @@ export class GoalRuntime {
 			if (input.decision === "user_confirmed") {
 				return "applied";
 			}
-			state.goal.hostGate = {
+			let nextGate: GoalHostGateState = {
 				...gate,
 				pendingVerification: false,
 				lastDecision: input.decision,
@@ -698,9 +708,51 @@ export class GoalRuntime {
 				lastReasons: input.reasons,
 				consecutiveContinueCount: input.decision === "continue" ? (gate.consecutiveContinueCount ?? 0) + 1 : 0,
 			};
+
+			let pausedNoProgress = false;
+			if (input.noProgress) {
+				const progress = applyNoProgressObservation({
+					gate: nextGate,
+					observation: {
+						...input.noProgress.observation,
+						nominationId: input.nominationId,
+						blockerKey: input.blockerKey ?? input.noProgress.observation.blockerKey,
+						hostReasons: input.reasons ?? input.noProgress.observation.hostReasons,
+					},
+					policyEnabled: input.noProgress.policyEnabled,
+					threshold: input.noProgress.threshold,
+					decision: input.decision,
+				});
+				nextGate = mergeNoProgressIntoGate(nextGate, progress);
+				if (progress.shouldPause) {
+					pausedNoProgress = true;
+					state.enabled = false;
+					if (state.goal.status === "active" || state.goal.status === "budget-limited") {
+						state.goal.status = "paused";
+					}
+					nextGate = {
+						...nextGate,
+						lastPauseReason: progress.lastPauseReason ?? "identical_host_observation",
+						lastDecision: "blocked",
+						lastNextStep:
+							nextGate.lastNextStep ||
+							"paused: identical host observation repeated without progress; review partial work and resume with a new baseline",
+					};
+				}
+			} else if (input.decision !== "continue") {
+				nextGate = {
+					...nextGate,
+					noProgressCount: 0,
+					lastProgressFingerprint: undefined,
+				};
+			}
+
+			state.goal.hostGate = nextGate;
 			state.goal.updatedAt = this.#now();
-			await this.#commitState(state, { persist: state.enabled ? "goal" : "goal_paused" });
-			return "applied";
+			await this.#commitState(state, {
+				persist: state.enabled ? "goal" : "goal_paused",
+			});
+			return pausedNoProgress ? "paused_no_progress" : "applied";
 		});
 	}
 

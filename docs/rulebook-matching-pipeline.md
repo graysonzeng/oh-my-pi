@@ -345,4 +345,4 @@ Implications:
 1. The rule providers currently loaded for `rules` are `native`, `omp-plugins`, `agents`, `cursor`, `windsurf`, `cline`, `github`, and embedded `builtin-defaults`; provider files for other tools may parse other config formats but do not register rule loaders.
 2. `globs` metadata is surfaced to prompt/UI and is used as a global path gate for TTSR matching, but it is not used to automatically select rulebook rules for `rule://`.
 3. Rule selection for `rule://` includes rulebook, always-apply, and registered TTSR rules (so a triggered TTSR rule can be re-read), but not rules that registered no condition and carry neither a description nor `alwaysApply`.
-4. Discovery warnings (`loadCapability("rules").warnings`) are produced but `createAgentSession` does not currently surface/log them in this path.
+4. Discovery warnings (`loadCapability("rules").warnings`) are logged once at session start via `formatRuleDiscoveryWarnings` (D5). Rule bodies are never dumped into the log line. Same-name winner/shadowed diagnosis is available from `diagnoseRuleSources` without changing priority.

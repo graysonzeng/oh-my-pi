@@ -163,6 +163,8 @@ export async function executeGoalComplete(
 	const settle = nominated.settle;
 	if (host.decision === "continue") {
 		try {
+			const noProgressPolicy = session.settings.get("goal.hostGate.noProgressPolicy") === true;
+			const noProgressThreshold = Number(session.settings.get("goal.hostGate.noProgressThreshold") ?? 3);
 			const applied = await runtime.applyNominationResult({
 				goalId: goal.id,
 				goalRevision: goal.hostGate?.goalRevision ?? 0,
@@ -173,6 +175,15 @@ export async function executeGoalComplete(
 				evidence: host.reasons.join(","),
 				nextStep: host.nextStep,
 				reasons: host.reasons,
+				noProgress: {
+					policyEnabled: noProgressPolicy,
+					threshold: Number.isFinite(noProgressThreshold) ? noProgressThreshold : 3,
+					observation: {
+						hostReasons: host.reasons,
+						codeVersionFingerprint: currentCodeVersion || null,
+						nominationId: goal.hostGate?.nominationId ?? nominationId,
+					},
+				},
 			});
 			if (applied === "stale") {
 				logger.warn("discarded stale goal host-gate continue", {
@@ -183,6 +194,13 @@ export async function executeGoalComplete(
 				});
 			}
 			const latest = session.getGoalModeState?.()?.goal ?? goal;
+			if (applied === "paused_no_progress") {
+				return completeResponse(
+					latest,
+					"blocked",
+					`Host gate: paused (no-progress policy)\nReasons: ${(latest.hostGate?.lastReasons ?? host.reasons).join(", ")}\npause_reason: ${latest.hostGate?.lastPauseReason ?? "identical_host_observation"}\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+				);
+			}
 			return completeResponse(
 				latest,
 				"continue",
@@ -209,6 +227,16 @@ export async function executeGoalComplete(
 			nextStep: result.nextStep,
 			blockerKey: result.blockerKey || undefined,
 			reasons: host.reasons,
+			noProgress: {
+				policyEnabled: false,
+				threshold: 3,
+				observation: {
+					hostReasons: host.reasons,
+					codeVersionFingerprint: currentCodeVersion || null,
+					nominationId: goal.hostGate?.nominationId ?? nominationId,
+					evaluatorUnavailable: result.failOpen === true,
+				},
+			},
 		});
 		if (applied === "stale") {
 			logger.warn("discarded stale goal evaluator result", {

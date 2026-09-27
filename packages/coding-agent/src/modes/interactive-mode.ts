@@ -4054,6 +4054,17 @@ export class InteractiveMode implements InteractiveModeContext {
 				lastGaps: Array.isArray(gate.lastGaps)
 					? gate.lastGaps.filter((item): item is string => typeof item === "string")
 					: undefined,
+				lastProgressFingerprint:
+					typeof gate.lastProgressFingerprint === "string" ? gate.lastProgressFingerprint : undefined,
+				noProgressCount: typeof gate.noProgressCount === "number" ? gate.noProgressCount : undefined,
+				lastObservedNominationId:
+					typeof gate.lastObservedNominationId === "string" ? gate.lastObservedNominationId : undefined,
+				lastPauseReason:
+					gate.lastPauseReason === "identical_host_observation" ||
+					gate.lastPauseReason === "missing_observation_budget_only" ||
+					gate.lastPauseReason === "evaluator_unavailable_not_progress"
+						? gate.lastPauseReason
+						: undefined,
 			};
 		}
 		return {
