@@ -144,17 +144,20 @@ export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; l
  * in `path`. When a range selector is already present, kwargs are rejected
  * with an explicit message instead of silently re-reading page 1.
  *
+ * `0` is treated as omitted so providers that must send every JSON field
+ * (strict required+nullable) can pass `offset: 0` / `limit: 0` without a
+ * validation round-trip. Non-zero kwargs with an existing range selector
+ * still fail closed.
+ *
  * Artifact URLs without an existing `:raw` get `:raw` injected so continue-read
  * pages the verbatim body (history E2/E3). Plain filesystem paths compose as
  * `path:301` / `path:301+K` — never force `:raw` onto hashline/preview reads.
  */
 export function composeReadPaginationArgs(input: { path: string; offset?: number; limit?: number }): { path: string } {
-	const hasOffset = input.offset !== undefined;
-	const hasLimit = input.limit !== undefined;
-	if (!hasOffset && !hasLimit) return { path: input.path };
+	const offset = omitZeroPaginationKwarg(input.offset);
+	const limit = omitZeroPaginationKwarg(input.limit);
+	if (offset === undefined && limit === undefined) return { path: input.path };
 
-	const offset = hasOffset ? Math.floor(input.offset!) : undefined;
-	const limit = hasLimit ? Math.floor(input.limit!) : undefined;
 	if (offset !== undefined && !(offset >= 1)) {
 		throw new ToolError(`Invalid offset ${input.offset}: must be a 1-indexed positive line number.`);
 	}
@@ -181,4 +184,11 @@ export function composeReadPaginationArgs(input: { path: string; offset?: number
 	// Verbatim artifact continue-read needs :raw; ordinary files keep hashline selectors.
 	if (/^artifact:\/\//i.test(input.path)) return { path: `${input.path}:raw${rangeSuffix}` };
 	return { path: `${input.path}${rangeSuffix}` };
+}
+
+/** Strict JSON schemas require every property; models send `0` for “unspecified”. */
+function omitZeroPaginationKwarg(value: number | undefined): number | undefined {
+	if (value === undefined) return undefined;
+	const n = Math.floor(value);
+	return n === 0 ? undefined : n;
 }

@@ -17,6 +17,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { composeReadPaginationArgs } from "@oh-my-pi/pi-coding-agent/tools/read-selector";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -73,6 +74,22 @@ describe("composeReadPaginationArgs", () => {
 			expect(String(error)).toContain("offset=301");
 		}
 	});
+
+	it("treats offset/limit 0 as omitted instead of rejecting", () => {
+		expect(composeReadPaginationArgs({ path: "src/foo.ts", offset: 0, limit: 0 })).toEqual({
+			path: "src/foo.ts",
+		});
+		expect(composeReadPaginationArgs({ path: "src/foo.ts", offset: 0, limit: 20 })).toEqual({
+			path: "src/foo.ts:1+20",
+		});
+		expect(composeReadPaginationArgs({ path: "artifact://0:raw:1-300", offset: 0, limit: 0 })).toEqual({
+			path: "artifact://0:raw:1-300",
+		});
+	});
+
+	it("still rejects a real stale offset when a range selector is present", () => {
+		expect(() => composeReadPaginationArgs({ path: "src/foo.ts:10-20", offset: 21 })).toThrow(ToolError);
+	});
 });
 
 describe("read tool pagination fidelity (S3)", () => {
@@ -123,6 +140,33 @@ describe("read tool pagination fidelity (S3)", () => {
 		await expect(tool.execute("stale", { path: "artifact://0:raw:1-300", offset: 301 })).rejects.toThrow(
 			/Stale pagination kwargs/,
 		);
+	});
+
+	it("offset/limit 0 reads the same window as omitting them", async () => {
+		await Bun.write(path.join(testDir, "n.txt"), "a\nb\nc\nd\ne\n");
+		const omitted = getTextOutput(await tool.execute("omit", { path: "n.txt" }));
+		const zeros = getTextOutput(await tool.execute("zeros", { path: "n.txt", offset: 0, limit: 0 }));
+		expect(zeros).toBe(omitted);
+		expect(zeros).toContain("a");
+		expect(zeros).toContain("e");
+	});
+
+	it("zero kwargs do not override an existing path selector", async () => {
+		await Bun.write(path.join(testDir, "n.txt"), "a\nb\nc\nd\ne\n");
+		const selected = getTextOutput(await tool.execute("sel", { path: "n.txt:2-3" }));
+		const zeros = getTextOutput(await tool.execute("sel0", { path: "n.txt:2-3", offset: 0, limit: 0 }));
+		expect(zeros).toBe(selected);
+	});
+
+	it("accepts offset/limit 0 at the tool schema so grok-style required zeros do not fail closed", () => {
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "zero-page",
+				name: "read",
+				arguments: { path: "n.txt", offset: 0, limit: 0 },
+			}),
+		).toEqual({ path: "n.txt", offset: 0, limit: 0 });
 	});
 
 	it("W7 replay: range selector vs full view are distinct; changed path is not reused as page-2", async () => {

@@ -84,7 +84,7 @@ import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
-import { attributeSubagentError } from "./error-attribution";
+import { attributeSubagentError, shouldKeepAliveSubagent } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
@@ -4876,7 +4876,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false) {
+				const keepAlive = shouldKeepAliveSubagent({
+					requestedKeepAlive: options.keepAlive !== false,
+					errorMessage: [error, session.getLastAssistantMessage()?.errorMessage].filter(Boolean).join("\n"),
+				});
+				if (keepAlive) {
 					installIrcWakeTurnMonitor(session);
 				}
 				await finalizeSubagentLifecycle({
@@ -4884,7 +4888,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false,
+					keepAlive,
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,

@@ -681,11 +681,11 @@ const readSchema = type({
 	path: type("string").describe(
 		"Local path, internal URI, or URL; page via inline selectors (preferred: path:301 or path:raw:301-).",
 	),
-	"offset?": type("number.integer>0").describe(
-		"Optional 1-indexed start line. Composed onto path when no range selector is present; prefer embedding :N in path.",
+	"offset?": type("number.integer>=0").describe(
+		"Optional 1-indexed start line. 0 is treated as omitted. Composed onto path when no range selector is present; prefer embedding :N in path.",
 	),
-	"limit?": type("number.integer>0").describe(
-		"Optional line count. Composed onto path when no range selector is present; prefer embedding :N+K in path.",
+	"limit?": type("number.integer>=0").describe(
+		"Optional line count. 0 is treated as omitted. Composed onto path when no range selector is present; prefer embedding :N+K in path.",
 	),
 });
 
