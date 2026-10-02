@@ -202,6 +202,15 @@ describe("model thinking derivation", () => {
 		expect(groqQwen.thinking?.effortMap).toBeUndefined();
 		// Explicit compat overrides still win over identity-derived wire values.
 		expect(deepseek.thinking?.effortMap).toEqual({ max: "max-plus" });
+		expect(getSupportedEfforts(deepseek)).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(deepseek.thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+		});
+		expect(deepseek.thinking?.requiresEffort).not.toBe(true);
+		expect(minimumSupportedEffort(deepseek)).toBe(Effort.Low);
+		expect(defaultSupportedEffort(deepseek)).toBe(Effort.Low);
+		expect(clampThinkingLevelForModel(deepseek, Effort.Low)).toBe(Effort.Low);
+		expect(requireSupportedEffort(deepseek, Effort.High)).toBe(Effort.High);
 		// OpenRouter-hosted Anthropic adaptive models carry the wire-exact
 		// five-tier ladder with no remapping.
 		expect(getSupportedEfforts(openRouterAnthropic)).toEqual([
@@ -212,6 +221,21 @@ describe("model thinking derivation", () => {
 			Effort.Max,
 		]);
 		expect(openRouterAnthropic.thinking?.effortMap).toBeUndefined();
+	});
+
+	it("treats official deepseek-flash as the V4 low/high/max ladder, not a max-only Flash SKU", () => {
+		const flash = createModel({
+			id: "deepseek-flash",
+			api: "openai-completions",
+			provider: "deepseek",
+			baseUrl: "https://api.deepseek.com",
+		});
+		expect(flash.thinking).toMatchObject({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+		});
+		expect(clampThinkingLevelForModel(flash, Effort.Low)).toBe(Effort.Low);
+		expect(requireSupportedEffort(flash, Effort.High)).toBe(Effort.High);
 	});
 
 	it("derives Anthropic adaptive thinking for SAP hai-proxy version-first Claude ids", () => {
@@ -296,6 +320,7 @@ describe("model thinking derivation", () => {
 			api: "ollama-chat",
 			provider: "ollama-cloud",
 			baseUrl: "https://ollama.com",
+			reasoning: false,
 		});
 		const pro = createModel({
 			id: "deepseek-v4-pro",
@@ -310,29 +335,28 @@ describe("model thinking derivation", () => {
 			baseUrl: "https://ollama.com",
 		});
 
-		// V4 Flash keeps its low/high/max ladder over the ollama-chat transport
-		// instead of Ollama's generic minimal..xhigh scale (medium/xhigh fold
-		// into high, max is a real wire tier).
+		// V4 Flash and Pro share the wire-exact low/high/max ladder; older V3.x
+		// reasoners still top out at high/max. Dated Ollama tags like `:0731` are
+		// not identity-preserving markers, so they do not inherit the Flash ladder.
 		expect(getSupportedEfforts(flash)).toEqual([Effort.Low, Effort.High, Effort.Max]);
-		expect(getSupportedEfforts(flashDated)).toEqual([Effort.Low, Effort.High, Effort.Max]);
-		expect(flash.thinking?.effortMap).toBeUndefined();
-		// V4 Pro shares Flash's low/high/max ladder on the direct API and every
-		// aggregator route (DeepSeek's docs advertise `low` for both V4 SKUs);
-		// the older V3.x reasoners still top out at high/max.
+		expect(flashDated.reasoning).toBe(false);
+		expect(getSupportedEfforts(flashDated)).toEqual([]);
 		expect(getSupportedEfforts(pro)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(getSupportedEfforts(v32)).toEqual([Effort.High, Effort.Max]);
 	});
 
 	it("applies the DeepSeek effort contract to opencode-go openai-responses flash (issue #9134)", () => {
-		// opencode-go/deepseek-v4-flash is pinned to the Responses transport
-		// (the Go gateway serves it only at /responses), but the effort ladder
-		// is a model property: it must expose low/high/max like the pro sibling
-		// on chat completions, not the generic minimal..xhigh fallback.
 		const flash = createModel({
 			id: "deepseek-v4-flash",
 			api: "openai-responses",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.High, Effort.Max],
+				defaultLevel: Effort.High,
+				requiresEffort: false,
+			},
 		});
 		const pro = createModel({
 			id: "deepseek-v4-pro",
@@ -342,8 +366,8 @@ describe("model thinking derivation", () => {
 		});
 
 		expect(getSupportedEfforts(flash)).toEqual([Effort.Low, Effort.High, Effort.Max]);
-		expect(flash.thinking?.effortMap).toBeUndefined();
-		expect(() => requireSupportedEffort(flash, Effort.Medium)).toThrow(/Supported efforts: low, high, max/);
+		expect(flash.thinking?.requiresEffort).not.toBe(true);
+		expect(clampThinkingLevelForModel(flash, Effort.Medium)).toBe(Effort.Low);
 		expect(getSupportedEfforts(pro)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 

@@ -8,6 +8,8 @@ import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
 import { debugToolRenderer } from "./debug";
+import { codeIntelToolRenderer } from "./code-intel";
+import { consultToolRenderer } from "./consult";
 import { editToolRenderer } from "./edit";
 import { evalToolRenderer } from "./eval";
 import { findToolRenderer } from "./find";
@@ -45,6 +47,8 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	glob: globToolRenderer,
 	grep: grepToolRenderer,
 	lsp: lspToolRenderer,
+	code_intel: codeIntelToolRenderer,
+	consult: consultToolRenderer,
 	wait: waitToolRenderer,
 	read: readToolRenderer,
 	// Keyed by xd:// resolution-device names: the write dispatch delegates here

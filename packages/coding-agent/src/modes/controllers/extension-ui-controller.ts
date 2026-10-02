@@ -24,6 +24,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { appendEntryViaOrdinaryAcceptanceSink } from "../../latency/ordinary-acceptance-sink";
 import {
 	type AskDialogPrompt,
 	type AskDialogPromptValue,
@@ -190,7 +191,7 @@ export class ExtensionUiController {
 			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
-				this.ctx.sessionManager.appendCustomEntry(customType, data);
+				appendEntryViaOrdinaryAcceptanceSink(this.ctx.session, customType, data);
 			},
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
@@ -412,7 +413,7 @@ export class ExtensionUiController {
 			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
-				this.ctx.sessionManager.appendCustomEntry(customType, data);
+				appendEntryViaOrdinaryAcceptanceSink(this.ctx.session, customType, data);
 			},
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);

@@ -250,6 +250,7 @@ describe("AgentSession plan-mode convergence", () => {
 			],
 		});
 		harness.session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		harness.session.settings.override("advisor.allowSameModel", true);
 		expect(harness.session.setAdvisorEnabled(true)).toBe(true);
 		const advisor = harness.session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be live");

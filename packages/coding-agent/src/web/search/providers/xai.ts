@@ -9,8 +9,10 @@ import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
-// xAI web search is latency-sensitive, so keep reasoning effort low regardless
-// of the selected model's configured timeout.
+// grok-4.6 defaults reasoning.effort to "high"; xAI documents "low" for
+// latency-sensitive agentic use and simple tool calling
+// (docs.x.ai/developers/model-capabilities/text/reasoning). Web search is
+// latency-sensitive, so pin these calls low regardless of the selected model's configured timeout.
 const XAI_WEB_SEARCH_REASONING_EFFORT = "low";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;

@@ -111,6 +111,7 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 
 `/agents` is a separate agent-definition/settings hub, not the live roster. It manages discovered agents, enable/disable state, model overrides, prewalk, and advisor selection.
 
+- **Action queue projection (D6):** `projectHubActionQueue` (`packages/tui/src/overlays/agent-hub-action-queue.ts`) buckets roster rows into need_decision / need_auth / need_integrate / blocked_or_no_progress / running_or_handled. It is a **view** over existing roster + host hints — it does not schedule tasks or replace status. `done_valid` integrate-eligible children belong in need_integrate until parent acceptance. Real hints are produced by `collectHubActionHints` (`modes/hub-action-hints.ts`) from pending ask / unstarted approval tools, goal host-gate blocked/no-progress, and parked children with output artifacts, and wired through `createAgentHubRuntime` → Hub inspector **Needs me**. Live interactive TUI paint remains **未验证** in CI-only environments.
 - `/jobs` prints a snapshot of running and recently settled asynchronous tool jobs. It does not replace the per-agent transcript or control view.
 - `history://<id>` gives the coding agent a concise transcript for a live/parked subagent or a retained on-disk transcript.
 - `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript. Before that artifact exists, a registered agent resolves to its status, the `yield` payloads it has submitted so far, and its latest assistant text.
@@ -119,4 +120,4 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 
 Advisor rows are intentionally excluded from the agent-facing peer roster, `history://` index, and `agent://` messaging workflows.
 
-See also [Task Agent Discovery and Selection](./task-agent-discovery.md), [Collaboration](./collab.md), and [Advisor, WATCHDOG.md, and WATCHDOG.yml](./advisor-watchdog.md).
+See also [Task Agent Discovery and Selection](./task-agent-discovery.md), [Collaboration](./collab.md), [Advisor, WATCHDOG.md, and WATCHDOG.yml](./advisor-watchdog.md), and [Background lifecycle modes](./background-lifecycle-modes.md).

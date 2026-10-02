@@ -1,8 +1,9 @@
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails as TuiReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -45,8 +46,12 @@ import {
 	type SchemeSpec,
 	sessionResolveContext,
 } from "../internal-urls";
+import { resolveWorkflowCatalogToolDocs } from "../internal-urls/xd-protocol";
+import { parseInternalUrl } from "../internal-urls/parse";
+import type { InternalUrl } from "../internal-urls/types";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
+import readRereadSoftCapHint from "../prompts/latency/read-reread-soft-cap.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
 	DEFAULT_MAX_BYTES,
@@ -69,6 +74,7 @@ import {
 import { askImageQuestion, resolveImageQuestionModel } from "../utils/image-question";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
+import { workflowToolWireName } from "../workflow/tool-optimization";
 import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import {
 	formatConflictSummary,
@@ -138,6 +144,7 @@ import {
 } from "../utils/video";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import {
+	composeReadPaginationArgs,
 	isMultiRange,
 	isRawSelector,
 	type ParsedSelector,
@@ -685,10 +692,114 @@ export function splitImageQuestionTarget(readPath: string): { path: string; ques
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
 const readSchema = type({
-	path: type("string").describe("Local path, internal URI, or URL; selectors inline."),
+	path: type("string").describe(
+		"Local path, internal URI, or URL; page via inline selectors (preferred: path:301 or path:raw:301-).",
+	),
+	"offset?": type("number.integer>=0").describe(
+		"Optional 1-indexed start line. 0 is treated as omitted. Composed onto path when no range selector is present; prefer embedding :N in path.",
+	),
+	"limit?": type("number.integer>=0").describe(
+		"Optional line count. 0 is treated as omitted. Composed onto path when no range selector is present; prefer embedding :N+K in path.",
+	),
 });
 
 export type ReadToolInput = typeof readSchema.infer;
+
+export interface ReadToolDetails extends TuiReadToolDetails {
+	branchOrWorktreeScope?: string;
+	providerViewIdentity?: string;
+	contentOrRevisionIdentity?: string;
+	canonicalSource?: string;
+	outputMode?: "raw" | "converted" | "decoded" | "summary" | "unknown";
+}
+
+type ReadIdentityOutputMode = NonNullable<ReadToolDetails["outputMode"]>;
+
+function readBranchOrWorktreeScope(cwd?: string): string {
+	const normalizedCwd = cwd?.trim();
+	if (!normalizedCwd) return "";
+	try {
+		const head = vcs.git(normalizedCwd)?.headSync();
+		if (head?.commit) return `git:${head.commit}`;
+		if (head?.kind === "ref" && head.branch) return `git:${head.branch}`;
+	} catch {
+		// Fall back to the absolute worktree when git metadata is unavailable.
+	}
+	return `worktree:${path.resolve(normalizedCwd)}`;
+}
+
+async function attachReadIdentity(
+	result: AgentToolResult<ReadToolDetails>,
+	options: {
+		absolutePath: string;
+		cwd?: string;
+		outputMode: ReadIdentityOutputMode;
+		canonicalSource?: string;
+		providerViewIdentity?: string;
+	},
+): Promise<AgentToolResult<ReadToolDetails>> {
+	const textBlocks = result.content.filter((content): content is TextContent => content.type === "text");
+	if (textBlocks.length === 0) return result;
+
+	let providerViewIdentity = options.providerViewIdentity ?? result.details?.providerViewIdentity ?? "";
+	if (!providerViewIdentity) {
+		try {
+			const stat = await fs.stat(options.absolutePath);
+			providerViewIdentity = `fs:${stat.mtimeMs}:${stat.size}`;
+		} catch {
+			// Identity production is fail-open when the source disappears after reading.
+		}
+	}
+
+	const returnedText = textBlocks.map(content => content.text).join("\n");
+	const contentOrRevisionIdentity = new Bun.CryptoHasher("sha256").update(returnedText).digest("hex");
+	const details: ReadToolDetails = {
+		...(result.details ?? {}),
+		resolvedPath: result.details?.resolvedPath ?? options.absolutePath,
+		canonicalSource: options.canonicalSource ?? result.details?.canonicalSource ?? options.absolutePath,
+		branchOrWorktreeScope: readBranchOrWorktreeScope(options.cwd),
+		providerViewIdentity,
+		contentOrRevisionIdentity,
+		outputMode: options.outputMode,
+	};
+	return { ...result, details };
+}
+
+/**
+ * Restricted attested identity for canonical `skill://<name>` full-text views
+ * so a second identical read can be recognized. Ranged, raw, query, fragment,
+ * and non-skill views stay fail-open.
+ */
+function attestCanonicalSkillFullText(
+	url: string,
+	parsedSel: ParsedSelector,
+	resource: { content: string; contentType?: string; immutable?: boolean },
+	details: ReadToolDetails,
+	cwd: string,
+): void {
+	if (parsedSel.kind !== "none") return;
+	let urlMeta: InternalUrl;
+	try {
+		urlMeta = parseInternalUrl(url);
+	} catch {
+		return;
+	}
+	const scheme = urlMeta.protocol.replace(/:$/, "").toLowerCase();
+	if (scheme !== "skill") return;
+	if (!resource.immutable) return;
+	if (urlMeta.search || urlMeta.hash) return;
+	const name = urlMeta.rawHost || urlMeta.hostname;
+	if (!name) return;
+	const urlPath = urlMeta.pathname;
+	if (urlPath && urlPath !== "/" && urlPath !== "") return;
+	details.canonicalSource = `${scheme}://${name}`;
+	details.branchOrWorktreeScope = readBranchOrWorktreeScope(cwd) || "immutable:session";
+	details.outputMode = resource.contentType === "text/markdown" ? "converted" : "raw";
+	details.providerViewIdentity = `${scheme}-immutable:${name}`;
+	if (resource.content.length > 0) {
+		details.contentOrRevisionIdentity = new Bun.CryptoHasher("sha256").update(resource.content).digest("hex");
+	}
+}
 
 type ReadParams = ReadToolInput;
 
@@ -708,11 +819,53 @@ function readDetailsLinkPath(details: ReadToolDetails | undefined): string | nul
 const REPEAT_READ_HINT_THRESHOLD = 3;
 /** Per-session cap on tracked read keys; the map resets when exceeded. */
 const REPEAT_READ_TRACKER_CAP = 64;
+/** Repeated identical delivered views of a known source version before a one-shot hint. */
+const PATH_REREAD_SOFT_CAP = 5;
 
 const kRepeatReadTracker = Symbol("read.repeatTracker");
+const kPathRereadTracker = Symbol("read.pathRereadTracker");
+const kReadTrackerScope = Symbol("read.trackerScope");
+
+interface PathRereadRecord {
+	version: string;
+	views: Map<string, { count: number; advised: boolean }>;
+}
 
 interface SessionWithRepeatReadTracker extends ToolSession {
 	[kRepeatReadTracker]?: Map<string, { hash: bigint; count: number }>;
+	[kPathRereadTracker]?: Map<string, PathRereadRecord>;
+	[kReadTrackerScope]?: string;
+}
+
+function logicalReadScope(session: ToolSession): string {
+	try {
+		const id = session.getSessionId?.();
+		if (typeof id === "string" && id.length > 0) return id;
+	} catch {
+		// Missing/throwing session id stays object-local (fail open).
+	}
+	return "";
+}
+
+/** Drop repeat/soft-cap maps so a reused ToolSession cannot nag a new logical session. */
+export function clearReadRepeatTrackers(session: object): void {
+	const holder = session as SessionWithRepeatReadTracker;
+	delete holder[kRepeatReadTracker];
+	delete holder[kPathRereadTracker];
+	delete holder[kReadTrackerScope];
+}
+
+function prepareReadTrackers(session: ToolSession): SessionWithRepeatReadTracker {
+	const holder = session as SessionWithRepeatReadTracker;
+	const scope = logicalReadScope(session);
+	if (holder[kReadTrackerScope] !== scope) {
+		holder[kRepeatReadTracker] = new Map();
+		holder[kPathRereadTracker] = new Map();
+		holder[kReadTrackerScope] = scope;
+	}
+	holder[kRepeatReadTracker] ??= new Map();
+	holder[kPathRereadTracker] ??= new Map();
+	return holder;
 }
 
 /**
@@ -726,9 +879,8 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	const block = result.content?.find(entry => entry.type === "text");
 	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
 
-	const holder = session as SessionWithRepeatReadTracker;
-	holder[kRepeatReadTracker] ??= new Map();
-	const tracker = holder[kRepeatReadTracker];
+	const holder = prepareReadTrackers(session);
+	const tracker = holder[kRepeatReadTracker]!;
 	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
 
 	const hash = Bun.hash.xxHash64(block.text);
@@ -846,14 +998,73 @@ async function assessLocalReadSpeculation(
 }
 
 /**
+ * One-shot soft-cap for identical delivered views of a known source version.
+ * Different ranges, changed bytes and unknown identities are not proven thrash.
+ */
+function appendPathRereadSoftCapHint(session: ToolSession, result: AgentToolResult<ReadToolDetails>): void {
+	if (session.agentKind !== "sub") return;
+	const block = result.content?.find(entry => entry.type === "text");
+	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
+
+	const source = result.details?.canonicalSource?.trim() || result.details?.resolvedPath?.trim() || "";
+	const version = result.details?.providerViewIdentity?.trim() || "";
+	const view = result.details?.contentOrRevisionIdentity?.trim() || "";
+	if (!source || !version || !view) return;
+
+	const holder = prepareReadTrackers(session);
+	const tracker = holder[kPathRereadTracker]!;
+	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
+
+	let record = tracker.get(source);
+	if (!record || record.version !== version) {
+		record = { version, views: new Map() };
+		tracker.set(source, record);
+	}
+
+	const current = record.views.get(view);
+	if (!current) {
+		if (record.views.size >= REPEAT_READ_TRACKER_CAP) record.views.clear();
+		record.views.set(view, { count: 1, advised: false });
+		return;
+	}
+	current.count += 1;
+	if (current.count < PATH_REREAD_SOFT_CAP || current.advised) return;
+	current.advised = true;
+	block.text += `\n\n${prompt.render(readRereadSoftCapHint, { source, count: current.count }).trim()}`;
+}
+
+/**
  * Read tool implementation.
  *
  * Reads files with support for images, converted documents (via markit), and text.
  * Directories return a formatted listing with modification times.
  */
+
+/** Structured children advertise `xd://tools/{name}` without an xd registry. */
+function workflowCatalogToolContent(url: string, session: ToolSession): string | undefined {
+	const match = /^xd:\/\/tools\/([^/?#]+)$/i.exec(url.trim());
+	const captured = match?.[1];
+	if (!captured) return undefined;
+	let name = captured;
+	try {
+		name = decodeURIComponent(captured);
+	} catch {
+		name = captured;
+	}
+	const workflowOpt = session.workflowToolOptimization;
+	if (!workflowOpt?.presentationToolSchemas) return undefined;
+	return resolveWorkflowCatalogToolDocs(name, workflowOpt);
+}
+
+export { resolveWorkflowCatalogToolDocs };
+
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
 	readonly readsSkillUris = true;
+	/** Model wire name when workflow toolAliases remaps read. */
+	get customWireName(): string | undefined {
+		return workflowToolWireName(this.session, this.name);
+	}
 	readonly approval = (args: unknown): ToolTier => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
@@ -1536,10 +1747,21 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
-		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
+		const composed = composeReadPaginationArgs({
+			path: params.path,
+			offset: params.offset,
+			limit: params.limit,
+		});
+		const effectiveParams: ReadParams = { ...params, path: composed.path };
+		const result = await this.#executeInner(toolCallId, effectiveParams, signal, onUpdate, toolContext);
+		const displayTarget = InternalUrlRouter.instance().locateSync(effectiveParams.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
-		appendRepeatReadHint(this.session, params.path, result);
+		// Byte-identical hint is skipped when providerViewIdentity is set (dedupe owns that path).
+		// Subagent soft-cap uses the existing digest of the delivered view and its source version.
+		if (!result.details?.providerViewIdentity) {
+			appendRepeatReadHint(this.session, effectiveParams.path, result);
+		}
+		appendPathRereadSoftCapHint(this.session, result);
 		return result;
 	}
 
@@ -1577,18 +1799,42 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			const urlSel = parsedUrlTarget.sel;
 			const urlRaw = isRawSelector(urlSel);
+			const urlOutputMode = (details: { contentType?: string }, raw?: boolean): ReadIdentityOutputMode =>
+				raw === true ? "raw" : details.contentType === "text/markdown" ? "converted" : "raw";
 			if (urlSel.kind === "lines" || urlSel.kind === "tail") {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				return buildInMemorySelectorResult(this.session, entry.output, urlSel, {
-					details: { ...entry.details },
-					sourceUrl: entry.details.finalUrl,
-					entityLabel: "URL output",
-					immutable: true,
-				});
+				return attachReadIdentity(
+					buildInMemorySelectorResult(this.session, entry.output, urlSel, {
+						details: { ...entry.details },
+						sourceUrl: entry.details.finalUrl,
+						entityLabel: "URL output",
+						immutable: true,
+					}),
+					{
+						absolutePath: entry.details.finalUrl,
+						cwd: this.session.cwd,
+						canonicalSource: entry.details.finalUrl,
+						providerViewIdentity: `url-content:${new Bun.CryptoHasher("sha256").update(entry.output).digest("hex")}`,
+						outputMode: urlOutputMode(entry.details, urlRaw),
+					},
+				);
 			}
-			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
+			const urlResult = await executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
+			const finalUrl = urlResult.details?.finalUrl ?? parsedUrlTarget.path;
+			const urlText = urlResult.content
+				.filter((content): content is TextContent => content.type === "text")
+				.map(content => content.text)
+				.join("\n");
+			// F4: plain URL path must stamp read identity (was completely missing).
+			return attachReadIdentity(urlResult, {
+				absolutePath: finalUrl,
+				cwd: this.session.cwd,
+				canonicalSource: finalUrl,
+				providerViewIdentity: `url-content:${new Bun.CryptoHasher("sha256").update(urlText).digest("hex")}`,
+				outputMode: urlOutputMode(urlResult.details ?? {}, urlRaw),
+			});
 		}
 
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
@@ -1638,6 +1884,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Protocol reads render Markdown regardless of `read.renderMarkdown`, as their resources always did.
 		if (!details.contentType && isMarkdownPath(located.path)) details.contentType = "text/markdown";
 		details.meta = { ...details.meta, source: { type: "internal", value: located.url } };
+		// Located skill:// files skip `#handleInternalUrl`; attest here so a second
+		// identical full-text read can form a ReadViewKey (ranged/raw/query stay fail-open).
+		const locatedText =
+			result.content
+				?.filter((block): block is TextContent => block.type === "text")
+				.map(block => block.text)
+				.join("\n") ?? "";
+		attestCanonicalSkillFullText(
+			located.url,
+			parseSel(located.sel),
+			{
+				content: locatedText,
+				contentType: details.contentType,
+				immutable: located.spec.immutable,
+			},
+			details,
+			this.session.cwd,
+		);
 		return { ...result, details };
 	}
 
@@ -1887,11 +2151,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			else if (isCpuProfilePath(renderAbsolutePath))
 				rendered = renderCpuProfile(await Bun.file(absolutePath).text());
 			if (rendered) {
-				return buildInMemorySelectorResult(this.session, rendered, parsed, {
-					details: { resolvedPath: renderAbsolutePath },
-					sourcePath: renderAbsolutePath,
-					entityLabel: "profile summary",
-				});
+				return attachReadIdentity(
+					buildInMemorySelectorResult(this.session, rendered, parsed, {
+						details: { resolvedPath: renderAbsolutePath },
+						sourcePath: renderAbsolutePath,
+						entityLabel: "profile summary",
+					}),
+					{ absolutePath, cwd: this.session.cwd, outputMode: "summary" },
+				);
 			}
 		}
 		// Read the file based on type
@@ -1950,11 +2217,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				throw error;
 			}
 			const notebookText = notebookToEditableText(notebookJson, resolvedDisplayPath);
-			return buildInMemorySelectorResult(this.session, notebookText, parsed, {
-				details: { resolvedPath: renderAbsolutePath },
-				sourcePath: renderAbsolutePath,
-				entityLabel: "notebook",
-			});
+			return attachReadIdentity(
+				buildInMemorySelectorResult(this.session, notebookText, parsed, {
+					details: { resolvedPath: renderAbsolutePath },
+					sourcePath: renderAbsolutePath,
+					entityLabel: "notebook",
+				}),
+				{ absolutePath, cwd: this.session.cwd, outputMode: "converted" },
+			);
 		} else if (shouldConvertWithMarkit) {
 			// Convert document via markit.
 			const result = await convertFileWithMarkit(absolutePath, signal);
@@ -1965,14 +2235,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// raw mode apply against the converted output. Without this,
 				// `file.pdf:50-100` silently returned the head of the document
 				// because only `truncateHead` was being applied.
-				return buildInMemorySelectorResult(this.session, renderedContent, parsed, {
-					details: {
-						resolvedPath: renderAbsolutePath,
-						contentType: cfgReadRenderMarkdown.get(this.session.settings) ? "text/markdown" : undefined,
-					},
-					sourcePath: renderAbsolutePath,
-					entityLabel: "document",
-				});
+				return attachReadIdentity(
+					buildInMemorySelectorResult(this.session, renderedContent, parsed, {
+						details: {
+							resolvedPath: renderAbsolutePath,
+							contentType: cfgReadRenderMarkdown.get(this.session.settings) ? "text/markdown" : undefined,
+						},
+						sourcePath: renderAbsolutePath,
+						entityLabel: "document",
+					}),
+					{ absolutePath, cwd: this.session.cwd, outputMode: "converted" },
+				);
 			} else if (result.error) {
 				content = [{ type: "text", text: `[Cannot read ${ext} file: ${result.error || "conversion failed"}]` }];
 			} else {
@@ -2103,7 +2376,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 						!located, // located URLs read their backing file directly, as their handlers do
 					);
-					if (multiResult.bridgeResult) return multiResult.bridgeResult;
+					if (multiResult.bridgeResult) {
+						return attachReadIdentity(multiResult.bridgeResult, {
+							absolutePath,
+							cwd: this.session.cwd,
+							outputMode: "raw",
+						});
+					}
 					content = [{ type: "text", text: multiResult.outputText }];
 					sourcePath = absolutePath;
 					details = multiResult.displayContent ? { displayContent: multiResult.displayContent } : {};
@@ -2135,7 +2414,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
 								if (firstText) firstText.text = `${notice}\n${firstText.text}`;
 							}
-							return bridgeResult;
+							return attachReadIdentity(bridgeResult, {
+								absolutePath,
+								cwd: this.session.cwd,
+								outputMode: "raw",
+							});
 						} catch (error) {
 							logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
 						}
@@ -2532,7 +2815,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (columnTruncated > 0) {
 			resultBuilder.limits({ columnMax: columnTruncated });
 		}
-		return resultBuilder.done();
+		const result = resultBuilder.done();
+		if (sourcePath && !mimeType) {
+			const identified = await attachReadIdentity(result, {
+				absolutePath,
+				cwd: this.session.cwd,
+				outputMode: details.summary ? "summary" : details.contentType === "text/markdown" ? "converted" : "raw",
+			});
+			return identified;
+		}
+		return result;
 	}
 
 	/**
@@ -2585,6 +2877,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		if (parsedSel.kind === "image") throw new ToolError("The ':img' selector requires a file-backed path.");
+		const catalogDocs = workflowCatalogToolContent(url, this.session);
+		if (catalogDocs !== undefined) {
+			return buildInMemorySelectorResult(this.session, catalogDocs, parsedSel, {
+				details: { contentType: "text/plain" },
+				sourceInternal: url,
+				entityLabel: "resource",
+				ignoreResultLimits: true,
+				immutable: true,
+			});
+		}
 		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 		const resourceDetails: NonNullable<InternalResource["details"]> = resource.details ?? {};
@@ -2596,6 +2898,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			...(display ? { displayContent: display } : {}),
 		};
 
+		attestCanonicalSkillFullText(url, parsedSel, resource, details, this.session.cwd);
 		if (resource.shape === "value") {
 			if (parsedSel.kind !== "none" && parsedSel.kind !== "raw") {
 				throw new ToolError("Cannot combine query extraction with line selectors");
@@ -2608,7 +2911,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			sourcePath: resource.sourcePath,
 			sourceInternal: url,
 			entityLabel: "resource",
-			ignoreResultLimits: spec.unbounded === true,
+			ignoreResultLimits: spec.unbounded === true || /^xd:\/\/(?:tools|skills)\/[^/?#]+$/i.test(url.trim()),
 			immutable: resource.immutable,
 		});
 	}

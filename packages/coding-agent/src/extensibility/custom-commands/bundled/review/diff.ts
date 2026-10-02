@@ -239,11 +239,14 @@ export function parseReviewDiffSnapshot(rawDiff: string): ReviewDiffSnapshot {
 export function getRecommendedReviewAgentCount(snapshot: ReviewDiffSnapshot): number {
 	const totalLines = snapshot.totalAdded + snapshot.totalRemoved;
 	const fileCount = snapshot.files.length;
-	if (totalLines < 100 || fileCount <= 2) return 1;
-	if (totalLines < 500) return Math.min(2, fileCount);
-	if (totalLines < 2000) return Math.min(4, Math.ceil(fileCount / 3));
-	if (totalLines < 5000) return Math.min(8, Math.ceil(fileCount / 2));
-	return Math.min(16, fileCount);
+	// One or two files stay with one reviewer. A wide file set still splits
+	// even when each hunk is tiny, so ownership stays disjoint.
+	if (fileCount <= 2) return 1;
+	if (totalLines < 100) return Math.min(3, Math.ceil(fileCount / 5));
+	if (totalLines < 500) return Math.min(3, Math.ceil(fileCount / 4));
+	if (totalLines < 2000) return Math.min(4, Math.max(2, Math.ceil(fileCount / 3)));
+	if (totalLines < 5000) return Math.min(6, Math.max(2, Math.ceil(fileCount / 2)));
+	return Math.min(6, fileCount);
 }
 
 /** Returns content rows only, preserving the patch's original row ordering. */

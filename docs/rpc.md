@@ -143,6 +143,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
+- `{ id?, type: "set_ptc_mode", mode: "off" | "on" | "auto" }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
 - `{ id?, type: "get_tree" }`
@@ -516,6 +517,12 @@ actual computed values: `enabled` reports the session setting, and `active`
 reports the resulting active state, including any provider-level Fireworks
 priority setting:
 
+xAI-capable Grok text models (`xai`, `xai-oauth`, gateway Grok on OpenAI-compat
+APIs, and `api.x.ai` relays) use family `xai`. Enable still fails with the same
+error string when the current model has no family. OpenRouter `x-ai/grok-*` can
+succeed with `{ enabled: true, active: false }` until upstream forwarding is
+verified.
+
 For direct Anthropic, an explicit enable also re-arms a provider attempt after
 the sticky rejection fallback, even when fast mode was already enabled.
 
@@ -592,6 +599,27 @@ fallback when enabling fails.
 }
 ```
 
+### `set_ptc_mode` payload
+
+`set_ptc_mode` overrides `tools.ptc.mode` for the current session. The request is:
+
+```json
+{ "id": "req_ptc_on", "type": "set_ptc_mode", "mode": "on" }
+```
+
+On success, `data` contains the requested `mode` and whether PTC/Code Mode is currently `active` (JS eval available and the resolved keep-set is in force):
+
+```json
+{
+  "id": "req_ptc_on",
+  "type": "response",
+  "command": "set_ptc_mode",
+  "success": true,
+  "data": { "mode": "on", "active": true }
+}
+```
+
+Invalid `mode` values return a failure. Codex `providers.openai-codex.codeMode` remains the fallback when the generic switch is `off`.
 ### `set_todos` payload
 
 Replaces the in-memory todo state for the current session and returns `{ todoPhases }`.

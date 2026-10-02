@@ -1,0 +1,23 @@
+{
+  "fixture": "planner_to_implementer_dedupe_v1",
+  "base": {
+    "utf8Bytes": 3065,
+    "estimateBytesDiv4": 767,
+    "tokenizerJev": 841
+  },
+  "deduped": {
+    "utf8Bytes": 3469,
+    "estimateBytesDiv4": 867,
+    "tokenizerJev": 973
+  },
+  "naiveDuplicate": {
+    "utf8Bytes": 5593,
+    "estimateBytesDiv4": 1398,
+    "tokenizerJev": 1645
+  },
+  "savedUtf8BytesVsNaive": 2124,
+  "savedTokenizerJevVsNaive": 672,
+  "handoffObjectBytesAfter": 881,
+  "handoffObjectBytesBefore": 2113,
+  "note": "Wire measurement is assembled prompt UTF-8 + countTokens(Jev) + estimateTokens(bytes/4). handoff.bytesAfterHandoff is not wire."
+}

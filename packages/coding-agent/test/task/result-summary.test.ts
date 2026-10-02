@@ -83,4 +83,35 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain("<output>\nagent failed\n</output>");
 		expect(summary).not.toContain("<error>");
 	});
+
+	it("surfaces parent-integrate classification instead of collapsing to unverified", () => {
+		const summary = formatTaskResultSummary(
+			{
+				...settledResult("done"),
+				parentIntegrateDecision: {
+					classification: "parent_verification_required",
+					action: "parent_coordinate",
+					reasons: ["parent_owns_verify", "acceptance_unproven:e2e"],
+					usedAuthorSelfAssessment: false,
+				},
+				deliveryEvidence: {
+					kind: "child_delivery_evidence",
+					v: 1,
+					codeVersion: { version: "abc", changedFiles: ["a.ts"] },
+					acceptanceProven: [],
+					checksNotRun: [{ id: "e2e", reason: "parent owns remaining verify" }],
+					finishOwner: "parent",
+					sharedInterfaces: [],
+					writeOwnershipReleased: false,
+					contentFingerprint: "test",
+				},
+			},
+			{ totalDurationMs: 5 },
+		);
+		expect(summary).toContain('classification="parent_verification_required"');
+		expect(summary).toContain('action="parent_coordinate"');
+		expect(summary).toContain("Reasons: parent_owns_verify, acceptance_unproven:e2e");
+		expect(summary).toContain("The parent owns the remaining checks");
+		expect(summary).toContain('status="parent_verification_required"');
+	});
 });

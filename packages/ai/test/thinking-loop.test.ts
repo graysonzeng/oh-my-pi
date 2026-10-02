@@ -230,6 +230,36 @@ function perFileTemplates(): string {
 		.join("\n\n");
 }
 
+/** Observed grok-4.6 orca shape: 17× short sentence, non-adjacent, chunked. */
+function orcaObservedShortSentenceChunks(): string[] {
+	const sentence = "Ensure the test passes with the new logic.";
+	const fillers = [
+		"Next I check the remaining compile warnings in isolation.",
+		"The previous assertion already covered the happy path.",
+		"I still need to confirm the error branch separately.",
+		"Nothing in the fixture depends on wall-clock time.",
+		"The helper returns a cloned copy so later mutations stay local.",
+		"Retrying the same request would hide a flaky network race.",
+		"I am not going to rewrite the public schema for this.",
+		"The snapshot table uses unique-key upserts instead of UPDATE.",
+		"Cluster id in the URL must match the live MCP collect.",
+		"Lua module cache should be cleared before the next hit.",
+		"The DTO parser already proved schema 4 coverage.",
+		"Packet sequence errors on the loopback path are noise.",
+		"The incomplete window still scans remaining events.",
+		"Intl MCP slots continue after a logged miss.",
+		"Left-corner note shows incomplete rather than empty.",
+		"Reload after restart is enough; no extra nginx flag.",
+	];
+	const chunks: string[] = [];
+	for (let i = 0; i < 17; i++) {
+		chunks.push(sentence.slice(0, 12));
+		chunks.push(`${sentence.slice(12)}\n\n`);
+		if (i < 16) chunks.push(`${fillers[i]!}\n\n`);
+	}
+	return chunks;
+}
+
 describe("ThinkingLoopDetector", () => {
 	test("trips on a tight near-duplicate paragraph loop via the trigram path", () => {
 		// High word-trigram overlap: the cluster check claims it before the lexical
@@ -255,6 +285,33 @@ describe("ThinkingLoopDetector", () => {
 		const detector = new ThinkingLoopDetector();
 		const detail = detector.push("🌊 ".repeat(120));
 		expect(detail).toContain("back-to-back");
+	});
+
+	test("trips on a 74-character CJK planning sentence repeated four times", () => {
+		const unit =
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积、找本机 Xcode，并核对 CLI 能否在无 widget 时单独构建。";
+		expect(unit.length).toBe(74);
+		expect(feed(unit.repeat(4))).toContain("back-to-back");
+	});
+
+	test("does not empty a mixed CJK planning sentence before the verbatim trip", () => {
+		const unit =
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积、找本机 Xcode，并核对 CLI 能否在无 widget 时单独构建。";
+		expect(feed(unit)).toBeNull();
+		expect(feed(unit.repeat(3))).toBeNull();
+	});
+
+	test("keeps Han tokens so drifted CJK paragraphs cluster as near-duplicates", () => {
+		const variants = [
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积并核对本机工具链是否齐全。",
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积并核对本机工具链是否完整。",
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积并核对本机工具链是否可用。",
+		];
+		const paragraphs: string[] = [];
+		for (let i = 0; i < 8; i++) {
+			paragraphs.push(`**核对工具链 ${i}**\n\n${variants[i % variants.length]}`);
+		}
+		expect(feed(paragraphs.join("\n\n\n"))).toContain("near-identical segments");
 	});
 
 	test("does not trip on genuinely distinct reasoning paragraphs", () => {
@@ -308,6 +365,17 @@ describe("ThinkingLoopDetector", () => {
 		// Below the repeated-char floor: a brief on-purpose repeat is not a loop.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("🌊 ".repeat(26))).toBeNull();
+	});
+
+	test("does not trip on the observed grok orca 17x non-adjacent short-sentence shape", () => {
+		const detector = new ThinkingLoopDetector();
+		let detail: string | null = null;
+		for (const chunk of orcaObservedShortSentenceChunks()) {
+			if (detail) break;
+			detail = detector.push(chunk);
+		}
+		detail ??= detector.flush();
+		expect(detail).toBeNull();
 	});
 });
 
@@ -499,6 +567,54 @@ describe("thinking-loop guard (stream wrapper)", () => {
 		} finally {
 			clearCustomApis();
 		}
+	});
+
+	test("aborts a grok CJK planning-sentence thinking loop", async () => {
+		registerMockApi();
+		try {
+			const unit =
+				"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积、找本机 Xcode，并核对 CLI 能否在无 widget 时单独构建。";
+			const mock = createMockModel({ provider: "gateway", id: "grok-4.6" });
+			mock.push({ content: [{ type: "thinking", thinking: unit.repeat(4) }] });
+
+			const result = await stream(mock.model, context()).result();
+
+			expect(result.stopReason).toBe("error");
+			expect(result.content).toEqual([]);
+			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+			expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
+			expect(isRetryableError(new Error(result.errorMessage))).toBe(true);
+		} finally {
+			clearCustomApis();
+		}
+	});
+
+	test("aborts a grok CJK planning-sentence loop on assistant text", async () => {
+		const unit =
+			"本机没有 Xcode，GitHub 上也没有现成包。先量 Swift 体积、找本机 Xcode，并核对 CLI 能否在无 widget 时单独构建。";
+		const model = {
+			api: "openai-completions",
+			provider: "gateway",
+			id: "grok-4.6",
+		} as unknown as Model<Api>;
+		const partial = { role: "assistant", content: [], stopReason: "stop" } as unknown as AssistantMessage;
+
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			const events: AssistantMessageEvent[] = [
+				{ type: "start", partial },
+				{ type: "text_start", contentIndex: 0, partial },
+				{ type: "text_delta", contentIndex: 0, delta: unit.repeat(4), partial },
+				{ type: "done", reason: "stop", message: partial },
+			];
+			for (const event of events) inner.push(event);
+			return inner;
+		});
+
+		const result = await guarded.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+		expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
 	});
 });
 
@@ -698,6 +814,12 @@ describe("isLoopGuardedModel", () => {
 
 		// enabled: true does not opt unrelated models into the guard.
 		expect(isLoopGuardedModel(other, { loopGuard: { enabled: true } })).toBe(false);
+
+		const grok = createMockModel({ provider: "gateway", id: "grok-4.6" }).model;
+		const namespaced = createMockModel({ provider: "openrouter", id: "x-ai/grok-4.6" }).model;
+		expect(isLoopGuardedModel(grok)).toBe(true);
+		expect(isLoopGuardedModel(namespaced)).toBe(true);
+		expect(isLoopGuardedModel(grok, { loopGuard: { enabled: true } })).toBe(true);
 	});
 });
 

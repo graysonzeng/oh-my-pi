@@ -10,7 +10,12 @@
  */
 
 import { defaultLocalModelInitializer, type StandardEmbeddingModel } from "@oh-my-pi/pi-mnemopi/core";
-import type { MnemopiEmbedModelId, MnemopiEmbedTransport, MnemopiEmbedWorkerInbound } from "./embed-protocol";
+import {
+	applyEmbedInstructionPrefix,
+	type MnemopiEmbedModelId,
+	type MnemopiEmbedTransport,
+	type MnemopiEmbedWorkerInbound,
+} from "./embed-protocol";
 
 interface LoadedModel {
 	model: MnemopiEmbedModelId;
@@ -67,7 +72,8 @@ async function handleEmbed(
 		// holds the cached `LocalEmbeddingModel` wrapper from before.
 		const { instance } = await ensureLoaded(message.model, message.cacheDir);
 		const vectors: number[][] = [];
-		const batches = instance.embed([...message.texts], message.batchSize);
+		const texts = applyEmbedInstructionPrefix(message.model, message.texts, message.role);
+		const batches = instance.embed(texts, message.batchSize);
 		for await (const batch of batches) {
 			for (const row of batch) vectors.push(row);
 		}

@@ -6,7 +6,7 @@ import reviewCustomRequestTemplate from "../../../../prompts/review-custom-reque
 import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-request.md" with { type: "text" };
 import * as gh from "../../../../tools/gh";
 import { github } from "../../../../utils/github";
-import { buildReviewPrompt } from "./prompt";
+import { buildReviewPrompt, LARGE_DIFF_CHARACTER_LIMIT, LARGE_DIFF_FILE_LIMIT } from "./prompt";
 import {
 	createResolvedReviewTarget,
 	getReviewTargetIssue,
@@ -347,17 +347,30 @@ export async function selectReviewChoice(
 	return ref ? { label: `Review PR ${ref.repo}#${ref.number}`, kind: "pr", ref } : undefined;
 }
 
-function reviewTargetPrompt(
+async function reviewTargetPrompt(
 	ctx: HookCommandContext,
 	target: ResolvedReviewTarget,
 	instructions?: string,
-): string | undefined {
+): Promise<string | undefined> {
 	const issue = getReviewTargetIssue(target);
 	if (issue) {
 		if (ctx.hasUI) ctx.ui.notify(issue, "warning");
 		return undefined;
 	}
-	return buildReviewPrompt(target, instructions);
+	const artifactId = await ctx.sessionManager?.saveArtifact?.(target.rawDiff, "review-diff");
+	const snapshotRef =
+		artifactId === undefined
+			? undefined
+			: artifactId.startsWith("artifact://")
+				? artifactId
+				: `artifact://${artifactId}`;
+	const requiresArtifact =
+		target.rawDiff.length > LARGE_DIFF_CHARACTER_LIMIT || target.snapshot.files.length > LARGE_DIFF_FILE_LIMIT;
+	if (requiresArtifact && snapshotRef === undefined) {
+		if (ctx.hasUI) ctx.ui.notify("Unable to persist the full review diff as a stable artifact", "error");
+		return undefined;
+	}
+	return buildReviewPrompt(target, instructions, { snapshotRef });
 }
 
 function buildHeadlessReviewPrompt(focus?: string): string {
@@ -389,7 +402,7 @@ export class ReviewCommand implements CustomCommand {
 			try {
 				const target = await resolvePrReviewTarget(cwd, ctx, parsedArgs.prRef);
 				const result = target
-					? reviewTargetPrompt(ctx, target, parsedArgs.extraInstructions || undefined)
+					? await reviewTargetPrompt(ctx, target, parsedArgs.extraInstructions || undefined)
 					: undefined;
 				return (
 					result ??
@@ -407,7 +420,7 @@ export class ReviewCommand implements CustomCommand {
 		if (!selectedChoice) return undefined;
 		if (selectedChoice.kind === "pr") {
 			const target = await resolvePrReviewTarget(cwd, ctx, selectedChoice.ref);
-			return target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
+			return target ? await reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
 		}
 		if (selectedChoice.kind === "custom") {
 			const instructions = await ctx.ui.editor(
@@ -419,7 +432,8 @@ export class ReviewCommand implements CustomCommand {
 			if (!instructions?.trim()) return undefined;
 			const target = await readUncommittedReviewTarget(cwd).catch(() => undefined);
 			if (target?.rawDiff.trim()) {
-				return buildReviewPrompt(
+				return reviewTargetPrompt(
+					ctx,
 					{ ...target, mode: `Custom review: ${instructions.split("\n")[0].slice(0, 60)}…` },
 					instructions,
 				);
@@ -427,7 +441,7 @@ export class ReviewCommand implements CustomCommand {
 			return buildCustomReviewPrompt(instructions);
 		}
 		const target = await resolveLocalReviewTarget(selectedChoice.kind, cwd, ctx.ui);
-		return target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
+		return target ? await reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
 	}
 }
 

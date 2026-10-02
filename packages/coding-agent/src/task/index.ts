@@ -35,13 +35,13 @@ import taskCoordinationAdvisoryTemplate from "../prompts/tools/task-coordination
 import taskSpawnFeedbackTemplate from "../prompts/tools/task-spawn-feedback.md" with { type: "text" };
 import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specialization-advisory.md" with { type: "text" };
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
-import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { isScoutSpawnable, isSonicSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
 import {
 	type AgentProgress,
@@ -63,6 +63,7 @@ import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 import { SpawnRun, type SpawnPermit } from "./spawn-run";
 import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
+import { settleChildDeliveryForParent } from "./parent-delivery-consume";
 
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
@@ -128,8 +129,17 @@ export { loadBundledAgents as BUNDLED_AGENTS } from "./agents";
 export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
+export * from "./evidence-handoff";
+export * from "./child-delivery-evidence";
 export * from "./read-only-policy";
-export type { AgentDefinition, SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "./types";
+export * from "./review-performance";
+export type {
+	AgentDefinition,
+	SubagentCompletionKind,
+	SubagentEventPayload,
+	SubagentLifecyclePayload,
+	SubagentProgressPayload,
+} from "./types";
 export type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 export * from "./result-summary";
 export {
@@ -138,6 +148,47 @@ export {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	taskSchema,
 } from "./types";
+
+/**
+ * Copy live metrics from a child executor snapshot onto the detached spawn
+ * job's progress object. The job body keeps status/identity; this list is the
+ * hub-path transport for current/recent tool activity. Assignments are
+ * direct — including `undefined` after tool end — so stale args/start cannot
+ * linger on the job-owned copy.
+ */
+export function copySpawnJobLiveProgress(target: AgentProgress, source: AgentProgress): void {
+	target.modelRole = source.modelRole ?? target.modelRole;
+	target.resolvedModel = source.resolvedModel;
+	target.resolvedModelIdentity = source.resolvedModelIdentity;
+	target.resolvedThinkingLevel = source.resolvedThinkingLevel;
+	target.resolvedModelIsFallback = source.resolvedModel ? source.resolvedModelIsFallback : undefined;
+	target.advisor = source.advisor ?? target.advisor;
+	target.completionPercent = source.completionPercent ?? target.completionPercent;
+	target.resolvedModelRoute = source.resolvedModelRoute ?? target.resolvedModelRoute;
+	target.tokens = source.tokens;
+	target.requests = source.requests;
+	target.contextTokens = source.contextTokens;
+	target.contextWindow = source.contextWindow;
+	target.cost = source.cost;
+	target.toolCount = source.toolCount;
+	target.currentTool = source.currentTool;
+	target.currentToolArgs = source.currentToolArgs;
+	target.currentToolArgsKey = source.currentToolArgsKey;
+	target.currentToolIntent = source.currentToolIntent;
+	target.currentToolStartMs = source.currentToolStartMs;
+	target.lastIntent = source.lastIntent;
+	target.recentTools = source.recentTools.slice();
+	target.recentOutput = source.recentOutput.slice();
+	target.retryState = source.retryState;
+	target.retryFailure = source.retryFailure;
+	target.reviewMetrics = source.reviewMetrics;
+	// Observed streaming-phase fields: the hub `wait`/`jobs` rows and the
+	// subagent HUD must tell the same story about what the child is doing now
+	// (and how long it has been silent). Direct assignment matches the other
+	// live progress fields, `undefined` included.
+	target.activityPhase = source.activityPhase;
+	target.lastActivityAtMs = source.lastActivityAtMs;
+}
 
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
@@ -173,9 +224,11 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
+	const sonicAvailable = isSonicSpawnable(options.disabledAgents, options.parentSpawns);
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
 		scoutAvailable,
+		sonicAvailable,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
 		isolationEnabled: options.isolationEnabled,
@@ -226,10 +279,10 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
  * undefined when valid.
  */
 
-/** Reject an out-of-range `effort` selector on internal/stale-transcript calls that bypass the wire schema. */
-function validateEffort(effort: TaskEffort | undefined, label: string): string | undefined {
-	if (effort === undefined || TASK_EFFORTS.includes(effort)) return undefined;
-	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
+/** Non-string `effort` values are invalid; unrecognized strings default to high at resolve time. */
+function validateEffort(effort: TaskEffort | string | undefined, label: string): string | undefined {
+	if (effort === undefined || typeof effort === "string") return undefined;
+	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}.`;
 }
 
 function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
@@ -291,6 +344,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
 	if ("isolated" in params) item.isolated = params.isolated;
+	if ("shadowReview" in params) item.shadowReview = params.shadowReview;
 	return [item];
 }
 
@@ -317,6 +371,11 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
 		spawn.isolated = params.isolated;
+	}
+	if (item.shadowReview !== undefined) {
+		spawn.shadowReview = item.shadowReview;
+	} else if ("shadowReview" in params) {
+		spawn.shadowReview = params.shadowReview;
 	}
 	return spawn;
 }
@@ -475,6 +534,93 @@ export function composeSpawnAdvisory(args: {
 
 /** Sentinel for async jobs whose subagent finished with a failing result; progress is already updated. */
 class TaskJobError extends AsyncJobError {}
+
+/** Unique first-cause token for queued-startup timeout (design §5.2.4 / F1). */
+const QUEUED_TIMEOUT_TOKEN = Symbol("queued-startup-timeout");
+
+type TimeoutMetricName = "queued_timeout_triggered" | "runtime_timeout_triggered";
+
+/** Per-job once-only counters for P0 timeout observability (F8 metrics owner: TaskTool). */
+const timeoutMetricOnce = new Set<string>();
+const timeoutMetricTotals: Record<TimeoutMetricName, number> = {
+	queued_timeout_triggered: 0,
+	runtime_timeout_triggered: 0,
+};
+
+function recordTimeoutMetric(name: TimeoutMetricName, jobKey: string): void {
+	const onceKey = `${name}:${jobKey}`;
+	if (timeoutMetricOnce.has(onceKey)) return;
+	timeoutMetricOnce.add(onceKey);
+	timeoutMetricTotals[name] += 1;
+	logger.warn(`task timeout metric: ${name}`, { jobKey, total: timeoutMetricTotals[name] });
+}
+
+function clearTimeoutMetricsForJob(jobKey: string): void {
+	timeoutMetricOnce.delete(`queued_timeout_triggered:${jobKey}`);
+	timeoutMetricOnce.delete(`runtime_timeout_triggered:${jobKey}`);
+}
+
+/** Test-only: reset per-job timeout metric de-duplication. */
+export function __resetTaskTimeoutMetricsForTests(): void {
+	timeoutMetricOnce.clear();
+	timeoutMetricTotals.queued_timeout_triggered = 0;
+	timeoutMetricTotals.runtime_timeout_triggered = 0;
+}
+
+/** Test-only: read timeout metric totals. */
+export function __getTaskTimeoutMetricsForTests(): Readonly<Record<TimeoutMetricName, number>> {
+	return { ...timeoutMetricTotals };
+}
+
+/** Test-only: count retained once-keys (F8 leak detector). */
+export function __getTaskTimeoutOnceKeyCountForTests(): number {
+	return timeoutMetricOnce.size;
+}
+
+/**
+ * Test-only: reproduce settle-then-late-record once-key race (F8).
+ * Fixed settleOnce always clears on re-entry, so keysAfterReentryClear must be 0.
+ */
+export function __exerciseTimeoutMetricSettleRaceForTests(jobKey: string): {
+	keysAfterLateRecord: number;
+	keysAfterReentryClear: number;
+} {
+	clearTimeoutMetricsForJob(jobKey);
+	recordTimeoutMetric("queued_timeout_triggered", jobKey);
+	const keysAfterLateRecord = timeoutMetricOnce.size;
+	clearTimeoutMetricsForJob(jobKey);
+	return { keysAfterLateRecord, keysAfterReentryClear: timeoutMetricOnce.size };
+}
+
+/** Test-only: build the abort reason payload used by queued-startup timeout. */
+export function __makeQueuedTimeoutReasonForTests(timeoutMs: number): {
+	reason: typeof QUEUED_TIMEOUT_TOKEN;
+	timeoutMs: number;
+} {
+	return { reason: QUEUED_TIMEOUT_TOKEN, timeoutMs };
+}
+
+/** Test-only: classify acquire abort by AbortSignal.any first-cause only (no secondary OR). */
+export function __classifyAcquireAbortReasonForTests(combinedReason: unknown): "queued_timeout" | "aborted" {
+	return isQueuedTimeoutReason(combinedReason) ? "queued_timeout" : "aborted";
+}
+
+function isQueuedTimeoutReason(reason: unknown): reason is { reason: typeof QUEUED_TIMEOUT_TOKEN; timeoutMs: number } {
+	return (
+		typeof reason === "object" &&
+		reason !== null &&
+		"reason" in reason &&
+		(reason as { reason: unknown }).reason === QUEUED_TIMEOUT_TOKEN
+	);
+}
+
+function queuedTimeoutErrorText(timeoutMs: number): string {
+	return (
+		`queued startup timeout: spawn request timed out after ${timeoutMs}ms waiting for semaphore permit ` +
+		`(task.queuedStartupTimeoutMs=${timeoutMs}). This usually means maxConcurrency is saturated ` +
+		`by stuck jobs. Consider cancelling hung jobs or increasing task.maxConcurrency.`
+	);
+}
 
 /**
  * Process-level create-time discovery memo and published reload snapshots,
@@ -803,10 +949,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			...(params.shadowReview !== undefined ? { shadowReview: params.shadowReview } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-			maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 		});
 	}
 
@@ -1017,6 +1163,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				progress: {
 					index,
 					id: agentId,
+					taskToolCallId: toolCallId,
 					agent: agentType,
 					agentSource,
 					modelRole: policy.modelRole,
@@ -1046,24 +1193,32 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		let failedCount = 0;
 		let primaryJobId = asyncSpawns[0].agentId;
 		const syncResults: SingleResult[] = [];
+		const asyncResults: SingleResult[] = [];
 		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
 		let syncUsage: Usage | undefined;
 		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
 		let syncOutputPaths: string[] | undefined;
 		let syncProjectAgentsDir: string | null = null;
-		const buildAsyncDetails = (): TaskToolDetails => ({
-			projectAgentsDir: syncProjectAgentsDir,
-			results: [...syncResults],
-			totalDurationMs: Date.now() - callStartedAt,
-			usage: syncUsage,
-			outputPaths: syncOutputPaths,
-			progress: spawns.map(spawn => ({ ...spawn.progress })),
-			async: {
-				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
+		const buildAsyncDetails = (): TaskToolDetails => {
+			const asyncState = {
+				state: (settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed") as
+					| "running"
+					| "completed"
+					| "failed",
 				jobId: primaryJobId,
-				type: "task",
-			},
-		});
+				type: "task" as const,
+				...(toolCallId ? { taskToolCallId: toolCallId } : {}),
+			};
+			return {
+				projectAgentsDir: syncProjectAgentsDir,
+				results: [...syncResults, ...asyncResults],
+				totalDurationMs: Date.now() - callStartedAt,
+				usage: syncUsage,
+				outputPaths: syncOutputPaths,
+				progress: spawns.map(spawn => ({ ...spawn.progress })),
+				async: asyncState,
+			};
+		};
 
 		const started: Array<{ agentId: string; jobId: string }> = [];
 		const failedSchedules: string[] = [];
@@ -1079,6 +1234,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
 					onUpdate,
+					recordSettledResult: result => {
+						asyncResults.push(result);
+					},
 					onSettled: failed => {
 						settledCount += 1;
 						if (failed) failedCount += 1;
@@ -1252,6 +1410,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
+		recordSettledResult?: (result: SingleResult) => void;
 		onSettled?: (failed: boolean) => void;
 	}): string {
 		const {
@@ -1264,6 +1423,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			ircEnabled,
 			buildDetails,
 			onUpdate,
+			recordSettledResult,
 			onSettled,
 		} = options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
@@ -1288,6 +1448,48 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			agentId,
 			async ({ jobId, signal: runSignal, reportProgress, markRunning }) => {
 				const startedAt = Date.now();
+				let settled = false;
+				const settleOnce = (failed: boolean) => {
+					// F8: always clear once-keys, even on re-entry after a late recordTimeoutMetric.
+					clearTimeoutMetricsForJob(agentId);
+					if (settled) return;
+					settled = true;
+					onSettled?.(failed);
+				};
+				const recordJobTimeout = (name: TimeoutMetricName) => {
+					// Do not leave orphan once-keys after the job has already settled.
+					if (settled) return;
+					recordTimeoutMetric(name, agentId);
+				};
+				// Freeze at job start so mid-run settings edits cannot change this job's policy.
+				const queuedTimeoutMsRaw = this.session.settings.get("task.queuedStartupTimeoutMs");
+				const queuedTimeoutMs =
+					typeof queuedTimeoutMsRaw === "number" && Number.isFinite(queuedTimeoutMsRaw) && queuedTimeoutMsRaw > 0
+						? Math.floor(queuedTimeoutMsRaw)
+						: 0;
+				const failQueuedTimeout = async (timeoutMs: number): Promise<never> => {
+					progress.status = "failed";
+					progress.durationMs = Math.max(0, Date.now() - startedAt);
+					recordJobTimeout("queued_timeout_triggered");
+					settleOnce(true);
+					// Publish a terminal tool snapshot before throwing so the original
+					// async task block can finalize/untrack instead of freezing on pending.
+					try {
+						await reportProgress(
+							queuedTimeoutErrorText(timeoutMs),
+							buildDetails() as unknown as Record<string, unknown>,
+						);
+					} catch {
+						// Progress delivery is best-effort; settlement already completed.
+					}
+					throw new TaskJobError(queuedTimeoutErrorText(timeoutMs));
+				};
+				const failAbortedBeforeExecution = (): never => {
+					progress.status = "aborted";
+					progress.durationMs = Math.max(0, Date.now() - startedAt);
+					settleOnce(true);
+					throw new Error("Aborted before execution");
+				};
 				const forwardSyncProgress: AgentToolUpdateCallback<TaskToolDetails> = async update => {
 					const nextProgress = update.details?.progress?.[0];
 					if (nextProgress) {
@@ -1296,32 +1498,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						// polling row reflects the resolved model, reasoning level,
 						// and running counters without reverting the "running"
 						// status back to the subagent's initial "pending" snapshot.
-						progress.modelRole = nextProgress.modelRole ?? progress.modelRole;
-						progress.resolvedModel = nextProgress.resolvedModel;
-						progress.resolvedModelIdentity = nextProgress.resolvedModelIdentity;
-						progress.resolvedThinkingLevel = nextProgress.resolvedThinkingLevel;
-						progress.resolvedModelIsFallback = nextProgress.resolvedModel
-							? nextProgress.resolvedModelIsFallback
-							: undefined;
-						progress.advisor = nextProgress.advisor ?? progress.advisor;
-						progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
-						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
-						progress.tokens = nextProgress.tokens;
-						progress.requests = nextProgress.requests;
-						progress.contextTokens = nextProgress.contextTokens;
-						progress.contextWindow = nextProgress.contextWindow;
-						progress.cost = nextProgress.cost;
-						progress.toolCount = nextProgress.toolCount;
-						progress.currentTool = nextProgress.currentTool;
-						progress.currentToolArgs = nextProgress.currentToolArgs;
-						progress.currentToolArgsKey = nextProgress.currentToolArgsKey;
-						progress.currentToolIntent = nextProgress.currentToolIntent;
-						progress.currentToolStartMs = nextProgress.currentToolStartMs;
-						progress.lastIntent = nextProgress.lastIntent;
-						progress.recentTools = nextProgress.recentTools.slice();
-						progress.recentOutput = nextProgress.recentOutput.slice();
-						progress.retryState = nextProgress.retryState;
-						progress.retryFailure = nextProgress.retryFailure;
+						copySpawnJobLiveProgress(progress, nextProgress);
 					}
 					const updateText =
 						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
@@ -1329,8 +1506,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				};
 				const spawnRun =
 					run ?? this.#launch({ toolCallId, params: spawnParams, index: progress.index, agentId, detached: true });
+				const queuedAbortController = new AbortController();
+				const queuedTimeoutHandle =
+					queuedTimeoutMs > 0
+						? setTimeout(() => {
+								queuedAbortController.abort({
+									reason: QUEUED_TIMEOUT_TOKEN,
+									timeoutMs: queuedTimeoutMs,
+								});
+							}, queuedTimeoutMs)
+						: undefined;
+				const combinedSignal =
+					queuedTimeoutMs > 0 ? AbortSignal.any([runSignal, queuedAbortController.signal]) : runSignal;
 				spawnRun.attach({
-					signal: runSignal,
+					signal: combinedSignal,
 					onUpdate: forwardSyncProgress,
 					onArtifactsRetained: cleanup => {
 						// Tie the retained temp directory's lifetime to this job
@@ -1345,18 +1534,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						else void cleanup();
 					},
 				});
-				// An acquire-time abort and a post-acquire abort take the same
-				// path: progress + onSettled have to fire even when the spawn
-				// never reached the executor, otherwise the batch aggregate state
-				// stays "running" forever.
-				const permitHeld = await spawnRun.started.then(
-					() => true,
-					() => false,
-				);
-				if (!permitHeld || runSignal.aborted) {
-					progress.status = "aborted";
-					onSettled?.(true);
-					throw new Error("Aborted before execution");
+				// Isolated acquire: timeout token must not be rewritten by outer catch.
+				// SpawnRun owns the concurrency permit; waiting on `started` is the
+				// queued-startup gate (do not acquire the semaphore again here).
+				let permitHeld = false;
+				try {
+					await spawnRun.started;
+					permitHeld = true;
+				} catch {
+					// AbortSignal.any first-cause only: never OR queuedAbortController.reason
+					// (timer may still fire after cancel won the race).
+					const reason = combinedSignal.reason;
+					if (isQueuedTimeoutReason(reason)) {
+						await failQueuedTimeout(reason.timeoutMs);
+					}
+					failAbortedBeforeExecution();
+				} finally {
+					clearTimeout(queuedTimeoutHandle);
+				}
+				if (!permitHeld || combinedSignal.aborted) {
+					const reason = combinedSignal.reason;
+					if (isQueuedTimeoutReason(reason)) {
+						await failQueuedTimeout(reason.timeoutMs);
+					}
+					failAbortedBeforeExecution();
 				}
 				try {
 					markRunning();
@@ -1368,6 +1569,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const result = await spawnRun.result;
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
+					if (singleResult) {
+						recordSettledResult?.(singleResult);
+					}
 					// A missing result means the sync path failed at the tool level
 					// (results: []) — treat it as a failure, not success. A runner
 					// error on a zero exit (changes captured but not landed, or a
@@ -1405,7 +1609,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						delete progress.resolvedThinkingLevel;
 						delete progress.resolvedModelIsFallback;
 					}
-					onSettled?.(resultFailed);
+					settleOnce(resultFailed);
 					const statusText = resultFailed
 						? `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
@@ -1423,7 +1627,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					}
 					progress.status = "failed";
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
-					onSettled?.(true);
+					settleOnce(true);
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
@@ -1434,6 +1638,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			{
 				id: agentId,
 				agentId,
+				taskToolCallId: toolCallId,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				onProgress: text => {
@@ -1636,10 +1841,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+				...(params.shadowReview !== undefined ? { shadowReview: params.shadowReview } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-				maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 				signal,
 				onProgress: progress => {
 					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };
@@ -1654,6 +1859,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					});
 				},
 			});
+			await this.#consumeParentDeliveryAfterSpawn(toolCallId, execution.result, context);
 			return this.#buildResultPayload(
 				execution.result,
 				execution.policy.discovery.projectAgentsDir,
@@ -1685,6 +1891,51 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 	}
 
+	/**
+	 * Batch 1 W2/W3: after a structured child settles, reclassify against the
+	 * current workspace and bind a parent_integrate_decision custom entry.
+	 * Packet-only settle decisions are never integrate-of-record.
+	 */
+	async #consumeParentDeliveryAfterSpawn(
+		toolCallId: string,
+		result: SingleResult,
+		spawnContext: string | undefined,
+	): Promise<void> {
+		const sink = this.session.sessionManager;
+		if (!sink?.appendCustomEntry) return;
+		const completed = result.exitCode === 0 && !result.error && !result.aborted;
+		try {
+			const consumed = await settleChildDeliveryForParent({
+				sink,
+				cwd: this.session.cwd,
+				delivery: result.deliveryEvidence,
+				spawnContext,
+				eventIdPrefix: `task:${toolCallId}:${result.id}`,
+				jobId: toolCallId,
+				agentId: result.id,
+				taskToolCallId: toolCallId,
+				noteSettled: completed,
+			});
+			if (consumed) result.parentIntegrateDecision = consumed.decision;
+		} catch (error) {
+			logger.warn("task: parent consume reclassify failed", {
+				toolCallId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	/** Record runtime-timeout metrics once per spawn id for both async and sync paths. */
+	#recordRuntimeTimeoutMetric(jobKey: string, result: SingleResult | undefined): void {
+		if (
+			result?.aborted &&
+			typeof result.abortReason === "string" &&
+			result.abortReason.includes("runtime limit exceeded")
+		) {
+			recordTimeoutMetric("runtime_timeout_triggered", jobKey);
+		}
+	}
+
 	/** Build the tool result (summary text + details) for a settled run. */
 	#buildResultPayload(
 		result: SingleResult,
@@ -1692,6 +1943,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		totalDurationMs: number,
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
+		this.#recordRuntimeTimeoutMetric(result.id, result);
 		const summary = formatTaskResultSummary(result, { totalDurationMs, mergeSummary });
 
 		return {

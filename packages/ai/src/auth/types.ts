@@ -687,6 +687,27 @@ export interface AuthSource extends CredentialOrigin {
 	concrete: boolean;
 }
 
+/**
+ * Non-secret identity + revision for the credential/route currently selected
+ * for a provider (session-sticky when known). Never includes tokens or
+ * hash-of-secret material. Callers that cannot obtain this must fail open
+ * rather than reuse another account's negative cache mark.
+ */
+export interface SelectedCredentialRoute {
+	kind: CredentialOriginKind;
+	/** Non-secret account/row identity when known (OAuth identityKey or `cred:<id>`). */
+	identityKey?: string;
+	/** Durable stored credential row id when known. */
+	credentialId?: number;
+	/**
+	 * Non-secret revision. Bumps when override epoch / credential generation
+	 * changes so negative caches drop stale marks after refresh/rotate/config.
+	 */
+	revision: string;
+	/** Env var name when `kind === "env"` and a single named variable backs it. */
+	envVar?: string;
+}
+
 /** Completed request usage supplied to {@link UsageApi.observe}. */
 export type ObservedUsageInput = {
 	provider: Provider;
@@ -929,6 +950,20 @@ export interface KeysApi {
 	 * The string is purely informational; consumers must not parse it.
 	 */
 	describe(provider: string, sessionId?: string): string | undefined;
+	/**
+	 * Monotonic counter for runtime and config key overrides. Not a secret.
+	 * Bumps when an override is added, replaced, or removed so caches can
+	 * invalidate without reading key material. Identical rewrites do not bump.
+	 * Stored-credential changes use {@link CredentialsApi.generation} instead.
+	 */
+	readonly overrideEpoch: number;
+	/**
+	 * Synchronous non-secret identity+revision for the credential that would
+	 * authenticate `provider` for `sessionId`. Returns undefined when the
+	 * selected account/revision cannot be proven (fail-open for negative caches).
+	 * Never returns tokens or hash-of-secret. Does not refresh OAuth.
+	 */
+	selectedRoute(provider: string, options?: { sessionId?: string | null }): SelectedCredentialRoute | undefined;
 	/**
 	 * Set a runtime API key override (not persisted to disk).
 	 * Used for CLI --api-key flag.

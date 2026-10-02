@@ -12,6 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { cfgAdvisorAllowSameModel } from "@oh-my-pi/pi-coding-agent/config/workflow-settings";
 import { cfgDisabledExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 
 const INITIAL_CONTEXT = "reload-context-initial-marker";
@@ -28,6 +29,7 @@ async function createContextSession(
 	if (options.advisor) {
 		authStorage.keys.setRuntime("openai", "test-key");
 		cfgAdvisorEnabled.set(settings, true);
+		cfgAdvisorAllowSameModel.set(settings, true);
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 	}
 	const modelRegistry = new ModelRegistry(authStorage, `${cwd}/models.json`);

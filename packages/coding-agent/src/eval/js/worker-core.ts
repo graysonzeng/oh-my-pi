@@ -312,6 +312,7 @@ export class WorkerCore {
 			sessionId: snapshot.sessionId,
 			localRoots: snapshot.localRoots,
 			packageRoot: snapshot.packageRoot,
+			restrictedIo: snapshot.restrictedIo,
 		});
 		return this.#runtime;
 	}
@@ -363,6 +364,7 @@ export class WorkerCore {
 		try {
 			const runtime = this.#ensureRuntime(snapshot, runId);
 			runtime.setCwd(snapshot.cwd);
+			runtime.setRestrictedIo(snapshot.restrictedIo === true);
 			runtime.syncPreludes(snapshot.preludes ?? []);
 			const value = await runtime.run(code, filename, hooks, { runId, cwd: snapshot.cwd });
 			runtime.displayValue(value, hooks);

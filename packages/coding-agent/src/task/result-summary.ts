@@ -10,6 +10,7 @@ import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: 
 import { AgentRegistry } from "../registry/agent-registry";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { checksIndicateParentOwnsVerify } from "./child-delivery-evidence";
 
 /** Inline preview budget before the envelope points at `agent://<id>` instead. */
 const FULL_OUTPUT_THRESHOLD = 5000;
@@ -42,19 +43,26 @@ export function formatTaskResultSummary(
 	result: SingleResult,
 	options: { totalDurationMs: number; mergeSummary?: string },
 ): string {
-	const status = result.aborted
-		? "cancelled"
-		: result.exitCode === 0 && result.error
-			? "merge failed"
-			: result.exitCode === 0
-				? "completed"
-				: `failed (exit ${result.exitCode})`;
+	const completionKind = result.completionKind;
+	const status =
+		completionKind && completionKind !== "completed"
+			? completionKind
+			: result.aborted
+				? "cancelled"
+				: result.exitCode === 0 && result.error
+					? "merge failed"
+					: result.exitCode === 0
+						? "completed"
+						: `failed (exit ${result.exitCode})`;
 	const output = formatResultOutputFallback(result);
 	// The preview prefers `output` over `stderr`, so a run that failed after
-	// streaming prose (provider stream error, missing yield) would otherwise
-	// show only the half-written text and no reason. Aborts carry their own
-	// <abort-reason>; an empty output already previews the error itself.
-	const error = result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 ? result.error : undefined;
+	// streaming prose would otherwise show only the half-written text and no
+	// reason. Aborts carry their own <abort-reason>.
+	const failureReason = (result.error ?? result.stderr).trim();
+	const error =
+		result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 && failureReason.length > 0
+			? failureReason
+			: undefined;
 	const outputCharCount = result.outputMeta?.charCount ?? output.length;
 	const truncated = outputCharCount > FULL_OUTPUT_THRESHOLD && result.outputPath !== undefined;
 	const preview = truncated ? previewHead(output) : output;
@@ -64,11 +72,27 @@ export function formatTaskResultSummary(
 	// "parked" status must not read as resumable.
 	const refStatus = AgentRegistry.global().get(result.id)?.status;
 	const resumable = result.aborted && !result.isolated && (refStatus === "idle" || refStatus === "parked");
+	const decision = result.parentIntegrateDecision;
+	const verificationStatus =
+		decision?.action === "integrate" && "boundToWorkspaceVersion" in decision
+			? "integrate_eligible"
+			: decision?.classification === "done_valid"
+				? "done_valid"
+				: decision?.classification
+					? decision.classification
+					: "unverified";
 	return prompt.render(taskSummaryTemplate, {
 		agentName: result.agent,
 		id: result.id,
 		status,
+		verificationStatus,
+		integrateClassification: decision?.classification,
+		integrateAction: decision?.action,
+		integrateReasons: decision?.reasons?.length ? decision.reasons.join(", ") : undefined,
+		pendingChecks: result.deliveryEvidence?.checksNotRun,
+		parentOwnsVerification: checksIndicateParentOwnsVerify(result.deliveryEvidence?.checksNotRun),
 		duration: formatDuration(options.totalDurationMs),
+		completionKind: completionKind !== "completed" ? completionKind : undefined,
 		abortReason: result.aborted ? result.abortReason : undefined,
 		error,
 		resumable,

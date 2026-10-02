@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
+import { resolveTaskEffortLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 // Contract: the single-spawn schema (`task.batch: false`; the exported
@@ -13,6 +15,31 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
+	it("accepts agent and task without shadowReview", () => {
+		const parsed = taskSchema({ agent: "reviewer", task: "Review the patch.", solutionSpace: "c" });
+		expect(parsed instanceof type.errors).toBe(false);
+	});
+
+	it("accepts optional shadowReview", () => {
+		const parsed = taskSchema({
+			agent: "reviewer",
+			task: "Review the patch.",
+			solutionSpace: "c",
+			shadowReview: "code",
+		});
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect(parsed.shadowReview).toBe("code");
+		}
+	});
+
+	it("defaults agent to `task` when omitted", () => {
+		const parsed = taskSchema({ task: "Map the auth module.", solutionSpace: "c" });
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect(parsed.agent).toBe("task");
+		}
+	});
 	it("requires task", () => {
 		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(true);
@@ -61,6 +88,38 @@ describe("task schema (single-spawn)", () => {
 	});
 });
 
+describe("task effort schema to resolve", () => {
+	it("accepts any string and resolves omitted or non-canonical values to high", () => {
+		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, effortEnabled: true });
+		const omitted = schema({ task: "do the work", solutionSpace: "c" });
+		expect(omitted instanceof type.errors).toBe(false);
+		if (omitted instanceof type.errors) throw new Error(omitted.summary);
+		if (!omitted || typeof omitted !== "object") throw new Error("Expected parsed task object");
+		const omittedEffort = "effort" in omitted ? omitted.effort : undefined;
+		if (omittedEffort !== undefined && typeof omittedEffort !== "string") throw new Error("Expected effort string");
+		expect(resolveTaskEffortLevel(undefined, omittedEffort)).toBe(Effort.High);
+
+		const rows = [
+			["high", Effort.High],
+			["hi", Effort.High],
+			["lo", Effort.High],
+			["med", Effort.High],
+			["garbage", Effort.High],
+			["low", Effort.Low],
+			["xhigh", Effort.XHigh],
+		] as const;
+		for (const [raw, expected] of rows) {
+			const parsed = schema({ task: "do the work", solutionSpace: "c", effort: raw });
+			expect(parsed instanceof type.errors).toBe(false);
+			if (parsed instanceof type.errors) throw new Error(parsed.summary);
+			if (!parsed || typeof parsed !== "object" || !("effort" in parsed) || typeof parsed.effort !== "string") {
+				throw new Error("Expected parsed task effort string");
+			}
+			expect(resolveTaskEffortLevel(undefined, parsed.effort)).toBe(expected);
+		}
+	});
+});
+
 describe("task spawn validation", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -86,12 +145,22 @@ describe("task spawn validation", () => {
 	it("defaults a missing agent to `task`", async () => {
 		// With no `agent`, execute() normalizes to the `task` default, so the
 		// failure is unknown-agent (none discovered), not missing-agent.
-		const text = await executeText({ task: "..." });
+		const text = await executeText({ task: "...", solutionSpace: "c" });
 		expect(text).toContain('Unknown agent "task"');
 	});
 
 	it("rejects a missing task", async () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
+	});
+
+	it("does not reject omitted or non-canonical effort before spawn", async () => {
+		for (const effort of [undefined, "high", "hi", "lo", "med", "garbage"]) {
+			const text = await executeText(
+				effort === undefined ? { task: "...", solutionSpace: "c" } : { task: "...", solutionSpace: "c", effort },
+			);
+			expect(text).not.toContain("invalid `effort`");
+			expect(text).toContain('Unknown agent "task"');
+		}
 	});
 });

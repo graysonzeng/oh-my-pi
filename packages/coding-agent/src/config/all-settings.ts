@@ -7,6 +7,7 @@ import { all, type AnySetting, Setting } from "./registry";
 import * as modesSettings from "../modes/settings";
 import * as sessionSettings from "../session/settings";
 import * as advisorSettings from "../advisor/settings";
+import * as workflowSettings from "./workflow-settings";
 import * as configModelSettings from "./model-settings";
 import * as sessionContextSettings from "../session/context-settings";
 import * as memoryBackendSettings from "../memory-backend/settings";
@@ -46,6 +47,7 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	modesSettings,
 	sessionSettings,
 	telemetrySettings,
+	workflowSettings,
 	advisorSettings,
 	sessionContextSettings,
 	memoryBackendSettings,

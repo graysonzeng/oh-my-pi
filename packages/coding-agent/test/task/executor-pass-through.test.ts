@@ -23,9 +23,10 @@ import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/p
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { createSessionDefaults } from "../helpers/session-defaults";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -419,6 +420,28 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.Low);
 	});
 
+	it("caps caller-requested effort at an agent-specific ceiling", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}`);
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "reviewer", model: ["@task"], maxEffort: Effort.XHigh },
+			id: "reviewer-agent-effort-ceiling",
+			effort: "max",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.XHigh);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.XHigh);
+	});
+
 	it("rejects a spawn when task.maxEffort is below the model floor", async () => {
 		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
@@ -448,6 +471,111 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy).not.toHaveBeenCalled();
 	});
 
+	it("runs a mandatory max-only model at max despite lower task and agent ceilings", async () => {
+		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
+		const model = {
+			...baseModel,
+			id: "deepseek-v4-flash",
+			provider: "mock",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Max],
+				defaultLevel: Effort.Max,
+				requiresEffort: true,
+			},
+		} as Model;
+		const settings = Settings.isolated({ "task.maxEffort": "low" });
+		settings.setModelRole("task", `${model.provider}/${model.id}:max`);
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: ["@task"], maxEffort: Effort.Medium },
+			id: "mandatory-max-only-effort",
+			effort: "lo",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Max);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.Low);
+	});
+
+	it("forces a concrete low agent selector to max on a mandatory max-only model", async () => {
+		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
+		const model = {
+			...baseModel,
+			id: "deepseek-v4-flash",
+			provider: "mock",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Max],
+				defaultLevel: Effort.Max,
+				requiresEffort: true,
+			},
+		} as Model;
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}`);
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: {
+				...baseAgent,
+				name: "scout",
+				model: ["@task"],
+				thinkingLevel: ThinkingLevel.Low,
+				maxEffort: Effort.Medium,
+			},
+			id: "mandatory-max-only-concrete-low",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Max);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.Medium);
+	});
+
+	it("rejects an initial model whose effort floor exceeds an agent ceiling", async () => {
+		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
+		const model = {
+			...baseModel,
+			id: "mock-max-only",
+			provider: "mock",
+			thinking: { mode: "effort", efforts: [Effort.Max] },
+		} as Model;
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}:max`);
+		const spy = vi.spyOn(sdkModule, "createAgentSession");
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: {
+				...baseAgent,
+				name: "reviewer",
+				model: ["@task"],
+				thinkingLevel: ThinkingLevel.Medium,
+				maxEffort: Effort.XHigh,
+			},
+			id: "reviewer-agent-ceiling-below-floor",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			"mock/mock-max-only has no supported thinking effort at or below agent reviewer maxEffort=xhigh",
+		);
+		expect(spy).not.toHaveBeenCalled();
+	});
+
 	it("preserves the model's full effort range by default", async () => {
 		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
@@ -460,13 +588,85 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			...baseOptions,
 			agent: { ...baseAgent, model: ["@task"] },
 			id: "subagent-default-effort-ceiling",
-			effort: "hi",
+			effort: "max",
 			settings,
 			modelRegistry: createModelRegistry(model),
 		});
 
 		expect(result.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Max);
+	});
+
+	it("resolves caller hi to high instead of the model's ceiling", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}`);
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, model: ["@task"] },
+			id: "subagent-hi-is-high",
+			effort: "hi",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.High);
+	});
+
+	it.each([undefined, AUTO_THINKING])(
+		"defaults omitted caller effort with agent selector %s to high",
+		async thinkingLevel => {
+			const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+			if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+			const settings = Settings.isolated();
+			settings.setModelRole("task", `${model.provider}/${model.id}`);
+			const session = yieldEmittingSession();
+			const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+			const result = await runSubprocess({
+				...baseOptions,
+				agent: { ...baseAgent, model: ["@task"] },
+				id: "subagent-auto-default-is-high",
+				settings,
+				modelRegistry: createModelRegistry(model),
+				thinkingLevel,
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.High);
+		},
+	);
+
+	it("caps an explicit model suffix when an agent omits caller effort", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}:max`);
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: {
+				...baseAgent,
+				name: "reviewer",
+				model: ["@task"],
+				thinkingLevel: ThinkingLevel.Medium,
+				maxEffort: Effort.XHigh,
+			},
+			id: "reviewer-suffix-effort-ceiling",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.XHigh);
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.XHigh);
 	});
 
 	it("resolves an explicit task-role effort suffix over the agent-definition default", async () => {
@@ -489,7 +689,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
 		// The user's explicit `:high` suffix on the resolved role pattern wins over
-		// the agent definition's default level (e.g. task's `auto`).
+		// the agent definition's default level (e.g. task's `high`).
 		expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.High);
 	});
 

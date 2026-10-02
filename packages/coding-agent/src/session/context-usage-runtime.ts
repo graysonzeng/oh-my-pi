@@ -14,12 +14,8 @@ import { estimateInlineSavings } from "./snapcompact-inline";
 import { resolveSpeculationLeadTokens } from "./speculation-lead";
 
 import { cfgSkillful } from "./settings";
-import {
-	cfgCompaction,
-	cfgSnapcompactShape,
-	cfgSnapcompactSystemPrompt,
-	cfgSnapcompactToolResults,
-} from "./context-settings";
+import { cfgSnapcompactShape, cfgSnapcompactSystemPrompt, cfgSnapcompactToolResults } from "./context-settings";
+import { effectiveCompactionSettings } from "./context-strategy-experiment";
 
 /** Resolve session policy before handing pure boundary arithmetic to the UI. */
 export function getSessionCompactionBoundaries(
@@ -28,7 +24,7 @@ export function getSessionCompactionBoundaries(
 	model?: Model | null,
 ): CompactionBoundaries | null {
 	if (!(contextWindow > 0)) return null;
-	const configured = cfgCompaction.get(settings);
+	const configured = effectiveCompactionSettings(settings, contextWindow);
 	const compaction: CompactionSettings = configured;
 	if (!compaction.enabled || compaction.strategy === "off") return null;
 	const threshold = resolveThresholdTokens(contextWindow, compaction);
@@ -59,8 +55,9 @@ export function computeSessionContextBreakdown(
 			});
 		}
 	}
+	const contextWindow = session.model?.contextWindow ?? 0;
 	return computeContextBreakdown(session, {
-		compaction: cfgCompaction.get(session.settings),
+		compaction: effectiveCompactionSettings(session.settings, contextWindow > 0 ? contextWindow : undefined),
 		sourceRevision: session.settings.revision,
 		skillful: cfgSkillful.get(session.settings),
 		snapcompact,

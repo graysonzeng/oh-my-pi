@@ -2808,6 +2808,40 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(zeroCtx?.contextWindow).toBe(128000);
 	});
 
+	test("proxy discovery prefers the configured reference provider for thin model payloads", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9996",
+				auth: "none",
+				referenceProvider: "openai-codex",
+				discovery: { type: "proxy" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9996/v1/models") {
+				return Response.json({
+					data: [
+						{
+							id: "gpt-5.6-sol",
+							object: "model",
+							owned_by: "gateway",
+							context_length: null,
+							supported_endpoint_types: null,
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("gateway", "gpt-5.6-sol");
+
+		expect(model?.contextWindow).toBe(372_000);
+		expect(model?.maxTokens).toBe(128_000);
+	});
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {
 		writeRawModelsJson({
 			"proxy-test": {
@@ -2837,8 +2871,8 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
-		const model = registry.find("proxy-test", "act_two");
-		expect(model?.name).toBe("Act Two");
+		const proxyModel = registry.find("proxy-test", "act_two");
+		expect(proxyModel?.name).toBe("Act Two");
 	});
 
 	test("proxy discovery falls back to bundled name when proxy reports none", async () => {
@@ -2867,10 +2901,10 @@ describe("ModelRegistry runtime discovery", () => {
 			}
 			throw new Error(`Unexpected URL: ${url}`);
 		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-		await registry.refresh();
-		const model = registry.find("proxy-test", "gpt-5");
-		expect(model?.name).toBe("GPT-5");
+		const fallbackRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await fallbackRegistry.refresh();
+		const fallbackModel = fallbackRegistry.find("proxy-test", "gpt-5");
+		expect(fallbackModel?.name).toBe("GPT-5");
 	});
 
 	test("litellm discovery maps rich model metadata and keeps runtime /v1 baseUrl", async () => {

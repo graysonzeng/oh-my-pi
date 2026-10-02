@@ -14,7 +14,11 @@ import {
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
-import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
+import {
+	isExternalizableImagePosition,
+	isPersistenceTruncatedString,
+	isToolResultMessageWithRecovery,
+} from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import {
 	parseTitleSlotFromContent,
@@ -434,17 +438,32 @@ interface BlobRefSite {
 }
 
 /**
- * Collect the blob references in session image blocks and provider image URLs.
+ * Descent position for image blob collection. Only elements of the VERIFIED
+ * `ToolResultMessage.omittedOriginal` recovery array — reached from the root
+ * session entry via a real toolResult message with a Text/Image content array —
+ * resolve under the new placement; generic subtrees can never re-authorize a
+ * same-named key. Legacy `content`/`images` positions keep their rules.
  * Snapcompact frames stay as references until context rebuilding selects them.
  */
-function collectBlobRefSites(value: unknown, sites: BlobRefSite[], key?: string): void {
-	if (key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
+type ResolveBlobStage = "entry" | "generic" | "toolResultMessage" | "omittedOriginal";
+
+function collectBlobRefSites(
+	value: unknown,
+	sites: BlobRefSite[],
+	key?: string,
+	stage: ResolveBlobStage = "generic",
+): void {
+	if (
+		key !== "frames" &&
+		isExternalizableImagePosition(value, key, stage === "omittedOriginal") &&
+		isBlobRef(value.data)
+	) {
 		sites.push({ holder: value, key: "data", ref: value.data, asDataUrl: false });
 		return;
 	}
 
 	if (Array.isArray(value)) {
-		for (const item of value) collectBlobRefSites(item, sites, key);
+		for (const item of value) collectBlobRefSites(item, sites, key, stage);
 		return;
 	}
 
@@ -458,7 +477,20 @@ function collectBlobRefSites(value: unknown, sites: BlobRefSite[], key?: string)
 		sites.push({ holder, key: "image_url", ref: value.image_url, asDataUrl: true });
 	}
 
-	for (const childKey in holder) collectBlobRefSites(holder[childKey], sites, childKey);
+	for (const childKey in holder) {
+		let childStage: ResolveBlobStage = "generic";
+		if (
+			stage === "entry" &&
+			holder.type === "message" &&
+			childKey === "message" &&
+			isToolResultMessageWithRecovery(holder[childKey])
+		) {
+			childStage = "toolResultMessage";
+		} else if (stage === "toolResultMessage") {
+			childStage = childKey === "omittedOriginal" && Array.isArray(holder[childKey]) ? "omittedOriginal" : "generic";
+		}
+		collectBlobRefSites(holder[childKey], sites, childKey, childStage);
+	}
 }
 
 /**
@@ -506,7 +538,7 @@ function repairTruncatedSnapcompactFrames(entry: FileEntry): void {
 function blobRefSites(values: readonly unknown[]): BlobRefSite[] {
 	const sites: BlobRefSite[] = [];
 	for (const value of values) {
-		if (containsBlobRef(value)) collectBlobRefSites(value, sites);
+		if (containsBlobRef(value)) collectBlobRefSites(value, sites, undefined, "entry");
 	}
 	return sites;
 }

@@ -501,6 +501,191 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(target.id);
 	});
 
+	it("switches when an eval cell nested-writes (PTC/Code Mode)", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const evalSchema = type({});
+		const nestedWriteEval: AgentTool<typeof evalSchema, { statusEvents: Array<{ op: string }> }> = {
+			name: "eval",
+			label: "Eval",
+			description: "Run a cell",
+			parameters: evalSchema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "wrote via tool.write" }],
+					details: { statusEvents: [{ op: "write", path: "src/app.ts", chars: 12 }] },
+				};
+			},
+		};
+		const mock = createMockModel({
+			responses: [toolCall("t1", "record"), toolCall("t2", "eval"), { content: ["done"] }],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [recordTool as AgentTool, nestedWriteEval as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map([
+				[recordTool.name, recordTool as AgentTool],
+				[nestedWriteEval.name, nestedWriteEval as AgentTool],
+			]),
+			prewalk: { target },
+		});
+
+		await session.prompt("implement via eval");
+
+		expect(requested).toEqual([
+			`${primary.provider}/${primary.id}`,
+			`${primary.provider}/${primary.id}`,
+			`${target.provider}/${target.id}`,
+		]);
+		expect(session.model?.id).toBe(target.id);
+	});
+
+	it("does not switch on nested write(xd://lsp) when the device tier is read", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const evalSchema = type({});
+		const nestedLspEval: AgentTool<
+			typeof evalSchema,
+			{ statusEvents: Array<{ op: string; xdev?: { tool: string; tier: string } }> }
+		> = {
+			name: "eval",
+			label: "Eval",
+			description: "Run a cell",
+			parameters: evalSchema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "lsp hover" }],
+					details: {
+						statusEvents: [
+							{
+								op: "write",
+								path: "xd://lsp",
+								chars: 12,
+								xdev: { tool: "lsp", mode: "execute", tier: "read" },
+							},
+						],
+					},
+				};
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				toolCall("t1", "record"),
+				toolCall("t2", "eval"),
+				{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
+				{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
+			],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [recordTool as AgentTool, nestedLspEval as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map([
+				[recordTool.name, recordTool as AgentTool],
+				[nestedLspEval.name, nestedLspEval as AgentTool],
+			]),
+			prewalk: { target },
+		});
+
+		await session.prompt("inspect via eval write xd://lsp");
+
+		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
+		expect(session.model?.id).toBe(primary.id);
+	});
+
+	it("does not switch on an eval cell that only nested-reads", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const evalSchema = type({});
+		const nestedReadEval: AgentTool<typeof evalSchema, { statusEvents: Array<{ op: string }> }> = {
+			name: "eval",
+			label: "Eval",
+			description: "Run a cell",
+			parameters: evalSchema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "read via tool.read" }],
+					details: { statusEvents: [{ op: "read", path: "src/app.ts", chars: 40 }] },
+				};
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				toolCall("t1", "record"),
+				toolCall("t2", "eval"),
+				{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
+				{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
+			],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [recordTool as AgentTool, nestedReadEval as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map([
+				[recordTool.name, recordTool as AgentTool],
+				[nestedReadEval.name, nestedReadEval as AgentTool],
+			]),
+			prewalk: { target },
+		});
+
+		await session.prompt("inspect via eval");
+
+		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
+		expect(session.model?.id).toBe(primary.id);
+	});
+
 	it("re-arms continuation after tool progress between prose turns", async () => {
 		// Regression: a normal prewalk can split planning across several turns:
 		// prose plan, todo init, then prose before implementation. Each tool

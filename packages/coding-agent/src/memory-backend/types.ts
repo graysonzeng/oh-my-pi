@@ -12,6 +12,12 @@ import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { AgentSession } from "../session/agent-session";
+import type {
+	MemoryExportPackage,
+	MemoryImportApplyResult,
+	MemoryImportPreview,
+	MemoryTransferCapabilities,
+} from "./transfer-types";
 
 export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
 
@@ -68,6 +74,10 @@ export interface MemoryBackendSaveResult {
 	ids?: string[];
 	queued?: boolean;
 	message?: string;
+	/** True when content was truncated to the interactive lesson char cap. */
+	truncated?: boolean;
+	/** Number of older lessons evicted to enforce the interactive lesson cap. */
+	evicted?: number;
 }
 
 export interface MemoryBackendOperationContext {
@@ -184,4 +194,32 @@ export interface MemoryBackend {
 	 * its runtime state, memory tools, and prompt from the current settings.
 	 */
 	applySettings?(session: AgentSession, changed: readonly string[]): Promise<void>;
+
+	/**
+	 * Optional D4 transfer capabilities. When omitted, export/import are unsupported.
+	 * Never pretend search results are a full export.
+	 */
+	transferCapabilities?(): MemoryTransferCapabilities;
+
+	/** Explicit user-requested export of traversable records. */
+	exportRecords?(context: MemoryBackendOperationContext): Promise<MemoryExportPackage>;
+
+	/** Validate and preview an import package without applying. */
+	previewImport?(
+		context: MemoryBackendOperationContext,
+		pkg: MemoryExportPackage,
+	): Promise<MemoryImportPreview> | MemoryImportPreview;
+
+	/** Apply a previously previewed import via this backend's write owner. */
+	applyImport?(
+		context: MemoryBackendOperationContext,
+		preview: MemoryImportPreview,
+		options?: {
+			replaceSystemArtifacts?: boolean;
+			/** Cross-scope confirm binding from preview — required when scopes differ. */
+			confirmBinding?: string;
+			/** Original package re-validated at the apply boundary. */
+			pkg?: MemoryExportPackage;
+		},
+	): Promise<MemoryImportApplyResult>;
 }
