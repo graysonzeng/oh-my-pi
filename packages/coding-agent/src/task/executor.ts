@@ -4019,6 +4019,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 interface SubagentPromptInputs {
 	id: string;
 	agentSystemPrompt: string;
+	performanceClass: SubagentPerformanceClass;
 	context: string;
 	planReference: string;
 	planReferencePath: string;
@@ -4076,6 +4077,8 @@ function buildSubagentSessionOptions(
 				: undefined;
 			const subagentPrompt = renderSubagentSystemPrompt({
 				agent: inputs.agentSystemPrompt,
+				exploreClass: inputs.performanceClass === "explore",
+				reviewClass: inputs.performanceClass === "review",
 				context: inputs.context,
 				planReference: inputs.planReference,
 				planReferencePath: inputs.planReferencePath,
@@ -4737,7 +4740,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					outputSchemaMode: options.outputSchemaMode,
 					restrictToolNames: options.restrictToolNames,
 					requireYieldTool,
-					workerClass: (options.performanceClass ?? "worker") === "worker",
+					workerClass: performanceClass === "worker",
 					contextFiles: options.contextFiles,
 					skills: options.skills,
 					promptTemplates: options.promptTemplates,
@@ -4781,6 +4784,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				prompt: {
 					id,
 					agentSystemPrompt: agent.systemPrompt,
+					performanceClass,
 					context: options.context?.trim() ?? "",
 					planReference: options.planReference?.content ?? "",
 					planReferencePath: options.planReference?.path ?? "",

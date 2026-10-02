@@ -3506,8 +3506,27 @@ async function executeToolCalls(
 				rec.isError = finalIsError;
 				rec.toolResultMessage = buildToolResultMessage(rec, admittedResult, finalIsError);
 			}
-			// Live `tool_execution_end` already fired at settle (completion
-			// order). Ordered writeback only holds result messages.
+			// Admission may replace the result or reject it. Publish only the
+			// accepted result; without an admission hook completion already fired.
+			if (!rec.executionEndEmitted) {
+				if (!rec.started) {
+					stream.push({
+						type: "tool_execution_start",
+						toolCallId: rec.toolCall.id,
+						toolName: rec.toolCall.name,
+						args: rec.args,
+						intent: rec.toolCall.intent,
+					});
+				}
+				stream.push({
+					type: "tool_execution_end",
+					toolCallId: rec.toolCall.id,
+					toolName: rec.toolCall.name,
+					result: rec.result!,
+					isError: rec.isError,
+				});
+				rec.executionEndEmitted = true;
+			}
 			rec.resultEmitted = true;
 			emittedToolResults.push(rec.toolResultMessage);
 			stream.push({ type: "message_start", message: rec.toolResultMessage });
@@ -3530,9 +3549,9 @@ async function executeToolCalls(
 			return;
 		}
 		if (orderedWriteback) {
-			// Live UI reports completion as soon as the call settles; result
-			// messages wait for head-of-line so history stays in call order.
-			if (!record.executionEndEmitted) {
+			// Without admission, completion can be published immediately while
+			// messages retain call order. Otherwise final admission owns completion.
+			if (!config.admitToolResult && !record.executionEndEmitted) {
 				const { toolCall } = record;
 				if (!record.started) {
 					stream.push({
