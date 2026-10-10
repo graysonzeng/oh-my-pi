@@ -25,7 +25,7 @@ output:
       type: string
 ---
 
-Investigate the codebase rapidly. Return structured findings another agent can use without re-reading everything. `summary`/`architecture` stay brief; a task that asks for an exhaustive report gets it in full under `report`.
+Investigate the codebase rapidly. Return structured findings another agent can use without re-reading everything. `summary`/`architecture` stay brief; a task that asks for an exhaustive report gets it in full under `report`. NEVER dump raw tool output, full file contents, or unfiltered grep hits into `summary` — parents keep context small; put path:line anchors and short excerpts only.
 
 <directives>
 - Unknown location / call chain / ownership / data flow: call `code_intel` once first.
@@ -34,6 +34,7 @@ Investigate the codebase rapidly. Return structured findings another agent can u
 - If `code_intel` returns `NOT_FOUND`, you MAY try one grep/glob/ast_grep fallback round before concluding the target does not exist.
 - Never describe semantic hits or identifier-tag name references as `calls` / `called by`.
 - `web_search` only when the task is explicitly about an external library or docs.
+- Prefer evidence the parent can act on (paths, symbols, 1–3 line excerpts) over pasting large regions.
 </directives>
 
 <thoroughness>

@@ -10,7 +10,11 @@ import {
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
+import {
+	normalizeModelPatternList,
+	resolveConfiguredModelPatterns,
+	resolveModelRoleValue,
+} from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
 import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
@@ -165,11 +169,47 @@ export function expandDefaultRetryFallbackChains(
 	return chains;
 }
 
-/** Resolves configured fallback chains, applying the default chain to named roles. */
+/** Deduplicate selector strings while preserving first-seen order. */
+function dedupeFallbackSelectors(selectors: readonly string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const selector of selectors) {
+		if (seen.has(selector)) continue;
+		seen.add(selector);
+		out.push(selector);
+	}
+	return out;
+}
+
+/**
+ * Resolves effective fallback chains.
+ *
+ * For each role, when both a comma-separated `modelRoles.<role>` list and an
+ * explicit `retry.fallbackChains.<role>` exist, the effective chain is the
+ * **comma list tail, then the explicit entries, deduped** (same attempt order as
+ * {@link resolveRoleChain}). A comma-only role uses the comma tail; an
+ * explicit-only role uses the explicit array (including empty). Chat roles
+ * without either still inherit `retry.fallbackChains.default`.
+ */
 export function getRetryFallbackChains(settings: Settings): RetryFallbackChains {
 	const configuredChains = cfgRetryFallbackChains.get(settings);
-	if (!configuredChains || typeof configuredChains !== "object") return {};
-	return expandDefaultRetryFallbackChains(configuredChains, Object.keys(settings.getModelRoles()));
+	const base: RetryFallbackChains =
+		configuredChains && typeof configuredChains === "object" && !Array.isArray(configuredChains)
+			? { ...configuredChains }
+			: {};
+	const roleNames = Object.keys(settings.getModelRoles());
+	for (const role of roleNames) {
+		const patterns = normalizeModelPatternList(settings.getModelRole(role));
+		const derivedTail = patterns.length > 1 ? patterns.slice(1) : [];
+		const hasExplicit = Object.hasOwn(base, role);
+		const explicit = hasExplicit ? base[role] : undefined;
+		if (hasExplicit && Array.isArray(explicit) && derivedTail.length > 0) {
+			base[role] = dedupeFallbackSelectors([...derivedTail, ...explicit]);
+		} else if (!hasExplicit && derivedTail.length > 0) {
+			base[role] = derivedTail;
+		}
+	}
+	return expandDefaultRetryFallbackChains(base, roleNames);
 }
 
 /**
@@ -238,7 +278,8 @@ function providerScopedPool(
 }
 
 /**
- * Validates configured fallback chains and reports each warning via `warn`.
+ * Validates effective fallback chains (explicit config plus comma-derived tails
+ * from {@link getRetryFallbackChains}) and reports each warning via `warn`.
  *
  * `options.isDiscoveryPending` suppresses "unknown model" warnings for
  * selectors whose config-declared discovery provider has not yet populated the
@@ -254,16 +295,45 @@ export function validateRetryFallbackChains(
 	options: { isDiscoveryPending?: (provider: string) => boolean } = {},
 ): void {
 	const configuredChains = cfgRetryFallbackChains.get(settings);
-	if (configuredChains === undefined) return;
 	const report = warn;
 	const isDiscoveryPending = options.isDiscoveryPending ?? (() => false);
-	if (!configuredChains || typeof configuredChains !== "object" || Array.isArray(configuredChains)) {
-		report("retry.fallbackChains must be a mapping of role names or model selectors to selector arrays.");
-		return;
+	if (configuredChains !== undefined) {
+		if (!configuredChains || typeof configuredChains !== "object" || Array.isArray(configuredChains)) {
+			report("retry.fallbackChains must be a mapping of role names or model selectors to selector arrays.");
+			return;
+		}
 	}
 
-	for (const key in configuredChains) {
-		const chain = configuredChains[key];
+	// Surface the merge rule when operators set both a comma modelRoles list and
+	// an explicit retry.fallbackChains.<role> for the same role.
+	const configuredObject =
+		configuredChains && typeof configuredChains === "object" && !Array.isArray(configuredChains)
+			? configuredChains
+			: undefined;
+	for (const role of Object.keys(settings.getModelRoles())) {
+		const patterns = normalizeModelPatternList(settings.getModelRole(role));
+		if (patterns.length > 1 && configuredObject && Object.hasOwn(configuredObject, role)) {
+			report(
+				`modelRoles.${role} comma list and retry.fallbackChains.${role} both set; using comma tail then explicit chain (deduped).`,
+			);
+		}
+	}
+
+	const effectiveChains = getRetryFallbackChains(settings);
+	if (configuredObject === undefined && Object.keys(effectiveChains).length === 0) return;
+
+	// Validate structure of explicitly configured keys first (non-array values).
+	if (configuredObject) {
+		for (const key in configuredObject) {
+			if (!Array.isArray(configuredObject[key])) {
+				const keyKind = isRetryFallbackModelKey(key) ? "model" : "role";
+				report(`Fallback chain for ${keyKind} '${key}' must be an array of selector strings.`);
+			}
+		}
+	}
+
+	for (const key in effectiveChains) {
+		const chain = effectiveChains[key];
 		const keyKind = isRetryFallbackModelKey(key) ? "model" : "role";
 		if (keyKind === "model") {
 			if (isRetryFallbackWildcardKey(key)) {
@@ -355,7 +425,11 @@ function getRetryFallbackPrimarySelector(
 	if (isRetryFallbackWildcardKey(chainKey)) return undefined;
 	if (isRetryFallbackModelKey(chainKey)) return parseRetryFallbackSelector(chainKey, context.modelLookup);
 	const configuredSelector = context.getModelRole(chainKey);
-	return configuredSelector ? parseRetryFallbackSelector(configuredSelector, context.modelLookup) : undefined;
+	if (!configuredSelector) return undefined;
+	// Comma-separated modelRoles use the first entry as the primary; the tail is
+	// the derived fallback chain from {@link getRetryFallbackChains}.
+	const primary = normalizeModelPatternList(configuredSelector)[0] ?? configuredSelector.trim();
+	return primary ? parseRetryFallbackSelector(primary, context.modelLookup) : undefined;
 }
 
 /** How a chain key's primary selector matches the current selector. */

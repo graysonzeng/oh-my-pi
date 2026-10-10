@@ -1589,16 +1589,45 @@ export interface RoleChainCandidate {
 	thinkingLevel?: ConfiguredThinkingLevel;
 }
 
-/** Resolve a role's primary and retry candidates in effective attempt order. */
-export function resolveRoleChain(role: string, settings: Settings, pool: Model<Api>[]): RoleChainCandidate[] {
+/**
+ * Resolve a role's primary and retry candidates in effective attempt order.
+ *
+ * Comma-separated `modelRoles.<role>` entries expand into ordered candidates.
+ * When an explicit `retry.fallbackChains.<role>` is also set, those selectors
+ * append after the comma list (deduped by route) — the same merge rule as
+ * {@link getRetryFallbackChains} (comma tail then explicit for the retry chain).
+ * Multi-entry modelRoles skip built-in priority.json defaults so they do not
+ * dilute the configured order.
+ */
+export function resolveRoleChain(
+	role: string,
+	settings: Settings,
+	pool: Model<Api>[],
+	options?: { hoistProvider?: string },
+): RoleChainCandidate[] {
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
-	const primarySelector = configured || formatModelRoleAlias(role);
 	const configuredFallbacks = cfgRetryFallbackChains.get(settings)[role];
 	const hasConfiguredFallbackChain = Array.isArray(configuredFallbacks);
-	const fallbackSelectors = hasConfiguredFallbackChain ? configuredFallbacks : rolePriorityDefaults(role);
+	// Comma lists in `modelRoles` are an ordered attempt chain (primary +
+	// credential/auth fallbacks). Expand each entry into its own candidate so a
+	// later selector is reachable after credits/auth fail on an earlier one —
+	// `resolveModelRoleValue` alone would collapse the list to the first hit.
+	const primaryPatterns = configured ? normalizeModelPatternList(configured) : [];
+	const primarySelectors =
+		primaryPatterns.length > 0
+			? primaryPatterns.map(selector => ({ selector, explicit: true as boolean }))
+			: [{ selector: formatModelRoleAlias(role), explicit: Object.hasOwn(configuredRoles, role) }];
+	// When the role already lists multiple models, those entries are the chain;
+	// skip built-in priority.json defaults so they do not dilute the configured order.
+	// Explicit retry.fallbackChains.<role> appends after the comma list (deduped).
+	const fallbackSelectors = hasConfiguredFallbackChain
+		? configuredFallbacks
+		: primaryPatterns.length > 1
+			? []
+			: rolePriorityDefaults(role);
 	const selectors = [
-		{ selector: primarySelector, explicit: Object.hasOwn(configuredRoles, role) },
+		...primarySelectors,
 		...fallbackSelectors.map(selector => ({ selector, explicit: hasConfiguredFallbackChain })),
 	];
 	const candidates: RoleChainCandidate[] = [];

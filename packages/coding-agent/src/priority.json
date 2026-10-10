@@ -1,6 +1,9 @@
 {
 	"smol": [
+		"gateway/deepseek-v4.1-flash:high",
+		"deepseek-v4.1-flash",
 		"gateway/deepseek-v4-flash:max",
+		"deepseek-v4-flash",
 		"gateway/grok-4.6:high",
 		"google-antigravity/gemini-3.8-flash",
 		"gemini-3.8-flash",
