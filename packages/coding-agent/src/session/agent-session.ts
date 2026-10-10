@@ -570,6 +570,7 @@ import {
 	cfgPrewalkEnabled,
 	cfgProviderAppendOnlyContext,
 	cfgProvidersAntigravityEndpoint,
+	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
 	cfgSkillful,
@@ -579,6 +580,7 @@ import {
 	cfgTierOpenai,
 	cfgProvidersAnthropicSlowMode,
 } from "./settings";
+import { formatEditFailureAdvisory } from "./edit-failure-escalation";
 import { type AnthropicSlowModeController, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 import { cfgInterruptMode } from "../modes/settings";
 import { cfgFollowUpMode } from "../modes/settings";
@@ -4990,7 +4992,7 @@ export class AgentSession implements SettingsScope {
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 		}
 		// Fingerprint the raw result before optimizer/TTSR composition; advisory only.
-		const errorStreakAdvisory = this.#toolErrorStreakAdvisory(ctx);
+		const errorStreakAdvisory = await this.#toolErrorStreakAdvisory(ctx);
 		const optimized = await this.#optimizeOrdinaryToolResult(ctx);
 		const ttsr = this.#ttsr.afterToolCall(
 			optimized ? { ...ctx, result: { ...ctx.result, content: optimized.content ?? ctx.result.content } } : ctx,
@@ -5004,20 +5006,50 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** One-shot advisory after N identical real tool errors; clear on success. */
-	#toolErrorStreakAdvisory(ctx: AfterToolCallContext): string | undefined {
+	async #toolErrorStreakAdvisory(ctx: AfterToolCallContext): Promise<string | undefined> {
 		if (isSkippedSyntheticResult(ctx.result)) {
 			clearToolErrorStreak(this);
 			return undefined;
 		}
+		const escalateAvailable = cfgRetryModelFallback.get(this.settings) !== false;
+		// Advisory starts re-read-only; the Escalating clause is added only after a
+		// successful top-model apply (never when modelFallback is off or apply fails).
+		const editOutcome = this.#recovery.noteEditToolOutcome(this, {
+			toolName: ctx.toolCall.name,
+			isError: ctx.isError,
+			toolArgs: ctx.toolCall.arguments,
+			escalateAvailable: false,
+		});
+		let editAdvisory = editOutcome?.advisory;
+		if (editOutcome?.escalateToTop && escalateAvailable) {
+			try {
+				const applied = await this.#recovery.escalateEditFailuresToTopModel({
+					reason: `edit-failure-escalation:${editOutcome.path}`,
+				});
+				if (applied) {
+					this.#recovery.markEditFailureEscalated(this, editOutcome.path);
+					if (editAdvisory !== undefined) {
+						editAdvisory = formatEditFailureAdvisory(editOutcome.path, editOutcome.count, true);
+					}
+				}
+			} catch (error) {
+				logger.debug("Edit-failure top-model escalation failed", {
+					path: editOutcome.path,
+					error: String(error),
+				});
+			}
+		}
 		if (!ctx.isError) {
 			clearToolErrorStreak(this);
-			return undefined;
+			return editAdvisory;
 		}
 		const parts: string[] = [];
 		for (const block of ctx.result.content ?? []) {
 			if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
 		}
-		return noteToolErrorStreak(this, ctx.toolCall.name, parts.join("\n"));
+		const streak = noteToolErrorStreak(this, ctx.toolCall.name, parts.join("\n"));
+		if (editAdvisory && streak) return `${editAdvisory}\n${streak}`;
+		return editAdvisory ?? streak;
 	}
 
 	/**

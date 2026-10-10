@@ -45,6 +45,7 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
+	concreteThinkingLevel,
 	modelSupportsEffortCeiling,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
@@ -89,6 +90,14 @@ import {
 	cfgRetryUsageReservePct,
 	cfgRetryUsageReservePolicy,
 } from "./settings";
+import {
+	clearEditFailureEscalation,
+	editPathFromToolArgs,
+	type EditFailureEscalationResult,
+	markEditFailureEscalated as markEditFailurePathEscalated,
+	noteEditFailureEscalation,
+} from "./edit-failure-escalation";
+import { formatModelRoleAlias } from "../config/model-roles";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
@@ -1626,6 +1635,83 @@ export class TurnRecovery {
 	}
 	#getRetryFallbackChains(): RetryFallbackChains {
 		return getRetryFallbackChains(this.#host.settings);
+	}
+
+	/**
+	 * Track a real `edit` tool outcome. On the second failure for the same path,
+	 * returns a re-read advisory and signals that the host should escalate to the
+	 * top model via {@link escalateEditFailuresToTopModel}. Escalation stays
+	 * re-triggerable until {@link markEditFailureEscalated} after a successful apply.
+	 */
+	noteEditToolOutcome(
+		session: object,
+		args: {
+			toolName: string;
+			isError: boolean;
+			toolArgs: unknown;
+			/** When false, advisory omits the "Escalating…" clause (e.g. modelFallback off). */
+			escalateAvailable?: boolean;
+		},
+	): EditFailureEscalationResult | undefined {
+		if (args.toolName !== "edit") return undefined;
+		const cwd = this.#host.sessionManager.getCwd();
+		const filePath = editPathFromToolArgs(args.toolArgs, cwd);
+		if (!filePath) return undefined;
+		if (!args.isError) {
+			clearEditFailureEscalation(session, filePath, cwd);
+			return undefined;
+		}
+		return noteEditFailureEscalation(session, filePath, {
+			cwd,
+			escalateAvailable: args.escalateAvailable,
+		});
+	}
+
+	/** Record that edit-failure top-model escalation succeeded for `path`. */
+	markEditFailureEscalated(session: object, filePath: string): void {
+		markEditFailurePathEscalated(session, filePath, this.#host.sessionManager.getCwd());
+	}
+
+	/**
+	 * Swap onto `@slow` (then `@default`) after repeated edit failures on one file.
+	 * Uses the existing retry-fallback applicator; no-op when already on that model,
+	 * when `retry.modelFallback` is false, or when neither role resolves.
+	 */
+	async escalateEditFailuresToTopModel(options?: { signal?: AbortSignal; reason?: string }): Promise<boolean> {
+		if (!cfgRetryModelFallback.get(this.#host.settings)) return false;
+		const currentModel = this.#host.model();
+		if (!currentModel) return false;
+		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
+		for (const role of ["slow", "default"] as const) {
+			const resolved = resolveModelOverride(
+				[formatModelRoleAlias(role)],
+				this.#host.modelRegistry,
+				this.#host.settings,
+			);
+			const candidate = resolved.model;
+			if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
+			if (!this.#host.modelRegistry.hasConfiguredAuth(candidate)) continue;
+			const selector = parseRetryFallbackSelector(formatModelStringWithRouting(candidate), this.#host.modelRegistry);
+			if (!selector) continue;
+			if (resolved.thinkingLevel !== undefined) {
+				selector.thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel) ?? selector.thinkingLevel;
+			}
+			try {
+				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
+					pinFallback: true,
+					signal: options?.signal,
+					reason: options?.reason ?? "edit-failure-escalation",
+				});
+				if (applied) return true;
+			} catch (error) {
+				logger.debug("Edit-failure top-model escalation skipped a candidate", {
+					role,
+					error: String(error),
+				});
+			}
+			if (options?.signal?.aborted) return false;
+		}
+		return false;
 	}
 
 	#validateRetryFallbackChains(): void {

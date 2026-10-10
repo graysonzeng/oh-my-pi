@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-file edit-failure escalation: after two failed `edit`s on the same path, omp advises a re-read and escalates to the top model (`@slow` / `@default`).
+- Persisted per-task `finalStatus` on `async-result` deliveries so stats/scripts can report success rate per role even when the parent `task` toolResult still has empty `details.results`.
+- Documented the quality/cost routing plan and a recommended `modelRoles` example with comma-separated credential fallbacks (`gpt-6-astra:high` for top roles, `grok-4.6` for `task`, `deepseek-v4.1-flash` for `@smol`).
+
+### Changed
+
+- Comma-separated `modelRoles` values are now an ordered attempt chain for `resolveRoleChain` and derive `retry.fallbackChains` tails when a role has no explicit chain; when both a comma list and explicit `retry.fallbackChains.<role>` exist, the effective chain is comma tail then explicit (deduped).
+- Scout / system / task prompts steer broad read/grep/glob exploration to `scout` (summaries, not raw dumps) and multi-file verification to `reviewer` (`@slow`); scout conclusions never replace verification.
+- Built-in `smol` priority now prefers `deepseek-v4.1-flash` before `deepseek-v4-flash`.
+- Edit-failure escalation marks the swap only after a successful top-model apply; when `retry.modelFallback` is off or already on the top model, the advisory is re-read-only.
+
 ## [18.3.1] - 2026-09-25
 
 ### Added
