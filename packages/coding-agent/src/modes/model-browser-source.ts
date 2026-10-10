@@ -5,6 +5,7 @@ import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-res
 import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
+import { cfgTierXai } from "../config/workflow-settings";
 import { describeModelCompactionPoint } from "../session/model-compaction-threshold";
 
 import {
@@ -59,6 +60,7 @@ export function createModelBrowserSource(
 							cfgTierOpenai.get(settings),
 							cfgTierAnthropic.get(settings),
 							cfgTierGoogle.get(settings),
+							cfgTierXai.get(settings),
 						),
 						model,
 					);

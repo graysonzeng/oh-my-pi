@@ -54,6 +54,8 @@ export const stateDefs = {
 			timeUsedSeconds: "number",
 			createdAt: "number.integer",
 			updatedAt: "number.integer",
+			"headlessContinuationCount?": doc("number.integer", "Headless auto-continuations spent on this goal."),
+			"hostGate?": doc("unknown", "Host completion-gate state (verification, decisions, no-progress)."),
 		},
 		"A tracked goal: its objective, lifecycle status, and resource accounting.",
 	),

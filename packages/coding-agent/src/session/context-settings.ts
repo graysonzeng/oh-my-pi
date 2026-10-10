@@ -148,23 +148,36 @@ export const cfgCompactionMethodOrder = register({
 	},
 });
 
+/** Production default soft-cap as a fraction of the model context window. */
+export const DEFAULT_COMPACTION_SOFT_CAP_PERCENT = 60;
+
 export const cfgCompactionThresholdPercent = register({
 	id: "compaction.thresholdPercent",
 	type: "number",
-	default: -1,
+	default: DEFAULT_COMPACTION_SOFT_CAP_PERCENT,
 	ui: {
 		tab: "context",
 		group: "Compaction",
 		label: "Compaction Threshold",
-		description: "Percent threshold for context maintenance; set to Default to use legacy reserve-based behavior",
+		description:
+			"Percent of context window that triggers maintenance; ignored when a positive token soft-cap is set (production default is 60%)",
 		options: [
-			{ value: "default", label: "Default", description: "Legacy reserve-based threshold" },
+			{
+				value: "default",
+				label: "Default",
+				description: "60% of context window (production soft-cap)",
+			},
+			{
+				value: "-1",
+				label: "Unset",
+				description: "No percent threshold; use token soft-cap or usable window (window − reserve)",
+			},
 			{ value: "10", label: "10%", description: "Extremely early maintenance" },
 			{ value: "20", label: "20%", description: "Very early maintenance" },
 			{ value: "30", label: "30%", description: "Early maintenance" },
 			{ value: "40", label: "40%", description: "Moderately early maintenance" },
 			{ value: "50", label: "50%", description: "Halfway point" },
-			{ value: "60", label: "60%", description: "Moderate context usage" },
+			{ value: "60", label: "60%", description: "Production soft-cap (same as Default)" },
 			{ value: "70", label: "70%", description: "Balanced" },
 			{ value: "75", label: "75%", description: "Slightly aggressive" },
 			{ value: "80", label: "80%", description: "Typical threshold" },
@@ -183,16 +196,22 @@ export const cfgCompactionThresholdTokens = register({
 		tab: "context",
 		group: "Compaction",
 		label: "Compaction Token Limit",
-		description: "Fixed token limit for context maintenance; overrides percentage if set",
+		description:
+			"Optional fixed-token soft-cap; when set (>0) overrides percentage and clamps to usable window (model window − reserve)",
 		options: [
-			{ value: "default", label: "Default", description: "Use percentage-based threshold" },
+			{
+				value: "default",
+				label: "Default",
+				description: "No fixed soft-cap; use the percentage threshold",
+			},
 			{ value: "25000", label: "25K tokens", description: "1/8 of a 200K window" },
 			{ value: "50000", label: "50K tokens", description: "1/4 of a 200K window" },
 			{ value: "100000", label: "100K tokens", description: "1/2 of a 200K window" },
 			{ value: "150000", label: "150K tokens", description: "3/4 of a 200K window" },
-			{ value: "200000", label: "200K tokens", description: "Full standard context window" },
+			{ value: "200000", label: "200K tokens", description: "Fixed 200K soft-cap" },
 			{ value: "300000", label: "300K tokens", description: "Large context window" },
 			{ value: "500000", label: "500K tokens", description: "Very large context window" },
+			{ value: "600000", label: "600K tokens", description: "Fixed 600K soft-cap" },
 		],
 	},
 });
@@ -402,6 +421,108 @@ export const cfgCompaction = combine({
  * for its model (see `applyModelCompactionThreshold`).
  */
 export type CompactionSettings = SettingValueOf<typeof cfgCompaction> & { baseWindowTokens?: number };
+
+// ────────────────────────────────────────────────────────────────────────
+// Context strategy experiment (P1-3) — default off; single factor only
+// ────────────────────────────────────────────────────────────────────────
+
+export const CONTEXT_STRATEGY_EXPERIMENT_FACTOR_VALUES = [
+	"none",
+	"threshold_tokens",
+	"keep_recent_tokens",
+	"reserve_tokens",
+] as const;
+
+/** Master gate for the SessionMaintenance single-factor experiment overlay. Default off. */
+export const cfgCompactionExperimentEnabled = register({
+	id: "compaction.experiment.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Context Strategy Experiment",
+		description:
+			"Opt-in single-factor context maintenance experiment. Off preserves production compaction defaults. Does not add a second compaction scheduler.",
+	},
+});
+
+/** Which one compaction factor the experiment may override. */
+export const cfgCompactionExperimentFactor = register({
+	id: "compaction.experiment.factor",
+	type: "enum",
+	values: CONTEXT_STRATEGY_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Experiment Factor",
+		description:
+			"Change only one factor per run: threshold_tokens (~200k experiment tier), keep_recent_tokens, or reserve_tokens.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "threshold_tokens",
+				label: "Threshold tokens",
+				description: "Experiment tier (default 200k); falls back when the window cannot host it",
+			},
+			{
+				value: "keep_recent_tokens",
+				label: "Keep recent tokens",
+				description: "Verbatim recent-edit retention window (preserve floor enforced)",
+			},
+			{
+				value: "reserve_tokens",
+				label: "Reserve tokens",
+				description: "Usable-budget floor under the context window",
+			},
+		],
+	},
+});
+
+/** Experiment tier for threshold_tokens. Not a global fixed cap for all models. */
+export const cfgCompactionExperimentThresholdTokens = register({
+	id: "compaction.experiment.thresholdTokens",
+	type: "number",
+	default: 200_000,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Experiment Threshold Tier",
+		description:
+			"Used only when factor=threshold_tokens. ~200k is an experiment tier; unsuitable windows fall back to control.",
+		options: [
+			{ value: "150000", label: "150K tokens" },
+			{ value: "200000", label: "200K tokens (experiment tier)" },
+			{ value: "250000", label: "250K tokens" },
+			{ value: "300000", label: "300K tokens" },
+		],
+	},
+});
+
+/** Treatment value when factor=keep_recent_tokens. */
+export const cfgCompactionExperimentKeepRecentTokens = register({
+	id: "compaction.experiment.keepRecentTokens",
+	type: "number",
+	default: undefined,
+});
+
+/** Treatment value when factor=reserve_tokens. */
+export const cfgCompactionExperimentReserveTokens = register({
+	id: "compaction.experiment.reserveTokens",
+	type: "number",
+	default: undefined,
+});
+
+export const cfgCompactionExperiment = combine({
+	enabled: cfgCompactionExperimentEnabled,
+	factor: cfgCompactionExperimentFactor,
+	thresholdTokens: cfgCompactionExperimentThresholdTokens,
+	keepRecentTokens: cfgCompactionExperimentKeepRecentTokens,
+	reserveTokens: cfgCompactionExperimentReserveTokens,
+});
+
+export type ContextStrategyExperimentSettings = SettingValueOf<typeof cfgCompactionExperiment>;
 
 // Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 export const cfgSnapcompactSystemPrompt = register({
@@ -618,3 +739,152 @@ export const cfgBranchSummaryReserveTokens = register({
 	type: "number",
 	default: 16384,
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// Delivery-first Package 4 experiments (opt-in; defaults off; separate factors)
+// ────────────────────────────────────────────────────────────────────────
+
+export const READ_DEDUPE_EXPERIMENT_FACTOR_VALUES = ["none", "same_version_view_reuse"] as const;
+
+/** Master gate for read-dedupe experiment A. Default off — production read path unchanged. */
+export const cfgReadDedupeExperimentEnabled = register({
+	id: "deliveryExperiment.readDedupe.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Read dedupe experiment",
+		description:
+			"Opt-in Experiment A: reuse same version+view reads only. Off preserves production. Does not lower output caps or add don’t-re-read prompts. Separate from stable-prefix cache and from latency.arms.readDedupe. Enabling together with Experiment B fails closed.",
+	},
+});
+
+export const cfgReadDedupeExperimentFactor = register({
+	id: "deliveryExperiment.readDedupe.factor",
+	type: "enum",
+	values: READ_DEDUPE_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Read dedupe factor",
+		description: "Change only one factor per run. Separate from stable-prefix cache experiment.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "same_version_view_reuse",
+				label: "Same version+view reuse",
+				description: "Reuse only when ReadViewKey matches; keep full truncation recovery",
+			},
+		],
+	},
+});
+
+export const cfgReadDedupeExperiment = combine({
+	enabled: cfgReadDedupeExperimentEnabled,
+	factor: cfgReadDedupeExperimentFactor,
+});
+
+export type ReadDedupeExperimentSettings = SettingValueOf<typeof cfgReadDedupeExperiment>;
+
+export const STABLE_PREFIX_CACHE_EXPERIMENT_FACTOR_VALUES = [
+	"none",
+	"inspect_provider_prefix",
+	"reorder_static_prefix",
+] as const;
+
+/** Master gate for stable-prefix cache experiment B. Default off. */
+export const cfgStablePrefixCacheExperimentEnabled = register({
+	id: "deliveryExperiment.stablePrefixCache.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Stable-prefix cache experiment",
+		description:
+			"Opt-in Experiment B: inspect/reorder provider request prefixes for cache study. Off preserves production assembly. Does not auto-run paid traffic. Enabling together with Experiment A fails closed.",
+	},
+});
+
+export const cfgStablePrefixCacheExperimentFactor = register({
+	id: "deliveryExperiment.stablePrefixCache.factor",
+	type: "enum",
+	values: STABLE_PREFIX_CACHE_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Stable-prefix factor",
+		description: "One factor per run. Do not attribute together with read-dedupe experiment.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "inspect_provider_prefix",
+				label: "Inspect provider prefix",
+				description: "Measure whether static rules/tools are cut by dynamic content",
+			},
+			{
+				value: "reorder_static_prefix",
+				label: "Reorder static prefix",
+				description: "Opt-in reorder: static rules/tools before dynamic context (permissions unchanged)",
+			},
+		],
+	},
+});
+
+export const cfgStablePrefixCacheExperiment = combine({
+	enabled: cfgStablePrefixCacheExperimentEnabled,
+	factor: cfgStablePrefixCacheExperimentFactor,
+});
+
+export type StablePrefixCacheExperimentSettings = SettingValueOf<typeof cfgStablePrefixCacheExperiment>;
+
+// ────────────────────────────────────────────────────────────────────────
+// History supplement S2 — phase-handoff / carry-slim (opt-in; default off)
+// ────────────────────────────────────────────────────────────────────────
+
+export const PHASE_HANDOFF_EXPERIMENT_FACTOR_VALUES = ["none", "phase_boundary_carry_slim"] as const;
+
+/** Master gate for phase-handoff experiment. Default off — production unchanged. */
+export const cfgPhaseHandoffExperimentEnabled = register({
+	id: "deliveryExperiment.phaseHandoff.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Phase-handoff experiment",
+		description:
+			"Opt-in S2: at natural phase boundaries, reduce bulky carried context while retaining open constraints, modification state, and acceptance basis. Off preserves production. Does not change model/concurrency or force a global 200k cap.",
+	},
+});
+
+export const cfgPhaseHandoffExperimentFactor = register({
+	id: "deliveryExperiment.phaseHandoff.factor",
+	type: "enum",
+	values: PHASE_HANDOFF_EXPERIMENT_FACTOR_VALUES,
+	default: "none",
+	ui: {
+		tab: "context",
+		group: "Delivery experiments",
+		label: "Phase-handoff factor",
+		description: "One factor per run. Do not change model or concurrency in the same experiment.",
+		options: [
+			{ value: "none", label: "None", description: "No experiment overlay" },
+			{
+				value: "phase_boundary_carry_slim",
+				label: "Phase-boundary carry slim",
+				description: "Drop bulky carry at phase boundaries; keep constraints / mods / acceptance",
+			},
+		],
+	},
+});
+
+export const cfgPhaseHandoffExperiment = combine({
+	enabled: cfgPhaseHandoffExperimentEnabled,
+	factor: cfgPhaseHandoffExperimentFactor,
+});
+
+export type PhaseHandoffExperimentSettings = SettingValueOf<typeof cfgPhaseHandoffExperiment>;

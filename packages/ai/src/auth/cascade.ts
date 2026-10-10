@@ -8,6 +8,7 @@ import { AUTHENTICATED_SENTINEL } from "../registry/types";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { CredentialSelector, OAuthResolutionResult } from "./select";
+import { resolveCredentialIdentityKey } from "./sqlite-credential-store";
 import type {
 	AuthApiKeyOptions,
 	AuthCredential,
@@ -16,7 +17,21 @@ import type {
 	KeysApi,
 	LimitsApi,
 	OAuthRequestIdentity,
+	SelectedCredentialRoute,
 } from "./types";
+
+/**
+ * True when a models.yml / config apiKey value is an observable reference
+ * (env var name or !command), not a literal secret. Literals must fail open —
+ * we never fingerprint secret material for negative-cache identity.
+ */
+export function isObservableConfigKeyReference(config: string): boolean {
+	const trimmed = config.trim();
+	if (!trimmed) return false;
+	if (trimmed.startsWith("!")) return true;
+	if (trimmed.startsWith("$") && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) return true;
+	return /^[A-Z][A-Z0-9_]{2,}$/.test(trimmed);
+}
 
 /**
  * Default config value resolver that checks env vars and treats as literal.
@@ -33,9 +48,26 @@ export class KeyOverrides {
 	#configOverrides: Map<string, string> = new Map();
 	#configFallbacks: Map<string, string> = new Map();
 	#configValueResolver: (config: string) => Promise<string | undefined>;
+	/**
+	 * Bumps when a runtime or config override is added, replaced, or removed.
+	 * Not a secret — credential-route caches use it to drop stale marks without
+	 * reading key material. Identical rewrites do not bump.
+	 */
+	#epoch = 0;
+	/**
+	 * Non-secret parse-owner revisions for observable config references.
+	 * Tracks the last observed resolved secret privately so same-ref rotation
+	 * (env / !command) bumps revision without exposing hash-of-secret on the
+	 * SelectedCredentialRoute surface. Missing observation → fail open.
+	 */
+	#configParseObserved = new Map<string, { value: string; rev: number }>();
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
 		this.#configValueResolver = resolver ?? defaultConfigValueResolver;
+	}
+
+	get epoch(): number {
+		return this.#epoch;
 	}
 
 	has(provider: string): boolean {
@@ -66,9 +98,53 @@ export class KeyOverrides {
 		return this.#configFallbacks.get(provider);
 	}
 
+	/**
+	 * Record a resolved config secret for non-secret revision tracking.
+	 * Returns the parse revision; never exposes the secret or a hash of it.
+	 */
+	noteConfigParse(config: string, resolved: string): number {
+		const key = config.trim();
+		const prev = this.#configParseObserved.get(key);
+		if (prev && prev.value === resolved) return prev.rev;
+		const rev = (prev?.rev ?? 0) + 1;
+		this.#configParseObserved.set(key, { value: resolved, rev });
+		return rev;
+	}
+
+	/** Drop parse observation for one config reference (rotation becomes unobservable). */
+	forgetConfigParse(config: string): void {
+		this.#configParseObserved.delete(config.trim());
+	}
+
+	/**
+	 * Non-secret parse revision for an observable config reference, or undefined
+	 * when the current credential cannot be observed (callers must fail open —
+	 * do not reuse a negative-cache mark across unobservable rotation).
+	 *
+	 * Env-style refs are peeked live via `$envExact`. `!command` refs are only
+	 * observable after a successful {@link resolve} noted the result.
+	 */
+	configParseRevision(config: string): number | undefined {
+		const trimmed = config.trim();
+		if (!isObservableConfigKeyReference(trimmed)) return undefined;
+		if (trimmed.startsWith("!")) {
+			return this.#configParseObserved.get(trimmed)?.rev;
+		}
+		const envName = trimmed.startsWith("$") ? trimmed.slice(1) : trimmed;
+		const value = $envExact(envName);
+		if (!value) return undefined;
+		return this.noteConfigParse(trimmed, value);
+	}
+
 	/** Resolve a config value (env var name, "!command", literal) to the secret. */
-	resolve(config: string): Promise<string | undefined> {
-		return this.#configValueResolver(config);
+	async resolve(config: string): Promise<string | undefined> {
+		const value = await this.#configValueResolver(config);
+		if (value !== undefined && isObservableConfigKeyReference(config)) {
+			this.noteConfigParse(config, value);
+		} else if (isObservableConfigKeyReference(config)) {
+			this.forgetConfigParse(config);
+		}
+		return value;
 	}
 
 	/**
@@ -76,14 +152,17 @@ export class KeyOverrides {
 	 * Used for CLI --api-key flag.
 	 */
 	setRuntime(provider: string, apiKey: string): void {
+		if (this.#runtimeOverrides.get(provider) === apiKey) return;
 		this.#runtimeOverrides.set(provider, apiKey);
+		this.#epoch += 1;
 	}
 
 	/**
 	 * Remove a runtime API key override.
 	 */
 	removeRuntime(provider: string): void {
-		this.#runtimeOverrides.delete(provider);
+		if (!this.#runtimeOverrides.delete(provider)) return;
+		this.#epoch += 1;
 	}
 
 	/**
@@ -103,20 +182,47 @@ export class KeyOverrides {
 	 */
 	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void {
 		if (options?.fallback) {
-			this.#configOverrides.delete(provider);
+			const previousOverride = this.#configOverrides.get(provider);
+			if (previousOverride !== undefined) {
+				this.#configOverrides.delete(provider);
+				if (previousOverride !== apiKeyConfig) this.forgetConfigParse(previousOverride);
+			}
+			if (this.#configFallbacks.get(provider) === apiKeyConfig) {
+				if (previousOverride !== undefined) this.#epoch += 1;
+				return;
+			}
+			const previous = this.#configFallbacks.get(provider);
+			if (previous !== undefined) this.forgetConfigParse(previous);
 			this.#configFallbacks.set(provider, apiKeyConfig);
 		} else {
-			this.#configFallbacks.delete(provider);
+			const previousFallback = this.#configFallbacks.get(provider);
+			if (previousFallback !== undefined) {
+				this.#configFallbacks.delete(provider);
+				if (previousFallback !== apiKeyConfig) this.forgetConfigParse(previousFallback);
+			}
+			const previous = this.#configOverrides.get(provider);
+			if (previous === apiKeyConfig) {
+				if (previousFallback !== undefined) this.#epoch += 1;
+				return;
+			}
+			if (previous !== undefined) this.forgetConfigParse(previous);
 			this.#configOverrides.set(provider, apiKeyConfig);
 		}
+		this.#epoch += 1;
 	}
 
 	/**
 	 * Remove a single config-sourced API key (override or fallback).
 	 */
 	removeConfig(provider: string): void {
-		this.#configOverrides.delete(provider);
-		this.#configFallbacks.delete(provider);
+		const previous = this.#configOverrides.get(provider);
+		const previousFallback = this.#configFallbacks.get(provider);
+		const hadOverride = this.#configOverrides.delete(provider);
+		const hadFallback = this.#configFallbacks.delete(provider);
+		if (!hadOverride && !hadFallback) return;
+		if (previous !== undefined) this.forgetConfigParse(previous);
+		if (previousFallback !== undefined) this.forgetConfigParse(previousFallback);
+		this.#epoch += 1;
 	}
 
 	/**
@@ -124,8 +230,12 @@ export class KeyOverrides {
 	 * re-parsing `models.yml` so removed entries actually disappear.
 	 */
 	clearConfig(): void {
+		if (this.#configOverrides.size === 0 && this.#configFallbacks.size === 0) return;
+		for (const config of this.#configOverrides.values()) this.forgetConfigParse(config);
+		for (const config of this.#configFallbacks.values()) this.forgetConfigParse(config);
 		this.#configOverrides.clear();
 		this.#configFallbacks.clear();
+		this.#epoch += 1;
 	}
 
 	/**
@@ -567,6 +677,74 @@ export class KeyCascade implements KeysApi {
 		);
 		if (apiKeySource) return apiKeySource;
 		return undefined;
+	}
+
+	/** Non-secret generation of runtime/config overrides. See {@link KeyOverrides.epoch}. */
+	get overrideEpoch(): number {
+		return this.#deps.overrides.epoch;
+	}
+
+	/**
+	 * Non-secret selected credential/route identity + revision for negative caches.
+	 * Fail-open (undefined) when the selected account cannot be proven — never
+	 * invents “first account”. Does not read or hash token material.
+	 */
+	selectedRoute(provider: string, options?: { sessionId?: string | null }): SelectedCredentialRoute | undefined {
+		const epoch = this.#deps.overrides.epoch;
+		const generation = this.#deps.pool.generation;
+		const revision = `g${generation}:e${epoch}`;
+
+		if (this.#deps.overrides.runtimeKey(provider) !== undefined) {
+			return { kind: "runtime", identityKey: "runtime", revision: `e${epoch}` };
+		}
+
+		const configKey = this.#deps.overrides.configKey(provider);
+		if (configKey !== undefined) {
+			if (!isObservableConfigKeyReference(configKey)) return undefined;
+			// Same config ref can rotate under an unchanged string (env / !command).
+			// Revision must come from the parse owner; if rotation is unobservable,
+			// fail open so negative caches do not inherit a stale failure mark.
+			const parseRev = this.#deps.overrides.configParseRevision(configKey);
+			if (parseRev === undefined) return undefined;
+			return {
+				kind: "config",
+				identityKey: `config:${configKey.trim()}`,
+				revision: `e${epoch}:p${parseRev}`,
+			};
+		}
+
+		const sessionId = options?.sessionId?.trim() || undefined;
+		const sticky = this.#deps.affinity.get(provider, sessionId);
+		if (!sticky) {
+			// Env / unpinned stored keys: value changes are not synchronously
+			// observable without reading secrets — fail open.
+			return undefined;
+		}
+
+		const entries = this.#deps.pool.entries(provider);
+		const entry =
+			sticky.credentialId !== undefined
+				? (entries.find(row => row.id === sticky.credentialId) ?? entries[sticky.index])
+				: entries[sticky.index];
+		if (!entry || entry.credential.type !== sticky.type) return undefined;
+
+		if (entry.credential.type === "oauth") {
+			const identityKey = resolveCredentialIdentityKey(provider, entry.credential) ?? `cred:${entry.id}`;
+			return {
+				kind: "oauth",
+				identityKey,
+				credentialId: entry.id,
+				revision,
+			};
+		}
+
+		// Stored api_key (login or broker copy) with a proven sticky pin.
+		return {
+			kind: "api_key",
+			identityKey: `cred:${entry.id}`,
+			credentialId: entry.id,
+			revision,
+		};
 	}
 
 	setRuntime(provider: string, apiKey: string): void {

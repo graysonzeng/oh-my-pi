@@ -199,7 +199,7 @@ export class IrcBridge {
 				from: msg.from,
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
-				interrupting: streaming,
+				interrupting: msg.interrupt === true,
 				relayOnStop,
 			}),
 			display: true,
@@ -224,8 +224,10 @@ export class IrcBridge {
 					timestamp: msg.ts,
 					steering: true,
 				});
-			} else {
+			} else if (msg.interrupt === true) {
 				this.#interrupts.push(record);
+			} else {
+				this.#asides.push(record);
 			}
 			return "injected";
 		}

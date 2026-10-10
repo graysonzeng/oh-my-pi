@@ -60,6 +60,7 @@ export type RpcCommand =
 			token_budget?: number;
 	  }
 	| { id?: string; type: "set_ask_dialog"; enabled: boolean }
+	| { id?: string; type: "set_ptc_mode"; mode: "off" | "on" | "auto" }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "get_entries"; since?: string }
 	| { id?: string; type: "get_tree" }
@@ -412,6 +413,13 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_slow_mode"; success: true; data: { enabled: boolean } }
 	| { id?: string; type: "response"; command: "goal"; success: true; data: RpcGoalResult }
 	| { id?: string; type: "response"; command: "set_ask_dialog"; success: true; data: { enabled: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_ptc_mode";
+			success: true;
+			data: { mode: "off" | "on" | "auto"; active: boolean };
+	  }
 	| {
 			id?: string;
 			type: "response";

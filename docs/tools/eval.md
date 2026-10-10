@@ -8,7 +8,7 @@
 - Entry and dynamic schema: `packages/coding-agent/src/tools/eval.ts`
 - Backend enablement: `packages/coding-agent/src/tools/eval-backends.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/eval.md`
-- Code Mode transport (enabled Codex Code Mode sessions demote non-essential tools into an eval bridge): `packages/tui/src/tools/eval-format/code-mode-declarations.ts`, prompt `packages/coding-agent/src/prompts/tools/eval-code-mode.md`
+- Code Mode / PTC transport (`tools.ptc.mode`, or Codex `providers.openai-codex.codeMode` as fallback): `packages/coding-agent/src/session/ptc.ts`, skeleton catalog `packages/coding-agent/src/tools/ptc-catalog.ts`, prompt `packages/coding-agent/src/prompts/tools/eval-code-mode.md`
 - Shared contracts: `packages/coding-agent/src/eval/backend.ts`, `types.ts`, `executor-base.ts`, `kernel-base.ts`
 - Host bridges: `packages/coding-agent/src/eval/agent-bridge.ts`, `completion-bridge.ts`, `handle-bridge.ts`, `workpool-bridge.ts`, `judgment-bridge.ts`, `judgment-batch-bridge.ts`, `budget-bridge.ts`
 - File/percent-command preparation: `packages/coding-agent/src/eval/input.ts`; extension preludes: `packages/coding-agent/src/eval/preludes.ts`
@@ -126,6 +126,7 @@ With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval
 
 - Persistent worker VM keyed by `js:${sessionId}`; `reset` recreates the VM and is destructive to concurrent users of that session id.
 - Runs under Bun and exposes host globals including `Bun`, `Buffer`, `fetch`, `process`, `require`, `createRequire`, `fs`, and Web Crypto.
+- When PTC/Code Mode is active, the JS runtime uses a best-effort restricted I/O profile: the injected `fs` helper is hidden, `fetch` is stubbed, and `read()`/`write()` go through session tools. `process` is left intact. This is not a security sandbox.
 - Top-level `await` and bare `return` work through async wrapping.
 - Static top-level imports and dynamic imports are rewritten through the local module loader. Local filesystem imports are cache-busted between cells; bare package and scheme/URL imports retain normal cache identity.
 - Awaited regions can interleave with another session sharing the executor; synchronous code still blocks the worker event loop.
@@ -145,6 +146,7 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `display(value)`, `print(...)`
 - `read(path, offset?, limit?)`, `write(path, content)`, `env(...)`, `output(...)`
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
+- `catalog.searchTools(query, { server?, limit? })` and `catalog.describeTools(names)` (JS, PTC/Code Mode) to recover schemas omitted from the eval skeleton catalog
 - `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
 - `judge(...)`, `judge_batch(...)` (Python) / `judgeBatch(...)` (JS), `completion(...)`
 - `wait(...)` for agent/completion handles
@@ -240,7 +242,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 
 ## Side effects and cancellation
 
-- Prelude helpers may read/write files and call arbitrary registered tools; JS exposes network-capable `fetch`.
+- Prelude helpers may read/write files and call arbitrary registered tools; JS exposes network-capable `fetch` except under the PTC/Code Mode restricted I/O profile, which stubs `fetch` and prefers `tool.*`.
 - Python uses a retained subprocess kernel speaking framed local IPC. JavaScript uses an isolated subprocess, with a Bun Worker fallback; if both fail to start, the call fails without executing code on the host thread.
 - Retained runtimes have no heartbeat or idle timer; they survive calls until reset, owner disposal (`EvalRunner.disposeKernels()` calls `disposeKernelSessionsByOwner` and `disposeVmContextsByOwner` keyed by `kernelOwnerId`, in `packages/coding-agent/src/session/eval-runner.ts`), or process exit.
 - Cancellation is destructive when needed: JS terminates its worker; managed kernels interrupt and may escalate to shutdown. A reset is likewise destructive to concurrent work sharing that backend session.
@@ -256,6 +258,47 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Malformed params are schema errors; unavailable/disabled backends and missing session are `ToolError`s.
 - Runtime exceptions become backend output with nonzero exit. Interactive stdin is an error. Output truncation does not fail the call.
 - A dead retained managed kernel may be replaced and the invocation retried once by its executor.
+
+## Couple a file mutation to its verifier
+
+SoL-Pi efficiency absorption here is a **control-flow recipe** over existing
+`tool.write` / `tool.bash` bridges — not a new runtime primitive. The locked
+contract is `packages/coding-agent/test/eval/mutation-then-verify.test.ts`.
+
+Recipe (JS sketch; same gate order in Python):
+
+1. Call `tool.write(...)` once.
+2. If the write throws or returns a bridged `{ hasError: true }`, **stop** —
+   do not start the verifier.
+3. Otherwise call a predetermined `tool.bash(...)` verifier **once**.
+4. If bash reports `details.async.state === "running"`, treat that as
+   background-start only — **not** verified success.
+5. If the verifier exits nonzero, report failure; **keep the written file**
+   (failed verify does not roll back the mutation).
+
+### Boundaries (explicit)
+
+| Claim | Status |
+|---|---|
+| Transaction / automatic rollback on verify fail | **No** — write is kept |
+| Background start ack (`async.running`) equals verified | **No** |
+| Cancel guarantees a re-run of verify | **No** |
+| Default sessions automatically save one model turn | **No** — unproven |
+| New `then_run` tool / second ObservationPack / tool rebuild | **Out of scope** |
+
+Absorb the recipe into docs and tests only. Do not invent `then_run`, stack
+ObservationPack, or rebuild write/bash for this contract.
+
+Design note: `docs/superpowers/specs/2026-09-13-sol-pi-efficiency-absorption.md`.
+
+## Subagent thrash go/no-go (Track E)
+
+Analysis of repeated identical-view reads has started. Offline
+`repeatedReads` / soft-cap signals (including any local “501 identical-view”
+candidate counts) are **investigation candidates**, not proven waste. Until
+humans attribute real thrash and decide **go**, **do not add Track E prompt
+rules**. Soft-cap advisory text already exists for subagent reads; expanding
+Track E prompts remains **no-go**.
 
 ## Notes
 

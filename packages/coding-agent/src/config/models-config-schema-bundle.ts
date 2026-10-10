@@ -202,6 +202,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
+		"requestModelId?": "string",
 		"api?": ModelApiSchema,
 		"kind?": ModelKindSchema,
 		"baseUrl?": "string",
@@ -240,6 +241,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
 			return ctx.mustBe("name a non-empty string");
 		}
+		if (
+			value.requestModelId !== undefined &&
+			typeof value.requestModelId === "string" &&
+			value.requestModelId.length === 0
+		) {
+			return ctx.mustBe("requestModelId a non-empty string");
+		}
 		if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
 			return ctx.mustBe("baseUrl a non-empty string");
 		}
@@ -264,6 +272,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"name?": "string",
 		"api?": ModelApiSchema,
 		"kind?": ModelKindSchema,
+		"requestModelId?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
@@ -294,6 +303,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 	}).narrow((value, ctx) => {
 		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
 			return ctx.mustBe("name a non-empty string");
+		}
+		if (
+			value.requestModelId !== undefined &&
+			typeof value.requestModelId === "string" &&
+			value.requestModelId.length === 0
+		) {
+			return ctx.mustBe("requestModelId a non-empty string");
 		}
 		if (
 			value.contextPromotionTarget !== undefined &&
@@ -342,6 +358,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"baseUrl?": "string",
 		"apiKey?": "string",
 		"api?": ApiSchema,
+		"referenceProvider?": "string",
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"remoteCompaction?": RemoteCompactionSchema,
@@ -380,6 +397,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		}
 		if (value.apiKey !== undefined && typeof value.apiKey === "string" && value.apiKey.length === 0) {
 			return ctx.mustBe("apiKey a non-empty string");
+		}
+		if (
+			value.referenceProvider !== undefined &&
+			typeof value.referenceProvider === "string" &&
+			value.referenceProvider.length === 0
+		) {
+			return ctx.mustBe("referenceProvider a non-empty string");
 		}
 		return true;
 	});

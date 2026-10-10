@@ -905,6 +905,47 @@ describe("role priorities and chains", () => {
 		]);
 	});
 
+	test("expands comma-separated modelRoles into ordered explicit chain candidates", () => {
+		const primary = roleChainModel("gateway", "gpt-6-astra");
+		const fallback = roleChainModel("openai-codex", "gpt-5.6-sol");
+		const settings = Settings.isolated({
+			modelRoles: { slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol" },
+		});
+
+		const chain = resolveRoleChain("slow", settings, [primary, fallback]);
+
+		expect(
+			chain.map(candidate => [
+				formatModelStringWithRouting(candidate.model),
+				candidate.explicit,
+				candidate.thinkingLevel,
+			]),
+		).toEqual([
+			["gateway/gpt-6-astra", true, Effort.High],
+			["openai-codex/gpt-5.6-sol", true, undefined],
+		]);
+		// Multi-entry modelRoles is the full chain; priority.json defaults must not dilute it.
+		expect(chain.length).toBe(2);
+	});
+
+	test("appends explicit retry.fallbackChains after a comma modelRoles list", () => {
+		const astra = roleChainModel("gateway", "gpt-6-astra");
+		const sol = roleChainModel("openai-codex", "gpt-5.6-sol");
+		const mini = roleChainModel("openai", "gpt-4o-mini");
+		const settings = Settings.isolated({
+			modelRoles: { slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol" },
+			"retry.fallbackChains": { slow: ["openai/gpt-4o-mini"] },
+		});
+
+		const chain = resolveRoleChain("slow", settings, [astra, sol, mini]);
+		expect(chain.map(candidate => formatModelStringWithRouting(candidate.model))).toEqual([
+			"gateway/gpt-6-astra",
+			"openai-codex/gpt-5.6-sol",
+			"openai/gpt-4o-mini",
+		]);
+		expect(chain[0]?.thinkingLevel).toBe(Effort.High);
+	});
+
 	test("upgrades a default primary when a configured fallback resolves the same route", () => {
 		const parallel = roleChainModel("web", "parallel");
 		const settings = Settings.isolated({
@@ -1251,12 +1292,11 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["anthropic/claude-sonnet-4-6", "zai/glm-5.2:high"]);
 	});
 
-	test("uses default for unconfigured smol and slow agent roles before priority defaults", () => {
+	test("uses default for an unconfigured slow agent role before priority defaults", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "local/llama" },
 		});
 
-		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["local/llama"]);
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["local/llama"]);
 	});
 
@@ -1354,12 +1394,65 @@ describe("resolveAgentModelPatterns", () => {
 		expect(tiny).toEqual(baseline.map(pattern => `${pattern}:high`));
 	});
 
+	test("uses flash then grok-4.6 high for unset smol and tiny even when default is configured", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "local/llama" },
+		});
+		const smol = resolveAgentModelPatterns({ agentModel: "@smol", settings });
+
+		expect(smol.slice(0, 4)).toEqual([
+			"gateway/deepseek-v4.1-flash:high",
+			"deepseek-v4.1-flash",
+			"gateway/deepseek-v4-flash:max",
+			"deepseek-v4-flash",
+		]);
+		expect(smol).toContain("gateway/grok-4.6:high");
+		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(smol);
+	});
+
+	test("keeps an explicit smol override ahead of the flash then grok chain", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "local/llama", smol: "fast/hy3" },
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["fast/hy3"]);
+	});
+
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "@slow", slow: "anthropic/claude-sonnet-4-5" },
 		});
 
-		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings }).slice(0, 2)).toEqual([
+			"gateway/deepseek-v4.1-flash:high",
+			"deepseek-v4.1-flash",
+		]);
+	});
+
+	test("expands a session-inherited marker inside a candidate list to the session fallback", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: ["gateway/gpt-5.6-sol:xhigh", "gateway/claude-opus-5:max", "@task"],
+			settings,
+			activeModelPattern: "gateway/deepseek-v4-flash",
+		});
+
+		expect(result).toEqual(["gateway/gpt-5.6-sol:xhigh", "gateway/claude-opus-5:max", "gateway/deepseek-v4-flash"]);
+	});
+
+	test("drops a session-inherited marker when no session pattern exists", () => {
+		const settings = Settings.isolated();
+
+		const result = resolveAgentModelPatterns({
+			agentModel: ["gateway/gpt-5.6-sol:xhigh", "@task"],
+			settings,
+		});
+
+		expect(result).toEqual(["gateway/gpt-5.6-sol:xhigh"]);
 	});
 
 	test("slow priority falls forward to Opus 4.8 before older Opus aliases", () => {

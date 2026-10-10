@@ -10,6 +10,15 @@ import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isCompletionProbeEnabled } from "./completion-probe";
 import { runSubagentFollowUpTurn } from "./executor";
+import { decideWorkerReuse, inspectEvidenceHandoffContext } from "./evidence-handoff";
+import {
+	buildEvidenceHandoffObserveRecord,
+	noteEvidenceHandoffInspect,
+	noteEvidenceHandoffReuseDecision,
+	persistEvidenceHandoffObserve,
+} from "./evidence-handoff-observe";
+import { settleChildDeliveryForParent } from "./parent-delivery-consume";
+import type { ChildDeliveryEvidenceV1, ParentIntegrateDecision } from "./child-delivery-evidence";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
@@ -100,6 +109,8 @@ interface TurnOutcome {
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
+	deliveryEvidence?: ChildDeliveryEvidenceV1;
+	parentIntegrateDecision?: ParentIntegrateDecision;
 }
 
 const DELIVERY_OUTPUT_LIMIT = 6_000;
@@ -126,6 +137,8 @@ export class WorkPool {
 	#poolJobStarted = false;
 	readonly #drainWaiters: PromiseWithResolvers<void>[] = [];
 	readonly #freshQueue: WorkPoolItem[] = [];
+	/** Items waiting for a fresh slot because existing workers must not be continued. */
+	readonly #heldForFreshSpawn: WorkPoolItem[] = [];
 
 	constructor(session: ToolSession, options: WorkPoolCreateOptions) {
 		this.name = options.name;
@@ -244,19 +257,6 @@ export class WorkPool {
 		return window !== undefined && window > 0 ? tokens / window : tokens;
 	}
 
-	#leastLoadedIdle(): WorkPoolAgent | undefined {
-		let selected: WorkPoolAgent | undefined;
-		let selectedLoad = Infinity;
-		for (const agent of this.agents) {
-			if (agent.state !== "idle") continue;
-			const load = this.#contextLoad(agent);
-			if (load >= selectedLoad) continue;
-			selected = agent;
-			selectedLoad = load;
-		}
-		return selected;
-	}
-
 	async #dispatch(item: WorkPoolItem): Promise<void> {
 		if (this.closed || item.status !== "queued") return;
 		if (this.freshAgents) {
@@ -268,8 +268,26 @@ export class WorkPool {
 			}
 			return;
 		}
-		const idle = this.#leastLoadedIdle();
+		// Pool probe stays observe:false; durable observe fires once on the real
+		// continue vs spawn_fresh boundary below.
+		if (this.#blocksExistingAgents()) {
+			this.#reuseDecision("pool", "idle", { observe: true, itemId: item.id, round: item.seq });
+			if (this.agents.length >= this.limit()) this.#evictIdleAgents();
+			if (this.agents.length < this.limit()) {
+				await this.#spawn(item);
+				return;
+			}
+			this.#heldForFreshSpawn.push(item);
+			this.#card("queued", this.name, `[${item.id}] ${item.text}`);
+			return;
+		}
+		const idle = this.#leastLoadedResumableIdle();
 		if (idle) {
+			this.#reuseDecision(idle.id, "idle", {
+				observe: true,
+				itemId: item.id,
+				round: idle.turns + 1,
+			});
 			item.agentId = idle.id;
 			idle.queue.push(item);
 			this.#card("dispatched", idle.id, `[${item.id}] ${item.text}`);
@@ -282,12 +300,156 @@ export class WorkPool {
 		}
 		const busy = this.#nextBusy();
 		if (!busy) {
-			await this.#spawn(item);
+			// Pool-idle agents that the registry will not resume must not keep the slot.
+			this.#evictIdleAgents();
+			if (this.agents.length < this.limit()) {
+				await this.#spawn(item);
+				return;
+			}
+			this.#heldForFreshSpawn.push(item);
+			this.#card("queued", this.name, `[${item.id}] ${item.text}`);
 			return;
 		}
 		item.agentId = busy.id;
 		busy.queue.push(item);
 		this.#card("queued", busy.id, `[${item.id}] ${item.text}`);
+	}
+
+	#blocksExistingAgents(): boolean {
+		// Pool probe only — do not inflate observe counters on dispatch/evict/yield gates.
+		return this.#reuseDecision("pool", "idle", { observe: false }).action !== "continue";
+	}
+
+	#reuseDecision(agentId: string, status: string, options?: { observe?: boolean; itemId?: string; round?: number }) {
+		const observe = options?.observe !== false;
+		const inspected = inspectEvidenceHandoffContext(this.context);
+		if (observe) {
+			if (inspected.invalid) noteEvidenceHandoffInspect("invalid");
+			else if (inspected.handoff) noteEvidenceHandoffInspect("valid");
+			else noteEvidenceHandoffInspect("missing");
+		}
+		const decision = decideWorkerReuse({
+			candidate: {
+				id: agentId,
+				status,
+				isolated: this.policy.isIsolated === true,
+			},
+			handoff: inspected.handoff,
+			invalidHandoff: inspected.invalid,
+		});
+		if (observe) {
+			noteEvidenceHandoffReuseDecision(decision, { agentId });
+			const sink = this.session.sessionManager;
+			if (sink?.appendCustomEntry) {
+				const phaseReason =
+					decision.reason === "stale_evidence"
+						? "stale"
+						: decision.action === "continue"
+							? "continue"
+							: "spawn_fresh";
+				const inspectReason = inspected.invalid ? "invalid" : inspected.handoff ? "valid" : "missing";
+				// Unique per item/round so multi-round agent reuse does not merge.
+				const itemKey = options?.itemId?.trim() || "noitem";
+				const roundKey =
+					typeof options?.round === "number" && Number.isFinite(options.round)
+						? `r${Math.trunc(options.round)}`
+						: "r0";
+				const scope = `${itemKey}:${roundKey}`;
+				try {
+					persistEvidenceHandoffObserve(
+						sink,
+						buildEvidenceHandoffObserveRecord({
+							eventId: `wp:${this.name}:${agentId}:${scope}:inspect:${inspectReason}`,
+							phase: "inspect",
+							ts: Date.now(),
+							reason: inspectReason,
+							agentId,
+							details: { itemId: options?.itemId, round: options?.round },
+						}),
+					);
+					if (decision.reason === "stale_evidence") {
+						persistEvidenceHandoffObserve(
+							sink,
+							buildEvidenceHandoffObserveRecord({
+								eventId: `wp:${this.name}:${agentId}:${scope}:reject_stale`,
+								phase: "reject_stale",
+								ts: Date.now(),
+								reason: decision.reason,
+								agentId,
+								details: { itemId: options?.itemId, round: options?.round },
+							}),
+						);
+					}
+					persistEvidenceHandoffObserve(
+						sink,
+						buildEvidenceHandoffObserveRecord({
+							eventId: `wp:${this.name}:${agentId}:${scope}:reuse:${phaseReason}`,
+							phase: "reuse",
+							ts: Date.now(),
+							reason: decision.action === "continue" ? "continue" : "spawn_fresh",
+							agentId,
+							details: { itemId: options?.itemId, round: options?.round },
+						}),
+					);
+				} catch (error) {
+					logger.warn("workpool: durable observe persist failed", {
+						pool: this.name,
+						agent: agentId,
+						itemId: options?.itemId,
+						round: options?.round,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		}
+		return decision;
+	}
+
+	#resumableStatus(agentId: string): "idle" | "parked" | undefined {
+		const status = AgentRegistry.global().get(agentId)?.status;
+		return status === "idle" || status === "parked" ? status : undefined;
+	}
+
+	#leastLoadedResumableIdle(): WorkPoolAgent | undefined {
+		let selected: WorkPoolAgent | undefined;
+		let selectedLoad = Infinity;
+		for (const agent of this.agents) {
+			if (agent.state !== "idle") continue;
+			if (!this.#resumableStatus(agent.id)) continue;
+			const load = this.#contextLoad(agent);
+			if (load >= selectedLoad) continue;
+			selected = agent;
+			selectedLoad = load;
+		}
+		return selected;
+	}
+
+	#evictIdleAgents(): void {
+		for (let index = this.agents.length - 1; index >= 0; index--) {
+			const agent = this.agents[index];
+			if (!agent || agent.state !== "idle") continue;
+			this.#detachAgent(agent, index);
+		}
+	}
+
+	#detachAgent(agent: WorkPoolAgent, index: number): void {
+		agent.state = "dead";
+		const stranded = agent.queue.splice(0);
+		this.agents.splice(index, 1);
+		for (const queued of stranded) {
+			queued.agentId = undefined;
+			queued.batchId = undefined;
+			if (queued.status === "queued") this.#heldForFreshSpawn.push(queued);
+		}
+	}
+
+	#releaseHeld(): void {
+		if (this.closed) return;
+		if (this.#blocksExistingAgents()) this.#evictIdleAgents();
+		const pending = this.#heldForFreshSpawn.splice(0);
+		for (const queued of pending) {
+			if (queued.status === "queued") this.#queueDispatch(queued);
+		}
 	}
 
 	async #spawn(item: WorkPoolItem): Promise<void> {
@@ -440,6 +602,33 @@ export class WorkPool {
 		for (const item of batch.items) item.status = batch.status;
 		agent.turns++;
 		agent.jobId = undefined;
+
+		const sink = this.session.sessionManager;
+		if (sink?.appendCustomEntry && batch.status === "completed") {
+			try {
+				const consumed = await settleChildDeliveryForParent({
+					sink,
+					cwd: this.session.cwd,
+					delivery: result.deliveryEvidence,
+					spawnContext: this.context,
+					eventIdPrefix: `wp:${this.name}:${agent.id}:${batch.id}`,
+					jobId: batch.jobId || batch.id,
+					agentId: agent.id,
+					noteSettled: true,
+				});
+				if (consumed) {
+					// Replace packet-only settle decision with workspace-bound consume.
+					result.parentIntegrateDecision = consumed.decision;
+				}
+			} catch (error) {
+				logger.warn("workpool: parent consume reclassify failed", {
+					pool: this.name,
+					agent: agent.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+
 		const ref = AgentRegistry.global().get(agent.id);
 		// Retained idle workers can wake through IRC, so clear the runtime schema and cached inline declaration together.
 		// A refresh failure must not strand the pool in #waitForDrain(): items are
@@ -486,18 +675,34 @@ export class WorkPool {
 			this.#notifyDrained();
 			return;
 		}
-		if (yieldCleared && ref && (ref.status === "idle" || ref.status === "parked")) {
+		if (yieldCleared && ref && (ref.status === "idle" || ref.status === "parked") && !this.#blocksExistingAgents()) {
 			this.#drain(agent);
+		} else if (yieldCleared && ref && (ref.status === "idle" || ref.status === "parked")) {
+			const stranded = agent.queue.splice(0);
+			for (const queued of stranded) {
+				queued.agentId = undefined;
+				queued.batchId = undefined;
+				if (queued.status === "queued") this.#heldForFreshSpawn.push(queued);
+			}
+			if (this.#heldForFreshSpawn.length > 0) {
+				agent.state = "dead";
+				const index = this.agents.indexOf(agent);
+				if (index !== -1) this.agents.splice(index, 1);
+				this.#releaseHeld();
+			} else {
+				agent.state = "idle";
+			}
 		} else {
 			agent.state = "dead";
 			const stranded = agent.queue.splice(0);
 			const index = this.agents.indexOf(agent);
 			if (index !== -1) this.agents.splice(index, 1);
-			for (const item of stranded) {
-				item.agentId = undefined;
-				item.batchId = undefined;
-				this.#queueDispatch(item);
+			for (const queued of stranded) {
+				queued.agentId = undefined;
+				queued.batchId = undefined;
+				this.#queueDispatch(queued);
 			}
+			this.#releaseHeld();
 		}
 		this.#notifyDrained();
 	}
@@ -536,6 +741,22 @@ export class WorkPool {
 			items: batch.items.map(item => ({ id: item.id, status: item.status, text: oneLineLabel(item.text) })),
 			output: renderedOutput,
 			remaining,
+			...(result.parentIntegrateDecision
+				? {
+						parentIntegrateDecision: {
+							classification: result.parentIntegrateDecision.classification,
+							action: result.parentIntegrateDecision.action,
+							reasons: result.parentIntegrateDecision.reasons.join(", "),
+							boundToWorkspaceVersion:
+								"boundToWorkspaceVersion" in result.parentIntegrateDecision
+									? String(
+											(result.parentIntegrateDecision as { boundToWorkspaceVersion?: string })
+												.boundToWorkspaceVersion ?? "",
+										)
+									: "",
+						},
+					}
+				: {}),
 		});
 	}
 
@@ -588,6 +809,7 @@ export class WorkPool {
 		}
 		for (const agent of this.agents) agent.queue.splice(0);
 		this.#freshQueue.splice(0);
+		this.#heldForFreshSpawn.splice(0);
 		this.#notifyDrained();
 		return { dropped };
 	}

@@ -2258,6 +2258,10 @@ type Goal struct {
 	CreatedAt       int64      `json:"createdAt"`
 	UpdatedAt       int64      `json:"updatedAt"`
 	TokenBudget     *int64     `json:"tokenBudget,omitempty"`
+	// Headless auto-continuations spent on this goal.
+	HeadlessContinuationCount *int64 `json:"headlessContinuationCount,omitempty"`
+	// Host completion-gate state (verification, decisions, no-progress).
+	HostGate json.RawMessage `json:"hostGate,omitempty"`
 }
 
 func (v *Goal) UnmarshalJSON(data []byte) error {
@@ -2275,6 +2279,8 @@ func (v *Goal) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("createdAt", &out.CreatedAt)
 	d.required("updatedAt", &out.UpdatedAt)
 	d.optional("tokenBudget", &out.TokenBudget)
+	d.optional("headlessContinuationCount", &out.HeadlessContinuationCount)
+	d.optional("hostGate", &out.HostGate)
 	if d.err != nil {
 		return d.err
 	}
@@ -3435,6 +3441,7 @@ const (
 	AutoCompactionActionHandoff     AutoCompactionAction = "handoff"
 	AutoCompactionActionShake       AutoCompactionAction = "shake"
 	AutoCompactionActionSnapcompact AutoCompactionAction = "snapcompact"
+	AutoCompactionActionStructured  AutoCompactionAction = "structured"
 )
 
 func (v *AutoCompactionAction) UnmarshalJSON(data []byte) error {
@@ -3443,7 +3450,7 @@ func (v *AutoCompactionAction) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	switch value := AutoCompactionAction(s); value {
-	case AutoCompactionActionContextFull, AutoCompactionActionRemote, AutoCompactionActionHandoff, AutoCompactionActionShake, AutoCompactionActionSnapcompact:
+	case AutoCompactionActionContextFull, AutoCompactionActionRemote, AutoCompactionActionHandoff, AutoCompactionActionShake, AutoCompactionActionSnapcompact, AutoCompactionActionStructured:
 		*v = value
 		return nil
 	}
@@ -3542,6 +3549,8 @@ type AgentEndEvent struct {
 	MessageCount *int64 `json:"messageCount,omitempty"`
 	// False when a continuation or async delivery remains.
 	IsTerminal *bool `json:"isTerminal,omitempty"`
+	// Async-job delivery that produced this run, when one did.
+	DeliveryID *string `json:"deliveryId,omitempty"`
 	// The agent finished its turn and resumes only for queued input or background-job results.
 	Yielded *bool `json:"yielded,omitempty"`
 	// Non-terminal end whose only possible resume is a background-job result.
@@ -3561,6 +3570,7 @@ func (v *AgentEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("messages", &out.Messages)
 	d.optional("messageCount", &out.MessageCount)
 	d.optional("isTerminal", &out.IsTerminal)
+	d.optional("deliveryId", &out.DeliveryID)
 	d.optional("yielded", &out.Yielded)
 	d.optional("awaitingAsyncWork", &out.AwaitingAsyncWork)
 	d.optional("telemetry", &out.Telemetry)
@@ -4252,6 +4262,31 @@ func (v TodoAutoClearEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"todo_auto_clear"`, nil)
 }
 
+type TodoUpdatedEvent struct {
+	Phases []TodoPhase `json:"phases"`
+}
+
+func (v *TodoUpdatedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "TodoUpdatedEvent", v.decodeFrom)
+}
+
+func (v *TodoUpdatedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out TodoUpdatedEvent
+	d := fieldDecoder{raw: raw, owner: "TodoUpdatedEvent"}
+	d.constant("type", "todo_updated")
+	d.required("phases", &out.Phases)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v TodoUpdatedEvent) MarshalJSON() ([]byte, error) {
+	type plain TodoUpdatedEvent
+	return encodeObject(plain(v), `"type":"todo_updated"`, nil)
+}
+
 type IrcMessageEvent struct {
 	Message CustomMessage `json:"message"`
 }
@@ -4432,6 +4467,7 @@ func (AdvisorYieldedEvent) isRpcAgentEvent()         {}
 func (TtsrTriggeredEvent) isRpcAgentEvent()          {}
 func (TodoReminderEvent) isRpcAgentEvent()           {}
 func (TodoAutoClearEvent) isRpcAgentEvent()          {}
+func (TodoUpdatedEvent) isRpcAgentEvent()            {}
 func (IrcMessageEvent) isRpcAgentEvent()             {}
 func (NoticeEvent) isRpcAgentEvent()                 {}
 func (ThinkingLevelChangedEvent) isRpcAgentEvent()   {}
@@ -4510,6 +4546,8 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[TodoReminderEvent](raw)
 	case "todo_auto_clear":
 		value, err = decodeVariant[TodoAutoClearEvent](raw)
+	case "todo_updated":
+		value, err = decodeVariant[TodoUpdatedEvent](raw)
 	case "irc_message":
 		value, err = decodeVariant[IrcMessageEvent](raw)
 	case "notice":
@@ -4758,6 +4796,8 @@ type SubagentLifecyclePayload struct {
 	ParentToolCallID *string                 `json:"parentToolCallId,omitempty"`
 	// The subagent runs as a detached background job.
 	Detached *bool `json:"detached,omitempty"`
+	// How a settled subagent ended, when it did not complete normally.
+	CompletionKind *SubagentLifecyclePayloadCompletionKind `json:"completionKind,omitempty"`
 }
 
 func (v *SubagentLifecyclePayload) UnmarshalJSON(data []byte) error {
@@ -4776,11 +4816,34 @@ func (v *SubagentLifecyclePayload) decodeFrom(raw map[string]json.RawMessage) er
 	d.optional("sessionFile", &out.SessionFile)
 	d.optional("parentToolCallId", &out.ParentToolCallID)
 	d.optional("detached", &out.Detached)
+	d.optional("completionKind", &out.CompletionKind)
 	if d.err != nil {
 		return d.err
 	}
 	*v = out
 	return nil
+}
+
+type SubagentLifecyclePayloadCompletionKind string
+
+const (
+	SubagentLifecyclePayloadCompletionKindCompleted  SubagentLifecyclePayloadCompletionKind = "completed"
+	SubagentLifecyclePayloadCompletionKindBudgetStop SubagentLifecyclePayloadCompletionKind = "budget_stop"
+	SubagentLifecyclePayloadCompletionKindTimeout    SubagentLifecyclePayloadCompletionKind = "timeout"
+	SubagentLifecyclePayloadCompletionKindHardAbort  SubagentLifecyclePayloadCompletionKind = "hard_abort"
+)
+
+func (v *SubagentLifecyclePayloadCompletionKind) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SubagentLifecyclePayloadCompletionKind")
+	if err != nil {
+		return err
+	}
+	switch value := SubagentLifecyclePayloadCompletionKind(s); value {
+	case SubagentLifecyclePayloadCompletionKindCompleted, SubagentLifecyclePayloadCompletionKindBudgetStop, SubagentLifecyclePayloadCompletionKindTimeout, SubagentLifecyclePayloadCompletionKindHardAbort:
+		*v = value
+		return nil
+	}
+	return unknownValue("SubagentLifecyclePayloadCompletionKind", s)
 }
 
 type SubagentProgressPayload struct {
@@ -6468,6 +6531,7 @@ func (AdvisorYieldedEvent) isRpcNotification()          {}
 func (TtsrTriggeredEvent) isRpcNotification()           {}
 func (TodoReminderEvent) isRpcNotification()            {}
 func (TodoAutoClearEvent) isRpcNotification()           {}
+func (TodoUpdatedEvent) isRpcNotification()             {}
 func (IrcMessageEvent) isRpcNotification()              {}
 func (NoticeEvent) isRpcNotification()                  {}
 func (ThinkingLevelChangedEvent) isRpcNotification()    {}
@@ -6577,6 +6641,8 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[TodoReminderEvent](raw)
 	case "todo_auto_clear":
 		value, err = decodeVariant[TodoAutoClearEvent](raw)
+	case "todo_updated":
+		value, err = decodeVariant[TodoUpdatedEvent](raw)
 	case "irc_message":
 		value, err = decodeVariant[IrcMessageEvent](raw)
 	case "notice":
@@ -6658,6 +6724,7 @@ func (AdvisorYieldedEvent) isRpcServerFrame()          {}
 func (TtsrTriggeredEvent) isRpcServerFrame()           {}
 func (TodoReminderEvent) isRpcServerFrame()            {}
 func (TodoAutoClearEvent) isRpcServerFrame()           {}
+func (TodoUpdatedEvent) isRpcServerFrame()             {}
 func (IrcMessageEvent) isRpcServerFrame()              {}
 func (NoticeEvent) isRpcServerFrame()                  {}
 func (ThinkingLevelChangedEvent) isRpcServerFrame()    {}
@@ -6777,6 +6844,8 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[TodoReminderEvent](raw)
 	case "todo_auto_clear":
 		value, err = decodeVariant[TodoAutoClearEvent](raw)
+	case "todo_updated":
+		value, err = decodeVariant[TodoUpdatedEvent](raw)
 	case "irc_message":
 		value, err = decodeVariant[IrcMessageEvent](raw)
 	case "notice":
@@ -6814,6 +6883,48 @@ func (v *NegotiateProtocolResult) decodeFrom(raw map[string]json.RawMessage) err
 	}
 	*v = out
 	return nil
+}
+
+type SetPtcModeResult struct {
+	Mode   SetPtcModeResultMode `json:"mode"`
+	Active bool                 `json:"active"`
+}
+
+func (v *SetPtcModeResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SetPtcModeResult", v.decodeFrom)
+}
+
+func (v *SetPtcModeResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SetPtcModeResult
+	d := fieldDecoder{raw: raw, owner: "SetPtcModeResult"}
+	d.required("mode", &out.Mode)
+	d.required("active", &out.Active)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type SetPtcModeResultMode string
+
+const (
+	SetPtcModeResultModeOff  SetPtcModeResultMode = "off"
+	SetPtcModeResultModeOn   SetPtcModeResultMode = "on"
+	SetPtcModeResultModeAuto SetPtcModeResultMode = "auto"
+)
+
+func (v *SetPtcModeResultMode) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SetPtcModeResultMode")
+	if err != nil {
+		return err
+	}
+	switch value := SetPtcModeResultMode(s); value {
+	case SetPtcModeResultModeOff, SetPtcModeResultModeOn, SetPtcModeResultModeAuto:
+		*v = value
+		return nil
+	}
+	return unknownValue("SetPtcModeResultMode", s)
 }
 
 type SetSlowModeResult struct {
@@ -7476,6 +7587,39 @@ func (c Commands) SetFastMode(ctx context.Context, p SetFastModeCommand) (FastMo
 	var out FastModeResult
 	err := c.call(ctx, "set_fast_mode", p, 0, &out)
 	return out, err
+}
+
+// SetPtcModeCommand holds the parameters of "set_ptc_mode".
+type SetPtcModeCommand struct {
+	Mode SetPtcModeCommandMode `json:"mode"`
+}
+
+// SetPtcMode sends "set_ptc_mode": Set programmatic tool calling mode (`off`, `on`, or `auto`); returns the mode and whether it is active.
+func (c Commands) SetPtcMode(ctx context.Context, p SetPtcModeCommand) (SetPtcModeResult, error) {
+	var out SetPtcModeResult
+	err := c.call(ctx, "set_ptc_mode", p, 0, &out)
+	return out, err
+}
+
+type SetPtcModeCommandMode string
+
+const (
+	SetPtcModeCommandModeOff  SetPtcModeCommandMode = "off"
+	SetPtcModeCommandModeOn   SetPtcModeCommandMode = "on"
+	SetPtcModeCommandModeAuto SetPtcModeCommandMode = "auto"
+)
+
+func (v *SetPtcModeCommandMode) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SetPtcModeCommandMode")
+	if err != nil {
+		return err
+	}
+	switch value := SetPtcModeCommandMode(s); value {
+	case SetPtcModeCommandModeOff, SetPtcModeCommandModeOn, SetPtcModeCommandModeAuto:
+		*v = value
+		return nil
+	}
+	return unknownValue("SetPtcModeCommandMode", s)
 }
 
 // SetSlowModeCommand holds the parameters of "set_slow_mode".

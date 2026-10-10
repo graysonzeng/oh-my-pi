@@ -1,5 +1,10 @@
 {
 	"smol": [
+		"gateway/deepseek-v4.1-flash:high",
+		"deepseek-v4.1-flash",
+		"gateway/deepseek-v4-flash:max",
+		"deepseek-v4-flash",
+		"gateway/grok-4.6:high",
 		"claude-haiku-5-5",
 		"claude-haiku-5.5",
 		"haiku-5-5",

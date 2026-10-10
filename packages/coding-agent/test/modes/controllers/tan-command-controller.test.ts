@@ -625,9 +625,8 @@ describe("TanCommandController", () => {
 		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
 		await compacted.promise;
 
-		// Inherited parent todos are wiped both in-memory and in the persisted
-		// session so reloads agree; otherwise todo reminders drag the tan back
-		// onto the parent's task.
+		// The canonical setter clears and persists inherited todos so reminders
+		// cannot drag the fork back onto the parent's task.
 		expect(stub.clone.setTodoPhases).toHaveBeenCalledWith([]);
 		expect(harness.cloneManager.appendCustomEntry).toHaveBeenCalledWith("user_todo_edit", { phases: [] });
 		// Initial dispatch places the fork notice before prompt(); after a
@@ -638,6 +637,14 @@ describe("TanCommandController", () => {
 			"developer",
 			"user",
 		]);
+		for (const call of stub.appendMessage.mock.calls.slice(0, 2)) {
+			expect(call[0]).toEqual(
+				expect.objectContaining({
+					role: "developer",
+					content: expect.stringContaining('<system-notice cause="fork">'),
+				}),
+			);
+		}
 		expect(stub.appendMessage.mock.calls[2]?.[0]).toEqual(
 			expect.objectContaining({
 				role: "user",

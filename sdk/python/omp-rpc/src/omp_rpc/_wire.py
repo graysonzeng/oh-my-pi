@@ -146,8 +146,8 @@ _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset({"threshold", 
 _decode_auto_compaction_reason = cast("Decoder[AutoCompactionReason]", literal(_AUTO_COMPACTION_REASON_VALUES))
 
 
-AutoCompactionAction: TypeAlias = Literal["context-full", "remote", "handoff", "shake", "snapcompact"]
-_AUTO_COMPACTION_ACTION_VALUES: Final[frozenset[str]] = frozenset({"context-full", "remote", "handoff", "shake", "snapcompact"})
+AutoCompactionAction: TypeAlias = Literal["context-full", "remote", "handoff", "shake", "snapcompact", "structured"]
+_AUTO_COMPACTION_ACTION_VALUES: Final[frozenset[str]] = frozenset({"context-full", "remote", "handoff", "shake", "snapcompact", "structured"})
 _decode_auto_compaction_action = cast("Decoder[AutoCompactionAction]", literal(_AUTO_COMPACTION_ACTION_VALUES))
 
 
@@ -595,6 +595,10 @@ class Goal:
     created_at: int
     updated_at: int
     token_budget: int | None = None
+    headless_continuation_count: int | None = None
+    """Headless auto-continuations spent on this goal."""
+    host_gate: JsonValue | None = None
+    """Host completion-gate state (verification, decisions, no-progress)."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -954,6 +958,8 @@ class AgentEndEvent:
     """Original message count when the frame was compacted."""
     is_terminal: bool | None = None
     """False when a continuation or async delivery remains."""
+    delivery_id: str | None = None
+    """Async-job delivery that produced this run, when one did."""
     yielded: bool | None = None
     """The agent finished its turn and resumes only for queued input or background-job results."""
     awaiting_async_work: bool | None = None
@@ -1152,6 +1158,12 @@ class TodoAutoClearEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class TodoUpdatedEvent:
+    type: Literal["todo_updated"] = "todo_updated"
+    phases: tuple[TodoPhase, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class IrcMessageEvent:
     type: Literal["irc_message"] = "irc_message"
     message: CustomMessage
@@ -1258,6 +1270,8 @@ class SubagentLifecyclePayload:
     parent_tool_call_id: str | None = None
     detached: bool | None = None
     """The subagent runs as a detached background job."""
+    completion_kind: Literal["completed", "budget_stop", "timeout", "hard_abort"] | None = None
+    """How a settled subagent ended, when it did not complete normally."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1574,6 +1588,12 @@ class NegotiateProtocolResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class SetPtcModeResult:
+    mode: Literal["off", "on", "auto"]
+    active: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class LogoutResult:
     remaining_source: str | None = None
 
@@ -1596,7 +1616,7 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | TodoUpdatedEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
@@ -1870,6 +1890,8 @@ def parse_goal(value: object, path: str = "Goal") -> Goal:
         created_at=required(payload, "createdAt", decode_int, path),
         updated_at=required(payload, "updatedAt", decode_int, path),
         token_budget=optional(payload, "tokenBudget", decode_int, path),
+        headless_continuation_count=optional(payload, "headlessContinuationCount", decode_int, path),
+        host_gate=optional(payload, "hostGate", decode_json, path),
     )
 
 
@@ -2266,6 +2288,7 @@ def parse_agent_end_event(value: object, path: str = "AgentEndEvent") -> AgentEn
         messages=required(payload, "messages", array(parse_agent_message), path),
         message_count=optional(payload, "messageCount", decode_int, path),
         is_terminal=optional(payload, "isTerminal", decode_bool, path),
+        delivery_id=optional(payload, "deliveryId", decode_str, path),
         yielded=optional(payload, "yielded", decode_bool, path),
         awaiting_async_work=optional(payload, "awaitingAsyncWork", decode_bool, path),
         telemetry=optional(payload, "telemetry", decode_json_object, path),
@@ -2501,6 +2524,14 @@ def parse_todo_auto_clear_event(value: object, path: str = "TodoAutoClearEvent")
     )
 
 
+def parse_todo_updated_event(value: object, path: str = "TodoUpdatedEvent") -> TodoUpdatedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["todo_updated"]]', literal(frozenset({"todo_updated"}))), path)
+    return TodoUpdatedEvent(
+        phases=required(payload, "phases", array(parse_todo_phase), path),
+    )
+
+
 def parse_irc_message_event(value: object, path: str = "IrcMessageEvent") -> IrcMessageEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["irc_message"]]', literal(frozenset({"irc_message"}))), path)
@@ -2618,6 +2649,7 @@ def parse_subagent_lifecycle_payload(value: object, path: str = "SubagentLifecyc
         session_file=optional(payload, "sessionFile", decode_str, path),
         parent_tool_call_id=optional(payload, "parentToolCallId", decode_str, path),
         detached=optional(payload, "detached", decode_bool, path),
+        completion_kind=optional(payload, "completionKind", cast('Decoder[Literal["completed", "budget_stop", "timeout", "hard_abort"]]', literal(frozenset({"completed", "budget_stop", "timeout", "hard_abort"}))), path),
     )
 
 
@@ -2981,6 +3013,14 @@ def parse_negotiate_protocol_result(value: object, path: str = "NegotiateProtoco
     )
 
 
+def parse_set_ptc_mode_result(value: object, path: str = "SetPtcModeResult") -> SetPtcModeResult:
+    payload = expect_object(value, path)
+    return SetPtcModeResult(
+        mode=required(payload, "mode", cast('Decoder[Literal["off", "on", "auto"]]', literal(frozenset({"off", "on", "auto"}))), path),
+        active=required(payload, "active", decode_bool, path),
+    )
+
+
 def parse_logout_result(value: object, path: str = "LogoutResult") -> LogoutResult:
     payload = expect_object(value, path)
     return LogoutResult(
@@ -3038,6 +3078,7 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "ttsr_triggered": parse_ttsr_triggered_event,
         "todo_reminder": parse_todo_reminder_event,
         "todo_auto_clear": parse_todo_auto_clear_event,
+        "todo_updated": parse_todo_updated_event,
         "irc_message": parse_irc_message_event,
         "notice": parse_notice_event,
         "thinking_level_changed": parse_thinking_level_changed_event,
@@ -3092,6 +3133,7 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "ttsr_triggered": parse_rpc_agent_event,
         "todo_reminder": parse_rpc_agent_event,
         "todo_auto_clear": parse_rpc_agent_event,
+        "todo_updated": parse_rpc_agent_event,
         "irc_message": parse_rpc_agent_event,
         "notice": parse_rpc_agent_event,
         "thinking_level_changed": parse_rpc_agent_event,
@@ -3177,6 +3219,12 @@ class WireClient:
         params: dict[str, object] = {}
         params["enabled"] = enabled
         return parse_fast_mode_result(self._command("set_fast_mode", params), "set_fast_mode")
+
+    def set_ptc_mode(self, mode: Literal["off", "on", "auto"]) -> SetPtcModeResult:
+        """Set programmatic tool calling mode (`off`, `on`, or `auto`); returns the mode and whether it is active."""
+        params: dict[str, object] = {}
+        params["mode"] = mode
+        return parse_set_ptc_mode_result(self._command("set_ptc_mode", params), "set_ptc_mode")
 
     def set_slow_mode(self, enabled: bool) -> bool:
         """Turn `/slow` on or off for the active model; returns whether it is now on."""
@@ -3681,6 +3729,10 @@ class WireClient:
         """Subscribe to `todo_auto_clear` frames."""
         return self._listen("todo_auto_clear", listener)
 
+    def on_todo_updated(self, listener: Callable[[TodoUpdatedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `todo_updated` frames."""
+        return self._listen("todo_updated", listener)
+
     def on_irc_message(self, listener: Callable[[IrcMessageEvent], None]) -> Callable[[], None]:
         """Subscribe to `irc_message` frames."""
         return self._listen("irc_message", listener)
@@ -3844,6 +3896,7 @@ __all__ = [
     "SessionStats",
     "SessionTree",
     "SetEditorTextUiRequest",
+    "SetPtcModeResult",
     "SetStatusUiRequest",
     "SetTitleUiRequest",
     "SetWidgetUiRequest",
@@ -3875,6 +3928,7 @@ __all__ = [
     "TodoPhase",
     "TodoReminderEvent",
     "TodoStatus",
+    "TodoUpdatedEvent",
     "TokenUsage",
     "ToolCall",
     "ToolDescriptor",
@@ -4014,6 +4068,7 @@ __all__ = [
     "parse_session_stats",
     "parse_session_tree",
     "parse_set_editor_text_ui_request",
+    "parse_set_ptc_mode_result",
     "parse_set_status_ui_request",
     "parse_set_title_ui_request",
     "parse_set_widget_ui_request",
@@ -4036,6 +4091,7 @@ __all__ = [
     "parse_todo_item",
     "parse_todo_phase",
     "parse_todo_reminder_event",
+    "parse_todo_updated_event",
     "parse_token_usage",
     "parse_tool_call",
     "parse_tool_descriptor",

@@ -712,25 +712,49 @@ async function generateModels(selectedProvider?: string) {
 	// after canonical fallback so finalized context windows drive the cap.
 	applyOllamaCloudOutputCap(allModels);
 
+	await writeBundledModels(allModels, selectedProvider);
+}
+
+/**
+ * Re-apply catalog policies and `buildModel` to the committed snapshot without
+ * live discovery. Used after KDL/compat changes so baked `compat`/`thinking`
+ * match the engine (compat-parity) while keeping the existing roster.
+ */
+async function rebakeBundledModels(): Promise<void> {
+	const previous = prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>;
+	const allModels: ModelSpec<Api>[] = [];
+	for (const provider of Object.keys(previous)) {
+		const providerModels = previous[provider];
+		if (!providerModels) continue;
+		for (const id of Object.keys(providerModels)) {
+			const model = providerModels[id];
+			if (!model) continue;
+			allModels.push(toModelSpec(model));
+		}
+	}
+	applyGeneratedModelPolicies(allModels);
+	linkOpenAIPromotionTargets(allModels);
+	applyCanonicalLimitFallback(allModels);
+	applyOllamaCloudOutputCap(allModels);
+	await writeBundledModels(allModels);
+}
+
+async function writeBundledModels(allModels: ModelSpec<Api>[], selectedProvider?: string): Promise<void> {
 	for (const model of allModels) {
 		canonicalizeModelCompat(model);
 	}
 
-	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, ModelSpec>> = {};
 	for (const model of allModels) {
 		if (DISCOVERY_ONLY_PROVIDERS.has(model.provider) || isRetiredProvider(model.provider)) continue;
 		if (!providers[model.provider]) {
 			providers[model.provider] = {};
 		}
-		// Use model ID as key to deduplicate the ordered sources assembled above.
-		// Earlier sources win.
 		if (!providers[model.provider][model.id]) {
 			providers[model.provider][model.id] = model;
 		}
 	}
 
-	// Sort providers alphabetically and models within each provider by ID
 	const sortObj = <V>(o: Record<string, V>): Record<string, V> => {
 		return Object.fromEntries(
 			Object.entries(o)
@@ -779,7 +803,6 @@ Model Statistics:`);
 		console.log(`  ${provider}: ${Object.keys(models).length} models`);
 	}
 }
-
 function canonicalizeModelCompat(model: ModelSpec<Api>): void {
 	if (!model.compat) return;
 
@@ -815,9 +838,16 @@ export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
 }
 
 if (import.meta.main) {
-	const { values } = parseArgs({ args: Bun.argv.slice(2), options: { provider: { type: "string" } } });
-	generateModels(values.provider).catch(error => {
-		console.error(error);
-		process.exitCode = 1;
-	});
+	if (process.argv.includes("--rebake")) {
+		rebakeBundledModels().catch(error => {
+			console.error(error);
+			process.exitCode = 1;
+		});
+	} else {
+		const { values } = parseArgs({ args: Bun.argv.slice(2), options: { provider: { type: "string" } } });
+		generateModels(values.provider).catch(error => {
+			console.error(error);
+			process.exitCode = 1;
+		});
+	}
 }

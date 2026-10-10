@@ -19,6 +19,11 @@ import {
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import {
+	buildEvidenceHandoff,
+	extractEvidenceHandoffFromContext,
+	renderEvidenceHandoffContext,
+} from "@oh-my-pi/pi-coding-agent/task/evidence-handoff";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
@@ -58,6 +63,7 @@ function session(
 		agentServiceTierOverrides?: Record<string, string>;
 		agentCompactionThresholdOverrides?: Record<string, AgentCompactionThresholdOverride>;
 		sessionAgents?: readonly AgentDefinition[];
+		maxRuntimeMs?: number;
 	} = {},
 ): ToolSession {
 	return {
@@ -79,6 +85,7 @@ function session(
 				...(options.agentCompactionThresholdOverrides
 					? { "task.agentCompactionThresholdOverrides": options.agentCompactionThresholdOverrides }
 					: {}),
+				...(options.maxRuntimeMs !== undefined ? { "task.maxRuntimeMs": options.maxRuntimeMs } : {}),
 			}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
@@ -357,6 +364,111 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
+	it("projects evidence handoff context so reviewers omit author conclusions", async () => {
+		const reviewer = { ...AGENT, name: "reviewer" };
+		mockDiscovery(reviewer);
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const handoff = buildEvidenceHandoff({
+			goals: ["Ship handoff"],
+			acceptance: ["Reviewer omits author conclusions"],
+			confirmedFacts: [{ id: "f1", version: "v1", statement: "raw fact", evidence: "diff hunk" }],
+			openQuestions: ["Any residual risk?"],
+			failedAttempts: [{ attempt: "copy full parent history" }],
+			changeScope: { paths: ["packages/coding-agent/src/task/evidence-handoff.ts"] },
+			verificationOwnership: { owner: "parent", commands: ["bun test"] },
+			authorConclusions: ["Author thinks this is perfect"],
+		});
+		const context = renderEvidenceHandoffContext(handoff, { preamble: "Shared packet" });
+
+		const settled = await runStructuredSubagent(request({ agent: "reviewer", context, retainArtifacts: true }));
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted).not.toBeNull();
+		expect(extracted!.preamble).toContain("Shared packet");
+		expect(extracted!.handoff.goals).toEqual(["Ship handoff"]);
+		expect(extracted!.handoff.acceptance).toEqual(["Reviewer omits author conclusions"]);
+		expect(extracted!.handoff.confirmedFacts[0]?.statement).toBe("raw fact");
+		expect(extracted!.handoff.confirmedFacts[0]?.version).toBe("v1");
+		expect(extracted!.handoff.openQuestions).toEqual(["Any residual risk?"]);
+		expect(extracted!.handoff.failedAttempts).toEqual([{ attempt: "copy full parent history" }]);
+		expect(extracted!.handoff.changeScope.paths).toEqual(["packages/coding-agent/src/task/evidence-handoff.ts"]);
+		expect(extracted!.handoff.verificationOwnership).toEqual({ owner: "parent", commands: ["bun test"] });
+		expect(extracted!.handoff.authorConclusions).toBeUndefined();
+		expect(dispatched[0]?.context).not.toContain("Author thinks this is perfect");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("restores full evidence handoff fields for worker-class dispatch", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const handoff = buildEvidenceHandoff({
+			goals: ["Reuse worker context"],
+			acceptance: ["Worker keeps failed attempts + ownership"],
+			confirmedFacts: [{ id: "f-worker", version: "sha:1", statement: "prior probe passed" }],
+			openQuestions: ["Need live corpus?"],
+			failedAttempts: [{ attempt: "blind respawn", reason: "lost context" }],
+			changeScope: { paths: ["packages/coding-agent/src/task/"], symbols: ["decideWorkerReuse"] },
+			verificationOwnership: { owner: "worker", commands: ["bun test evidence-handoff"] },
+			authorConclusions: ["Keep for worker continuity"],
+		});
+		const context = renderEvidenceHandoffContext(handoff);
+
+		const settled = await runStructuredSubagent(request({ context, retainArtifacts: true }));
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted?.handoff.goals).toEqual(handoff.goals);
+		expect(extracted?.handoff.acceptance).toEqual(handoff.acceptance);
+		expect(extracted?.handoff.confirmedFacts).toEqual(handoff.confirmedFacts);
+		expect(extracted?.handoff.openQuestions).toEqual(handoff.openQuestions);
+		expect(extracted?.handoff.failedAttempts).toEqual(handoff.failedAttempts);
+		expect(extracted?.handoff.changeScope).toEqual(handoff.changeScope);
+		expect(extracted?.handoff.verificationOwnership).toEqual(handoff.verificationOwnership);
+		expect(extracted?.handoff.authorConclusions).toEqual(handoff.authorConclusions);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("synthesizes an evidence handoff fence from the task contract when context is freeform", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const assignment = [
+			"# Target",
+			"- packages/coding-agent/src/task/evidence-handoff.ts",
+			"# Change",
+			"- Wire ensureEvidenceHandoffContext into spawn",
+			"# Acceptance",
+			"- Dispatched context includes an evidence-handoff fence",
+		].join("\n");
+		const settled = await runStructuredSubagent(
+			request({
+				assignment,
+				context: "Freeform parent notes without a fence.",
+				retainArtifacts: true,
+			}),
+		);
+		const extracted = extractEvidenceHandoffFromContext(dispatched[0]?.context ?? "");
+		expect(extracted).not.toBeNull();
+		expect(extracted!.preamble).toContain("Freeform parent notes");
+		expect(extracted!.handoff.goals).toEqual([
+			"- packages/coding-agent/src/task/evidence-handoff.ts",
+			"- Wire ensureEvidenceHandoffContext into spawn",
+		]);
+		expect(extracted!.handoff.acceptance).toEqual(["- Dispatched context includes an evidence-handoff fence"]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("forwards parent-authorized model agents to nested subagent sessions", async () => {
 		mockDiscovery();
 		const inheritedAgent: AgentDefinition = { ...AGENT, name: "m1", model: ["b/y"] };
@@ -372,6 +484,7 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);
@@ -993,6 +1106,143 @@ describe("structured subagent primitive", () => {
 		expect(settled.mergeSummary).toContain("/recovery/Worker.patch");
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("retains budget-stopped patches without auto-applying even a schema-valid zero-exit result", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockResolvedValue({
+			...result(),
+			completionKind: "budget_stop",
+			patchPath: "/recovery/Worker.patch",
+			structuredOutput: { source: "agent", mode: "permissive", status: "valid", data: { agent: true } },
+		});
+		const merge = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
+		const nested = vi.spyOn(isolationRunner, "applyEligibleNestedPatches");
+		const settled = await runStructuredSubagent(
+			request({
+				session: session({ isolationEnabled: true, isolationApply: true }),
+				isolation: { requested: true },
+			}),
+		);
+		try {
+			expect(merge).not.toHaveBeenCalled();
+			expect(nested).not.toHaveBeenCalled();
+			expect(settled.changesApplied).toBeNull();
+			expect(settled.mergeSummary).toContain("/recovery/Worker.patch");
+			expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
+			expect((await fs.stat(settled.artifactsDir)).isDirectory()).toBe(true);
+		} finally {
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("classifies performance after fresh discovery and applies task omitted ceilings", async () => {
+		const reviewer = { ...AGENT, name: "reviewer" };
+		mockDiscovery(reviewer);
+		const review = await resolveEffectiveSubagentPolicy(
+			request({ agent: "reviewer", session: session({ maxRuntimeMs: 3_600_000 }) }),
+		);
+		expect(review.performanceClass).toBe("review");
+		expect(review.effectiveMaxRuntimeMs).toBe(1_800_000);
+
+		const unlimited = await resolveEffectiveSubagentPolicy(
+			request({ agent: "reviewer", session: session({ maxRuntimeMs: 0 }) }),
+		);
+		expect(unlimited.effectiveMaxRuntimeMs).toBe(0);
+
+		const stricter = await resolveEffectiveSubagentPolicy(
+			request({ agent: "reviewer", session: session({ maxRuntimeMs: 300_000 }) }),
+		);
+		expect(stricter.effectiveMaxRuntimeMs).toBe(300_000);
+
+		mockDiscovery({ ...AGENT, name: "sonic" });
+		const sonic = await resolveEffectiveSubagentPolicy(
+			request({ agent: "sonic", session: session({ maxRuntimeMs: 3_600_000 }) }),
+		);
+		expect(sonic.performanceClass).toBe("explore");
+		expect(sonic.effectiveMaxRuntimeMs).toBe(600_000);
+
+		mockDiscovery({ ...AGENT, name: "task" });
+		const worker = await resolveEffectiveSubagentPolicy(
+			request({ agent: "task", session: session({ maxRuntimeMs: 3_600_000 }) }),
+		);
+		expect(worker.performanceClass).toBe("worker");
+		expect(worker.effectiveMaxRuntimeMs).toBe(3_600_000);
+	});
+
+	it("keeps explicit caller caps authoritative for task and eval omitted inherits setting", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer" });
+		const explicitZero = await resolveEffectiveSubagentPolicy(
+			request({
+				agent: "reviewer",
+				maxRuntimeMs: 0,
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(explicitZero.effectiveMaxRuntimeMs).toBe(0);
+
+		const belowCeiling = await resolveEffectiveSubagentPolicy(
+			request({
+				agent: "reviewer",
+				maxRuntimeMs: 300_000,
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(belowCeiling.effectiveMaxRuntimeMs).toBe(300_000);
+
+		const aboveCeiling = await resolveEffectiveSubagentPolicy(
+			request({
+				agent: "reviewer",
+				maxRuntimeMs: 2_000_000,
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(aboveCeiling.effectiveMaxRuntimeMs).toBe(2_000_000);
+
+		const evalInherited = await resolveEffectiveSubagentPolicy(
+			request({
+				invocationKind: "eval",
+				agent: "reviewer",
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(evalInherited.performanceClass).toBe("review");
+		expect(evalInherited.effectiveMaxRuntimeMs).toBe(3_600_000);
+		expect(Object.hasOwn(request({ invocationKind: "eval" }), "maxRuntimeMs")).toBe(false);
+
+		mockDiscovery({ ...AGENT, name: "sonic" });
+		const sonicOverride = await resolveEffectiveSubagentPolicy(
+			request({
+				agent: "sonic",
+				maxRuntimeMs: 900_000,
+				session: session({ maxRuntimeMs: 3_600_000 }),
+			}),
+		);
+		expect(sonicOverride.performanceClass).toBe("explore");
+		expect(sonicOverride.effectiveMaxRuntimeMs).toBe(900_000);
+	});
+
+	it("passes performanceClass and effective runtime through executor options", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer" });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({
+				agent: "reviewer",
+				session: session({ maxRuntimeMs: 3_600_000 }),
+				retainArtifacts: true,
+			}),
+		);
+		expect(settled.policy.performanceClass).toBe("review");
+		expect(settled.policy.effectiveMaxRuntimeMs).toBe(1_800_000);
+		expect(dispatched[0]?.performanceClass).toBe("review");
+		expect(dispatched[0]?.maxRuntimeMs).toBe(1_800_000);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 });

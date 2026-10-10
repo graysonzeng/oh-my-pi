@@ -200,6 +200,68 @@ export function configureProviderMaxInFlightRequests(limits: Record<string, numb
 	configuredProviderMaxInFlightRequests = limits ?? {};
 }
 
+/**
+ * Read-only occupancy for D8 limiter attribution.
+ * Counts active (non-stale) leases under the provider's in-flight root without
+ * acquiring a slot. Missing/empty roots report inFlight=0; capacity comes from
+ * the configured limit (or 0 = unlimited / unknown cap when unset).
+ */
+export async function snapshotProviderInFlightOccupancy(
+	provider: string,
+): Promise<{ inFlight: number; capacity: number } | null> {
+	const capacity = resolveProviderInFlightLimit(provider);
+	if (capacity === undefined) return null;
+	const dir = providerInFlightDir(provider);
+	let inFlight = 0;
+	try {
+		inFlight = await cleanupProviderInFlightLeases(dir);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		inFlight = 0;
+	}
+	return { inFlight, capacity };
+}
+
+/**
+ * Snapshot every configured provider's in-flight occupancy.
+ * Does NOT sum capacities across providers (that masks local saturation:
+ * 4/4 + 0/4 must not look like 4/8 idle). Reports the worst-saturated
+ * provider's occupancy so blocking reflects any local saturation.
+ */
+export async function snapshotConfiguredProviderInFlightOccupancy(): Promise<{
+	inFlight: number;
+	capacity: number;
+	providers: number;
+	/** True when any sampled provider is at/over capacity. */
+	anyBlocking: boolean;
+	saturatedProviders: string[];
+} | null> {
+	const providers = Object.keys(configuredProviderMaxInFlightRequests);
+	if (providers.length === 0) return null;
+	let counted = 0;
+	let worst: { inFlight: number; capacity: number; score: number } | null = null;
+	const saturatedProviders: string[] = [];
+	for (const provider of providers) {
+		const snap = await snapshotProviderInFlightOccupancy(provider);
+		if (!snap) continue;
+		counted++;
+		const unlimited = !Number.isFinite(snap.capacity) || snap.capacity <= 0;
+		const score = unlimited ? 0 : snap.inFlight / snap.capacity;
+		if (!unlimited && snap.inFlight >= snap.capacity) saturatedProviders.push(provider);
+		if (!worst || score > worst.score) {
+			worst = { inFlight: snap.inFlight, capacity: snap.capacity, score };
+		}
+	}
+	if (counted === 0 || !worst) return null;
+	return {
+		inFlight: worst.inFlight,
+		capacity: worst.capacity,
+		providers: counted,
+		anyBlocking: saturatedProviders.length > 0,
+		saturatedProviders,
+	};
+}
+
 function resolveProviderInFlightLimit(
 	provider: string,
 	options?: Pick<StreamOptions, "maxInFlightRequests">,

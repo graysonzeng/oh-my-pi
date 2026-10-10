@@ -1872,6 +1872,9 @@ export async function runRootCommand(
 			// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
 			cfgToolsApprovalMode.override(settingsInstance, "yolo");
 		}
+		if (parsedArgs.ptc) {
+			settingsInstance.override("tools.ptc.mode", parsedArgs.ptc);
+		}
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyProtocolDefaults("rpc", settingsInstance);
 		} else if (parsedArgs.mode === "acp") {
@@ -1934,6 +1937,13 @@ export async function runRootCommand(
 		// Apply --advisor CLI flag (ephemeral, not persisted)
 		if (parsedArgs.advisor) {
 			cfgAdvisorEnabled.override(settingsInstance, true);
+		}
+		if (parsedArgs.consult) {
+			settingsInstance.override("consult.enabled", true);
+		}
+		if (parsedArgs.consultModel) {
+			settingsInstance.override("consult.enabled", true);
+			settingsInstance.override("consult.model", parsedArgs.consultModel);
 		}
 		// Apply --external-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.externalThinking) {
@@ -2210,6 +2220,7 @@ export async function runRootCommand(
 		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.tuiTranscript = isInteractive;
 		sessionOptions.autoTitle = isInteractive;
+		if (isInteractive) sessionOptions.allowHeadlessGoalContinuation = false;
 		sessionOptions.settings = settingsInstance;
 		sessionOptions.onPrewalkWarning = warning => {
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });

@@ -125,8 +125,8 @@ import {
 	cfgAdvisorReviewMode,
 	cfgAdvisorSyncBacklog,
 } from "../advisor/settings";
-import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
-import { resolveModelCompactionSettings } from "./model-compaction-threshold";
+import { cfgContextPromotionEnabled } from "./context-settings";
+import { effectiveCompactionSettings } from "./context-strategy-experiment";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -460,6 +460,8 @@ export interface SessionAdvisorsHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	/** The session's current active model, used for same-model suspension. */
+	getActiveModel(): Model | undefined;
 	yieldQueue: YieldQueue;
 	obfuscator(): SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
@@ -720,6 +722,37 @@ export class SessionAdvisors {
 		else this.#buildAdvisorRuntime(true);
 	}
 
+	/**
+	 * Re-evaluates advisor availability when the primary active model — or the
+	 * consultation settings that gate same-model suspension
+	 * (`advisor.allowSameModel`) — changes. Advisors whose resolved model equals
+	 * the new active model are suspended (`same_model`: no runtime is built while
+	 * the enabled config stays intact); as soon as the models diverge again the
+	 * runtime rebuilds from the current transcript tail. Mirrors
+	 * {@link onModelRolesChanged} but rebuilds quietly so high-frequency setting
+	 * signals never re-notify while an advisor is already suspended; one notice
+	 * marks the explicit running → same-model transition.
+	 */
+	onPrimaryModelChanged(): void {
+		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		const wasActive = this.#advisors.length > 0;
+		if (wasActive && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+		const started = this.#buildAdvisorRuntime(true, false);
+		if (wasActive && !started) {
+			const statuses = [...this.#advisorStatuses.values()];
+			if (
+				statuses.length > 0 &&
+				statuses.some(entry => entry.status === "same_model") &&
+				statuses.every(entry => entry.status === "same_model" || entry.status === "paused")
+			) {
+				this.#host.emitNotice(
+					"warning",
+					"Advisor paused: its resolved model now matches the active model. Set advisor.allowSameModel to run it anyway.",
+					"advisor",
+				);
+			}
+		}
+	}
 	/**
 	 * True when the enabled advisor roster still has an entry left at `no_model`.
 	 *
@@ -1155,6 +1188,25 @@ export class SessionAdvisors {
 				model = sel.model;
 				autoThinking = sel.thinkingLevel === AUTO_THINKING;
 				thinkingLevel = concreteThinkingLevel(sel.thinkingLevel);
+			}
+
+			// Same-model suspension: an advisor whose resolved model equals the
+			// primary's active model would only re-review that model's own output, so
+			// it stays off (status `same_model`) unless the user opts in via
+			// `advisor.allowSameModel`. The enabled config is preserved — a later
+			// active-model change (or role reassignment / setting toggle) rebuilds the
+			// runtime without user action.
+			const activeModel = this.#host.getActiveModel();
+			if (activeModel && modelsAreEqual(activeModel, model) && !this.#host.settings.get("advisor.allowSameModel")) {
+				this.#advisorStatuses.set(slug, { name: config.name, status: "same_model" });
+				if (emitWarnings) {
+					this.#host.emitNotice(
+						"warning",
+						`Advisor "${config.name}" paused: it resolves to the active model (${formatModelString(model)}). Set advisor.allowSameModel to run it anyway.`,
+						"advisor",
+					);
+				}
+				continue;
 			}
 			// Clamp the effort against the resolved model. Historically we defaulted
 			// to `ThinkingLevel.Medium` unconditionally, which threw at first stream
@@ -2308,19 +2360,17 @@ export class SessionAdvisors {
 		}
 		const incomingTokens = agent.tokenizer.countMessage(incoming);
 
-		const configuredCompaction = cfgCompaction.get(this.#host.settings);
+		let advisorModel = agent.state.model;
+		const contextWindow = advisorModel.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+
+		const configuredCompaction = effectiveCompactionSettings(this.#host.settings, contextWindow, advisorModel);
 		const methods = resolveCompactionMethodOrder(configuredCompaction.methodOrder);
 		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
 		}
 		const compactionMethod = methods.includes("remote") ? "remote" : "soft";
-		let advisorModel = agent.state.model;
-		let compactionSettings = resolveMethodSettings(
-			resolveModelCompactionSettings(this.#host.settings, advisorModel),
-			compactionMethod,
-		);
-		const contextWindow = advisorModel.contextWindow ?? 0;
-		if (contextWindow <= 0) return false;
+		let compactionSettings = resolveMethodSettings(configuredCompaction, compactionMethod);
 
 		const messages = agent.state.messages;
 		const storedConversationTokens = agent.tokenizer.countMessages(messages, { excludeEncryptedReasoning: true });
@@ -2346,7 +2396,7 @@ export class SessionAdvisors {
 			// Promotion succeeded, check if new model has enough space under its own compaction point
 			const newModel = agent.state.model;
 			compactionSettings = resolveMethodSettings(
-				resolveModelCompactionSettings(this.#host.settings, newModel),
+				effectiveCompactionSettings(this.#host.settings, newModel.contextWindow ?? undefined, newModel),
 				compactionMethod,
 			);
 			const newWindow = newModel.contextWindow ?? 0;
@@ -2970,6 +3020,11 @@ export class SessionAdvisors {
 					? "Advisor setting is enabled, but no model is assigned to the 'advisor' role."
 					: "Advisor is disabled.";
 			}
+			if (s.status === "same_model") {
+				return stats.configured
+					? `Advisor "${s.name}" is paused: it resolves to the same model as the active model. Set advisor.allowSameModel to run it anyway.`
+					: "Advisor is disabled.";
+			}
 			const contextLine =
 				s.contextWindow > 0
 					? `Context: ${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} tokens (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
@@ -2988,7 +3043,7 @@ export class SessionAdvisors {
 					? `${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
 					: `${s.contextTokens.toLocaleString()}`;
 			lines.push(
-				`  • ${s.name}${s.model && s.status === "running" ? ` (${s.model.provider}/${s.model.id})` : ` [${s.status}]`} — context ${ctx} tokens, $${s.cost.toFixed(4)}`,
+				`  • ${s.name}${s.model && s.status === "running" ? ` (${s.model.provider}/${s.model.id})` : ` [${s.status === "same_model" ? "same model" : s.status}]`} — context ${ctx} tokens, $${s.cost.toFixed(4)}`,
 			);
 		}
 		lines.push(

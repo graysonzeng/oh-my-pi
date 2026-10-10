@@ -2208,8 +2208,8 @@ export interface TaskItem {
 	task?: string;
 	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
 	solutionSpace?: string;
-	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
-	effort?: "lo" | "med" | "hi";
+	/** Per-spawn thinking effort (`minimal`/`low`/`medium`/`high`/`xhigh`/`max`). Overrides the agent's default selector. Unrecognized values resolve to high. */
+	effort?: string;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -2235,8 +2235,8 @@ export interface TaskParams {
 	task?: string;
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
 	solutionSpace?: string;
-	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
-	effort?: "lo" | "med" | "hi";
+	/** Per-spawn thinking effort (flat form). Canonical names clamp to model support; unrecognized values resolve to high. */
+	effort?: string;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */

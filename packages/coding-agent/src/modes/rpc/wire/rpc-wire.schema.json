@@ -153,6 +153,17 @@
 				"clientOmit": []
 			},
 			{
+				"name": "set_ptc_mode",
+				"doc": "Set programmatic tool calling mode (`off`, `on`, or `auto`); returns the mode and whether it is active.",
+				"params": "SetPtcModeParams",
+				"result": "SetPtcModeResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "set_slow_mode",
 				"doc": "Turn `/slow` on or off for the active model; returns whether it is now on.",
 				"params": "SetSlowModeParams",
@@ -2389,6 +2400,13 @@
 				},
 				"tokenBudget": {
 					"type": "integer"
+				},
+				"headlessContinuationCount": {
+					"type": "integer",
+					"description": "Headless auto-continuations spent on this goal."
+				},
+				"hostGate": {
+					"description": "Host completion-gate state (verification, decisions, no-progress)."
 				}
 			},
 			"required": [
@@ -3469,7 +3487,8 @@
 				"remote",
 				"handoff",
 				"shake",
-				"snapcompact"
+				"snapcompact",
+				"structured"
 			],
 			"type": "string"
 		},
@@ -3528,6 +3547,10 @@
 				"isTerminal": {
 					"type": "boolean",
 					"description": "False when a continuation or async delivery remains."
+				},
+				"deliveryId": {
+					"type": "string",
+					"description": "Async-job delivery that produced this run, when one did."
 				},
 				"yielded": {
 					"type": "boolean",
@@ -4054,6 +4077,24 @@
 				"type"
 			]
 		},
+		"TodoUpdatedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "todo_updated"
+				},
+				"phases": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/TodoPhase"
+					}
+				}
+			},
+			"required": [
+				"type",
+				"phases"
+			]
+		},
 		"IrcMessageEvent": {
 			"type": "object",
 			"properties": {
@@ -4245,6 +4286,9 @@
 				},
 				{
 					"$ref": "#/$defs/TodoAutoClearEvent"
+				},
+				{
+					"$ref": "#/$defs/TodoUpdatedEvent"
 				},
 				{
 					"$ref": "#/$defs/IrcMessageEvent"
@@ -4449,6 +4493,16 @@
 				"detached": {
 					"type": "boolean",
 					"description": "The subagent runs as a detached background job."
+				},
+				"completionKind": {
+					"enum": [
+						"completed",
+						"budget_stop",
+						"timeout",
+						"hard_abort"
+					],
+					"type": "string",
+					"description": "How a settled subagent ended, when it did not complete normally."
 				}
 			},
 			"required": [
@@ -5923,6 +5977,42 @@
 			},
 			"required": [
 				"enabled"
+			]
+		},
+		"SetPtcModeParams": {
+			"type": "object",
+			"properties": {
+				"mode": {
+					"enum": [
+						"off",
+						"on",
+						"auto"
+					],
+					"type": "string"
+				}
+			},
+			"required": [
+				"mode"
+			]
+		},
+		"SetPtcModeResult": {
+			"type": "object",
+			"properties": {
+				"mode": {
+					"enum": [
+						"off",
+						"on",
+						"auto"
+					],
+					"type": "string"
+				},
+				"active": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"mode",
+				"active"
 			]
 		},
 		"SetSlowModeParams": {

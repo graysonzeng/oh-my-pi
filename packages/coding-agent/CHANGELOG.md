@@ -1037,6 +1037,16 @@
 - Fixed `grep` paths like `dir/*.go` also matching files in subdirectories of `dir` ([#13146](https://github.com/can1357/oh-my-pi/issues/13146), [#13150](https://github.com/can1357/oh-my-pi/pull/13150) by [@radkawar](https://github.com/radkawar))
 - Fixed auto-compaction re-sending a failed native (server-side) compaction on every turn, re-reading the full context each time; after a failure a retry would repeat, the next configured method runs instead until a compaction succeeds ([#13310](https://github.com/can1357/oh-my-pi/pull/13310) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a `/slow off` session resending requests indefinitely when another session had activated the shared Anthropic low-priority lane ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
+- Added per-file edit-failure escalation: after two failed `edit`s on the same path, omp advises a re-read and escalates to the top model (`@slow` / `@default`).
+- Persisted per-task `finalStatus` on `async-result` deliveries so stats/scripts can report success rate per role even when the parent `task` toolResult still has empty `details.results`.
+- Documented the quality/cost routing plan and a recommended `modelRoles` example with comma-separated credential fallbacks (`gpt-6-astra:high` for top roles, `grok-4.6` for `task`, `deepseek-v4.1-flash` for `@smol`).
+
+### Changed
+
+- Comma-separated `modelRoles` values are now an ordered attempt chain for `resolveRoleChain` and derive `retry.fallbackChains` tails when a role has no explicit chain; when both a comma list and explicit `retry.fallbackChains.<role>` exist, the effective chain is comma tail then explicit (deduped).
+- Scout / system / task prompts steer broad read/grep/glob exploration to `scout` (summaries, not raw dumps) and multi-file verification to `reviewer` (`@slow`); scout conclusions never replace verification.
+- Built-in `smol` priority now prefers `deepseek-v4.1-flash` before `deepseek-v4-flash`.
+- Edit-failure escalation marks the swap only after a successful top-model apply; when `retry.modelFallback` is off or already on the top model, the advisory is re-read-only.
 
 ## [18.3.1] - 2026-09-25
 
@@ -1073,6 +1083,15 @@
 - Improved IDA database resource management with project sharing, bounded concurrency, idle cleanup, autosave, and clearer database status in listings.
 - Improved runtime configuration behavior with type-safe layered settings, live updates, and safe sequential saves.
 - Improved authentication and credential management to support live broker and credential-store changes.
+### Added
+
+- Added resumable, quality-gated multi-model workflows and `/delivery`, with independent review and verified worktree changes.
+- Added optional mid-turn `consult` with isolated context, usage budgets, and same-model auto-pause.
+- Added `code_intel`, structured compaction with recoverable tool output, and optional raw session-history search.
+- Added subagent performance-class budgets, live activity displays, deferred ordinary IRC messages, and offline latency reports.
+- Added session-wide programmatic tool calling via `tools.ptc.mode` (`off`/`on`/`auto`), CLI `--ptc`, and RPC `set_ptc_mode`, so any provider can collapse the direct tool surface into eval with a skeleton catalog and `catalog.searchTools`/`describeTools`.
+- Added `collab.autoStart` (`off` | `view` | `control`): every local interactive session hosts itself as it starts and rotates its room on `/new`, `/resume`, fork, or branch, so a phone or dashboard can reach any running session without running `/collab` first ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm) and [@sorphwer](https://github.com/sorphwer)).
+- Added `omp collab list [--json]` and `/collab list` to enumerate every live local Collab host (instance, generation, session, cwd, model, participants, relay/attention state, access) without exposing links, plus `omp collab link <instanceId|pid> [--view]` to fetch one generation-bound browser URL from a private per-room Unix socket/named pipe registry; room keys, write tokens, and URLs never touch disk ([#6099](https://github.com/can1357/oh-my-pi/issues/6099); [#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm) and [@sorphwer](https://github.com/sorphwer)).
 
 ### Fixed
 

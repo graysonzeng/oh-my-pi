@@ -17,6 +17,11 @@ export interface MCPServer {
 	name: string;
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
+	/**
+	 * When true, defer the real transport until first tool use (or manual
+	 * reconnect). Distinct from tool loadMode/discoverable presentation.
+	 */
+	lazy?: boolean;
 	/** Connection timeout in milliseconds */
 	timeout?: number;
 	/** Encoding for outgoing JSON-RPC request ids (default: `"number"`) */

@@ -5,6 +5,7 @@ import {
 	parseModelString,
 	splitUpstreamRouting,
 } from "@oh-my-pi/pi-tui/overlays/model-selector";
+export { parseModelString };
 /**
  * Model resolution, scoping, and initial selection.
  *
@@ -1030,6 +1031,32 @@ export function parseModelPattern(
 	);
 }
 
+/**
+ * Stable “does this selector match the active model?” entry for profile resolution.
+ * Reuses the same matching pipeline as model selection:
+ * - glob selectors (`*`, `?`, `[…]`) via {@link matchingGlobModels}
+ * - otherwise {@link parseModelPattern} + {@link modelsAreEqual}
+ *
+ * Callers must pass an `availableModels` list that includes the active model
+ * (or an equivalent identity) so fuzzy/exact resolution can see it.
+ */
+export function modelMatchesSelector(
+	model: Model<Api>,
+	selector: string,
+	availableModels: Model<Api>[],
+	preferences?: ModelMatchPreferences,
+): boolean {
+	const trimmed = selector.trim();
+	if (!trimmed) return false;
+
+	if (trimmed.includes("*") || trimmed.includes("?") || trimmed.includes("[")) {
+		return matchingGlobModels(trimmed, availableModels).some(candidate => modelsAreEqual(candidate, model));
+	}
+
+	const matched = parseModelPattern(trimmed, availableModels, preferences).model;
+	return matched !== undefined && modelsAreEqual(matched, model);
+}
+
 const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 
@@ -1100,7 +1127,7 @@ function isSessionInheritedAgentPattern(value: string): boolean {
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
-	return role === "smol" || role === "slow";
+	return role === "slow";
 }
 
 /**
@@ -1286,9 +1313,25 @@ function resolveEffectiveAgentModelSelection(
 	}
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
-	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
 	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
+
+	// A multi-candidate agent model may list a session-inherited marker (e.g.
+	// "@task") as one fallback among literal candidates. Role expansion cannot
+	// resolve that marker — only the single-pattern form inherits — so expand it
+	// to the session fallback pattern (the main agent's model) here, keeping it
+	// a real candidate. Without a session pattern the marker is dropped.
+	let resolvedAgentModel = agentModel;
+	if (singleAgentPattern === undefined && normalizedAgentPatterns.some(isSessionInheritedAgentPattern)) {
+		const sessionFallback =
+			activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
+		const expanded = normalizedAgentPatterns.flatMap(pattern =>
+			isSessionInheritedAgentPattern(pattern) ? (sessionFallback ? [sessionFallback] : []) : [pattern],
+		);
+		resolvedAgentModel = expanded;
+	}
+
+	const configuredAgentPatterns = resolveConfiguredModelPatterns(resolvedAgentModel, settings);
 	if (configuredAgentPatterns.length > 0) {
 		if (
 			singleAgentPattern === formatModelRoleAlias("task") ||
@@ -1566,16 +1609,45 @@ export interface RoleChainCandidate {
 	thinkingLevel?: ConfiguredThinkingLevel;
 }
 
-/** Resolve a role's primary and retry candidates in effective attempt order. */
-export function resolveRoleChain(role: string, settings: Settings, pool: Model<Api>[]): RoleChainCandidate[] {
+/**
+ * Resolve a role's primary and retry candidates in effective attempt order.
+ *
+ * Comma-separated `modelRoles.<role>` entries expand into ordered candidates.
+ * When an explicit `retry.fallbackChains.<role>` is also set, those selectors
+ * append after the comma list (deduped by route) — the same merge rule as
+ * {@link getRetryFallbackChains} (comma tail then explicit for the retry chain).
+ * Multi-entry modelRoles skip built-in priority.json defaults so they do not
+ * dilute the configured order.
+ */
+export function resolveRoleChain(
+	role: string,
+	settings: Settings,
+	pool: Model<Api>[],
+	options?: { hoistProvider?: string },
+): RoleChainCandidate[] {
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
-	const primarySelector = configured || formatModelRoleAlias(role);
 	const configuredFallbacks = cfgRetryFallbackChains.get(settings)[role];
 	const hasConfiguredFallbackChain = Array.isArray(configuredFallbacks);
-	const fallbackSelectors = hasConfiguredFallbackChain ? configuredFallbacks : rolePriorityDefaults(role);
+	// Comma lists in `modelRoles` are an ordered attempt chain (primary +
+	// credential/auth fallbacks). Expand each entry into its own candidate so a
+	// later selector is reachable after credits/auth fail on an earlier one —
+	// `resolveModelRoleValue` alone would collapse the list to the first hit.
+	const primaryPatterns = configured ? normalizeModelPatternList(configured) : [];
+	const primarySelectors =
+		primaryPatterns.length > 0
+			? primaryPatterns.map(selector => ({ selector, explicit: true as boolean }))
+			: [{ selector: formatModelRoleAlias(role), explicit: Object.hasOwn(configuredRoles, role) }];
+	// When the role already lists multiple models, those entries are the chain;
+	// skip built-in priority.json defaults so they do not dilute the configured order.
+	// Explicit retry.fallbackChains.<role> appends after the comma list (deduped).
+	const fallbackSelectors = hasConfiguredFallbackChain
+		? configuredFallbacks
+		: primaryPatterns.length > 1
+			? []
+			: rolePriorityDefaults(role);
 	const selectors = [
-		{ selector: primarySelector, explicit: Object.hasOwn(configuredRoles, role) },
+		...primarySelectors,
 		...fallbackSelectors.map(selector => ({ selector, explicit: hasConfiguredFallbackChain })),
 	];
 	const candidates: RoleChainCandidate[] = [];

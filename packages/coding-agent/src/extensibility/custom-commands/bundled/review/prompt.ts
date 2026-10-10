@@ -5,8 +5,8 @@ import type { CodeReviewAnnotation, ReviewDiffFile } from "@oh-my-pi/pi-tui/over
 import { getRecommendedReviewAgentCount, getReviewDiffPreview } from "./diff";
 import type { ResolvedReviewTarget } from "./target";
 
-const LARGE_DIFF_CHARACTER_LIMIT = 50_000;
-const LARGE_DIFF_FILE_LIMIT = 20;
+export const LARGE_DIFF_CHARACTER_LIMIT = 50_000;
+export const LARGE_DIFF_FILE_LIMIT = 20;
 
 export interface FormatCodeReviewAnnotationsOptions {
 	forReviewer: boolean;
@@ -79,7 +79,11 @@ export function formatCodeReviewAnnotations(
 }
 
 /** Renders a review request from one frozen target snapshot. */
-export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstructions?: string): string {
+export function buildReviewPrompt(
+	target: ResolvedReviewTarget,
+	additionalInstructions?: string,
+	evidence?: { snapshotRef?: string },
+): string {
 	const skipDiff =
 		target.rawDiff.length > LARGE_DIFF_CHARACTER_LIMIT || target.snapshot.files.length > LARGE_DIFF_FILE_LIMIT;
 	const linesPerFile = skipDiff ? Math.max(5, Math.floor(100 / target.snapshot.files.length)) : 0;
@@ -96,6 +100,8 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 		skipDiff,
 		linesPerFile,
 		rawDiff: target.rawDiff.trim(),
+		snapshotId: new Bun.CryptoHasher("sha256").update(target.rawDiff).digest("hex"),
+		snapshotRef: evidence?.snapshotRef,
 		diffInstruction: target.diffInstruction,
 		contextInstruction: target.contextInstruction,
 		additionalInstructions: additionalInstructions?.trim(),

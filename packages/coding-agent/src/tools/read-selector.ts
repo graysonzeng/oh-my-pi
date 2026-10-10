@@ -1,7 +1,8 @@
 import type { LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { parseTailCount } from "./path-utils";
 import { parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { splitInternalUrlSel, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { parseTailCount } from "./path-utils";
 /** Parsed representation of a path-embedded selector. */
 export type ParsedSelector =
 	| { kind: "none" }
@@ -108,6 +109,26 @@ export function parseSel(sel: string | undefined): ParsedSelector {
  * Returns the FIRST range only — multi-range callers MUST branch on `isMultiRange` before
  * calling this helper.
  */
+export function parseReadPathSelector(path: unknown): ParsedSelector {
+	if (typeof path !== "string" || path.length === 0) return { kind: "none" };
+	const split = /^[a-z][a-z0-9+.-]*:\/\//i.test(path) ? splitInternalUrlSel(path) : splitPathAndSel(path);
+	return parseSel(split.sel);
+}
+
+/** Explicit bounded ranges and `:raw` must survive ordinary-session tool-output clamps. */
+export function shouldPreserveExplicitReadRange(path: unknown): boolean {
+	const parsed = parseReadPathSelector(path);
+	return parsed.kind === "raw" || parsed.kind === "lines";
+}
+
+/** Read tool args historically use `path`; some call sites still pass `file_path`. */
+export function readPathFromToolArgs(args: unknown): unknown {
+	if (!args || typeof args !== "object") return undefined;
+	if (Object.hasOwn(args, "path")) return Reflect.get(args, "path");
+	if (Object.hasOwn(args, "file_path")) return Reflect.get(args, "file_path");
+	return undefined;
+}
+
 export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; limit?: number } {
 	if (parsed.kind === "lines") {
 		const first = parsed.ranges[0];
@@ -115,4 +136,59 @@ export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; l
 		return { offset: first.startLine, limit };
 	}
 	return {};
+}
+
+/**
+ * Compose optional Claude-style `offset`/`limit` kwargs onto the path-inline
+ * selector contract (history supplement S3). Prefer embedding `:N` / `:raw:N-`
+ * in `path`. When a range selector is already present, kwargs are rejected
+ * with an explicit message instead of silently re-reading page 1.
+ *
+ * `0` is treated as omitted so providers that must send every JSON field
+ * (strict required+nullable) can pass `offset: 0` / `limit: 0` without a
+ * validation round-trip. Non-zero kwargs with an existing range selector
+ * still fail closed.
+ *
+ * Artifact URLs without an existing `:raw` get `:raw` injected so continue-read
+ * pages the verbatim body (history E2/E3). Plain filesystem paths compose as
+ * `path:301` / `path:301+K` — never force `:raw` onto hashline/preview reads.
+ */
+export function composeReadPaginationArgs(input: { path: string; offset?: number; limit?: number }): { path: string } {
+	const offset = omitZeroPaginationKwarg(input.offset);
+	const limit = omitZeroPaginationKwarg(input.limit);
+	if (offset === undefined && limit === undefined) return { path: input.path };
+
+	if (offset !== undefined && !(offset >= 1)) {
+		throw new ToolError(`Invalid offset ${input.offset}: must be a 1-indexed positive line number.`);
+	}
+	if (limit !== undefined && !(limit >= 1)) {
+		throw new ToolError(`Invalid limit ${input.limit}: must be a positive line count.`);
+	}
+
+	const parsed = parseReadPathSelector(input.path);
+	if (parsed.kind === "lines" || parsed.kind === "tail") {
+		const next = offset !== undefined ? (limit !== undefined ? `:${offset}+${limit}` : `:${offset}-`) : `:1+${limit}`;
+		const example = input.path.includes("artifact://") ? "artifact://…:raw:301-" : "path:301";
+		throw new ToolError(
+			`Stale pagination kwargs: path already declares a line selector (${input.path}). ` +
+				`Do not pass separate offset/limit — use the next-page locator from the previous read ` +
+				`(for example ${example} or compose onto the path as ${next}). ` +
+				`Received offset=${offset ?? "unset"} limit=${limit ?? "unset"}.`,
+		);
+	}
+
+	const rangeSuffix =
+		offset === undefined ? `:1+${limit}` : limit === undefined ? `:${offset}-` : `:${offset}+${limit}`;
+	const hasRaw = parsed.kind === "raw" || input.path.split(":").some(chunk => chunk.toLowerCase() === "raw");
+	if (hasRaw) return { path: `${input.path}${rangeSuffix}` };
+	// Verbatim artifact continue-read needs :raw; ordinary files keep hashline selectors.
+	if (/^artifact:\/\//i.test(input.path)) return { path: `${input.path}:raw${rangeSuffix}` };
+	return { path: `${input.path}${rangeSuffix}` };
+}
+
+/** Strict JSON schemas require every property; models send `0` for “unspecified”. */
+function omitZeroPaginationKwarg(value: number | undefined): number | undefined {
+	if (value === undefined) return undefined;
+	const n = Math.floor(value);
+	return n === 0 ? undefined : n;
 }

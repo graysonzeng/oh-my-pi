@@ -2934,6 +2934,12 @@ pub struct Goal {
 	pub updated_at: i64,
 	#[serde(rename = "tokenBudget", default, skip_serializing_if = "Option::is_none")]
 	pub token_budget: Option<i64>,
+	/// Headless auto-continuations spent on this goal.
+	#[serde(rename = "headlessContinuationCount", default, skip_serializing_if = "Option::is_none")]
+	pub headless_continuation_count: Option<i64>,
+	/// Host completion-gate state (verification, decisions, no-progress).
+	#[serde(rename = "hostGate", default, skip_serializing_if = "Option::is_none")]
+	pub host_gate: Option<Value>,
 }
 
 /// Session goal mode; `mode` is `"exiting"` while a completed goal unwinds.
@@ -3509,6 +3515,8 @@ pub enum AutoCompactionAction {
 	Shake,
 	#[serde(rename = "snapcompact")]
 	Snapcompact,
+	#[serde(rename = "structured")]
+	Structured,
 }
 
 impl AutoCompactionAction {
@@ -3520,6 +3528,7 @@ impl AutoCompactionAction {
 			Self::Handoff => "handoff",
 			Self::Shake => "shake",
 			Self::Snapcompact => "snapcompact",
+			Self::Structured => "structured",
 		}
 	}
 }
@@ -3600,6 +3609,9 @@ pub struct AgentEndEvent {
 	/// False when a continuation or async delivery remains.
 	#[serde(rename = "isTerminal", default, skip_serializing_if = "Option::is_none")]
 	pub is_terminal: Option<bool>,
+	/// Async-job delivery that produced this run, when one did.
+	#[serde(rename = "deliveryId", default, skip_serializing_if = "Option::is_none")]
+	pub delivery_id: Option<String>,
 	/// The agent finished its turn and resumes only for queued input or background-job results.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub yielded: Option<bool>,
@@ -3806,6 +3818,11 @@ pub struct TodoReminderEvent {
 pub struct TodoAutoClearEvent {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TodoUpdatedEvent {
+	pub phases: Vec<TodoPhase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IrcMessageEvent {
 	pub message: CustomMessage,
 }
@@ -3879,6 +3896,7 @@ pub enum RpcAgentEvent {
 	TtsrTriggered(TtsrTriggeredEvent),
 	TodoReminder(TodoReminderEvent),
 	TodoAutoClear(TodoAutoClearEvent),
+	TodoUpdated(TodoUpdatedEvent),
 	IrcMessage(IrcMessageEvent),
 	Notice(NoticeEvent),
 	/// The effective thinking level changed.
@@ -3919,6 +3937,7 @@ impl RpcAgentEvent {
 			Some("ttsr_triggered") => |value| serde_json::from_value(value).map(Self::TtsrTriggered),
 			Some("todo_reminder") => |value| serde_json::from_value(value).map(Self::TodoReminder),
 			Some("todo_auto_clear") => |value| serde_json::from_value(value).map(Self::TodoAutoClear),
+			Some("todo_updated") => |value| serde_json::from_value(value).map(Self::TodoUpdated),
 			Some("irc_message") => |value| serde_json::from_value(value).map(Self::IrcMessage),
 			Some("notice") => |value| serde_json::from_value(value).map(Self::Notice),
 			Some("thinking_level_changed") => |value| serde_json::from_value(value).map(Self::ThinkingLevelChanged),
@@ -3961,6 +3980,7 @@ impl Serialize for RpcAgentEvent {
 			Self::TtsrTriggered(member) => serialize_tagged(member, &[("type", "ttsr_triggered")], serializer),
 			Self::TodoReminder(member) => serialize_tagged(member, &[("type", "todo_reminder")], serializer),
 			Self::TodoAutoClear(member) => serialize_tagged(member, &[("type", "todo_auto_clear")], serializer),
+			Self::TodoUpdated(member) => serialize_tagged(member, &[("type", "todo_updated")], serializer),
 			Self::IrcMessage(member) => serialize_tagged(member, &[("type", "irc_message")], serializer),
 			Self::Notice(member) => serialize_tagged(member, &[("type", "notice")], serializer),
 			Self::ThinkingLevelChanged(member) => serialize_tagged(member, &[("type", "thinking_level_changed")], serializer),
@@ -4098,6 +4118,9 @@ pub struct SubagentLifecyclePayload {
 	/// The subagent runs as a detached background job.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub detached: Option<bool>,
+	/// How a settled subagent ended, when it did not complete normally.
+	#[serde(rename = "completionKind", default, skip_serializing_if = "Option::is_none")]
+	pub completion_kind: Option<SubagentLifecyclePayloadCompletionKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4931,7 +4954,7 @@ impl RpcNotification {
 			Some("session_info_update") => |value| serde_json::from_value(value).map(Self::SessionInfoUpdate),
 			Some("config_update") => |value| serde_json::from_value(value).map(Self::ConfigUpdate),
 			Some("rpc_frame_error") => |value| serde_json::from_value(value).map(Self::RpcFrameError),
-			Some("agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcAgentEvent),
+			Some("agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "todo_updated" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcAgentEvent),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)
@@ -4991,7 +5014,7 @@ impl RpcServerFrame {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("response") => |value| serde_json::from_value(value).map(Self::Response),
 			Some("host_tool_call" | "host_tool_cancel" | "host_uri_request" | "host_uri_cancel") => |value| serde_json::from_value(value).map(Self::RpcHostRequest),
-			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
+			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "todo_updated" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)
@@ -5091,6 +5114,17 @@ pub struct OpenSessionParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetFastModeParams {
 	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetPtcModeParams {
+	pub mode: SetPtcModeParamsMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetPtcModeResult {
+	pub mode: SetPtcModeResultMode,
+	pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5717,6 +5751,30 @@ impl LogoutAccountType {
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SubagentLifecyclePayloadCompletionKind {
+	#[serde(rename = "completed")]
+	Completed,
+	#[serde(rename = "budget_stop")]
+	BudgetStop,
+	#[serde(rename = "timeout")]
+	Timeout,
+	#[serde(rename = "hard_abort")]
+	HardAbort,
+}
+
+impl SubagentLifecyclePayloadCompletionKind {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Completed => "completed",
+			Self::BudgetStop => "budget_stop",
+			Self::Timeout => "timeout",
+			Self::HardAbort => "hard_abort",
+		}
+	}
+}
+
 /// The constant `true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct LitTrue;
@@ -5755,6 +5813,48 @@ impl HostUriResultContentType {
 			Self::TextMarkdown => "text/markdown",
 			Self::ApplicationJson => "application/json",
 			Self::TextPlain => "text/plain",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SetPtcModeParamsMode {
+	#[serde(rename = "off")]
+	Off,
+	#[serde(rename = "on")]
+	On,
+	#[serde(rename = "auto")]
+	Auto,
+}
+
+impl SetPtcModeParamsMode {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Off => "off",
+			Self::On => "on",
+			Self::Auto => "auto",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SetPtcModeResultMode {
+	#[serde(rename = "off")]
+	Off,
+	#[serde(rename = "on")]
+	On,
+	#[serde(rename = "auto")]
+	Auto,
+}
+
+impl SetPtcModeResultMode {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Off => "off",
+			Self::On => "on",
+			Self::Auto => "auto",
 		}
 	}
 }
@@ -6082,6 +6182,22 @@ impl Command for SetFastModeCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<FastModeResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Set programmatic tool calling mode (`off`, `on`, or `auto`); returns the mode and whether it is active.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetPtcModeCommand {
+	pub mode: SetPtcModeParamsMode,
+}
+
+impl Command for SetPtcModeCommand {
+	const NAME: &'static str = "set_ptc_mode";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SetPtcModeResult;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SetPtcModeResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
 	}
 }
 

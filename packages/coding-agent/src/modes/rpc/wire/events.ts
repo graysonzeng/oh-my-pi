@@ -10,7 +10,7 @@ const MESSAGE_ID = doc("string", "Shared by the start, updates, and end of one m
 
 export const eventDefs = {
 	AutoCompactionReason: "'threshold' | 'overflow' | 'idle' | 'incomplete'",
-	AutoCompactionAction: "'context-full' | 'remote' | 'handoff' | 'shake' | 'snapcompact'",
+	AutoCompactionAction: "'context-full' | 'remote' | 'handoff' | 'shake' | 'snapcompact' | 'structured'",
 	CacheWarmingPhase: "'streaming' | 'idle'",
 	CacheWarmingOutcome: "'hit' | 'miss' | 'error' | 'aborted'",
 	NotifyType: "'info' | 'warning' | 'error'",
@@ -24,6 +24,7 @@ export const eventDefs = {
 		),
 		"messageCount?": doc("number.integer", "Original message count when the frame was compacted."),
 		"isTerminal?": doc("boolean", "False when a continuation or async delivery remains."),
+		"deliveryId?": doc("string", "Async-job delivery that produced this run, when one did."),
 		"yielded?": doc(
 			"boolean",
 			"The agent finished its turn and resumes only for queued input or background-job results.",
@@ -137,6 +138,7 @@ export const eventDefs = {
 		maxAttempts: "number.integer",
 	},
 	TodoAutoClearEvent: { type: "'todo_auto_clear'" },
+	TodoUpdatedEvent: { type: "'todo_updated'", phases: "TodoPhase[]" },
 	IrcMessageEvent: { type: "'irc_message'", message: "CustomMessage" },
 	NoticeEvent: { type: "'notice'", level: "NotifyType", message: "string", "source?": "string" },
 	ThinkingLevelChangedEvent: doc(
@@ -185,6 +187,7 @@ export const eventDefs = {
 			"TtsrTriggeredEvent",
 			"TodoReminderEvent",
 			"TodoAutoClearEvent",
+			"TodoUpdatedEvent",
 			"IrcMessageEvent",
 			"NoticeEvent",
 			"ThinkingLevelChangedEvent",

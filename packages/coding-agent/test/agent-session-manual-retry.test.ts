@@ -396,7 +396,7 @@ describe("AgentSession manual retry", () => {
 		expect(failedAssistant?.stopReason).toBe("error");
 
 		const reopenedManager = SessionManager.inMemory();
-		reopenedManager.restoreState(sessionManager.captureState());
+		await reopenedManager.restoreState(sessionManager.captureState());
 		await session.dispose();
 		session = undefined;
 
