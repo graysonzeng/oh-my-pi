@@ -904,6 +904,23 @@ describe("role priorities and chains", () => {
 		]);
 	});
 
+	test("expands comma-separated modelRoles into ordered explicit chain candidates", () => {
+		const primary = roleChainModel("gateway", "gpt-6-astra");
+		const fallback = roleChainModel("openai-codex", "gpt-5.6-sol");
+		const settings = Settings.isolated({
+			modelRoles: { slow: "gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol" },
+		});
+
+		const chain = resolveRoleChain("slow", settings, [primary, fallback]);
+
+		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
+			["gateway/gpt-6-astra", true],
+			["openai-codex/gpt-5.6-sol", true],
+		]);
+		// Multi-entry modelRoles is the full chain; priority.json defaults must not dilute it.
+		expect(chain.length).toBe(2);
+	});
+
 	test("upgrades a default primary when a configured fallback resolves the same route", () => {
 		const parallel = roleChainModel("web", "parallel");
 		const settings = Settings.isolated({
@@ -1391,7 +1408,13 @@ describe("resolveAgentModelPatterns", () => {
 		});
 		const smol = resolveAgentModelPatterns({ agentModel: "@smol", settings });
 
-		expect(smol.slice(0, 2)).toEqual(["gateway/deepseek-v4-flash:max", "gateway/grok-4.6:high"]);
+		expect(smol.slice(0, 4)).toEqual([
+			"gateway/deepseek-v4.1-flash:high",
+			"deepseek-v4.1-flash",
+			"gateway/deepseek-v4-flash:max",
+			"deepseek-v4-flash",
+		]);
+		expect(smol).toContain("gateway/grok-4.6:high");
 		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(smol);
 	});
 
@@ -1410,8 +1433,8 @@ describe("resolveAgentModelPatterns", () => {
 
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
 		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings }).slice(0, 2)).toEqual([
-			"gateway/deepseek-v4-flash:max",
-			"gateway/grok-4.6:high",
+			"gateway/deepseek-v4.1-flash:high",
+			"deepseek-v4.1-flash",
 		]);
 	});
 

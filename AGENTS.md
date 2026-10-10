@@ -345,3 +345,7 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+
+## Standing goal: fast and good (model routing)
+
+Cut task time and cost without lowering quality: top model (`gpt-6-astra:medium`) for orchestration, design/plan and verification; strong coding model (`grok-4.6`) for execution (`task`); fast cheap model (`deepseek-v4.1-flash` via `@smol`) for scout/search/commit. Verification never on the cheap tier. Policy, measured numbers, config mapping and the re-analysis loop: `docs/design/2026-10-11-model-routing-cost-latency.md` and the prioritized fix/rollout plan `docs/design/2026-10-11-omp-quality-cost-plan.md` (re-run `scripts/model-routing-report.sh` and `scripts/model-routing-roles.py` periodically and update them). Recommended `modelRoles` example: `packages/coding-agent/examples/config/model-roles-quality-cost.example.yml`. Main development branch: `workflow`. `paired_evidence_ready=false` — do not claim live cost/latency wins without paired evidence.

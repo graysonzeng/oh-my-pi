@@ -5,6 +5,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
+	getRetryFallbackChains,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
@@ -141,6 +142,24 @@ describe("retry fallback selector resolution", () => {
 		expect(expanded.judge).toEqual([]);
 		expect(expanded.image).toBeUndefined();
 		expect(expanded.web).toBeUndefined();
+	});
+
+	it("derives retry.fallbackChains tails from comma-separated modelRoles when unset", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				slow: "gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol",
+				task: "gateway/grok-4.6:high, gateway/grok-4.5:high",
+			},
+		});
+		const chains = getRetryFallbackChains(settings);
+		expect(chains.slow).toEqual(["openai-codex/gpt-5.6-sol"]);
+		expect(chains.task).toEqual(["gateway/grok-4.5:high"]);
+		// Explicit empty array still wins over modelRoles derivation.
+		const emptyExplicit = Settings.isolated({
+			modelRoles: { slow: "gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol" },
+			"retry.fallbackChains": { slow: [] },
+		});
+		expect(getRetryFallbackChains(emptyExplicit).slow).toEqual([]);
 	});
 
 	it("prefers an exact model+effort key over a different-effort key regardless of object order", () => {

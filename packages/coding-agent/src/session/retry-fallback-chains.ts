@@ -9,7 +9,11 @@ import {
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
+import {
+	normalizeModelPatternList,
+	resolveConfiguredModelPatterns,
+	resolveModelRoleValue,
+} from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
 import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
@@ -157,11 +161,27 @@ export function expandDefaultRetryFallbackChains(
 	return chains;
 }
 
-/** Resolves configured fallback chains, applying the default chain to named roles. */
+/**
+ * Resolves configured fallback chains.
+ *
+ * Order of ownership for a role:
+ * 1. Explicit `retry.fallbackChains.<role>` (including an empty array).
+ * 2. Tail of a comma-separated `modelRoles.<role>` list (credential/auth fallbacks).
+ * 3. Inherited `retry.fallbackChains.default` for chat roles without either.
+ */
 export function getRetryFallbackChains(settings: Settings): RetryFallbackChains {
 	const configuredChains = cfgRetryFallbackChains.get(settings);
-	if (!configuredChains || typeof configuredChains !== "object") return {};
-	return expandDefaultRetryFallbackChains(configuredChains, Object.keys(settings.getModelRoles()));
+	const base: RetryFallbackChains =
+		configuredChains && typeof configuredChains === "object" && !Array.isArray(configuredChains)
+			? { ...configuredChains }
+			: {};
+	const roleNames = Object.keys(settings.getModelRoles());
+	for (const role of roleNames) {
+		if (Object.hasOwn(base, role)) continue;
+		const patterns = normalizeModelPatternList(settings.getModelRole(role));
+		if (patterns.length > 1) base[role] = patterns.slice(1);
+	}
+	return expandDefaultRetryFallbackChains(base, roleNames);
 }
 
 /**
@@ -301,7 +321,11 @@ function getRetryFallbackPrimarySelector(
 	if (isRetryFallbackWildcardKey(chainKey)) return undefined;
 	if (isRetryFallbackModelKey(chainKey)) return parseRetryFallbackSelector(chainKey, context.modelLookup);
 	const configuredSelector = context.getModelRole(chainKey);
-	return configuredSelector ? parseRetryFallbackSelector(configuredSelector, context.modelLookup) : undefined;
+	if (!configuredSelector) return undefined;
+	// Comma-separated modelRoles use the first entry as the primary; the tail is
+	// the derived fallback chain from {@link getRetryFallbackChains}.
+	const primary = normalizeModelPatternList(configuredSelector)[0] ?? configuredSelector.trim();
+	return primary ? parseRetryFallbackSelector(primary, context.modelLookup) : undefined;
 }
 
 /** How a chain key's primary selector matches the current selector. */

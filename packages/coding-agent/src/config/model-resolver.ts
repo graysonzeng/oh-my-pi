@@ -1582,12 +1582,26 @@ export function resolveRoleChain(
 ): RoleChainCandidate[] {
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
-	const primarySelector = configured || formatModelRoleAlias(role);
 	const configuredFallbacks = cfgRetryFallbackChains.get(settings)[role];
 	const hasConfiguredFallbackChain = Array.isArray(configuredFallbacks);
-	const fallbackSelectors = hasConfiguredFallbackChain ? configuredFallbacks : rolePriorityDefaults(role);
+	// Comma lists in `modelRoles` are an ordered attempt chain (primary +
+	// credential/auth fallbacks). Expand each entry into its own candidate so a
+	// later selector is reachable after credits/auth fail on an earlier one —
+	// `resolveModelRoleValue` alone would collapse the list to the first hit.
+	const primaryPatterns = configured ? normalizeModelPatternList(configured) : [];
+	const primarySelectors =
+		primaryPatterns.length > 0
+			? primaryPatterns.map(selector => ({ selector, explicit: true as boolean }))
+			: [{ selector: formatModelRoleAlias(role), explicit: Object.hasOwn(configuredRoles, role) }];
+	// When the role already lists multiple models, those entries are the chain;
+	// skip built-in priority.json defaults so they do not dilute the configured order.
+	const fallbackSelectors = hasConfiguredFallbackChain
+		? configuredFallbacks
+		: primaryPatterns.length > 1
+			? []
+			: rolePriorityDefaults(role);
 	const selectors = [
-		{ selector: primarySelector, explicit: Object.hasOwn(configuredRoles, role) },
+		...primarySelectors,
 		...fallbackSelectors.map(selector => ({ selector, explicit: hasConfiguredFallbackChain })),
 	];
 	const candidates: RoleChainCandidate[] = [];

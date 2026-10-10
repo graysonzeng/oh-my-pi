@@ -5009,15 +5009,27 @@ export class AgentSession implements SettingsScope {
 			clearToolErrorStreak(this);
 			return undefined;
 		}
+		const editOutcome = this.#recovery.noteEditToolOutcome(this, {
+			toolName: ctx.toolCall.name,
+			isError: ctx.isError,
+			toolArgs: ctx.toolCall.arguments,
+		});
+		if (editOutcome?.escalateToTop) {
+			void this.#recovery.escalateEditFailuresToTopModel({
+				reason: `edit-failure-escalation:${editOutcome.path}`,
+			});
+		}
 		if (!ctx.isError) {
 			clearToolErrorStreak(this);
-			return undefined;
+			return editOutcome?.advisory;
 		}
 		const parts: string[] = [];
 		for (const block of ctx.result.content ?? []) {
 			if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
 		}
-		return noteToolErrorStreak(this, ctx.toolCall.name, parts.join("\n"));
+		const streak = noteToolErrorStreak(this, ctx.toolCall.name, parts.join("\n"));
+		if (editOutcome?.advisory && streak) return `${editOutcome.advisory}\n${streak}`;
+		return editOutcome?.advisory ?? streak;
 	}
 
 	/**

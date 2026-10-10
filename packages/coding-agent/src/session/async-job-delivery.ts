@@ -59,6 +59,20 @@ type AsyncResultJobDetails = {
 	requestPhaseQueueMs?: number;
 	/** Originating parent `task` tool call id, when the job recorded one. */
 	taskToolCallId?: string;
+	/** Bundled/custom agent type (e.g. scout, reviewer, task) from the settled result. */
+	agent?: string;
+	/** Progress/result status: completed | failed | aborted. */
+	status?: "completed" | "failed" | "aborted";
+	/** Process-style exit code from the settled {@link SingleResult}. */
+	exitCode?: number;
+	/** True when the run was aborted before a clean completion. */
+	aborted?: boolean;
+	/**
+	 * Compact final outcome for stats/reporting: `success` | `failed` | `aborted`.
+	 * Derived from status/exitCode so period reports can compute per-role success rate
+	 * even when the parent `task` toolResult still has an empty `details.results`.
+	 */
+	finalStatus?: "success" | "failed" | "aborted";
 };
 
 export type AsyncResultDetails = {
@@ -114,6 +128,27 @@ function firstRequestPhaseQueueMs(metrics: unknown): number | undefined {
 	return undefined;
 }
 
+function finalStatusFromSettled(matched: Record<string, unknown>): "success" | "failed" | "aborted" | undefined {
+	if (matched.aborted === true) return "aborted";
+	const status = typeof matched.status === "string" ? matched.status : undefined;
+	if (status === "aborted") return "aborted";
+	if (status === "failed") return "failed";
+	if (status === "completed") return "success";
+	if (typeof matched.exitCode === "number") {
+		if (matched.exitCode === 0 && matched.error === undefined) return "success";
+		return "failed";
+	}
+	return undefined;
+}
+
+function progressStatusFromSettled(matched: Record<string, unknown>): "completed" | "failed" | "aborted" | undefined {
+	const status = typeof matched.status === "string" ? matched.status : undefined;
+	if (status === "completed" || status === "failed" || status === "aborted") return status;
+	if (matched.aborted === true) return "aborted";
+	if (typeof matched.exitCode === "number") return matched.exitCode === 0 ? "completed" : "failed";
+	return undefined;
+}
+
 /** Minimal identity/metrics from `latestDetails.results` for persistent async delivery. */
 export function settledTaskDeliveryFields(job: {
 	id?: string;
@@ -124,9 +159,14 @@ export function settledTaskDeliveryFields(job: {
 	completionKind?: SubagentCompletionKind;
 	spawnQueueMs?: number;
 	requestPhaseQueueMs?: number;
+	agent?: string;
+	status?: "completed" | "failed" | "aborted";
+	exitCode?: number;
+	aborted?: boolean;
+	finalStatus?: "success" | "failed" | "aborted";
 } {
 	const results = job.latestDetails?.results;
-	if (!Array.isArray(results)) return {};
+	const progress = job.latestDetails?.progress;
 	const jobKeys = new Set<string>();
 	if (job.id) jobKeys.add(job.id);
 	if (job.agentId) jobKeys.add(job.agentId);
@@ -134,26 +174,54 @@ export function settledTaskDeliveryFields(job: {
 	let matched: Record<string, unknown> | undefined;
 	let only: Record<string, unknown> | undefined;
 	let recordCount = 0;
-	for (const item of results) {
-		if (!isRecord(item)) continue;
+	const consider = (item: unknown): void => {
+		if (!isRecord(item)) return;
 		recordCount++;
 		only ??= item;
 		if (jobKeys.size > 0 && resultRowTrueIds(item).some(id => jobKeys.has(id))) {
 			matched = item;
-			break;
+		}
+	};
+	if (Array.isArray(results)) {
+		for (const item of results) {
+			consider(item);
+			if (matched) break;
 		}
 	}
 	if (!matched && recordCount === 1 && only && resultRowTrueIds(only).length === 0) {
 		matched = only;
 	}
+	// Async spawn toolResults often persist `results: []` at schedule time; the
+	// live progress row still carries terminal status once the job settles.
+	if (!matched && Array.isArray(progress)) {
+		recordCount = 0;
+		only = undefined;
+		for (const item of progress) {
+			consider(item);
+			if (matched) break;
+		}
+		if (!matched && recordCount === 1 && only && resultRowTrueIds(only).length === 0) {
+			matched = only;
+		}
+	}
 	if (!matched) return {};
 	const metrics = matched.reviewMetrics;
 	const spawnQueueMs = isRecord(metrics) ? asNonNegativeNumber(metrics.spawnQueueMs) : undefined;
 	const requestPhaseQueueMs = firstRequestPhaseQueueMs(metrics);
+	const agent = typeof matched.agent === "string" && matched.agent.trim() ? matched.agent.trim() : undefined;
+	const status = progressStatusFromSettled(matched);
+	const exitCode = typeof matched.exitCode === "number" ? matched.exitCode : undefined;
+	const aborted = matched.aborted === true ? true : undefined;
+	const finalStatus = finalStatusFromSettled(matched);
 	return {
 		completionKind: knownCompletionKind(matched.completionKind),
 		...(spawnQueueMs !== undefined ? { spawnQueueMs } : {}),
 		...(requestPhaseQueueMs !== undefined ? { requestPhaseQueueMs } : {}),
+		...(agent ? { agent } : {}),
+		...(status ? { status } : {}),
+		...(exitCode !== undefined ? { exitCode } : {}),
+		...(aborted !== undefined ? { aborted } : {}),
+		...(finalStatus ? { finalStatus } : {}),
 	};
 }
 
@@ -241,6 +309,11 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 				...(settled.spawnQueueMs !== undefined ? { spawnQueueMs: settled.spawnQueueMs } : {}),
 				...(settled.requestPhaseQueueMs !== undefined ? { requestPhaseQueueMs: settled.requestPhaseQueueMs } : {}),
 				...(taskToolCallId ? { taskToolCallId } : {}),
+				...(settled.agent ? { agent: settled.agent } : {}),
+				...(settled.status ? { status: settled.status } : {}),
+				...(settled.exitCode !== undefined ? { exitCode: settled.exitCode } : {}),
+				...(settled.aborted !== undefined ? { aborted: settled.aborted } : {}),
+				...(settled.finalStatus ? { finalStatus: settled.finalStatus } : {}),
 			};
 		}),
 	};
