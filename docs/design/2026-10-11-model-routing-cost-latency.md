@@ -9,6 +9,7 @@ models (scout/search/read → fast cheap model; code execution → strong coding
 
 ## Findings (one user's history, last 21 days, real projects only)
 Source: `~/.omp/stats.db` (`messages`, `tool_calls`), aggregated with `scripts/model-routing-report.sh`.
+See the prioritized plan with quality data: `2026-10-11-omp-quality-cost-plan.md`.
 No `/tmp` benchmark sessions fell in this window. Costs are as recorded by omp (`cost_total`, USD); `cost_unpriced=0` for all rows.
 
 | agent_type | calls | sessions | model time (h) | input M | output M | cache-read M | cost $ |

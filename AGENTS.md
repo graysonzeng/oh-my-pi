@@ -350,4 +350,5 @@ The script handles version bump, CHANGELOG finalization, commit, tag, publish, a
 Cut task time and cost without lowering quality: top model for orchestration, design/plan and verification;
 strong coding model for execution (`task`); fast cheap model for scout/search (`smol`). Verification never on the cheap tier.
 Policy, measured numbers, config mapping and the re-analysis loop: `docs/design/2026-10-11-model-routing-cost-latency.md`
-(re-run `scripts/model-routing-report.sh` periodically and update it). Main development branch: `workflow`.
+and the prioritized fix/rollout plan `docs/design/2026-10-11-omp-quality-cost-plan.md`
+(re-run `scripts/model-routing-report.sh` and `scripts/model-routing-roles.py` periodically and update them). Main development branch: `workflow`.
