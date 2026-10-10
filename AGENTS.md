@@ -345,3 +345,9 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+
+## Standing goal: fast and good (model routing)
+Cut task time and cost without lowering quality: top model for orchestration, design/plan and verification;
+strong coding model for execution (`task`); fast cheap model for scout/search (`smol`). Verification never on the cheap tier.
+Policy, measured numbers, config mapping and the re-analysis loop: `docs/design/2026-10-11-model-routing-cost-latency.md`
+(re-run `scripts/model-routing-report.sh` periodically and update it). Main development branch: `workflow`.
