@@ -5,6 +5,10 @@ Usage: model-routing-roles.py [days] [sessions_dir] [stats_db]
 Prints per-role cost/error aggregates and per-role task success rate from
 persisted `details.results` / `details.progress` / `async-result` jobs
 (`finalStatus` / `status` / `exitCode`).
+
+Outcomes are deduped by jobId/agentUrlId/id with priority
+async-result.finalStatus > results > progress (aligned with
+packages/coding-agent/src/stats/task-outcome.ts mergeTaskOutcomes).
 """
 import collections as C, datetime, glob, json, os, re, sqlite3, sys, time
 
@@ -14,14 +18,18 @@ db = sqlite3.connect(sys.argv[3] if len(sys.argv) > 3 else os.path.expanduser("~
 cut = time.time() - days * 86400
 role, comp, spans, idle = {}, [], [], 0.0
 edit_err = loops = 0
-# agent -> Counter(finalStatus)
-outcomes = C.defaultdict(C.Counter)
+# id -> (priority, agent, finalStatus); priority: async-result=3 > results=2 > progress=1
+outcome_by_id = {}
+SOURCE_PRIORITY = {"async-result": 3, "results": 2, "progress": 1}
 
 
-def note_outcome(agent, final_status):
-    if not agent or not final_status:
+def note_outcome(job_id, agent, final_status, source):
+    if not job_id or not final_status:
         return
-    outcomes[agent][final_status] += 1
+    pri = SOURCE_PRIORITY.get(source, 0)
+    prev = outcome_by_id.get(job_id)
+    if prev is None or pri > prev[0]:
+        outcome_by_id[job_id] = (pri, agent or "?", final_status)
 
 
 def final_from_row(p):
@@ -37,6 +45,14 @@ def final_from_row(p):
         return "failed"
     if isinstance(p.get("exitCode"), int):
         return "success" if p["exitCode"] == 0 and not p.get("error") else "failed"
+    return None
+
+
+def row_id(p):
+    for key in ("id", "jobId", "agentUrlId", "agentId"):
+        v = p.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return None
 
 
@@ -65,26 +81,33 @@ for f in glob.glob(os.path.join(sd, "*", "*.jsonl")):
             prev[n] = e
             if n == "task":
                 d = m.get("details") or {}
-                for p in (d.get("results") or []) + (d.get("progress") or []):
-                    if p.get("id"):
-                        role[p["id"]] = p.get("agent") or "?"
-                    fs = final_from_row(p)
-                    if fs:
-                        note_outcome(p.get("agent") or role.get(p.get("id") or "", "?"), fs)
+                for source, key in (("results", "results"), ("progress", "progress")):
+                    for p in d.get(key) or []:
+                        jid = row_id(p)
+                        if jid:
+                            role[jid] = p.get("agent") or role.get(jid) or "?"
+                        fs = final_from_row(p)
+                        if fs:
+                            note_outcome(jid or f"{source}:{len(outcome_by_id)}", p.get("agent") or role.get(jid or "", "?"), fs, source)
         if m.get("role") == "custom" and m.get("customType") == "async-result":
             d = m.get("details") or {}
             for job in d.get("jobs") or []:
                 agent = job.get("agent") or "?"
-                jid = job.get("agentUrlId") or job.get("jobId")
+                jid = row_id(job)
                 if jid:
                     role[jid] = agent
                 fs = final_from_row(job)
                 if fs:
-                    note_outcome(agent, fs)
+                    note_outcome(jid or f"async:{len(outcome_by_id)}", agent, fs, "async-result")
     if len(T) > 1:
         T.sort()
         spans.append(T[-1] - T[0])
         idle += sum(b - a for a, b in zip(T, T[1:]) if b - a > 300)
+
+# Collapse deduped rows into per-agent counters.
+outcomes = C.defaultdict(C.Counter)
+for _pri, agent, fs in outcome_by_id.values():
+    outcomes[agent][fs] += 1
 
 print(f"main sessions {len(spans)} wall_h {sum(spans)/3600:.1f} idle>5m_h {idle/3600:.1f}")
 n = max(1, len(comp))

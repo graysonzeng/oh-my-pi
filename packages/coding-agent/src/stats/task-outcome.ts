@@ -6,16 +6,27 @@
  * (`details.jobs[].finalStatus`) and from live `details.progress[].status`.
  * This module is the coding-agent owner for that contract so `omp stats` /
  * `scripts/model-routing-roles.py` can report success rate per role.
+ *
+ * When the same job appears in multiple sources, prefer
+ * `async-result.finalStatus` > `results` > `progress` (see {@link mergeTaskOutcomes}).
  */
 
 export type TaskFinalStatus = "success" | "failed" | "aborted";
+
+export type TaskOutcomeSource = "async-result" | "results" | "progress";
 
 export interface TaskOutcomeRow {
 	id: string;
 	agent: string;
 	finalStatus: TaskFinalStatus;
-	source: "results" | "progress" | "async-result";
+	source: TaskOutcomeSource;
 }
+
+const SOURCE_PRIORITY: Record<TaskOutcomeSource, number> = {
+	"async-result": 3,
+	results: 2,
+	progress: 1,
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -52,18 +63,30 @@ function agentFromRow(item: Record<string, unknown>, fallback = "?"): string {
 	return typeof item.agent === "string" && item.agent.trim() ? item.agent.trim() : fallback;
 }
 
+/**
+ * Deduplicate outcome rows by job id (`id` / `jobId` / `agentUrlId`), keeping the
+ * highest-priority source: async-result > results > progress.
+ */
+export function mergeTaskOutcomes(rows: readonly TaskOutcomeRow[]): TaskOutcomeRow[] {
+	const byId = new Map<string, TaskOutcomeRow>();
+	for (const row of rows) {
+		const existing = byId.get(row.id);
+		if (!existing || SOURCE_PRIORITY[row.source] > SOURCE_PRIORITY[existing.source]) {
+			byId.set(row.id, row);
+		}
+	}
+	return [...byId.values()];
+}
+
 /** Collect terminal outcomes from a `task` toolResult details blob. */
 export function taskOutcomesFromToolDetails(details: unknown): TaskOutcomeRow[] {
 	if (!isRecord(details)) return [];
 	const rows: TaskOutcomeRow[] = [];
-	const seen = new Set<string>();
-	const push = (item: Record<string, unknown>, source: TaskOutcomeRow["source"]): void => {
+	const push = (item: Record<string, unknown>, source: "results" | "progress"): void => {
 		const finalStatus = finalStatusFromRow(item);
 		if (!finalStatus) return;
 		const ids = rowIds(item);
 		const id = ids[0] ?? `${source}:${rows.length}`;
-		if (seen.has(id)) return;
-		seen.add(id);
 		rows.push({ id, agent: agentFromRow(item), finalStatus, source });
 	};
 	if (Array.isArray(details.results)) {
@@ -76,7 +99,8 @@ export function taskOutcomesFromToolDetails(details: unknown): TaskOutcomeRow[] 
 			if (isRecord(item)) push(item, "progress");
 		}
 	}
-	return rows;
+	// results > progress when the same job id appears in both.
+	return mergeTaskOutcomes(rows);
 }
 
 /** Collect terminal outcomes from an `async-result` custom message details blob. */

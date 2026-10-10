@@ -161,13 +161,27 @@ export function expandDefaultRetryFallbackChains(
 	return chains;
 }
 
+/** Deduplicate selector strings while preserving first-seen order. */
+function dedupeFallbackSelectors(selectors: readonly string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const selector of selectors) {
+		if (seen.has(selector)) continue;
+		seen.add(selector);
+		out.push(selector);
+	}
+	return out;
+}
+
 /**
- * Resolves configured fallback chains.
+ * Resolves effective fallback chains.
  *
- * Order of ownership for a role:
- * 1. Explicit `retry.fallbackChains.<role>` (including an empty array).
- * 2. Tail of a comma-separated `modelRoles.<role>` list (credential/auth fallbacks).
- * 3. Inherited `retry.fallbackChains.default` for chat roles without either.
+ * For each role, when both a comma-separated `modelRoles.<role>` list and an
+ * explicit `retry.fallbackChains.<role>` exist, the effective chain is the
+ * **comma list tail, then the explicit entries, deduped** (same attempt order as
+ * {@link resolveRoleChain}). A comma-only role uses the comma tail; an
+ * explicit-only role uses the explicit array (including empty). Chat roles
+ * without either still inherit `retry.fallbackChains.default`.
  */
 export function getRetryFallbackChains(settings: Settings): RetryFallbackChains {
 	const configuredChains = cfgRetryFallbackChains.get(settings);
@@ -177,9 +191,15 @@ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains 
 			: {};
 	const roleNames = Object.keys(settings.getModelRoles());
 	for (const role of roleNames) {
-		if (Object.hasOwn(base, role)) continue;
 		const patterns = normalizeModelPatternList(settings.getModelRole(role));
-		if (patterns.length > 1) base[role] = patterns.slice(1);
+		const derivedTail = patterns.length > 1 ? patterns.slice(1) : [];
+		const hasExplicit = Object.hasOwn(base, role);
+		const explicit = hasExplicit ? base[role] : undefined;
+		if (hasExplicit && Array.isArray(explicit) && derivedTail.length > 0) {
+			base[role] = dedupeFallbackSelectors([...derivedTail, ...explicit]);
+		} else if (!hasExplicit && derivedTail.length > 0) {
+			base[role] = derivedTail;
+		}
 	}
 	return expandDefaultRetryFallbackChains(base, roleNames);
 }
@@ -204,7 +224,8 @@ function providerScopedPool(
 }
 
 /**
- * Validates configured fallback chains and reports each warning via `warn`.
+ * Validates effective fallback chains (explicit config plus comma-derived tails
+ * from {@link getRetryFallbackChains}) and reports each warning via `warn`.
  *
  * `options.isDiscoveryPending` suppresses "unknown model" warnings for
  * selectors whose config-declared discovery provider has not yet populated the
@@ -220,16 +241,45 @@ export function validateRetryFallbackChains(
 	options: { isDiscoveryPending?: (provider: string) => boolean } = {},
 ): void {
 	const configuredChains = cfgRetryFallbackChains.get(settings);
-	if (configuredChains === undefined) return;
 	const report = warn;
 	const isDiscoveryPending = options.isDiscoveryPending ?? (() => false);
-	if (!configuredChains || typeof configuredChains !== "object" || Array.isArray(configuredChains)) {
-		report("retry.fallbackChains must be a mapping of role names or model selectors to selector arrays.");
-		return;
+	if (configuredChains !== undefined) {
+		if (!configuredChains || typeof configuredChains !== "object" || Array.isArray(configuredChains)) {
+			report("retry.fallbackChains must be a mapping of role names or model selectors to selector arrays.");
+			return;
+		}
 	}
 
-	for (const key in configuredChains) {
-		const chain = configuredChains[key];
+	// Surface the merge rule when operators set both a comma modelRoles list and
+	// an explicit retry.fallbackChains.<role> for the same role.
+	const configuredObject =
+		configuredChains && typeof configuredChains === "object" && !Array.isArray(configuredChains)
+			? configuredChains
+			: undefined;
+	for (const role of Object.keys(settings.getModelRoles())) {
+		const patterns = normalizeModelPatternList(settings.getModelRole(role));
+		if (patterns.length > 1 && configuredObject && Object.hasOwn(configuredObject, role)) {
+			report(
+				`modelRoles.${role} comma list and retry.fallbackChains.${role} both set; using comma tail then explicit chain (deduped).`,
+			);
+		}
+	}
+
+	const effectiveChains = getRetryFallbackChains(settings);
+	if (configuredObject === undefined && Object.keys(effectiveChains).length === 0) return;
+
+	// Validate structure of explicitly configured keys first (non-array values).
+	if (configuredObject) {
+		for (const key in configuredObject) {
+			if (!Array.isArray(configuredObject[key])) {
+				const keyKind = isRetryFallbackModelKey(key) ? "model" : "role";
+				report(`Fallback chain for ${keyKind} '${key}' must be an array of selector strings.`);
+			}
+		}
+	}
+
+	for (const key in effectiveChains) {
+		const chain = effectiveChains[key];
 		const keyKind = isRetryFallbackModelKey(key) ? "model" : "role";
 		if (keyKind === "model") {
 			if (isRetryFallbackWildcardKey(key)) {

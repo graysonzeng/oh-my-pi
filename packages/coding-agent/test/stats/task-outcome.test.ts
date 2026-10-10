@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	mergeTaskOutcomes,
 	successRateByAgent,
 	taskOutcomesFromAsyncResultDetails,
 	taskOutcomesFromToolDetails,
@@ -54,5 +55,21 @@ describe("task-outcome persistence contract", () => {
 			progress: [],
 		});
 		expect(rows).toEqual([{ id: "r1", agent: "reviewer", finalStatus: "aborted", source: "results" }]);
+	});
+
+	it("dedupes by job id with priority async-result > results > progress", () => {
+		const fromTool = taskOutcomesFromToolDetails({
+			results: [{ id: "job_1", agent: "scout", status: "failed", exitCode: 1 }],
+			progress: [{ id: "job_1", agent: "scout", status: "completed", exitCode: 0 }],
+		});
+		expect(fromTool).toEqual([{ id: "job_1", agent: "scout", finalStatus: "failed", source: "results" }]);
+
+		const merged = mergeTaskOutcomes([
+			...fromTool,
+			...taskOutcomesFromAsyncResultDetails({
+				jobs: [{ jobId: "job_1", agentUrlId: "job_1", agent: "scout", finalStatus: "success" }],
+			}),
+		]);
+		expect(merged).toEqual([{ id: "job_1", agent: "scout", finalStatus: "success", source: "async-result" }]);
 	});
 });

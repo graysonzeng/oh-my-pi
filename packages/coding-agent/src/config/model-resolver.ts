@@ -1573,7 +1573,16 @@ export interface RoleChainCandidate {
 	thinkingLevel?: ConfiguredThinkingLevel;
 }
 
-/** Resolve a role's primary and retry candidates in effective attempt order. */
+/**
+ * Resolve a role's primary and retry candidates in effective attempt order.
+ *
+ * Comma-separated `modelRoles.<role>` entries expand into ordered candidates.
+ * When an explicit `retry.fallbackChains.<role>` is also set, those selectors
+ * append after the comma list (deduped by route) — the same merge rule as
+ * {@link getRetryFallbackChains} (comma tail then explicit for the retry chain).
+ * Multi-entry modelRoles skip built-in priority.json defaults so they do not
+ * dilute the configured order.
+ */
 export function resolveRoleChain(
 	role: string,
 	settings: Settings,
@@ -1595,6 +1604,7 @@ export function resolveRoleChain(
 			: [{ selector: formatModelRoleAlias(role), explicit: Object.hasOwn(configuredRoles, role) }];
 	// When the role already lists multiple models, those entries are the chain;
 	// skip built-in priority.json defaults so they do not dilute the configured order.
+	// Explicit retry.fallbackChains.<role> appends after the comma list (deduped).
 	const fallbackSelectors = hasConfiguredFallbackChain
 		? configuredFallbacks
 		: primaryPatterns.length > 1

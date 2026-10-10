@@ -10,9 +10,10 @@
 
 ### Changed
 
-- Comma-separated `modelRoles` values are now an ordered attempt chain for `resolveRoleChain` and derive `retry.fallbackChains` tails when a role has no explicit chain.
-- Scout / system / task prompts steer broad read/grep/glob exploration to `scout` (summaries, not raw dumps) and multi-file verification to `reviewer` (`@slow`).
+- Comma-separated `modelRoles` values are now an ordered attempt chain for `resolveRoleChain` and derive `retry.fallbackChains` tails when a role has no explicit chain; when both a comma list and explicit `retry.fallbackChains.<role>` exist, the effective chain is comma tail then explicit (deduped).
+- Scout / system / task prompts steer broad read/grep/glob exploration to `scout` (summaries, not raw dumps) and multi-file verification to `reviewer` (`@slow`); scout conclusions never replace verification.
 - Built-in `smol` priority now prefers `deepseek-v4.1-flash` before `deepseek-v4-flash`.
+- Edit-failure escalation marks the swap only after a successful top-model apply; when `retry.modelFallback` is off or already on the top model, the advisory is re-read-only.
 
 ## [18.3.1] - 2026-09-25
 

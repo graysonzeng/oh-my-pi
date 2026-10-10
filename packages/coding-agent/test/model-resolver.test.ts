@@ -913,12 +913,36 @@ describe("role priorities and chains", () => {
 
 		const chain = resolveRoleChain("slow", settings, [primary, fallback]);
 
-		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
-			["gateway/gpt-6-astra", true],
-			["openai-codex/gpt-5.6-sol", true],
+		expect(
+			chain.map(candidate => [
+				formatModelStringWithRouting(candidate.model),
+				candidate.explicit,
+				candidate.thinkingLevel,
+			]),
+		).toEqual([
+			["gateway/gpt-6-astra", true, Effort.High],
+			["openai-codex/gpt-5.6-sol", true, undefined],
 		]);
 		// Multi-entry modelRoles is the full chain; priority.json defaults must not dilute it.
 		expect(chain.length).toBe(2);
+	});
+
+	test("appends explicit retry.fallbackChains after a comma modelRoles list", () => {
+		const astra = roleChainModel("gateway", "gpt-6-astra");
+		const sol = roleChainModel("openai-codex", "gpt-5.6-sol");
+		const mini = roleChainModel("openai", "gpt-4o-mini");
+		const settings = Settings.isolated({
+			modelRoles: { slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol" },
+			"retry.fallbackChains": { slow: ["openai/gpt-4o-mini"] },
+		});
+
+		const chain = resolveRoleChain("slow", settings, [astra, sol, mini]);
+		expect(chain.map(candidate => formatModelStringWithRouting(candidate.model))).toEqual([
+			"gateway/gpt-6-astra",
+			"openai-codex/gpt-5.6-sol",
+			"openai/gpt-4o-mini",
+		]);
+		expect(chain[0]?.thinkingLevel).toBe(Effort.High);
 	});
 
 	test("upgrades a default primary when a configured fallback resolves the same route", () => {
