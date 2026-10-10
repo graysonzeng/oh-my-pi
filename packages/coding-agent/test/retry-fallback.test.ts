@@ -147,7 +147,7 @@ describe("retry fallback selector resolution", () => {
 	it("derives retry.fallbackChains tails from comma-separated modelRoles when unset", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
-				slow: "gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol",
+				slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol",
 				task: "gateway/grok-4.6:high, gateway/grok-4.5:high",
 			},
 		});
@@ -156,7 +156,7 @@ describe("retry fallback selector resolution", () => {
 		expect(chains.task).toEqual(["gateway/grok-4.5:high"]);
 		// Explicit empty array still wins over modelRoles derivation.
 		const emptyExplicit = Settings.isolated({
-			modelRoles: { slow: "gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol" },
+			modelRoles: { slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol" },
 			"retry.fallbackChains": { slow: [] },
 		});
 		expect(getRetryFallbackChains(emptyExplicit).slow).toEqual([]);

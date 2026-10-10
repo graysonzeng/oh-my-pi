@@ -35,7 +35,7 @@ Main: gpt-6-astra $670 / 19 h (avg ctx ~160K). Advisor: $135 / 5.6 h.
 | # | Problem (evidence) | Root cause | Fix / owner |
 |---|---|---|---|
 | A | 57 auth/credit failures; 8/8 grok reviewer runs dead | single-provider role chains, no fallback when credits run out | Configure fallback chains in `modelRoles` (comma lists); `resolveRoleChain` expands each entry; `getRetryFallbackChains` derives runtime tails; route-unavailable in `src/latency/credential-route-unavailable.ts`. |
-| B | Verification rarely delegated (reviewer 24 calls) | reviewer chain failing + main does it inline at 160K ctx | Reviewer stays `@slow` (`src/prompts/agents/reviewer.md`); set `slow` to astra:medium with fallback; parent spawns reviewer for multi-file changes (`system-prompt.md` §Verify). |
+| B | Verification rarely delegated (reviewer 24 calls) | reviewer chain failing + main does it inline at 160K ctx | Reviewer stays `@slow` (`src/prompts/agents/reviewer.md`); set `slow` to astra:high with fallback; parent spawns reviewer for multi-file changes (`system-prompt.md` §Verify). |
 | C | Top model doing lookups (astra main: 2139 read / 338 grep / 280 glob) | scout under-delegated | `scout.md` (`@smol`) + system/task prompts steer broad exploration; summaries not raw dumps. |
 | D | Large context (160K main, 148K grok-4.7 task; 281K pre-compaction) | long sessions, pasted tool output | 60% window soft-cap kept (`DEFAULT_COMPACTION_SOFT_CAP_PERCENT=60`, `thresholdTokens=-1`); scout returns summaries. |
 | E | Edit failures (10% on grok-4.7 executor, consecutive retries) | stale anchors / re-edit without re-read | `session/edit-failure-escalation.ts` + `TurnRecovery.noteEditToolOutcome` / `escalateEditFailuresToTopModel`: after 2 edit failures on a file, re-read advisory + escalate to `@slow`/`@default`. |
@@ -43,15 +43,15 @@ Main: gpt-6-astra $670 / 19 h (avg ctx ~160K). Advisor: $135 / 5.6 h.
 | G | Task outcome not measurable | results not persisted in `details.results` | Persist `finalStatus`/`status`/`exitCode`/`agent` on `async-result` jobs (`async-job-delivery.ts`); report via `src/stats/task-outcome.ts` + `scripts/model-routing-roles.py`. |
 
 ## 3. Routing + policy
-Orchestrate/design/plan/verify → gpt-6-astra:medium (`default`, `slow`, `plan`); execute → grok-4.6 (`task`);
+Orchestrate/design/plan/verify → gpt-6-astra:high (`default`, `slow`, `plan`); execute → grok-4.6 (`task`);
 scout/search/commit → deepseek-v4.1-flash (`smol`, `commit`); advisor → cheaper than default, with fallback.
 Escalate to top model on: ambiguity, 2+ failed edits on the same file, failing tests, design change. Verification never on `smol`.
 
 ## 4. Phased rollout
 **P0 (config + reliability)**
 - A: per-role fallback models in `modelRoles` (comma lists) + chain expansion in resolver/retry. *Accept:* auth/credit errors <10 per 21 days; 0 reviewer runs dying pre-first-token.
-- B: reviewer on astra:medium with fallback via `@slow`, spawned for multi-file changes. *Accept:* reviewer calls ≥ 1 per change-making session; reviewer error rate <5%.
-- `plan` role → top model @ medium. *Accept:* recommended config shows it; no rise in correction-like messages.
+- B: reviewer on astra:high with fallback via `@slow`, spawned for multi-file changes. *Accept:* reviewer calls ≥ 1 per change-making session; reviewer error rate <5%.
+- `plan` role → top model @ high. *Accept:* recommended config shows it; no rise in correction-like messages.
 
 **P1 (cost/time)**
 - C: scout delegation + summary-only returns. *Accept:* read+grep+glob on top-model main −30% vs baseline 2757; scout error rate stays 0–1%.
@@ -77,8 +77,8 @@ Every 2–3 weeks: run both scripts, update tables here, re-rank P-items, adjust
 |---|---|---|
 | P0-A comma fallbacks in modelRoles → resolveRoleChain + derived retry chains | **done** | `model-resolver.ts`, `retry-fallback-chains.ts`; example config shipped |
 | P0-B reviewer `@slow` + multi-file spawn guidance | **done** | `reviewer.md` already `@slow`; `system-prompt.md` / `task.md` updated |
-| P0 plan → top @ medium | **done** | recommended example + docs; no personal `~/.omp` writes |
-| P0 gpt-6-astra:medium for top roles | **done** | via existing `:medium` thinking suffix in modelRoles examples |
+| P0 plan → top @ high | **done** | recommended example + docs; no personal `~/.omp` writes |
+| P0 gpt-6-astra:high for top roles | **done** | via existing `:high` thinking suffix in modelRoles examples |
 | P0 task = grok-4.6 | **done** | recommended example; smol priority head → deepseek-v4.1-flash |
 | P1-C scout delegation + summaries | **done** | system/scout/task prompts |
 | P1-D soft-cap 60% | **done** (verified intact) | `DEFAULT_COMPACTION_SOFT_CAP_PERCENT=60`, `thresholdTokens=-1` |

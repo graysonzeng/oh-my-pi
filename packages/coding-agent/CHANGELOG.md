@@ -6,7 +6,7 @@
 
 - Added per-file edit-failure escalation: after two failed `edit`s on the same path, omp advises a re-read and escalates to the top model (`@slow` / `@default`).
 - Persisted per-task `finalStatus` on `async-result` deliveries so stats/scripts can report success rate per role even when the parent `task` toolResult still has empty `details.results`.
-- Documented the quality/cost routing plan and a recommended `modelRoles` example with comma-separated credential fallbacks (`gpt-6-astra:medium` for top roles, `grok-4.6` for `task`, `deepseek-v4.1-flash` for `@smol`).
+- Documented the quality/cost routing plan and a recommended `modelRoles` example with comma-separated credential fallbacks (`gpt-6-astra:high` for top roles, `grok-4.6` for `task`, `deepseek-v4.1-flash` for `@smol`).
 
 ### Changed
 

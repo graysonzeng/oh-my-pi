@@ -36,8 +36,8 @@ Reliability: stop_reason error 87, aborted 36 of 12618 calls. `grok-4.7` subagen
 ## Routing policy
 | Phase | Model tier | Example |
 |---|---|---|
-| Orchestrate / design / plan | top @ medium | gpt-6-astra:medium (`default`, `plan`) |
-| Verify / review / final acceptance | top @ medium (never cheap) | gpt-6-astra:medium (`reviewer` → `@slow`) |
+| Orchestrate / design / plan | top @ high | gpt-6-astra:high (`default`, `plan`) |
+| Verify / review / final acceptance | top @ high (never cheap) | gpt-6-astra:high (`reviewer` → `@slow`) |
 | Execute / write code (`task`) | strong coding model | grok-4.6 |
 | Scout / search / read-only exploration | fast cheap | deepseek-v4.1-flash (`scout` → `@smol`) |
 | Commit messages, titles | fast cheap | `@smol` / `commit` role |
@@ -48,9 +48,9 @@ Reliability: stop_reason error 87, aborted 36 of 12618 calls. `grok-4.7` subagen
 Recommended example (also at `packages/coding-agent/examples/config/model-roles-quality-cost.example.yml`):
 ```yaml
 modelRoles:
-  default: gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol
-  slow: gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol
-  plan: gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol
+  default: gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol
+  slow: gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol
+  plan: gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol
   task: gateway/grok-4.6:high, gateway/grok-4.5:high
   smol: gateway/deepseek-v4.1-flash:high, gateway/deepseek-v4-flash:max
   commit: gateway/deepseek-v4.1-flash:high, gateway/deepseek-v4-flash:max

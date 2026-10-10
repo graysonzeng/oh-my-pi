@@ -908,7 +908,7 @@ describe("role priorities and chains", () => {
 		const primary = roleChainModel("gateway", "gpt-6-astra");
 		const fallback = roleChainModel("openai-codex", "gpt-5.6-sol");
 		const settings = Settings.isolated({
-			modelRoles: { slow: "gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol" },
+			modelRoles: { slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol" },
 		});
 
 		const chain = resolveRoleChain("slow", settings, [primary, fallback]);

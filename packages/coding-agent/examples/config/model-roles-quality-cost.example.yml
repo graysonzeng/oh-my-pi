@@ -7,16 +7,16 @@
 # Thinking suffixes use existing modelRoles selectors (`:medium`, `:high`, …).
 #
 # Top-model roles (orchestration / plan / review / verify) use gpt-6-astra at
-# medium effort. Execution (`task`) uses grok-4.6. Scout/search/commit use
+# high effort. Execution (`task`) uses grok-4.6. Scout/search/commit use
 # deepseek-v4.1-flash via @smol. Verification never runs on the cheap tier.
 #
 # paired_evidence_ready=false — these are recommended examples, not measured
 # live wins. See docs/design/2026-10-11-omp-quality-cost-plan.md.
 
 modelRoles:
-  default: gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol
-  slow: gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol
-  plan: gateway/gpt-6-astra:medium, openai-codex/gpt-5.6-sol
+  default: gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol
+  slow: gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol
+  plan: gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol
   task: gateway/grok-4.6:high, gateway/grok-4.5:high
   smol: gateway/deepseek-v4.1-flash:high, gateway/deepseek-v4-flash:max
   commit: gateway/deepseek-v4.1-flash:high, gateway/deepseek-v4-flash:max
