@@ -5823,10 +5823,6 @@ impl HostUriResultContentType {
 	}
 }
 
-fn default_queued_messages_state_live_steered() -> i64 {
-	serde_json::from_str("0").expect("valid wire default")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SetPtcModeParamsMode {
 	#[serde(rename = "off")]
@@ -5867,6 +5863,10 @@ impl SetPtcModeResultMode {
 			Self::Auto => "auto",
 		}
 	}
+}
+
+fn default_queued_messages_state_live_steered() -> i64 {
+	serde_json::from_str("0").expect("valid wire default")
 }
 
 fn default_session_state_is_streaming() -> bool {
