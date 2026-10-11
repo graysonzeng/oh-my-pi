@@ -52,7 +52,8 @@ export interface AsyncResultEntry {
 type AsyncResultJobDetails = {
 	jobId: string;
 	type?: AsyncJobType;
-	status?: AsyncJob["status"];
+	/** Job status; overridden by the settled progress status (completed | failed | aborted) when known. */
+	status?: AsyncJob["status"] | "aborted";
 	agentId?: string;
 	label?: string;
 	durationMs?: number;
@@ -69,8 +70,6 @@ type AsyncResultJobDetails = {
 	taskToolCallId?: string;
 	/** Bundled/custom agent type (e.g. scout, reviewer, task) from the settled result. */
 	agent?: string;
-	/** Progress/result status: completed | failed | aborted. */
-	status?: "completed" | "failed" | "aborted";
 	/** Process-style exit code from the settled {@link SingleResult}. */
 	exitCode?: number;
 	/** True when the run was aborted before a clean completion. */
