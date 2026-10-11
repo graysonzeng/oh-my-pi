@@ -855,7 +855,7 @@ describe("system prompt tool inventory", () => {
 		});
 		const text = systemPrompt.join("\n\n");
 
-		expect(text).toContain("- prompt-authoring: Prompt authoring workflow");
+		expect(text).toContain("- `skill://prompt-authoring`: Prompt authoring workflow");
 	});
 	it("keeps skill URL guidance when bash is the only skill reader", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
@@ -1001,6 +1001,41 @@ describe("system prompt tool inventory", () => {
 
 		expect(withScout).toContain("read-only scout");
 		expect(withoutScout).not.toContain("read-only scout");
+	});
+
+	it("lists unglobbed routing rules as rule:// URIs, not skill names", async () => {
+		const rulePath = path.join(tempDir, "adaptive-delivery.md");
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "engineering-flow",
+					description: "Verification workflow",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [
+				{
+					name: "adaptive-delivery",
+					path: rulePath,
+					description: "Use when workflow choice is unclear",
+				},
+			],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+		expect(text).toContain("Names in `<domain-rules>` are `rule://`, not `skill://`");
+		expect(text).toContain("`adaptive-delivery` is `rule://adaptive-delivery`, not a skill");
+		expect(text).toContain("- `skill://engineering-flow`: Verification workflow");
+		expect(text).toContain("- `rule://adaptive-delivery`: Use when workflow choice is unclear");
+		expect(text).not.toContain("- adaptive-delivery ():");
+		expect(text).not.toContain("- `rule://adaptive-delivery` ():");
+		expect(text).not.toContain("delivery-route skill");
 	});
 
 	it("omits todo workflow guidance when the todo tool is absent", async () => {

@@ -455,6 +455,33 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval", "read"]);
 	});
 
+	test("tools.ptc.mode on restricts a non-Codex model without Codex namespaces", async () => {
+		const { session, directModel } = createSession(Settings.isolated({ "tools.ptc.mode": "on" }));
+		await session.setModel(directModel);
+		await session.setActiveToolsByName(["eval", "read"]);
+
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
+		expect(session.getCodeModeDirectToolNames()).toEqual(["eval"]);
+		expect(session.codeModeNamespacesInfo).toBeUndefined();
+	});
+
+	test("runtime tools.ptc.mode changes immediately reconcile a non-Codex surface", async () => {
+		const settings = Settings.isolated();
+		const { session, directModel } = createSession(settings);
+		await session.setModel(directModel);
+		await session.setActiveToolsByName(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval", "read"]);
+
+		settings.override("tools.ptc.mode", "on");
+		await session.runToolRegistryMutation(async () => undefined);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
+		expect(session.codeModeNamespacesInfo).toBeUndefined();
+
+		settings.override("tools.ptc.mode", "off");
+		await session.runToolRegistryMutation(async () => undefined);
+		expect(session.getActiveToolNames()).toEqual(["eval", "read"]);
+	});
+
 	test("runtime eval.js changes reconcile Code Mode transport availability", async () => {
 		const settings = Settings.isolated();
 		cfgEvalJs.set(settings, true);

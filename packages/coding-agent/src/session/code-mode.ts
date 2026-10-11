@@ -1,10 +1,11 @@
 /**
- * Codex Code Mode: collapse the direct tool surface for code_mode_only models
- * to a small keep-set and expose every other session tool through the eval
- * bridge, mirroring codex-rs ToolMode::CodeModeOnly.
+ * Codex Code Mode adapter: `tool_namespaces_info` plus the legacy
+ * `providers.openai-codex.codeMode` setting. Generic activation lives in
+ * `session/ptc.ts`; this module keeps the Codex wire snapshot.
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import { PTC_KEEP_TOOLS, resolvePtc } from "./ptc";
 
 /**
  * Tool names that always stay directly model-visible under code mode. The
@@ -14,27 +15,7 @@ import { logger } from "@oh-my-pi/pi-utils";
  * registered tool sharing one of those names is only reachable while it stays
  * on the direct surface.
  */
-export const CODE_MODE_KEEP_TOOLS: Record<string, true> = {
-	eval: true,
-	ask: true,
-	todo: true,
-	yield: true,
-	think: true,
-	// checkpoint/rewind results drive session state machinery keyed on the
-	// toolResult's toolName (see session/checkpoint-entries.ts); wrapped inside
-	// an eval result they are invisible to it, so they must stay direct.
-	checkpoint: true,
-	rewind: true,
-	// Rollover requests likewise depend on the direct toolResult's toolName.
-	new_context: true,
-	__agent__: true,
-	__budget__: true,
-	__completion__: true,
-	__wait__: true,
-	__status__: true,
-	__cancel__: true,
-	__workpool__: true,
-};
+export const CODE_MODE_KEEP_TOOLS: Record<string, true> = PTC_KEEP_TOOLS;
 
 export interface CodeModeResolution {
 	active: boolean;
@@ -50,20 +31,16 @@ export function resolveCodeMode(args: {
 	enabledToolNames: readonly string[];
 	evalTransportAvailable: boolean;
 }): CodeModeResolution {
-	const active =
-		args.provider === "openai-codex" &&
-		args.enabledToolNames.includes("eval") &&
-		args.evalTransportAvailable &&
-		(args.setting === "on" || (args.setting === "auto" && args.toolMode === "code_mode_only"));
-	if (!active) return { active: false, directToolNames: new Set(args.enabledToolNames) };
-	const direct = new Set<string>();
-	for (const name of args.enabledToolNames) {
-		if (CODE_MODE_KEEP_TOOLS[name] === true) direct.add(name);
-	}
-	for (const name of args.extraDirectTools ?? []) {
-		if (args.enabledToolNames.includes(name)) direct.add(name);
-	}
-	return { active: true, directToolNames: direct };
+	const resolved = resolvePtc({
+		provider: args.provider,
+		toolMode: args.toolMode,
+		ptcMode: "off",
+		codexMode: args.setting,
+		codexExtraDirectTools: args.extraDirectTools,
+		enabledToolNames: args.enabledToolNames,
+		evalTransportAvailable: args.evalTransportAvailable,
+	});
+	return { active: resolved.active, directToolNames: resolved.directToolNames };
 }
 
 /** codex-rs TurnToolFunctionInfo shape (snake_case on the wire). */

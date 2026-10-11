@@ -7,6 +7,7 @@ import {
 	convertToLlm,
 	dedupeEphemeralReply,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	isEmptyAssistantStop,
 	replaceLlmImagesWithText,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
@@ -381,4 +382,51 @@ describe("dedupeEphemeralReply", () => {
 			`${"a".repeat(8)}😀${suffix}`,
 		);
 	});
+});
+
+describe("isEmptyAssistantStop", () => {
+	function stopAssistant(
+		content: AssistantMessage["content"],
+		stopReason: AssistantMessage["stopReason"] = "stop",
+	): AssistantMessage {
+		return {
+			role: "assistant",
+			content,
+			api: "openai-completions",
+			provider: "openai",
+			model: "gpt-5.4",
+			usage: interruptedUsage,
+			stopReason,
+			timestamp: 1,
+		};
+	}
+
+	it("retries unsigned thinking-only stops", () => {
+		expect(
+			isEmptyAssistantStop(stopAssistant([{ type: "thinking", thinking: "I should inspect the next file." }])),
+		).toBe(true);
+	});
+
+	it("accepts a provider-authenticated thinking signature as output", () => {
+		expect(
+			isEmptyAssistantStop(stopAssistant([{ type: "thinking", thinking: "", thinkingSignature: "sig_anthropic" }])),
+		).toBe(false);
+	});
+
+	it.each(["reasoning_content", "reasoning", "reasoning_text"] as const)(
+		"treats OpenAI reasoning field name %s as unsigned thinking",
+		signature => {
+			expect(
+				isEmptyAssistantStop(
+					stopAssistant([
+						{
+							type: "thinking",
+							thinking: "I should inspect the next file.",
+							thinkingSignature: signature,
+						},
+					]),
+				),
+			).toBe(true);
+		},
+	);
 });

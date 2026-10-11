@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import type { Model } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -24,6 +26,7 @@ describe("Portkey gateway custom models", () => {
 
 	afterEach(() => {
 		resetSettingsForTest();
+		vi.restoreAllMocks();
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
@@ -64,5 +67,57 @@ describe("Portkey gateway custom models", () => {
 		expect(model).toBeDefined();
 		expect(resolveWireModelId(model!, Effort.High)).toBe("@modal/GLM-5-2-FP8");
 		expect(resolveWireModelId(model!, undefined)).toBe("@modal/GLM-5-2-FP8");
+	});
+
+	test("gateway requestModelId sends display-name wire id for DeepSeek V4 Flash", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			`providers:
+  gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-completions
+    apiKey: test
+    authHeader: true
+    models:
+      - id: deepseek-v4-flash
+        name: deepseek-v4-flash
+        requestModelId: DeepSeek V4 Flash
+        api: openai-completions
+        reasoning: true
+`,
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("gateway", "deepseek-v4-flash");
+		expect(model).toBeDefined();
+		expect(model!.id).toBe("deepseek-v4-flash");
+		expect(model!.requestModelId).toBe("DeepSeek V4 Flash");
+		expect(resolveWireModelId(model!, Effort.Max)).toBe("DeepSeek V4 Flash");
+		expect(resolveWireModelId(model!, undefined)).toBe("DeepSeek V4 Flash");
+
+		const wireModelIds: unknown[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const body =
+				input instanceof Request
+					? ((await input.clone().json()) as Record<string, unknown>)
+					: (JSON.parse(String(init?.body)) as Record<string, unknown>);
+			wireModelIds.push(body.model);
+			return new Response(JSON.stringify({ error: { message: "Unauthorized" } }), {
+				status: 401,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+		const result = await streamOpenAICompletions(
+			model as Model<"openai-completions">,
+			{
+				messages: [{ role: "user", content: "hello", timestamp: 1_700_000_000_000 }],
+			},
+			{
+				apiKey: "test",
+				fetch: fetchMock as unknown as typeof fetch,
+				reasoning: Effort.Max,
+			},
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(wireModelIds[0]).toBe("DeepSeek V4 Flash");
 	});
 });

@@ -8,7 +8,7 @@ import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { formatBytes, getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
-
+import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
 import { withRepoLock } from "../utils/repo-lock";
 import { writeIsolationOwner } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
@@ -331,39 +331,6 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
 }
 
-function unquoteGitDiffPath(rawPath: string): string {
-	let value = rawPath;
-	if (value.startsWith('"') && value.endsWith('"')) {
-		try {
-			value = JSON.parse(value) as string;
-		} catch {
-			value = value.slice(1, -1);
-		}
-	}
-	return value.replace(/^[ab]\//, "");
-}
-
-function parseDiffGitLinePaths(line: string): string[] {
-	if (!line.startsWith("diff --git ")) return [];
-	const rest = line.slice("diff --git ".length);
-	const quoted = rest.match(/^("(?:\\.|[^"])+"|\/dev\/null) ("(?:\\.|[^"])+"|\/dev\/null)$/);
-	const parts = quoted ? [quoted[1], quoted[2]] : rest.split(" ");
-	if (parts.length < 2) return [];
-	const paths = parts
-		.slice(0, 2)
-		.map(unquoteGitDiffPath)
-		.filter(file => file && file !== "/dev/null");
-	return [...new Set(paths)];
-}
-
-function patchTouchedFiles(patch: string): string[] {
-	const files = new Set<string>();
-	for (const line of patch.split("\n")) {
-		for (const file of parseDiffGitLinePaths(line)) files.add(file);
-	}
-	return [...files];
-}
-
 export interface DeltaPatchResult {
 	rootPatch: string;
 	nestedPatches: NestedRepoPatch[];
@@ -430,7 +397,7 @@ export async function applyNestedPatches(
 		const repository = vcs.requireGit(nestedDir);
 
 		const combinedDiff = repoPatches.map(p => p.patch).join("\n");
-		const touchedFiles = [...new Set(repoPatches.flatMap(p => patchTouchedFiles(p.patch)))];
+		const touchedFiles = [...new Set(repoPatches.flatMap(p => parsePatchTouchedFiles(p.patch)))];
 
 		// Preserve any pre-existing dirty state (tracked + untracked) so we
 		// commit only the agent delta, not the user's in-flight work.
@@ -662,7 +629,7 @@ function collectWipPatches(wip: BaselineWipContext | undefined): string[] {
 /** Keep only the `diff --git` sections of `patch` that touch one of `files`. */
 function filterPatchFiles(patch: string, files: ReadonlySet<string>): string {
 	const sections = patch.split(/^(?=diff --git )/m);
-	return sections.filter(section => parseDiffGitLinePaths(section.split("\n", 1)[0]).some(f => files.has(f))).join("");
+	return sections.filter(section => parsePatchTouchedFiles(section).some(file => files.has(file))).join("");
 }
 
 /**
@@ -716,8 +683,8 @@ async function patchTree(
 	}
 	try {
 		const withWip = await writeSyntheticTree(repoDir, parentSha, wipPatches);
-		const deltaFiles = new Set(patchTouchedFiles(patchText));
-		const wipOnly = new Set(wipPatches.flatMap(patchTouchedFiles).filter(f => !deltaFiles.has(f)));
+		const deltaFiles = new Set(parsePatchTouchedFiles(patchText));
+		const wipOnly = new Set(wipPatches.flatMap(parsePatchTouchedFiles).filter(file => !deltaFiles.has(file)));
 		// WIP-only files are untouched by the delta, so their post-delta state
 		// is the WIP state; diffing it back to the parent rewinds them.
 		const rewind =

@@ -22,6 +22,9 @@ import {
 import { compactionThresholdSettings, createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { cfgTaskAgentCompactionThresholdOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
 
+/** Workflow defaults compaction.thresholdPercent to a 60% soft cap; these cases pin upstream's unset percent. */
+const UPSTREAM_THRESHOLD_DEFAULTS = { "compaction.thresholdPercent": -1 } as const;
+
 async function withConfigDirs(run: (dirs: { root: string; agentDir: string; cwd: string }) => Promise<void>) {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-compaction-threshold-"));
 	const agentDir = path.join(root, "agent");
@@ -97,7 +100,7 @@ describe("task.agentCompactionThresholdOverrides", () => {
 	});
 
 	it("rejects invalid set and override calls without changing the effective value", () => {
-		const settings = Settings.isolated();
+		const settings = Settings.isolated(UPSTREAM_THRESHOLD_DEFAULTS);
 		cfgTaskAgentCompactionThresholdOverrides.override(settings, { scout: 90000 });
 
 		expect(() => cfgTaskAgentCompactionThresholdOverrides.set(settings, { scout: "eighty" })).toThrow(
@@ -137,14 +140,15 @@ describe("compaction.modelThresholds", () => {
 			"openrouter/*",
 		);
 		expect(matchModelCompactionThreshold(raw, { provider: "anthropic", id: "opus" })).toBeUndefined();
-		expect(() => cfgCompactionModelThresholds.set(Settings.isolated(), { opus: 1000 })).toThrow(
-			'compaction.modelThresholds key "opus"',
-		);
+		expect(() =>
+			cfgCompactionModelThresholds.set(Settings.isolated(UPSTREAM_THRESHOLD_DEFAULTS), { opus: 1000 }),
+		).toThrow('compaction.modelThresholds key "opus"');
 	});
 
 	it("lets a per-agent override outrank model entries without hiding them from that agent's children", () => {
 		const deepseek = { provider: "deepseek", id: "v4" };
 		const root = Settings.isolated({
+			...UPSTREAM_THRESHOLD_DEFAULTS,
 			"compaction.thresholdPercent": 80,
 			"compaction.modelThresholds": { "deepseek/*": 90000 },
 		});
@@ -174,11 +178,15 @@ describe("compaction.modelThresholds", () => {
 	it("scales the configured policy from a token entry instead of triggering at it", () => {
 		const terra = { provider: "openai", id: "gpt-5.6-terra" };
 		const window = 1_050_000;
-		const byDefault = Settings.isolated({ "compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 } });
+		const byDefault = Settings.isolated({
+			...UPSTREAM_THRESHOLD_DEFAULTS,
+			"compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 },
+		});
 		// Reserve policy: the base minus max(15%, 16384).
 		expect(resolveThresholdTokens(window, resolveModelCompactionSettings(byDefault, terra))).toBe(340_000);
 
 		const byPercent = Settings.isolated({
+			...UPSTREAM_THRESHOLD_DEFAULTS,
 			"compaction.thresholdPercent": 80,
 			"compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 },
 		});
@@ -186,17 +194,22 @@ describe("compaction.modelThresholds", () => {
 
 		// A global fixed trigger is not a scale; the model's base replaces it.
 		const byFixed = Settings.isolated({
+			...UPSTREAM_THRESHOLD_DEFAULTS,
 			"compaction.thresholdTokens": 40_000,
 			"compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 },
 		});
 		expect(resolveThresholdTokens(window, resolveModelCompactionSettings(byFixed, terra))).toBe(340_000);
 
 		// A percentage entry still scales the real window.
-		const byModelPercent = Settings.isolated({ "compaction.modelThresholds": { "openai/gpt-5.6-terra": "50%" } });
+		const byModelPercent = Settings.isolated({
+			...UPSTREAM_THRESHOLD_DEFAULTS,
+			"compaction.modelThresholds": { "openai/gpt-5.6-terra": "50%" },
+		});
 		expect(resolveThresholdTokens(window, resolveModelCompactionSettings(byModelPercent, terra))).toBe(525_000);
 
 		// An `f`-prefixed entry is the exact trigger, whatever the policy.
 		const byModelFixed = Settings.isolated({
+			...UPSTREAM_THRESHOLD_DEFAULTS,
 			"compaction.thresholdPercent": 80,
 			"compaction.modelThresholds": { "openai/gpt-5.6-terra": "f400000" },
 		});
@@ -225,7 +238,7 @@ describe("compaction.modelThresholds", () => {
 	});
 
 	it("writes a point past the standard window only once confirmed, and rejects one past the largest window", () => {
-		const settings = Settings.isolated({ extendedContext: false });
+		const settings = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, extendedContext: false });
 		const model = {
 			provider: "openai",
 			id: "gpt-5.6-terra",
@@ -265,7 +278,7 @@ describe("compaction.modelThresholds", () => {
 	});
 
 	it("needs room above a fixed trigger: the standard window opens the extended one and the max is rejected", () => {
-		const settings = Settings.isolated({ extendedContext: false });
+		const settings = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, extendedContext: false });
 		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 272_000, cost: {} } as Model;
 		const tiers = { standard: 272_000, extended: 1_050_000 };
 
@@ -288,7 +301,7 @@ describe("compaction.modelThresholds", () => {
 	});
 
 	it("skips the warning when extended context is already on", () => {
-		const settings = Settings.isolated({ extendedContext: true });
+		const settings = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, extendedContext: true });
 		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 1_050_000 } as Model;
 		expect(
 			setModelCompactionPoint(settings, model, "400k", { tiers: { standard: 272_000, extended: 1_050_000 } }),
@@ -296,7 +309,7 @@ describe("compaction.modelThresholds", () => {
 	});
 
 	it("plans where each kind of typed limit compacts, and nothing for input submit would reject", () => {
-		const settings = Settings.isolated({ extendedContext: false });
+		const settings = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, extendedContext: false });
 		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 272_000 } as Model;
 		const tiers = { standard: 272_000, extended: 1_050_000 };
 		const plan = (input: string) => planModelCompactionPoint(settings, model, input, tiers);
@@ -317,7 +330,7 @@ describe("compaction.modelThresholds", () => {
 	});
 
 	it("reports fractional shares exactly", () => {
-		const settings = Settings.isolated({ extendedContext: false });
+		const settings = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, extendedContext: false });
 		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 272_000 } as Model;
 		const tiers = { standard: 272_000, extended: 1_050_000 };
 		expect(planModelCompactionPoint(settings, model, "12.5%", tiers)?.trigger).toMatchObject({ share: 12.5 });
@@ -329,31 +342,43 @@ describe("compaction.modelThresholds", () => {
 	it("shows a fixed trigger at or past the window as capped at the window less its reserve", () => {
 		// A provider capping the window below the configured trigger (Factory serves Kimi K3 with 196,608).
 		const capped = { provider: "factory-droid", id: "kimi-k3", contextWindow: 196_608 } as Model;
-		const global = Settings.isolated({ "compaction.thresholdTokens": 300_000 });
+		const global = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, "compaction.thresholdTokens": 300_000 });
 		const point = describeModelCompactionPoint(global, capped);
 		expect(point).toMatchObject({ tokens: 167_117, source: "global" });
 		expect(point.basis).toContain("capped by window");
 		const wide = { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 1_000_000 } as Model;
 		expect(describeModelCompactionPoint(global, wide)).toMatchObject({ tokens: 300_000, basis: "fixed" });
-		// One token below the window is still the user's exact trigger.
-		const justBelow = Settings.isolated({ "compaction.thresholdTokens": 196_607 });
-		expect(describeModelCompactionPoint(justBelow, capped)).toMatchObject({ tokens: 196_607, basis: "fixed" });
+		// Workflow clamps fixed triggers to the usable window (window − reserve): one token below
+		// that is still the user's exact trigger; one token below the raw window is capped.
+		const justBelow = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, "compaction.thresholdTokens": 167_116 });
+		expect(describeModelCompactionPoint(justBelow, capped)).toMatchObject({ tokens: 167_116, basis: "fixed" });
+		const belowRaw = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, "compaction.thresholdTokens": 196_607 });
+		expect(describeModelCompactionPoint(belowRaw, capped)).toMatchObject({ tokens: 167_117 });
 
 		// A prefix entry the model falls back to; an entry below the window stays exact.
-		const prefixed = Settings.isolated({ "compaction.modelThresholds": { "factory-droid/*": "f300000" } });
+		const prefixed = Settings.isolated({
+			...UPSTREAM_THRESHOLD_DEFAULTS,
+			"compaction.modelThresholds": { "factory-droid/*": "f300000" },
+		});
 		expect(planModelCompactionPoint(prefixed, capped, "", undefined)?.trigger).toEqual({
 			kind: "fixed",
 			tokens: 167_117,
 			cappedFrom: 300_000,
 		});
+		expect(planModelCompactionPoint(prefixed, capped, "f160k", undefined)?.trigger).toEqual({
+			kind: "fixed",
+			tokens: 160_000,
+		});
+		// Between the usable window and the raw window: workflow caps it to the usable window.
 		expect(planModelCompactionPoint(prefixed, capped, "f190k", undefined)?.trigger).toEqual({
 			kind: "fixed",
-			tokens: 190_000,
+			tokens: 167_117,
+			cappedFrom: 190_000,
 		});
 	});
 
 	it("plans and saves a reset as the prefix entry the model falls back to", () => {
-		const settings = Settings.isolated({ extendedContext: false });
+		const settings = Settings.isolated({ ...UPSTREAM_THRESHOLD_DEFAULTS, extendedContext: false });
 		cfgCompactionModelThresholds.set(settings, { "openai/*": "f100000", "openai/gpt-5.6-terra": 400_000 });
 		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 1_050_000 } as Model;
 		const tiers = { standard: 272_000, extended: 1_050_000 };

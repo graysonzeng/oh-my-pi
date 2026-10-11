@@ -12,6 +12,8 @@
 /** Identifier of the fastembed model the worker should load (e.g. `fast-bge-base-en-v1.5`). */
 export type MnemopiEmbedModelId = string;
 
+export type MnemopiEmbedRole = "query" | "passage";
+
 export type MnemopiEmbedWorkerInbound =
 	| { type: "ping"; id: string }
 	| { type: "init"; id: string; model: MnemopiEmbedModelId; cacheDir?: string }
@@ -20,7 +22,26 @@ export type MnemopiEmbedWorkerInbound =
 	// previous one but mnemopi still holds the cached `LocalEmbeddingModel`)
 	// can lazily reload the model on demand instead of returning
 	// "embed before init".
-	| { type: "embed"; id: string; model: MnemopiEmbedModelId; cacheDir?: string; texts: string[]; batchSize?: number };
+	| {
+			type: "embed";
+			id: string;
+			model: MnemopiEmbedModelId;
+			cacheDir?: string;
+			texts: string[];
+			batchSize?: number;
+			role?: MnemopiEmbedRole;
+	  };
+
+/** Prefix E5 query/passage texts. Unspecified role keeps memory-backend behavior. */
+export function applyEmbedInstructionPrefix(
+	model: string,
+	texts: readonly string[],
+	role: MnemopiEmbedRole | undefined,
+): string[] {
+	if (!role || !model.includes("multilingual-e5")) return [...texts];
+	const prefix = role === "query" ? "query: " : "passage: ";
+	return texts.map(text => (text.startsWith(prefix) ? text : `${prefix}${text}`));
+}
 
 export type MnemopiEmbedWorkerOutbound =
 	| { type: "pong"; id: string }

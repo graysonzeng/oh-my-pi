@@ -261,6 +261,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** The agent's `outputTruncation` setting (`false` = model-family tool-output clamps disabled); absent uses the session default. */
+	outputTruncation?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
 	/** Effective thresholds for a child with an explicit compaction override. */
@@ -269,6 +271,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	isolated?: boolean;
 	/** Work-pool yield items of the last model call; revival restores them so the yield tool matches. Absent when none. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
+	/** Structured-policy performance class resolved at first spawn; absent on pre-class files. */
+	performanceClass?: "review" | "explore" | "worker";
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

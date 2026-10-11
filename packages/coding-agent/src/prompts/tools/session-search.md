@@ -1,0 +1,1 @@
+Search this session's raw journal on the current branch. Use after compaction to recover assistant text, tool calls, and tool results that left the model context. Matches full tool-call arguments; snippets are display-only.

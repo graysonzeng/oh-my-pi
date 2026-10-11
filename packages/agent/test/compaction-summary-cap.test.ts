@@ -11,6 +11,7 @@ import {
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { checkpointSummary } from "./helpers";
 
 function createAssistantMessage(text: string): AssistantMessage {
 	return {
@@ -43,13 +44,16 @@ const messages: AgentMessage[] = [
 	createAssistantMessage("started"),
 ];
 
+/** A valid local summary every mocked completion can legally return. */
+const validSummary = checkpointSummary();
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
 describe("compaction summary output budget", () => {
 	test("caps the summary budget for large reserves", async () => {
-		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage(validSummary));
 		// A 1M-token window yields a 150k reserve, which used to authorize a ~120k-token summary.
 		await generateSummary(messages, getModel(), 150_000, "test-key");
 		expect(spy.mock.calls[0]?.[2]?.maxTokens).toBe(MAX_SUMMARY_TOKENS);
@@ -61,7 +65,7 @@ describe("compaction summary output budget", () => {
 			remoteEndpoint: "https://compaction.example.test/summarize",
 			fetch: async (_input, init) => {
 				requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-				return new Response(JSON.stringify({ summary: "summary" }));
+				return new Response(JSON.stringify({ summary: validSummary }));
 			},
 		});
 
@@ -69,7 +73,7 @@ describe("compaction summary output budget", () => {
 	});
 
 	test("caps both summaries when compaction splits a turn", async () => {
-		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage(validSummary));
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "kept",
 			messagesToSummarize: messages,
@@ -92,7 +96,7 @@ describe("compaction summary output budget", () => {
 	});
 
 	test("leaves a reserve smaller than the cap proportional", async () => {
-		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage(validSummary));
 		await generateSummary(messages, getModel(), 10_000, "test-key");
 		expect(spy.mock.calls[0]?.[2]?.maxTokens).toBe(8_000);
 	});

@@ -10,6 +10,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import questionFile from "../prompts/judge/unexpected-stop.json" with { type: "json" };
+import { isAuthenticatedThinkingSignature } from "./messages";
 
 /**
  * Yes-probability at or above which a turn counts as an unexpected stop.
@@ -49,11 +50,15 @@ export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 		}
 		// A signed thinking-only stop is still a candidate: reasoning models can
 		// trap the intended response (or a truncated fragment) in a thinking block
-		// with no text. #isEmptyAssistantStop treats a non-whitespace signature as
+		// with no text. `isEmptyAssistantStop` treats an authenticated signature as
 		// terminal (not empty), so such stops bypass the empty-stop path entirely.
-		// Match that predicate here — unsigned thinking-only stops stay with the
-		// empty-stop retry path (and its cap) rather than being re-handled here.
-		if (content.type === "thinking" && /\S/.test(content.thinking) && /\S/.test(content.thinkingSignature ?? "")) {
+		// OpenAI reasoning field names are replay coordinates, not authentication —
+		// those unsigned thinking-only stops stay with the empty-stop retry path.
+		if (
+			content.type === "thinking" &&
+			/\S/.test(content.thinking) &&
+			isAuthenticatedThinkingSignature(content.thinkingSignature)
+		) {
 			hasContent = true;
 		}
 	}

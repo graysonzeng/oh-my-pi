@@ -164,7 +164,8 @@ it.each([
 			"advisor.syncBacklog": "off",
 			...(immuneTurns === 0 ? { "advisor.immuneTurns": 0 } : {}),
 		});
-		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		// Workflow pauses an advisor on the primary model (same_model); use a distinct advisor model.
+		settings.setModelRole("advisor", "anthropic/claude-opus-4-5");
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
