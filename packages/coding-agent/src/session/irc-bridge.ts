@@ -216,7 +216,8 @@ export class IrcBridge {
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			if (fromParent) {
+			// Only interrupt:true parent IRC steers; ordinary parent IRC waits as an aside.
+			if (fromParent && msg.interrupt === true) {
 				this.#host.agent.steer({
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),

@@ -327,17 +327,19 @@ describe("runSubprocess reviewMetrics contract (real SDK session path)", () => {
 		}
 	});
 
-	it("abnormal empty toolCallId from the real dispatcher is unmatched without durationMs", async () => {
+	it("empty toolCallId from the provider is repaired upstream and pairs with durationMs", async () => {
 		const { result } = await runContract("MetricsEmptyId", [
 			{ content: [{ type: "toolCall", id: "", name: "bash", arguments: { command: "true" } }] },
 			yieldResponse(),
 		]);
-		const reads = toolPhasesOf(result).filter(phase => phase.name === "bash" && phase.unmatched === true);
-		expect(reads.length).toBeGreaterThan(0);
-		for (const phase of reads) {
-			expect(phase.toolCallId).toBeUndefined();
-			expect(phase.durationMs).toBeUndefined();
-			expect(JSON.stringify(phase)).not.toContain("durationMs");
+		// Upstream main synthesizes a stable id for empty provider tool-call ids, so the
+		// dispatcher never sees the abnormal empty id and the phase pairs normally.
+		const phases = toolPhasesOf(result).filter(phase => phase.name === "bash");
+		expect(phases.length).toBeGreaterThan(0);
+		for (const phase of phases) {
+			expect(phase.unmatched).toBeUndefined();
+			expect(typeof phase.toolCallId === "string" && phase.toolCallId.length > 0).toBe(true);
+			expect(phase.durationMs).toBeTypeOf("number");
 		}
 	});
 

@@ -318,7 +318,7 @@ describe("SessionManager.forkFrom", () => {
 			});
 			const migrated = forked.getEntries().find(entry => entry.id === "hook");
 			expect(migrated).toMatchObject({ type: "message", message: { role: "custom", customType: "legacy" } });
-			forked.branch("user");
+			await forked.branch("user");
 			forked.appendMessage({ role: "user", content: "fork-only continuation", timestamp: 3 });
 			expect(forked.buildSessionContext().messages).toMatchObject([
 				{ role: "user", content: "source" },

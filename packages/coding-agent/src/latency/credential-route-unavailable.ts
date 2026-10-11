@@ -217,7 +217,9 @@ export function classifyCredentialRouteFailure(input: CredentialRouteFailureInpu
 	if (kind === "timeout" || kind === "provider_transient") return "transport_blip";
 
 	if (AIError.isPermanentBillingFailureText(message)) return "config_unavailable";
-	if (AIError.is(id, AIError.Flag.AuthFailed)) return "config_unavailable";
+	// A timeout/stall is a transport blip even when an earlier auth status left
+	// AuthFailed on the carried id; a real auth rejection never times out.
+	if (AIError.is(id, AIError.Flag.AuthFailed) && !AIError.is(id, AIError.Flag.Timeout)) return "config_unavailable";
 	if (AIError.is(id, AIError.Flag.Transient) || AIError.is(id, AIError.Flag.Timeout)) {
 		return "transport_blip";
 	}

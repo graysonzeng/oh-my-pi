@@ -74,6 +74,7 @@ function createHost(model: Model, modelRegistry: ModelRegistry, messages: readon
 		sessionManager: {
 			getLastModelChangeRole: () => undefined,
 			getBranch: () => [],
+			getBranchView: () => [],
 			appendCustomMessageEntry: () => {},
 		} as never,
 		persistedAssistantEntryId: () => undefined,

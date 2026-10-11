@@ -206,12 +206,14 @@ export function resolveSoftRequestBudget(performanceClass: SubagentPerformanceCl
 /** Per-run monitor budgets. An omitted override is not `0`; explicit `0` disables that guard. */
 export function resolveRunMonitorBudgets(args: {
 	performanceClass: SubagentPerformanceClass;
-	settings: Settings;
+	/** Absent for hosts without settings (e.g. minimal wake-turn sessions): configured guards are off. */
+	settings: Settings | undefined;
 	maxRuntimeMs?: number;
 	softRequestBudget?: number;
 }): { maxRuntimeMs: number; softRequestBudget: number; softRequestBudgetNotice: boolean } {
-	const configuredMax = Math.max(0, Math.trunc(Number(cfgTaskMaxRuntimeMs.get(args.settings)) || 0));
-	const configuredBudget = Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(args.settings)) || 0));
+	const settings = args.settings;
+	const configuredMax = settings ? Math.max(0, Math.trunc(Number(cfgTaskMaxRuntimeMs.get(settings)) || 0)) : 0;
+	const configuredBudget = settings ? Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(settings)) || 0)) : 0;
 	const classCeiling = resolveClassMaxRuntimeMs(args.performanceClass);
 	const maxRuntimeMs =
 		args.maxRuntimeMs !== undefined
@@ -226,7 +228,7 @@ export function resolveRunMonitorBudgets(args: {
 	return {
 		maxRuntimeMs,
 		softRequestBudget,
-		softRequestBudgetNotice: cfgTaskSoftRequestBudgetNotice.get(args.settings),
+		softRequestBudgetNotice: settings ? cfgTaskSoftRequestBudgetNotice.get(settings) : false,
 	};
 }
 
