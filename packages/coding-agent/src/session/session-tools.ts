@@ -2132,6 +2132,11 @@ export class SessionTools {
 
 	/** Re-evaluate availability without changing the user's enabled setting. */
 	reconcileConsultTool(): Promise<boolean> {
+		// No-op fast path: never queue behind an in-flight roster rebuild (a prompt
+		// awaits this) when consult is neither wanted nor active.
+		if (!this.#consultShouldBeActive() && !this.getEnabledToolNames().includes("consult")) {
+			return Promise.resolve(this.#host.agentKind() === "main");
+		}
 		return this.runToolRegistryMutation(() => this.#reconcileConsultTool());
 	}
 

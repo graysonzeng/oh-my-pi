@@ -39,6 +39,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const OpenAICompatFields = {
 		"supportsStore?": "boolean",
+		"codexResponsesEndpoint?": '"codex" | "standard"',
 		"supportsDeveloperRole?": "boolean",
 		"supportsMultipleSystemMessages?": "boolean",
 		"supportsReasoningEffort?": "boolean",

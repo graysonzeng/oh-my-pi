@@ -43,7 +43,12 @@ const usageZero = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-const PNG_IMAGE: ImageContent = { type: "image", data: "AAAA", mimeType: "image/png" };
+/** Header-only 1024x1024 PNG: upstream sizes image tokens from dimensions (~1229 tokens here); an unparseable image is charged as maximal. */
+const PNG_IMAGE: ImageContent = {
+	type: "image",
+	data: "iVBORw0KGgoAAAANSUhEUgAABAAAAAQACAYAAAB/HSuDAAAAAElFTkSuQmCC",
+	mimeType: "image/png",
+};
 
 /** A mock model that reports the image input capability the real catalog models carry. */
 class ImageMockModel extends MockModel {
