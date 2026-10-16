@@ -43,6 +43,7 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
 import { renderPtcSkeletonCatalog } from "./ptc-catalog";
+import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
 import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -429,7 +430,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		);
 		const catalog = renderPtcSkeletonCatalog(collectSessionPtcCatalogTools(session));
 		const preludeDeclarations = this.#advertisedPreludes(session)
-			.map(definition => definition.codeModeDeclarations?.trim())
+			.map(definition => (definition as { codeModeDeclarations?: string }).codeModeDeclarations?.trim())
 			.filter((declaration): declaration is string => Boolean(declaration))
 			.join("\n\n");
 		return prompt.render(evalCodeModeDescription, { baseDescription, catalog, declarations, preludeDeclarations });

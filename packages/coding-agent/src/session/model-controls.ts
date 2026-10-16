@@ -1,3 +1,4 @@
+import { cfgTierXai } from "../config/workflow-settings";
 import { type Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model, ProviderSessionState, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
 import {
@@ -774,6 +775,7 @@ export class ModelControls {
 			cfgTierOpenai.get(settings),
 			cfgTierAnthropic.get(settings),
 			cfgTierGoogle.get(settings),
+			cfgTierXai.get(settings),
 		);
 		return this.#realizesFastTier(model, tiers);
 	}

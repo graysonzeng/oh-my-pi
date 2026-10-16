@@ -2111,7 +2111,7 @@ export class AgentSession implements SettingsScope {
 		return listPlanFiles({ localProtocolOptions: this.#localProtocolOptions() });
 	}
 
-	#codeModeState: { namespacesInfo?: unknown };
+	#codeModeState: { namespacesInfo?: unknown } = {};
 	#nestedToolScheduler = new NestedToolScheduler();
 
 	/** Live generation tok/s for the working row; fed by this session's own streamed deltas. */
@@ -5660,7 +5660,7 @@ export class AgentSession implements SettingsScope {
 		if (admission.toolCall.name !== READ_OMITTED_CONTENT_TOOL_NAME) return undefined;
 		const model = this.agent.state.model;
 		const contextWindow = model?.contextWindow ?? 0;
-		if (contextWindow <= 0) return ADMIT_TOOL_RESULT_TERMINAL;
+		if (!model || contextWindow <= 0) return ADMIT_TOOL_RESULT_TERMINAL;
 		const result: AgentToolResult = this.isRecoveryToolAuthorized()
 			? admission.result
 			: {
@@ -5687,9 +5687,9 @@ export class AgentSession implements SettingsScope {
 		const remainingTokens = fitBudget - baseTokens - pendingTokens;
 		// Images are counted against the provider image limit AND the model's
 		// actual input capability: a text-only model has no image budget at all.
-		const modelSupportsImages = recoveryImagesSupported(model, result.content);
+		const modelSupportsImages = recoveryImagesSupported(model as Model, result.content);
 		const remainingImages = modelSupportsImages
-			? providerImageBudget(model.provider) - countImagesInMessages(admission.context.messages) - pendingImages
+			? providerImageBudget(model) - countImagesInMessages(admission.context.messages) - pendingImages
 			: 0;
 		const count = (content: readonly (TextContent | ImageContent)[]): { tokens: number; images: number } => {
 			const candidateMessage: ToolResultMessage = {
@@ -7056,7 +7056,7 @@ export class AgentSession implements SettingsScope {
 	fitsRecoveryResult(content: readonly (TextContent | ImageContent)[]): boolean {
 		const model = this.agent.state.model;
 		const contextWindow = model?.contextWindow ?? 0;
-		if (contextWindow <= 0) return false;
+		if (!model || contextWindow <= 0) return false;
 		const tokenizer = this.agent.tokenizer;
 		const compactionSettings = effectiveCompactionSettings(this.settings, contextWindow);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
@@ -7074,10 +7074,10 @@ export class AgentSession implements SettingsScope {
 		// includes non-message tokens.
 		const anchoredContextTokens = this.getContextUsage({ contextWindow })?.tokens ?? 0;
 		if (anchoredContextTokens + tokenizer.countMessage(candidateMessage) > fitBudget) return false;
-		const modelSupportsImages = recoveryImagesSupported(model, content);
+		const modelSupportsImages = recoveryImagesSupported(model as Model, content);
 		if (!modelSupportsImages && countImagesInContent(content) > 0) return false;
 		const usedImages = countImagesInMessages(this.agent.state.messages) + countImagesInContent(content);
-		return usedImages <= providerImageBudget(model.provider);
+		return usedImages <= providerImageBudget(model);
 	}
 
 	/**
@@ -7788,7 +7788,7 @@ export class AgentSession implements SettingsScope {
 	 * behind any pending publish/repair; the maintenance implementation's own
 	 * owner acquisition is reentrant inside this wrapper.
 	 */
-	dropImages(): Promise<{ removed: number }> {
+	dropImages(): Promise<{ removed: number; tokensFreed: number }> {
 		return this.sessionManager.runExclusive(() => this.#maintenance.dropImages());
 	}
 

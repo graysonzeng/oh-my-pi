@@ -364,8 +364,7 @@ export class VibeSessionRegistry {
 		const { patterns, role } = resolveAgentModelSelection({
 			settingsOverride: agentModelOverrides[agentName],
 			agentModel: agent.model,
-			settings: session.settings,
-			activeModelPattern: session.getActiveModelString?.(),
+						activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
 		});
 		return { agent, modelOverride: patterns, modelRole: role };
@@ -1298,10 +1297,6 @@ export class VibeSessionRegistry {
 			modelRole: record.modelRole,
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
-			performanceClass: resolveSubagentPerformanceClass({
-				agentName: record.agent.name,
-				agentShadowReview: record.agent.shadowReview,
-			}),
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
@@ -1312,8 +1307,7 @@ export class VibeSessionRegistry {
 			onProgress,
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
-			settings: session.settings,
-			asyncJobManager: session.asyncJobManager,
+						asyncJobManager: session.asyncJobManager,
 			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
@@ -1404,12 +1398,7 @@ export class VibeSessionRegistry {
 								eventBus: session.eventBus,
 								subagentEventBus: session.subagentEventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
-								performanceClass: resolveSubagentPerformanceClass({
-									agentName: record.agent.name,
-									agentShadowReview: record.agent.shadowReview,
-								}),
-								settings: session.settings,
-							});
+															});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;

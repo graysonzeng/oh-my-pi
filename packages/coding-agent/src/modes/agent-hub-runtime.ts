@@ -1,13 +1,6 @@
 import * as fs from "node:fs";
 import type { AgentHubDeps, AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import {
-	type AgentCostSnapshot,
-	type AgentMetrics,
-	aggregateCost,
-	aggregateMetrics,
-	hubFallbackStatsSession,
-	hubRowMetrics,
-} from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import { type AgentCostSnapshot, aggregateCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import type { HubActionQueueHints } from "@oh-my-pi/pi-tui/overlays/agent-hub-action-queue";
 import type { AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";

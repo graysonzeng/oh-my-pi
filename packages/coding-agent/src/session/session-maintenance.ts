@@ -1648,7 +1648,7 @@ export class SessionMaintenance {
 					}
 
 					const deadEndWarning = noProgressDeadEnd
-						? compactionDeadEndWarning("clear large tool output")
+						? this.#compactionDeadEndWarning("clear large tool output")
 						: undefined;
 					if (deadEndWarning) {
 						const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
@@ -5347,7 +5347,7 @@ export class SessionMaintenance {
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (contextWindow > 0) {
 			const recoveryBand = Math.floor(
-				resolveThresholdTokens(contextWindow, this.#compactionSettings) * COMPACTION_RECOVERY_BAND,
+				resolveThresholdTokens(contextWindow, this.#compactionSettings(contextWindow)) * COMPACTION_RECOVERY_BAND,
 			);
 			const overhead = computeNonMessageTokens(
 				this.#host.nonMessageTokenSource(),
@@ -5457,7 +5457,7 @@ export class SessionMaintenance {
 			replayedReasoningShift =
 				tokenizer.replayedReasoningTokens(retained) - this.#tokenizer.replayedReasoningTokens(retained);
 		}
-		const compactionSettings = this.#compactionSettings;
+		const compactionSettings = this.#compactionSettings(contextWindow);
 		const residualTokens = compactionContextTokens(
 			Math.max(
 				0,

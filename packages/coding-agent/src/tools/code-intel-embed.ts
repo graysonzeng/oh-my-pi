@@ -88,7 +88,7 @@ export async function collectEmbedMatrix(
 	for (let offset = 0; offset < texts.length; offset += batchSize) {
 		if (signal?.aborted) return rows;
 		const batch = texts.slice(offset, offset + batchSize);
-		const iterator = handle.embed(batch, batchSize, role)[Symbol.asyncIterator]();
+		const iterator = handle.embed(batch, batchSize)[Symbol.asyncIterator]();
 		while (true) {
 			const next = await untilAborted(signal, iterator.next());
 			if (next.done) break;

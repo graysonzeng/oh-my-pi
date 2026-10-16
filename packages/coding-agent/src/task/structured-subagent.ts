@@ -1,3 +1,4 @@
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 /**
  * Shared policy resolution and execution for task and eval subagents.
  *
@@ -53,6 +54,7 @@ import { bindHostSealsToAcceptance, readHostTerminalSeal, type HostTerminalSeal 
 import { resolveCurrentWorkspaceCodeVersion } from "./workspace-code-version";
 import type { WorkflowBudgetGuard } from "../workflow/budget-ledger";
 import { parsePatchTouchedFiles } from "../utils/parse-patch-touched-files";
+import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
 	applyEligibleNestedPatches,
@@ -145,7 +147,7 @@ export interface StructuredSubagentRequest {
 	 */
 	structured?: boolean;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
-	effort?: TaskEffort;
+	effort?: TaskEffort | string;
 	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
 	solutionSpace?: string;
 	/** Request a code-review shadow cohort (`code`) or force it off. */
@@ -677,10 +679,9 @@ function buildExecutorOptions(
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: request.thinkingLevel ?? policy.effectiveAgent.thinkingLevel,
-		effort: request.effort,
+		effort: request.effort as TaskEffort | undefined,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
 		structured: policy.structured,
-		shadowReview: request.shadowReview,
 		...(policy.schema.source === "none"
 			? {}
 			: {
@@ -694,7 +695,6 @@ function buildExecutorOptions(
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
-		performanceClass: policy.performanceClass,
 		maxRuntimeMs: policy.effectiveMaxRuntimeMs,
 		restrictToolNames,
 		keepAlive: request.keepAlive,
@@ -702,13 +702,6 @@ function buildExecutorOptions(
 		eventBus: session.eventBus,
 		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
-		onResponse: request.onResponse,
-		onPayload: request.onPayload,
-		strictModelIdentity: request.strictModelIdentity,
-		budgetGuard: request.budgetGuard,
-		providerChargeKeys: request.providerChargeKeys,
-		authStorage: session.authStorage,
-		modelRegistry: session.modelRegistry,
 		settings: session.settings,
 		asyncJobManager: session.asyncJobManager,
 		inheritedSessionAgents: session.getSessionAgents?.(),

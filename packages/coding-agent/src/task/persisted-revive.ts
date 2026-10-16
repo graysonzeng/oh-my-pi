@@ -311,8 +311,6 @@ export function createPersistedSubagentReviverFactory(
 				// Anchor artifacts to the revived ref's own dir (its parent's children
 				// dir), not the live root session's, matching the spawn callers (#11563).
 				artifactsDir: path.dirname(sessionFile),
-				performanceClass,
-				settings: ctx.settings,
 			});
 			return session;
 		};

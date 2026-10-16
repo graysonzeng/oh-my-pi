@@ -29,6 +29,7 @@ import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" wit
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { type ConsultSelectionHost, isConsultActivationAllowed } from "../tools/consult-model";
+import { denyError, resolveApproval, resolveApprovalFromContext } from "../tools/approval";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -54,7 +55,14 @@ import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
-import { cfgExternalThinking, cfgIncludeModelInPrompt, cfgInlineToolDescriptors, cfgSkillful } from "./settings";
+import {
+	cfgExternalThinking,
+	cfgIncludeModelInPrompt,
+	cfgInlineToolDescriptors,
+	cfgProvidersOpenaiCodexCodeMode,
+	cfgProvidersOpenaiCodexCodeModeDirectTools,
+	cfgSkillful,
+} from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "../tools/settings";
 
@@ -370,8 +378,6 @@ export class SessionTools {
 	#lastAppliedToolSignature: string | undefined;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
-	/** Names currently exposed through tool-session `isToolActive` predicates. */
-	#toolPredicateNames: readonly string[] | undefined;
 	/** Wire-name snapshot for the direct Code Mode tools last applied successfully. */
 	#codeModeDirectWireSignature: string | undefined;
 	/** Direct partition of the last applied Code Mode surface; undefined when inactive. */
@@ -703,7 +709,7 @@ export class SessionTools {
 		return evalTool.supportsCodeModeTransport?.() ?? false;
 	}
 
-		hasBuiltInTool(name: string): boolean {
+	hasBuiltInTool(name: string): boolean {
 		if (this.#builtInToolNames.has(name)) return true;
 		if (this.#toolRegistry.has(name)) return false;
 		for (const builtInName of this.#builtInToolNames) {
@@ -905,7 +911,7 @@ export class SessionTools {
 	#resolvePtc(model: Model | undefined, enabledToolNames: readonly string[]): PtcResolution {
 		return resolvePtc({
 			provider: model?.provider ?? "",
-			toolMode: model?.toolMode,
+			toolMode: (model as { toolMode?: string } | undefined)?.toolMode,
 			ptcMode: cfgToolsPtcMode.get(this.#host.settings),
 			codexMode: cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings),
 			extraDirectTools: cfgToolsPtcDirectTools.get(this.#host.settings),
