@@ -14,6 +14,7 @@ import {
 	TurnRecovery,
 	type TurnRecoveryHost,
 } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
+import { editInspect } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function createHost(
@@ -188,6 +189,26 @@ describe("TurnRecovery edit-failure escalation", () => {
 				toolArgs: { command: "false" },
 			}),
 		).toBeUndefined();
+	});
+
+	it("tracks hashline edits whose path lives only inside `input`", () => {
+		const host = createHost(worker, modelRegistry);
+		const recovery = new TurnRecovery(host);
+		const session = {};
+		const note = (input: string) => {
+			const toolArgs = { i: "fix", input };
+			return recovery.noteEditToolOutcome(session, {
+				toolName: "edit",
+				isError: true,
+				toolArgs,
+				targetPaths: editInspect("hashline", JSON.stringify(toolArgs)).paths,
+				escalateAvailable: false,
+			});
+		};
+		expect(note("[src/fail.py#BBA3]\nPUT 20.=20:\n+x\n@@ fn @@\nPUT >5:\n+y")?.count).toBe(1);
+		const atThreshold = note("[src/fail.py#C0DE]\nPUT 21.=21:\n+x");
+		expect(atThreshold?.path).toBe("/tmp/edit-escalation-test/src/fail.py");
+		expect(atThreshold?.advisory).toContain("Re-read");
 	});
 
 	it("clears the streak on a successful edit", () => {

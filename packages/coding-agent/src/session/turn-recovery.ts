@@ -99,6 +99,7 @@ import {
 	editPathFromToolArgs,
 	type EditFailureEscalationResult,
 	markEditFailureEscalated as markEditFailurePathEscalated,
+	normalizeEditFailurePath,
 	noteEditFailureEscalation,
 } from "./edit-failure-escalation";
 import { formatModelRoleAlias } from "../config/model-roles";
@@ -1849,13 +1850,18 @@ export class TurnRecovery {
 			toolName: string;
 			isError: boolean;
 			toolArgs: unknown;
+			/** Paths the edit tool reports for the payload (hashline/patch carry them inside `input`). */
+			targetPaths?: readonly string[];
 			/** When false, advisory omits the "Escalating…" clause (e.g. modelFallback off). */
 			escalateAvailable?: boolean;
 		},
 	): EditFailureEscalationResult | undefined {
 		if (args.toolName !== "edit") return undefined;
 		const cwd = this.#host.sessionManager.getCwd();
-		const filePath = editPathFromToolArgs(args.toolArgs, cwd);
+		const targetPath = args.targetPaths?.find(candidate => candidate.trim());
+		const filePath = targetPath
+			? normalizeEditFailurePath(targetPath, cwd)
+			: editPathFromToolArgs(args.toolArgs, cwd);
 		if (!filePath) return undefined;
 		if (!args.isError) {
 			clearEditFailureEscalation(session, filePath, cwd);

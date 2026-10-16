@@ -5602,10 +5602,12 @@ export class AgentSession implements SettingsScope {
 		const escalateAvailable = cfgRetryModelFallback.get(this.settings) !== false;
 		// Advisory starts re-read-only; the Escalating clause is added only after a
 		// successful top-model apply (never when modelFallback is off or apply fails).
+		const editTool = ctx.toolCall.name === "edit" ? ctx.context.tools?.find(tool => tool.name === "edit") : undefined;
 		const editOutcome = this.#recovery.noteEditToolOutcome(this, {
 			toolName: ctx.toolCall.name,
 			isError: ctx.isError,
 			toolArgs: ctx.toolCall.arguments,
+			targetPaths: editTool?.matcherPaths?.(ctx.toolCall.arguments),
 			escalateAvailable: false,
 		});
 		let editAdvisory = editOutcome?.advisory;
