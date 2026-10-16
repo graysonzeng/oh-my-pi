@@ -92,6 +92,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: "FastModeResult",
 	},
 	{
+		name: "set_ptc_mode",
+		doc: "Set programmatic tool calling mode (`off`, `on`, or `auto`); returns the mode and whether it is active.",
+		params: { mode: "'off' | 'on' | 'auto'" },
+		result: { mode: "'off' | 'on' | 'auto'", active: "boolean" },
+	},
+	{
 		name: "set_slow_mode",
 		doc: "Turn `/slow` on or off for the active model; returns whether it is now on.",
 		params: { enabled: "boolean" },

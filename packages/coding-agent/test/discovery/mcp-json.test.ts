@@ -125,4 +125,26 @@ describe("standalone mcp.json oauth env expansion", () => {
 		});
 		expect(server?.auth).toBeUndefined();
 	});
+
+	test("preserves explicit lazy: true on standalone mcp.json servers", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					slow: {
+						command: "npx",
+						args: ["-y", "some-mcp"],
+						lazy: true,
+						enabled: true,
+					},
+				},
+			}),
+		);
+
+		const [server] = await loadStandaloneMcpConfig(tempDir);
+		expect(server).toBeDefined();
+		expect(server?.lazy).toBe(true);
+		expect(server?.enabled).toBe(true);
+		expect(server?.command).toBe("npx");
+	});
 });

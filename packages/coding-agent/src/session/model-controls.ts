@@ -16,7 +16,11 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
-import { classifyDifficulty } from "../auto-thinking/classifier";
+import {
+	ADAPTIVE_THINKING_TOOL_RESULT_WINDOW,
+	type AdaptiveThinkingContextSignals,
+	classifyDifficulty,
+} from "../auto-thinking/classifier";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
@@ -76,6 +80,11 @@ export interface ModelControlsHost {
 	emit(event: AgentSessionEvent): void;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
+	agentKind(): "main" | "sub";
+	recentToolFailureCount(window: number): number;
+	contextUsagePercent(): number | undefined;
+	isLatencyArmEnabled(arm: "adaptive_thinking_context"): boolean;
+	markLatencyArmFired(arm: "adaptive_thinking_context"): void;
 }
 
 /** Owns model selection, thinking effort, role cycling, and service tiers. */
@@ -651,6 +660,7 @@ export class ModelControls {
 				parentId: this.#host.sessionManager.getLeafId(),
 			};
 			try {
+				const adaptiveContext = this.#adaptiveThinkingContextSignals();
 				resolved = await classifyDifficulty(
 					{ request: promptText, solutionSpace },
 					{
@@ -665,6 +675,7 @@ export class ModelControls {
 							if (entryId) usageOwner.parentId = entryId;
 						},
 						telemetry: this.#host.agent.telemetry,
+						...(adaptiveContext !== undefined ? { adaptiveContext } : {}),
 					},
 				);
 			} catch (error) {
@@ -698,6 +709,17 @@ export class ModelControls {
 			configured: AUTO_THINKING,
 			resolved: effort,
 		});
+	}
+
+	#adaptiveThinkingContextSignals(): AdaptiveThinkingContextSignals | undefined {
+		if (!this.#host.isLatencyArmEnabled("adaptive_thinking_context")) return undefined;
+		this.#host.markLatencyArmFired("adaptive_thinking_context");
+		const contextUsagePercent = this.#host.contextUsagePercent();
+		return {
+			agentRole: this.#host.agentKind(),
+			recentToolFailures: this.#host.recentToolFailureCount(ADAPTIVE_THINKING_TOOL_RESULT_WINDOW),
+			...(contextUsagePercent !== undefined ? { contextUsagePercent } : {}),
+		};
 	}
 
 	/**

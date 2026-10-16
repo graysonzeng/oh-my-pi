@@ -14,6 +14,7 @@ import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
+import { collectSessionPtcCatalogTools } from "../eval/catalog-bridge";
 import { IdleTimeout } from "../eval/idle-timeout";
 import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes } from "../eval/preludes";
 import { prepareEvalSource } from "../eval/input";
@@ -41,6 +42,8 @@ import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
+import { renderPtcSkeletonCatalog } from "./ptc-catalog";
+import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
@@ -56,8 +59,11 @@ import {
 	cfgEvalAutoProvision,
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
+import { mayMigrateEvalGate, recordOrRequireEvalParity } from "../latency/eval-parity";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
+
+export { mayMigrateEvalGate, recordOrRequireEvalParity };
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
@@ -404,6 +410,30 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return session.getAdvertisedEvalPreludes?.() ?? getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []);
 	}
 
+	/**
+	 * PTC / Code Mode advertisement: a budgeted skeleton catalog of bridged
+	 * tools plus search/describe recovery. Direct keep-set tools are omitted
+	 * so the prompt never advertises a tool the model can already call.
+	 */
+	#codeModeDescription(baseDescription: string): string | undefined {
+		const session = this.session;
+		const directToolNames = session?.getCodeModeDirectToolNames?.();
+		if (!session || !directToolNames) return undefined;
+		const direct = new Set(directToolNames);
+		const declarations = generateCodeModeDeclarations(
+			(session.getEvalBridgeToolNames?.() ?? [...(session.toolRegistry?.keys() ?? [])]).flatMap(name => {
+				if (direct.has(name)) return [];
+				const tool = session.toolRegistry?.get(name);
+				return tool ? [{ name, parameters: (tool as { parameters?: unknown }).parameters }] : [];
+			}),
+		);
+		const catalog = renderPtcSkeletonCatalog(collectSessionPtcCatalogTools(session));
+		const preludeDeclarations = this.#advertisedPreludes(session)
+			.map(definition => definition.codeModeDeclarations?.trim())
+			.filter((declaration): declaration is string => Boolean(declaration))
+			.join("\n\n");
+		return prompt.render(evalCodeModeDescription, { baseDescription, catalog, declarations, preludeDeclarations });
+	}
 	/** Only syntax not obvious from the field schema; filtered by enabled language. */
 	static readonly #examples: readonly ToolExample<typeof evalSchema.infer>[] = [
 		{
@@ -503,6 +533,23 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
 		const session = this.session;
+		const frozenArm = this.session.isLatencyArmEnabled
+			? this.session.isLatencyArmEnabled("eval_gate_migration")
+			: session.settings.get("latency.arms.evalGateMigration") === true;
+		const evalGateArmEnabled = frozenArm === true;
+		// Optional session-provided parity receipt (tests / offline proven receipt).
+		const sessionReceipt = (session as { evalGateParityReceipt?: unknown }).evalGateParityReceipt;
+		const evalGateControl = recordOrRequireEvalParity(
+			sessionReceipt as import("../latency/eval-parity").EvalGateParityReceiptV1 | undefined,
+			evalGateArmEnabled,
+		);
+		// Treatment receipt: native control actually engaged on this eval gate.
+		if (evalGateControl === "native-control") session.markLatencyArmFired?.("eval_gate_migration");
+		const evalGateNotice = evalGateArmEnabled
+			? evalGateControl === "native-control"
+				? "[eval-gate] native-control selected from proven parity receipt; bridge retained until native owner cutover"
+				: "[eval-gate] migration not proven; parity receipt unavailable/unproven; bridge control retained"
+			: undefined;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
 		const cellLanguage: EvalLanguage = params.language === "py" ? "python" : params.language;
@@ -533,7 +580,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			},
 		];
 		const languages = uniqueEvalLanguages(cells);
-		const notice = detailsNotice(cells);
+		const notice = [detailsNotice(cells), evalGateNotice].filter(Boolean).join("\n") || undefined;
 		const sessionAbortController = new AbortController();
 		const emitToolUpdate = onUpdate
 			? (text: string, details: EvalToolDetails): void => {

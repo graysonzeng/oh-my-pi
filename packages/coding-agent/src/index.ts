@@ -74,6 +74,8 @@ export type {
 // Tools (detail types and utilities)
 export * from "./tools";
 export * from "./utils/github";
+// Workflow (single barrel — workflow/index re-exports runtime-adapter)
+export * from "./workflow";
 // UI components for extensions
 export {
 	HookEditorComponent as ExtensionEditorComponent,

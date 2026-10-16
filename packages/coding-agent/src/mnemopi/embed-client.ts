@@ -169,7 +169,7 @@ function connectMnemopiEmbedServer(model: MnemopiEmbedModelId, cacheDir: string 
  * throughput.
  */
 export interface MnemopiSubprocessEmbeddingModel {
-	embed(texts: string[], batchSize?: number): AsyncIterable<number[][]>;
+	embed(texts: string[], batchSize?: number, role?: MnemopiEmbedRole): AsyncIterable<number[][]>;
 }
 
 /**
@@ -260,6 +260,7 @@ export class MnemopiEmbedClient {
 		cacheDir: string | undefined,
 		texts: string[],
 		batchSize: number | undefined,
+		role: MnemopiEmbedRole | undefined,
 	): Promise<number[][]> {
 		const key = workerKey(model, cacheDir);
 		const worker = this.#ensureWorker(key, model, cacheDir);
@@ -324,6 +325,7 @@ export class MnemopiEmbedClient {
 		cacheDir: string | undefined,
 		texts: string[],
 		batchSize: number | undefined,
+		role: MnemopiEmbedRole | undefined,
 	): AsyncIterable<number[][]> {
 		// Mnemopi's `collectMatrix` re-batches via async iteration anyway; yield
 		// a single batch carrying the full result so the caller's drain loop

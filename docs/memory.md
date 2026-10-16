@@ -155,9 +155,30 @@ Recall is injected as background context, not instructions, and recalled memory 
 
 `/memory view`, `/memory stats`, `/memory diagnose`, and `/memory enqueue` operate through the active Hindsight state. `/memory clear` first drains pending retains, then clears only the local session state and recall cache. It **does not delete the server-side bank**; delete that bank with the Hindsight UI or API.
 
+## Export / preview / import (D4)
+
+Local and sharpshooter backends support optional transfer via `MemoryBackend.transferCapabilities` / `exportRecords` / `previewImport` / `applyImport`:
+
+- Local walks `getMemoryRoot` (`learned.md`, `memory_summary.md`, `MEMORY.md`) — **never** search top-N.
+- Sharpshooter walks `architecture.md` / `product.md` / `style.md` and **omits** `queue/`, `state.json`, and `consolidate.lock`.
+- Manifest marks omitted capabilities (`entryDelete`, `structuredSearch`) and omitted fields.
+- Import preview lists create / skip / conflict / overwrite against the **live target**; content is data only (no instruction execution).
+- Learning candidates apply through `saveLearnedLesson` (redaction + serial queue). System / decision files require explicit `replaceSystemArtifacts` (formal activation ≠ candidate).
+- Packages re-verify content checksums and per-record fingerprints at the apply boundary; unknown `formatVersion` is refused (not warn-and-apply).
+- Cross-project apply requires `--confirm-cross-scope=<binding>` matching the preview token (source scope + target scope + checksum + plan). A bare `--confirm-cross-scope` flag is not authorization. Entry delete is **unsupported** — do not fake it with `clear`.
+- `complete=true` only when no existing out-of-surface assets were omitted; sharpshooter dumps that omit queue/state/lock are incomplete by design.
+- `off` / hindsight / mnemopi report unsupported until a full traverse seam exists.
+
+Slash: `/memory export [path]`, `/memory import-preview <path>`, `/memory import-apply <path> [--confirm-cross-scope=<binding>] [--replace-system]`.
+
+Implementation: `packages/coding-agent/src/memory-backend/local-transfer.ts`, `sharpshooter-transfer.ts`, `transfer-cli.ts`, `transfer-integrity.ts`; types in `transfer-types.ts`; learned owner in `memories/learned.ts`.
+
 ## Key files
 
 - `packages/coding-agent/src/memories/index.ts` — pipeline orchestration, injection, clear/enqueue entry points (the `/memory` command routes here via `packages/coding-agent/src/memory-backend/local-backend.ts`)
 - `packages/coding-agent/src/memories/storage.ts` — SQLite-backed job queue and thread registry
 - `packages/coding-agent/src/prompts/memories/` — memory prompt templates
 - `packages/coding-agent/src/internal-urls/memory-protocol.ts` — `memory://` URL handler
+- `packages/coding-agent/src/memory-backend/local-transfer.ts` — D4 local export/preview/import
+- `packages/coding-agent/src/memory-backend/sharpshooter-transfer.ts` — D4 second-seam decision-file transfer
+- `packages/coding-agent/src/memory-backend/transfer-cli.ts` — `/memory export` / import preview/apply
