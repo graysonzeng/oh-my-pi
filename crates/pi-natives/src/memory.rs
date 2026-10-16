@@ -32,6 +32,10 @@ pub struct NativeWork(());
 
 /// Count a blocking native job as running until the guard drops.
 #[inline]
+#[allow(
+	clippy::missing_const_for_fn,
+	reason = "body is Linux-only via cfg; const only on other targets"
+)]
 pub fn native_work() -> NativeWork {
 	#[cfg(all(target_os = "linux", target_env = "gnu"))]
 	allocator::begin();
@@ -49,6 +53,10 @@ impl Drop for NativeWork {
 /// Report memory freed outside a running job, so the trimmer returns its pages
 /// after the next quiet period.
 #[inline]
+#[allow(
+	clippy::missing_const_for_fn,
+	reason = "body is Linux-only via cfg; const only on other targets"
+)]
 pub fn released() {
 	#[cfg(all(target_os = "linux", target_env = "gnu"))]
 	allocator::settled();

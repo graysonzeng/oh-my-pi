@@ -406,7 +406,7 @@ fn extract_from_source(
 			chunks: chunk_windows(source, path),
 		});
 	};
-	let tree = parse_cached(source, lang).map_err(|err| err.to_string())?;
+	let tree = parse_cached(source, lang, Some(path)).map_err(|err| err.to_string())?;
 	let Some(tree) = tree else {
 		return Ok(FileExtraction {
 			tags:   Vec::new(),
