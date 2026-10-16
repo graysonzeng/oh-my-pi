@@ -154,7 +154,6 @@ async function spawnKeptAliveChild() {
 			enableLsp: false,
 			enableMCP: false,
 			enableIrc: false,
-			requireYieldTool: true,
 		});
 		expect(result.exitCode).toBe(0);
 	} catch (error) {

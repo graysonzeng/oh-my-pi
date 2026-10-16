@@ -364,7 +364,7 @@ export class VibeSessionRegistry {
 		const { patterns, role } = resolveAgentModelSelection({
 			settingsOverride: agentModelOverrides[agentName],
 			agentModel: agent.model,
-						activeModelPattern: session.getActiveModelString?.(),
+			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
 		});
 		return { agent, modelOverride: patterns, modelRole: role };
@@ -1307,7 +1307,7 @@ export class VibeSessionRegistry {
 			onProgress,
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
-						asyncJobManager: session.asyncJobManager,
+			asyncJobManager: session.asyncJobManager,
 			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
@@ -1398,7 +1398,7 @@ export class VibeSessionRegistry {
 								eventBus: session.eventBus,
 								subagentEventBus: session.subagentEventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
-															});
+							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;

@@ -193,7 +193,6 @@ async function createPersistedSession(
 			? { compactionThreshold: contract.compactionThreshold }
 			: undefined),
 		readSummarize: contract?.readSummarize,
-		performanceClass: contract?.performanceClass,
 		...(contract?.outputSchema !== undefined ? { outputSchema: contract.outputSchema } : {}),
 	});
 	manager.appendMessage({
@@ -1718,7 +1717,6 @@ describe("buildWakeRelayBody", () => {
 		const cwd = makeTempDir("@pi-revive-class-");
 		const reviewFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
 			agent: "task",
-			performanceClass: "review",
 		});
 		const workerFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
 			agent: "task",
@@ -1755,7 +1753,6 @@ describe("buildWakeRelayBody", () => {
 		};
 		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
 			agent: "reviewer",
-			performanceClass: "review",
 			outputSchema,
 		});
 		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);

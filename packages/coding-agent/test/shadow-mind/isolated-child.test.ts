@@ -66,7 +66,6 @@ describe("isolatedChild session tools", () => {
 			parentTaskPrefix: "reviewer-1",
 			agentDisplayName: "shadow:architecture-review",
 			taskDepth: 1,
-			requireYieldTool: false,
 			skills: [],
 			contextFiles: [],
 			promptTemplates: [],

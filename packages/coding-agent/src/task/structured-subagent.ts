@@ -1,4 +1,3 @@
-import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 /**
  * Shared policy resolution and execution for task and eval subagents.
  *

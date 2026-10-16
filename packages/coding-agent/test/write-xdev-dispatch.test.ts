@@ -828,7 +828,6 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		try {
 			const activeNames = new Set(["read", "grep"]);
 			const session = xdevSession(tempDir, {
-				requireYieldTool: true,
 				isToolActive: name => activeNames.has(name),
 				setActiveToolNames: names => {
 					for (const name of names) activeNames.add(name);

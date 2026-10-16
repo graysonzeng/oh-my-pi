@@ -116,7 +116,6 @@ describe("parseAgentFields", () => {
 			getSessionSpawns: () => "",
 			settings: Settings.isolated(),
 			taskDepth: 1,
-			requireYieldTool: true,
 			enableLsp: false,
 			skipPythonPreflight: true,
 		};

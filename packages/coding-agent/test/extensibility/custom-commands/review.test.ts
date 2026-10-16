@@ -81,6 +81,19 @@ interface EditorCall {
 	editorOptions: { promptStyle?: boolean } | undefined;
 }
 
+function makeManyFileDiff(fileCount: number): string {
+	return Array.from(
+		{ length: fileCount },
+		(_, idx) => `diff --git a/src/pr-${idx}.ts b/src/pr-${idx}.ts
+--- a/src/pr-${idx}.ts
++++ b/src/pr-${idx}.ts
+@@ -1 +1 @@
+-export const pr${idx} = false;
++export const pr${idx} = true;
+`,
+	).join("\n");
+}
+
 describe("ReviewCommand", () => {
 	let tmpDir: string;
 

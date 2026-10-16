@@ -88,7 +88,6 @@ describe("C6 tool-free final without yield reminders", () => {
 		const result = await runSubprocess({
 			...baseOptions,
 			settings,
-			performanceClass: "worker",
 		});
 
 		expect(captured[0]?.requireYieldTool).toBe(false);

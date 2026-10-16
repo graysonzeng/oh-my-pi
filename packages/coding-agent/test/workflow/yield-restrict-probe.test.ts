@@ -55,7 +55,6 @@ describe("implement/repair scoped tools retain yield under catalog filter", () =
 			cwd: tempDir,
 			authStorage,
 			modelRegistry,
-			requireYieldTool: true,
 			restrictToolNames: true,
 			toolNames: [...SCOPED_IMPLEMENTATION_TOOLS],
 			hasUI: false,

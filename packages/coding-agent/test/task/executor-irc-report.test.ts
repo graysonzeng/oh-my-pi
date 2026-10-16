@@ -71,9 +71,7 @@ for (const scenario of [
 		attachIrcWakeTurnMonitor(child, {
 			id: "Review",
 			agent: { name: "reviewer", description: "Review", systemPrompt: "", source: "bundled" },
-			performanceClass: "review",
 			maxRuntimeMs: scenario === "timeout" ? 10 : 0,
-			softRequestBudget: 0,
 			...(scenario === "schema-reject"
 				? {
 						outputSchema: {
@@ -179,9 +177,7 @@ describe("IRC wake artifact refresh", () => {
 		attachIrcWakeTurnMonitor(child, {
 			id: "Review",
 			agent: { name: "reviewer", description: "Review", systemPrompt: "", source: "bundled" },
-			performanceClass: "review",
 			maxRuntimeMs: 0,
-			softRequestBudget: 0,
 			artifactsDir: args.artifactsDir,
 			...(args.outputSchema !== undefined ? { outputSchema: args.outputSchema } : {}),
 		});

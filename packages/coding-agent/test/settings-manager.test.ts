@@ -1,3 +1,4 @@
+import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
@@ -39,6 +40,9 @@ import {
 	cfgPowerSleepPrevention,
 	cfgFeaturesUnexpectedStopDetection,
 	cfgRetryFallbackChains,
+	cfgProvidersOpenaiCodexCodeMode,
+	cfgProvidersOpenaiCodexCodeModeDirectTools,
+	cfgCodeModeInputs,
 	cfgProviderAppendOnlyContext,
 	cfgDefaultThinkingLevel,
 	cfgInlineToolDescriptors,

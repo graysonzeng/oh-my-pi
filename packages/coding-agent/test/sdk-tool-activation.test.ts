@@ -1749,7 +1749,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			requireYieldTool: true,
 			toolNames: ["read", "grep", "glob", "web_search"],
 		});
 
@@ -1764,7 +1763,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			requireYieldTool: true,
 			toolNames: ["yield"],
 		});
 
@@ -2088,7 +2086,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			extensions: [toolActivationExtension, restrictedLateExtension],
 			customTools: [sdkCustomTool],
 			toolNames: ["read", "lsp"],
-			requireYieldTool: true,
 			restrictToolNames: true,
 			enableMCP: true,
 			mcpManager: inheritedManager,
@@ -2131,7 +2128,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			extensions: [toolActivationExtension],
 			customTools: [sdkCustomTool],
 			toolNames: ["read", "generate_image"],
-			requireYieldTool: true,
 			restrictToolNames: false,
 		});
 

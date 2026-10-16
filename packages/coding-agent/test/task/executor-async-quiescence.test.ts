@@ -240,7 +240,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 			task: "verify the build",
 			index: 0,
 			id: "quiescence-wait-before-yield",
-			requireYieldTool: true,
 		});
 
 		expect(harness.settleCalls()).toBe(1);
@@ -273,7 +272,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 			task: "do the work",
 			index: 0,
 			id: "quiescence-malformed-schema",
-			performanceClass: "review",
 			outputSchema: {
 				type: "object",
 				properties: { approved: { type: "boolean" } },

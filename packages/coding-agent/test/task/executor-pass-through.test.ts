@@ -443,7 +443,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			...baseOptions,
 			agent: { ...baseAgent, model: ["@task"] },
 			id: "subagent-effort-ceiling",
-			effort: "hi",
+			effort: Effort.High,
 			settings,
 			modelRegistry: createModelRegistry(model),
 		});
@@ -467,7 +467,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			...baseOptions,
 			agent: { ...baseAgent, name: "reviewer", model: ["@task"], maxEffort: Effort.XHigh },
 			id: "reviewer-agent-effort-ceiling",
-			effort: "max",
+			effort: Effort.Max,
 			settings,
 			modelRegistry: createModelRegistry(model),
 		});
@@ -494,7 +494,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			...baseOptions,
 			agent: { ...baseAgent, model: ["@task"] },
 			id: "subagent-effort-ceiling-below-floor",
-			effort: "hi",
+			effort: Effort.High,
 			settings,
 			modelRegistry: createModelRegistry(model),
 		});
@@ -529,7 +529,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			...baseOptions,
 			agent: { ...baseAgent, name: "scout", model: ["@task"], maxEffort: Effort.Medium },
 			id: "mandatory-max-only-effort",
-			effort: "lo",
+			effort: Effort.Low,
 			settings,
 			modelRegistry: createModelRegistry(model),
 		});
@@ -623,7 +623,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			...baseOptions,
 			agent: { ...baseAgent, model: ["@task"] },
 			id: "subagent-default-effort-ceiling",
-			effort: "max",
+			effort: Effort.Max,
 			settings,
 			modelRegistry: createModelRegistry(model),
 		});
@@ -644,7 +644,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			...baseOptions,
 			agent: { ...baseAgent, model: ["@task"] },
 			id: "subagent-hi-is-high",
-			effort: "hi",
+			effort: Effort.High,
 			settings,
 			modelRegistry: createModelRegistry(model),
 		});

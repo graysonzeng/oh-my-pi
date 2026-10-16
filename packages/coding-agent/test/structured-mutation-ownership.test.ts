@@ -691,7 +691,7 @@ describe("structured mutation ownership: real public entries queue behind a pend
 
 			storage.allowRewrite.resolve();
 			expect(await committing).toBe(true);
-			expect(await dropped).toEqual({ removed: 0 });
+			expect(await dropped).toEqual({ removed: 0, tokensFreed: 0 });
 			await branched;
 			await reset;
 			await summarised;

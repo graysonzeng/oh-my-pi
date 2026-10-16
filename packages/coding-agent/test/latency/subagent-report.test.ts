@@ -155,7 +155,6 @@ function sessionInit(opts: { agent?: string; performanceClass?: "review" | "expl
 		task: "do work",
 		tools: [],
 		agent: opts.agent,
-		performanceClass: opts.performanceClass,
 	};
 }
 

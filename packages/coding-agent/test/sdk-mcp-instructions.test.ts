@@ -189,7 +189,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 				text => text.includes(SERVER_INSTRUCTIONS) && text.includes(DO_THING_ROUTE),
 			);
 
-			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
+			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			const write = session.getToolByName("write");
 			expect(write).toBeDefined();
 			const result = await write!.execute("deferred-mcp-activation", {
@@ -197,12 +197,6 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 				content: "{}",
 			});
 			expect(result.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
-
-			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
-				await Bun.sleep(50);
-				prompt = session.systemPrompt.join("\n");
-			}
-			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			// The instructions are framed under the MCP section, and guidance keeps
 			// the escaped original tool name while routing through the exact
 			// normalized name actually mounted in the live xd:// registry.
