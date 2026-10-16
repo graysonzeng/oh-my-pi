@@ -370,6 +370,12 @@ export class SessionTools {
 	#lastAppliedToolSignature: string | undefined;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
+	/** Names currently exposed through tool-session `isToolActive` predicates. */
+	#toolPredicateNames: readonly string[] | undefined;
+	/** Wire-name snapshot for the direct Code Mode tools last applied successfully. */
+	#codeModeDirectWireSignature: string | undefined;
+	/** Direct partition of the last applied Code Mode surface; undefined when inactive. */
+	#codeModeDirectToolNames: readonly string[] | undefined;
 	/**
 	 * `xd://` device names the current base system prompt renders in its catalog
 	 * (the last rebuild's {@link BuildSystemPromptResult.xdevCatalogNames}). Consulted
@@ -682,7 +688,22 @@ export class SessionTools {
 	 * routes exact-name matches ahead of wire aliases — so a registered non-built-in
 	 * tool with that name wins and the alias no longer counts as built-in.
 	 */
-	hasBuiltInTool(name: string): boolean {
+	getCodeModeDirectToolNames(): readonly string[] | undefined {
+		return this.#codeModeDirectToolNames;
+	}
+
+	#hasCodeModeEvalTransport(): boolean {
+		const evalTool = this.#toolRegistry.get("eval") as
+			| (AgentTool & { supportsCodeModeTransport?: () => boolean })
+			| undefined;
+		if (!evalTool) return false;
+		// A replacement `eval` that cannot state the capability cannot be assumed
+		// to run `tool.<name>()`; demoting the direct surface behind it would
+		// leave every other tool unreachable.
+		return evalTool.supportsCodeModeTransport?.() ?? false;
+	}
+
+		hasBuiltInTool(name: string): boolean {
 		if (this.#builtInToolNames.has(name)) return true;
 		if (this.#toolRegistry.has(name)) return false;
 		for (const builtInName of this.#builtInToolNames) {

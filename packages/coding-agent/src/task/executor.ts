@@ -4515,7 +4515,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			spawnShadowReview: options.shadowReview,
 		});
 	const requireYieldTool = options.requireYieldTool ?? resolveRequireYieldTool(performanceClass);
-	const { maxRuntimeMs, softRequestBudget, softRequestBudgetNotice } = resolveRunMonitorBudgets({
+	const { maxRuntimeMs } = resolveRunMonitorBudgets({
 		performanceClass,
 		settings,
 		maxRuntimeMs: options.maxRuntimeMs,

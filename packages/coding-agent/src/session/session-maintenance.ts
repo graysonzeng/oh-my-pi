@@ -6251,25 +6251,30 @@ export class SessionMaintenance {
 				// with no history change.
 				const patch = await this.#prepareStructuredPatch(
 					reason,
-				});
-				return await this.#commitAutoCompactionResult({
-					summary: armedSpec.result.summary,
-					shortSummary: armedSpec.result.shortSummary,
-					firstKeptEntryId: armedSpec.result.firstKeptEntryId,
-					tokensBefore: options.triggerContextTokens ?? armedSpec.result.tokensBefore,
-					details: armedSpec.result.details,
-					preserveData: armedSpec.result.preserveData,
-					fromExtension: false,
-					codexCompaction: armedSpec.codexCompaction,
-					method: armedSpec.method,
-					providerReplayThroughEntryId:
-						armedSpec.result.providerReplayThroughEntryId ??
-						(armedSpec.result.preserveData?.openaiRemoteCompaction ||
-						(armedSpec.result.preserveData?.anthropicCompaction &&
-							this.#host.sessionManager.getBranch().at(-1)?.id !== armedSpec.snapshotLeafId)
-							? armedSpec.snapshotLeafId
-							: undefined),
-					action,
+					options.triggerContextTokens,
+					autoCompactionSignal,
+				);
+				if (!patch) {
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: false,
+							willRetry: false,
+							skipped: true,
+							errorMessage:
+								"Structured compaction found no usable candidate; trying the next preferred compaction method.",
+						},
+						options.detachPostCommit === true,
+					);
+					return await this.runAutoCompaction(reason, willRetry, {
+						...options,
+						methodIndex: methodIndex + 1,
+					});
+				}
+				const commitOutcome = await this.#commitStructuredAutoResult({
+					patch,
 					reason,
 					willRetry,
 					generation,
