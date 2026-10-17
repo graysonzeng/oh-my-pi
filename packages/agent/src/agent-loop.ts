@@ -4096,8 +4096,7 @@ async function executeToolCalls(
 			// ask) keeps that error even when a background completion was also queued.
 			const cooperativeInterrupt =
 				interrupted &&
-				((record.interruptible &&
-					(interruptState.source === "aside" || interruptState.source === "background")) ||
+				((record.interruptible && (interruptState.source === "aside" || interruptState.source === "background")) ||
 					caughtError === TOOL_INTERRUPT_ABORT_REASON ||
 					(caughtError instanceof Error && caughtError.name === "AbortError"));
 			if (cooperativeInterrupt) {
