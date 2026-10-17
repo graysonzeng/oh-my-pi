@@ -22,4 +22,13 @@ export const offBackend: MemoryBackend = {
 			message: "Memory backend is off.",
 		};
 	},
+	transferCapabilities() {
+		return {
+			export: false,
+			importPreview: false,
+			importApply: false,
+			entryDelete: false,
+			fullTraverse: false,
+		};
+	},
 };

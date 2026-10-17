@@ -14,6 +14,7 @@ export type SymbolKey =
 	| "status.warning"
 	| "status.info"
 	| "status.pending"
+	| "status.skipped"
 	| "status.disabled"
 	| "status.enabled"
 	| "status.running"
@@ -395,6 +396,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"status.warning": "⚠",
 	"status.info": "ⓘ",
 	"status.pending": "⏳",
+	"status.skipped": "↷",
 	"status.disabled": "⦸",
 	"status.enabled": "●",
 	"status.running": "⟳",
@@ -703,6 +705,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"status.pending": "\uf254",
 	// pick:  | alt:  
 	"status.disabled": "\uf05e",
+	"status.skipped": "\uf2f5",
 	// pick:  | alt:  
 	"status.enabled": "\uf111",
 	// pick:  | alt:   
@@ -1179,6 +1182,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"status.pending": "[*]",
 	"status.disabled": "[ ]",
 	"status.enabled": "[x]",
+	"status.skipped": "[>]",
 	"status.running": "[~]",
 	"status.shadowed": "[/]",
 	"status.aborted": "[-]",

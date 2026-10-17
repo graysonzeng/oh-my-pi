@@ -200,7 +200,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			streamFn: mock.stream,
 		});
 		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"advisor.allowSameModel": true,
+		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
@@ -289,6 +293,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			"compaction.enabled": false,
 			"retry.enabled": false,
 		});
+		settings.override("advisor.allowSameModel", true);
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);

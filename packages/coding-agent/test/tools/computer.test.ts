@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import * as path from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
@@ -2840,5 +2841,22 @@ describe("display hold follows the agent turn", () => {
 		await run;
 		expect(native.displayHolds).toEqual(["turn"]);
 		await supervisor.close();
+	});
+});
+
+describe("computer worker module graph", () => {
+	// Spawned subprocess: the specifier must stay dynamic so this file's static graph cannot hide a TDZ.
+	it("keeps the eval worker graph importable after computer renderer registration", async () => {
+		const processHandle = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				'await import("./src/eval/js/context-manager.ts"); const { toolRenderers } = await import("../tui/src/tools/index.ts"); if (typeof toolRenderers.wait.renderCall !== "function") process.exit(2)',
+			],
+			{ cwd: path.resolve(import.meta.dir, "../.."), stdout: "ignore", stderr: "pipe" },
+		);
+		const [exitCode, stderr] = await Promise.all([processHandle.exited, new Response(processHandle.stderr).text()]);
+		if (exitCode !== 0) throw new Error(`eval worker graph import failed:\n${stderr}`);
+		expect(exitCode).toBe(0);
 	});
 });

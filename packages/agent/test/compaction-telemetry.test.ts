@@ -16,6 +16,7 @@ import {
 	generateBranchSummary,
 	generateHandoff,
 	generateSummary,
+	REQUIRED_CHECKPOINT_SUMMARY_HEADINGS,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type AgentTelemetryConfig,
@@ -91,6 +92,10 @@ function makeAssistantMessage(text: string, usage: Usage = makeUsage()): Assista
 	};
 }
 
+function checkpointSummary(body: string): string {
+	return REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.map(heading => `${heading}\n${body}`).join("\n\n");
+}
+
 function makeUserMessage(text: string): AgentMessage {
 	return { role: "user", content: text, timestamp: Date.now() };
 }
@@ -123,7 +128,9 @@ describe("compaction oneshot telemetry", () => {
 	it("tags compact() chat spans with compaction_summary + compaction_short_summary", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce(makeAssistantMessage("history summary text", makeUsage(200, 90, 10, 5)))
+			.mockResolvedValueOnce(
+				makeAssistantMessage(checkpointSummary("history summary text"), makeUsage(200, 90, 10, 5)),
+			)
 			.mockResolvedValueOnce(makeAssistantMessage("short summary text"));
 
 		const telemetry = resolveTelemetry(makeTelemetryConfig(), "session-1");
@@ -147,7 +154,7 @@ describe("compaction oneshot telemetry", () => {
 	});
 
 	it("emits three chat spans for split-turn preparation (history + turn-prefix + short)", async () => {
-		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(makeAssistantMessage("ok"));
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(makeAssistantMessage(checkpointSummary("ok")));
 
 		const telemetry = resolveTelemetry(makeTelemetryConfig(), "session-split");
 		const preparation = makePreparation({
@@ -166,7 +173,7 @@ describe("compaction oneshot telemetry", () => {
 
 	it("emits no spans when telemetry is undefined", async () => {
 		vi.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce(makeAssistantMessage("history"))
+			.mockResolvedValueOnce(makeAssistantMessage(checkpointSummary("history")))
 			.mockResolvedValueOnce(makeAssistantMessage("short"));
 
 		await compact(makePreparation(), MODEL, "test-api-key", undefined, undefined);

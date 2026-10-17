@@ -229,6 +229,8 @@ describe("AsyncJobManager", () => {
 					type: "task",
 					status: "completed",
 					agentId: "Foo-t1",
+					// Workflow: async-result details carry agentUrlId for agent:// links and task-outcome dedup.
+					agentUrlId: "Foo-t1",
 					label: "agent task",
 					durationMs: expect.any(Number),
 				},
