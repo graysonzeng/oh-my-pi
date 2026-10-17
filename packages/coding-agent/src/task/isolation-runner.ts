@@ -208,6 +208,8 @@ export interface IsolatedRunOptions {
 	buildFailureResult: (err: unknown) => SingleResult;
 	/** Observe the real child result before post-run isolation work. */
 	onSubprocessResult?: (result: SingleResult) => void;
+	/** Takes ownership of cleanup that may complete after the visible task result. */
+	onCleanupDeferred?: (completion: Promise<void>) => void;
 }
 
 /**
@@ -357,7 +359,7 @@ function renderIsolationError(context: IsolationErrorContext): string {
 }
 
 /**
- * Run a subagent inside an isolation worktree and capture its changes.
+ * Run a callback inside an isolation worktree and capture its changes.
  *
  * Branch mode: on success, commits the diff onto `omp/task/${agentId}` and
  * returns `branchName` + `nestedPatches` (+ `nestedPatchPaths`). On commit
@@ -601,12 +603,6 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	}
 }
 
-export interface IsolationMergeOptions {
-	result: SingleResult;
-	repoRoot: string;
-	mergeMode: "patch" | "branch";
-}
-
 export interface IsolationMergeOutcome {
 	/** Trailing summary appended to the subagent's result text. May be empty. */
 	summary: string;
@@ -620,6 +616,12 @@ export interface IsolationMergeOutcome {
 	hadAnyChanges: boolean;
 	/** True iff the root branch actually merged — gates nested-repo patch application. */
 	mergedBranchForNestedPatches: boolean;
+}
+
+export interface IsolationMergeOptions {
+	result: SingleResult;
+	repoRoot: string;
+	mergeMode: "patch" | "branch";
 }
 
 /**

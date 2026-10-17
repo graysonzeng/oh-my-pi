@@ -1,0 +1,41 @@
+{
+  "measuredAt": "2026-09-26T19:48:14.503Z",
+  "rows": [
+    {
+      "scenario": "first_retain_trust_identity",
+      "hashOps": 3,
+      "diskReads": 0,
+      "saves": 1,
+      "wallMs": 1.02,
+      "finalInputBytes": 18,
+      "contentSha256Prefix": "999d9d77d73c"
+    },
+    {
+      "scenario": "verify_by_reread",
+      "hashOps": 3,
+      "diskReads": 1,
+      "saves": 1,
+      "wallMs": 0.411,
+      "finalInputBytes": 19,
+      "contentSha256Prefix": "75ace77476a9"
+    },
+    {
+      "scenario": "consecutive_identical",
+      "hashOps": 4,
+      "diskReads": 0,
+      "saves": 2,
+      "wallMs": 0.225,
+      "finalInputBytes": 17,
+      "contentSha256Prefix": "9b9c005d8df5"
+    },
+    {
+      "scenario": "long_file_trust",
+      "hashOps": 3,
+      "diskReads": 0,
+      "saves": 1,
+      "wallMs": 0.361,
+      "finalInputBytes": 84400,
+      "contentSha256Prefix": "8d2d4fdfd8ce"
+    }
+  ]
+}
