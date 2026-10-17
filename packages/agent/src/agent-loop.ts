@@ -4031,25 +4031,30 @@ async function executeToolCalls(
 		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
 		if (perToolAborted && isError && !completedToolExecution) {
 			// Cooperative interruptible waits (AbortError / throwIfAborted) and
-			// background-completion cuts, and a queued aside cutting an
-			// `interruptible` tool short, use the skip/interrupt placeholder so the
-			// model retries after the queued message. Any other generic throw after
-			// execute() started (e.g. a steering cut) is a started-abort: side
-			// effects may exist.
-			record.skipped = true;
+			// background-completion / aside cuts of an `interruptible` tool use the
+			// skip/interrupt placeholder so the model retries after the queued
+			// message. A steering cut of an interruptible tool that throws after
+			// execute() started is a started-abort (side effects may exist). A
+			// non-interruptible tool that throws its own error (e.g. a cancelled
+			// ask) keeps that error even when a background completion was also queued.
 			const cooperativeInterrupt =
 				interrupted &&
-				((record.interruptible && interruptState.source === "aside") ||
-					interruptState.source === "background" ||
+				((record.interruptible &&
+					(interruptState.source === "aside" || interruptState.source === "background")) ||
 					caughtError === TOOL_INTERRUPT_ABORT_REASON ||
 					(caughtError instanceof Error && caughtError.name === "AbortError"));
-			await emitToolResult(
-				record,
-				cooperativeInterrupt
-					? createSkippedToolResult(interruptState.source, true)
-					: createStartedAbortedToolResult(interruptState.source),
-				true,
-			);
+			if (cooperativeInterrupt) {
+				record.skipped = true;
+				await emitToolResult(record, createSkippedToolResult(interruptState.source, true), true);
+			} else if (
+				caughtError === TOOL_INTERRUPT_ABORT_REASON ||
+				(caughtError instanceof Error && caughtError.name === "AbortError") ||
+				(interrupted && record.interruptible)
+			) {
+				await emitToolResult(record, createStartedAbortedToolResult(interruptState.source), true);
+			} else {
+				await emitToolResult(record, result, isError);
+			}
 		} else {
 			// No interrupt on this signal, or the tool finished before the interrupt landed
 			// (`completedToolExecution`) — even if the signal aborted around completion. Keep
