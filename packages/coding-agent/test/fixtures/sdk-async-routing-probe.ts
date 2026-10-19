@@ -66,6 +66,11 @@ const model = createMockModel({
 				],
 			};
 		}
+		// Workflow: `yield` is optional for task subagents, so a tool-free child
+		// completes with its final text; carry the correction marker the same way.
+		if (!context.tools?.some(tool => tool.name === "task") && JSON.stringify(context.messages).includes(marker)) {
+			return { content: [marker] };
+		}
 		return { content: ["acknowledged"] };
 	},
 });
@@ -155,7 +160,13 @@ try {
 		status: child.status,
 	});
 	assert.equal(child.status, "idle");
-	const receipt = await IrcBus.global().send({ from: "ReproPeerB", to: childId, body: marker });
+	const receipt = await IrcBus.global().send({
+		// Workflow: `yield` is optional, so the woken turn reaches the parent as an
+		// async job only when the parent itself woke it (upstream used a peer + yield).
+		from: child.parentId!,
+		to: childId,
+		body: marker,
+	});
 	console.log("IRC", receipt);
 	assert.equal(receipt.outcome, "woken");
 	await child.session.waitForIdle();

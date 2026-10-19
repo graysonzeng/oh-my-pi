@@ -1,0 +1,327 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../tools";
+import { bindHostSealsToAcceptance, collectTrustedHostSeals, type HostTerminalSeal } from "../task/host-terminal-check";
+import { resolveCurrentWorkspaceCodeVersion } from "../task/workspace-code-version";
+import { fingerprintStable } from "../latency/stable-serialize";
+import { ToolAbortError, ToolError } from "../tools/tool-errors";
+import * as evaluator from "./evaluator";
+import {
+	buildGoalCompletionSettleSnapshot,
+	evaluateGoalHostGate,
+	flattenTodoSnapshot,
+	type GoalCompletionSettleSnapshot,
+	settleTurnMessages,
+} from "./host-gate";
+import type { ProgressObservationInput } from "./no-progress";
+import type { GoalRuntime } from "./runtime";
+import type { Goal, GoalToolDetails } from "./state";
+import { buildGoalToolResponse, type GoalToolResponse } from "./tools/goal-tool";
+
+export type GoalCompleteResult = {
+	response: GoalToolResponse;
+	details: GoalToolDetails;
+	text: string;
+};
+
+function formatCompleteText(response: GoalToolResponse, extra?: string): string {
+	if (!response.goal) return "No active goal.";
+	let text = `Goal: ${response.goal.objective}\nStatus: ${response.goal.status}\nTokens: ${response.goal.tokensUsed} used`;
+	if (response.goal.tokenBudget !== undefined) {
+		text += ` / ${response.goal.tokenBudget} budget`;
+	}
+	if (response.remainingTokens !== null) {
+		text += `\nRemaining tokens: ${response.remainingTokens}`;
+	}
+	if (extra) text += `\n${extra}`;
+	if (response.completionBudgetReport) {
+		text += `\n\n${response.completionBudgetReport}`;
+	}
+	return text;
+}
+
+/**
+ * Host-fact progress observation for D2 — seals/gate snapshot only.
+ * Does not invent failure ids when checks were never assessed.
+ */
+function progressObservationFromHost(input: {
+	goal: Goal;
+	hostReasons: readonly string[];
+	nominationId: string;
+	currentCodeVersion: string;
+	hostReceipts: readonly HostTerminalSeal[];
+	evaluatorUnavailable?: boolean;
+}): ProgressObservationInput {
+	const acceptanceRevision = fingerprintStable({
+		objective: input.goal.objective,
+		// Intentionally omit goalRevision / nominate counter — nominate churn
+		// must not reset the no-progress streak. Acceptance content only.
+	});
+	const current = input.currentCodeVersion.trim();
+	const proven = current
+		? bindHostSealsToAcceptance({
+				seals: input.hostReceipts,
+				acceptanceIds: [input.goal.objective],
+				currentCodeVersion: current,
+			}).map(row => row.id)
+		: undefined;
+	return {
+		hostReasons: [...input.hostReasons],
+		codeVersionFingerprint: current || null,
+		nominationId: input.nominationId,
+		acceptanceRevision,
+		// Fresh seals only via bindHostSealsToAcceptance. Stale seals are unknown
+		// evidence — never invent trustedFailureIds from codeVersion mismatch.
+		...(proven !== undefined ? { provenAcceptanceIds: proven } : {}),
+		...(input.evaluatorUnavailable === true ? { evaluatorUnavailable: true } : {}),
+	};
+}
+
+function latestAssistant(messages: readonly AgentMessage[]): AssistantMessage | undefined {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message.role === "assistant") return message;
+	}
+	return undefined;
+}
+
+export function snapshotForComplete(
+	session: ToolSession,
+	runtime: GoalRuntime,
+	goal: Goal,
+	excludeToolCallIds?: Iterable<string>,
+	identity?: { currentCodeVersion?: string; hostReceipts?: HostTerminalSeal[] },
+): GoalCompletionSettleSnapshot {
+	const messages = settleTurnMessages(session.snapshotConsultContext?.().messages ?? []);
+	const assistant = latestAssistant(messages);
+	if (!assistant) {
+		return {
+			turnId: runtime.currentTurnId() ?? "unknown-turn",
+			generation: runtime.currentGeneration(),
+			assistantText: "",
+			stopReason: "stop",
+			tools: [],
+			goalId: goal.id,
+			goalRevision: goal.hostGate?.goalRevision ?? 0,
+			nomination: {
+				outcome: "nominated",
+				nominationId: goal.hostGate?.nominationId,
+			},
+			todos: flattenTodoSnapshot(session.getTodoPhases?.()),
+			messages,
+			currentCodeVersion: identity?.currentCodeVersion,
+			hostReceipts: identity?.hostReceipts,
+		};
+	}
+	return buildGoalCompletionSettleSnapshot({
+		turnId: runtime.currentTurnId() ?? "unknown-turn",
+		generation: runtime.currentGeneration(),
+		assistant,
+		messages,
+		todos: session.getTodoPhases?.(),
+		goal,
+		nominationOutcome: "nominated",
+		excludeToolCallIds,
+		currentCodeVersion: identity?.currentCodeVersion,
+		hostReceipts: identity?.hostReceipts,
+	});
+}
+
+function completeResponse(
+	goal: Goal,
+	gate: GoalToolDetails["gate"],
+	extra: string,
+	includeCompletionReport = false,
+): GoalCompleteResult {
+	const response = buildGoalToolResponse(goal, { includeCompletionReport });
+	return {
+		response,
+		details: {
+			op: "complete",
+			goal: response.goal,
+			remainingTokens: response.remainingTokens,
+			completionBudgetReport: includeCompletionReport ? response.completionBudgetReport : null,
+			gate,
+		},
+		text: formatCompleteText(response, extra),
+	};
+}
+
+export async function executeGoalComplete(
+	session: ToolSession,
+	runtime: GoalRuntime,
+	signal?: AbortSignal,
+	toolCallId?: string,
+): Promise<GoalCompleteResult> {
+	if (session.settings.get("goal.hostGate.enabled") === false) {
+		const completed = await runtime.completeGoalFromTool();
+		return completeResponse(completed, "user_confirmed", "", true);
+	}
+
+	const existing = session.getGoalModeState?.()?.goal;
+	if (!existing) throw new ToolError("cannot complete goal because no goal is active");
+	const nominationId = String(Snowflake.next());
+	const turnId = runtime.currentTurnId() ?? "unknown-turn";
+	const generation = runtime.currentGeneration();
+	const nominated = await runtime.nominateComplete({ nominationId, turnId, generation });
+	const goal = nominated.goal;
+	const history = session.snapshotConsultContext?.().messages ?? [];
+	const currentCodeVersion = await resolveCurrentWorkspaceCodeVersion(session.cwd);
+	const snapshot = snapshotForComplete(session, runtime, goal, toolCallId ? [toolCallId] : undefined, {
+		currentCodeVersion,
+		hostReceipts: collectTrustedHostSeals(history),
+	});
+	const host = evaluateGoalHostGate(snapshot);
+
+	if (nominated.shared) {
+		if (nominated.flight) await nominated.flight;
+		const latest = session.getGoalModeState?.()?.goal ?? goal;
+		const decision = latest.hostGate?.lastDecision;
+		if (decision === "blocked") {
+			return completeResponse(
+				latest,
+				"blocked",
+				`Host gate: blocked\nblocker_key: ${latest.hostGate?.lastBlockerKey ?? ""}\n${latest.hostGate?.lastNextStep ?? ""}`,
+			);
+		}
+		if (decision === "continue") {
+			return completeResponse(
+				latest,
+				"continue",
+				`Host gate: continue\nReasons: ${(latest.hostGate?.lastReasons ?? host.reasons).join(", ")}\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+			);
+		}
+		return completeResponse(
+			latest,
+			"candidate_complete",
+			`Host checks passed. Ask the user to confirm with /goal complete.\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+		);
+	}
+
+	const settle = nominated.settle;
+	if (host.decision === "continue") {
+		try {
+			const noProgressPolicy = session.settings.get("goal.hostGate.noProgressPolicy") === true;
+			const noProgressThreshold = Number(session.settings.get("goal.hostGate.noProgressThreshold") ?? 3);
+			const nominationKey = goal.hostGate?.nominationId ?? nominationId;
+			const applied = await runtime.applyNominationResult({
+				goalId: goal.id,
+				goalRevision: goal.hostGate?.goalRevision ?? 0,
+				nominationId: nominationKey,
+				turnId,
+				generation,
+				decision: "continue",
+				evidence: host.reasons.join(","),
+				nextStep: host.nextStep,
+				reasons: host.reasons,
+				noProgress: {
+					policyEnabled: noProgressPolicy,
+					threshold: Number.isFinite(noProgressThreshold) ? noProgressThreshold : 3,
+					observation: progressObservationFromHost({
+						goal,
+						hostReasons: host.reasons,
+						nominationId: nominationKey,
+						currentCodeVersion: currentCodeVersion ?? "",
+						hostReceipts: snapshot.hostReceipts ?? [],
+					}),
+				},
+			});
+			if (applied === "stale") {
+				logger.warn("discarded stale goal host-gate continue", {
+					goalId: goal.id,
+					nominationId,
+					turnId,
+					generation,
+				});
+			}
+			const latest = session.getGoalModeState?.()?.goal ?? goal;
+			if (applied === "paused_no_progress") {
+				return completeResponse(
+					latest,
+					"blocked",
+					`Host gate: paused (no-progress policy)\nReasons: ${(latest.hostGate?.lastReasons ?? host.reasons).join(", ")}\npause_reason: ${latest.hostGate?.lastPauseReason ?? "identical_host_observation"}\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+				);
+			}
+			return completeResponse(
+				latest,
+				"continue",
+				`Host gate: continue\nReasons: ${host.reasons.join(", ")}\nNext step: ${host.nextStep}`,
+			);
+		} finally {
+			settle?.resolve();
+		}
+	}
+
+	const controller = settle?.controller ?? new AbortController();
+	const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+	try {
+		const result = await evaluator.runGoalEvaluator({ session, goal, snapshot, signal: combined });
+		if (combined.aborted) throw new ToolAbortError();
+		const nominationKey = goal.hostGate?.nominationId ?? nominationId;
+		const failOpen = result.failOpen === true;
+		const decision = failOpen ? "continue" : result.decision === "blocked" ? "blocked" : "candidate_complete";
+		const applied = await runtime.applyNominationResult({
+			goalId: goal.id,
+			goalRevision: goal.hostGate?.goalRevision ?? 0,
+			nominationId: nominationKey,
+			turnId,
+			generation,
+			decision,
+			evidence: result.evidence,
+			nextStep: result.nextStep,
+			blockerKey: result.blockerKey || undefined,
+			reasons: host.reasons,
+			noProgress: {
+				policyEnabled: false,
+				threshold: 3,
+				observation: progressObservationFromHost({
+					goal,
+					hostReasons: host.reasons,
+					nominationId: nominationKey,
+					currentCodeVersion: currentCodeVersion ?? "",
+					hostReceipts: snapshot.hostReceipts ?? [],
+					evaluatorUnavailable: failOpen,
+				}),
+			},
+		});
+		if (applied === "stale") {
+			logger.warn("discarded stale goal evaluator result", {
+				goalId: goal.id,
+				nominationId,
+				turnId,
+				generation,
+			});
+		}
+	} catch (error) {
+		if (error instanceof ToolAbortError || combined.aborted) {
+			await runtime.recoverPendingVerification();
+			throw error instanceof ToolAbortError ? error : new ToolAbortError();
+		}
+		throw error;
+	} finally {
+		settle?.resolve();
+	}
+
+	const latest = session.getGoalModeState?.()?.goal ?? goal;
+	if (latest.hostGate?.lastDecision === "blocked") {
+		await runtime.pauseGoal();
+		const paused = session.getGoalModeState?.()?.goal ?? latest;
+		const extra = `Host gate: blocked\nblocker_key: ${paused.hostGate?.lastBlockerKey ?? latest.hostGate?.lastBlockerKey}\n${paused.hostGate?.lastNextStep ?? latest.hostGate?.lastNextStep}`;
+		return completeResponse(paused, "blocked", extra);
+	}
+
+	if (latest.hostGate?.lastDecision === "continue") {
+		return completeResponse(
+			latest,
+			"continue",
+			`Host gate: continue\nReasons: evaluator_unavailable\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+		);
+	}
+
+	return completeResponse(
+		latest,
+		"candidate_complete",
+		`Host checks passed. Ask the user to confirm with /goal complete.\nNext step: ${latest.hostGate?.lastNextStep ?? host.nextStep}`,
+	);
+}

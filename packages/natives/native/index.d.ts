@@ -1305,13 +1305,125 @@ export interface ClipboardImage {
 }
 
 /**
- * Invalidates this process's event taps; for a host about to
- * exit, after which no desktop session here sees the user's input again. A
- * macOS tap that dies with its process while the user types makes
- * `WindowServer` deliver their key again; Bun's `process.exit` runs no native
- * exit hook, so the host calls this from its exit handler.
+ * Invalidates this process's event taps before it exits.
+ *
+ * No desktop session here sees the user's input again afterwards. A macOS tap
+ * that dies with its process while the user types makes `WindowServer`
+ * deliver their key again; Bun's `process.exit` runs no native exit hook, so
+ * the host calls this from its exit handler.
  */
 export declare function closeDesktopEventTaps(): void
+
+/**
+ * Build a generation directory: files/tags/chunks/graph. Does not write
+ * embeddings.
+ */
+export declare function codeIntelBuildGeneration(options: CodeIntelBuildOptions): Promise<CodeIntelBuildResult>
+
+export interface CodeIntelBuildOptions {
+  root: string
+  destDir: string
+  hidden?: boolean
+  gitignore?: boolean
+  maxFiles?: number
+  signal?: unknown
+  timeoutMs?: number
+}
+
+export interface CodeIntelBuildResult {
+  filesScanned: number
+  tagCount: number
+  chunkCount: number
+  parseErrors: Array<string>
+}
+
+/** A verified call-expression capture (callee name + span). */
+export interface CodeIntelCall {
+  path: string
+  callee: string
+  startLine: number
+  endLine: number
+}
+
+/** A source chunk for embedding / retrieval. */
+export interface CodeIntelChunk {
+  startLine: number
+  endLine: number
+  symbol: string
+  kind: string
+  text: string
+}
+
+/** Chunk one file's content using the same def/window rules as generation. */
+export declare function codeIntelChunkFile(options: CodeIntelChunkOptions): Array<CodeIntelChunk>
+
+export interface CodeIntelChunkOptions {
+  path: string
+  content: string
+}
+
+/** Extract verified call-expression callees from one file. */
+export declare function codeIntelExtractCalls(options: CodeIntelChunkOptions): Array<CodeIntelCall>
+
+export interface CodeIntelExtractOptions {
+  root: string
+  hidden?: boolean
+  gitignore?: boolean
+  maxFiles?: number
+  signal?: unknown
+  timeoutMs?: number
+}
+
+export interface CodeIntelExtractResult {
+  tags: Array<CodeIntelTag>
+  calls: Array<CodeIntelCall>
+  filesScanned: number
+  parseErrors: Array<string>
+}
+
+/**
+ * Extract tags and call-expressions from a file or directory (tests /
+ * diagnostics).
+ */
+export declare function codeIntelExtractTags(options: CodeIntelExtractOptions): Promise<CodeIntelExtractResult>
+
+/** Ranked symbol/file node from personalized `PageRank`. */
+export interface CodeIntelRankedNode {
+  path: string
+  symbol: string
+  score: number
+  startLine: number
+  endLine: number
+}
+
+/**
+ * Rank a previously built generation by personalized `PageRank`. Native holds
+ * the graph.
+ */
+export declare function codeIntelRankGeneration(options: CodeIntelRankOptions): Array<CodeIntelRankedNode>
+
+export interface CodeIntelRankOptions {
+  generationDir: string
+  seedPaths?: Array<string>
+  seedSymbols?: Array<string>
+  topFiles?: number
+  topSymbols?: number
+}
+
+/** One definition or identifier reference extracted from a source file. */
+export interface CodeIntelTag {
+  path: string
+  name: string
+  kind: CodeIntelTagKind
+  grammar: string
+  startLine: number
+  endLine: number
+}
+
+export declare enum CodeIntelTagKind {
+  Def = 'def',
+  Ref = 'ref'
+}
 
 /** A context line (before or after a match). */
 export interface ContextLine {
@@ -1469,6 +1581,12 @@ export interface DesktopDisplay {
 }
 
 /**
+ * Physical-Escape stops counted under `key` by every desktop session created
+ * with it, including closed ones, until the key is forgotten.
+ */
+export declare function desktopEscapeStops(key: string): number
+
+/**
  * Where focus ended after a takeover input call, as `WindowServer` reports
  * it. Input calls resolve to it on macOS when they took over; other
  * backends and background delivery resolve to `null`.
@@ -1513,12 +1631,6 @@ export interface DesktopScreenState {
   screenLocked: boolean
   displayAsleep: boolean
 }
-
-/**
- * Physical-Escape stops counted under `key` by every desktop session created
- * with it, including closed ones, until the key is forgotten.
- */
-export declare function desktopEscapeStops(key: string): number
 
 export interface DesktopSessionOptions {
   display?: string
@@ -2841,9 +2953,6 @@ export interface NodeSpan {
 /** Decode notebook JSON into the editable cell-marker text. */
 export declare function notebookToEditableText(json: string, displayPath: string): string
 
-/** Check syntax through the shared parse cache without constructing a summary. */
-export declare function parseCodeStatus(options: ParseStatusOptions): ParseStatus
-
 /**
  * An opened application: its [`Application`] fields and the window it
  * shows. On macOS `window` is its frontmost window once one is on screen;
@@ -2857,6 +2966,9 @@ export interface OpenedApplication {
   pid?: number
   window?: DesktopWindow
 }
+
+/** Check syntax through the shared parse cache without constructing a summary. */
+export declare function parseCodeStatus(options: ParseStatusOptions): ParseStatus
 
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {

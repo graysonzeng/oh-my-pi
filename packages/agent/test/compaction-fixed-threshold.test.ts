@@ -30,16 +30,21 @@ describe("fixed compaction trigger near the window", () => {
 		expect(resolveThresholdTokens(window, fixed(-1))).toBe(budget);
 	});
 
-	it("keeps a trigger below the window exact", () => {
-		expect(resolveThresholdTokens(window, fixed(window - 1))).toBe(window - 1);
-		expect(resolveThresholdTokens(window, fixed(budget + 1))).toBe(budget + 1);
+	// Soft-cap contract (workflow): a fixed trigger below the usable budget is
+	// exact; one inside the reserve clamps to the usable budget so a soft trigger
+	// never bypasses the hard capacity reserve.
+	it("keeps a trigger below the usable budget exact and clamps one inside the reserve", () => {
+		expect(resolveThresholdTokens(window, fixed(window - 1))).toBe(budget);
+		expect(resolveThresholdTokens(window, fixed(budget + 1))).toBe(budget);
+		expect(resolveThresholdTokens(window, fixed(budget - 1))).toBe(budget - 1);
 		expect(resolveThresholdTokens(window, fixed(100_000))).toBe(100_000);
 		expect(resolveThresholdTokens(1_000_000, fixed(300_000))).toBe(300_000);
 	});
 
 	it("uses an explicit reserve as the budget", () => {
 		expect(resolveThresholdTokens(200_000, fixed(250_000, { reserveTokens: 50_000 }))).toBe(150_000);
-		expect(resolveThresholdTokens(200_000, fixed(180_000, { reserveTokens: 50_000 }))).toBe(180_000);
+		expect(resolveThresholdTokens(200_000, fixed(180_000, { reserveTokens: 50_000 }))).toBe(150_000);
+		expect(resolveThresholdTokens(200_000, fixed(120_000, { reserveTokens: 50_000 }))).toBe(120_000);
 	});
 
 	it("falls back to the 15% reserve on small windows", () => {
