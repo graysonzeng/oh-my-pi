@@ -8,7 +8,12 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
 import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
 
-import { renderStructuredJson, structuredStatusLabel } from "../session/async-job-delivery";
+import {
+	renderStructuredJson,
+	settledTaskDeliveryFields,
+	structuredStatusLabel,
+	taskToolCallIdFromJob,
+} from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -156,6 +161,10 @@ interface TrackedJobLike {
 	resultText?: string;
 	errorText?: string;
 	structured?: StructuredSubagentOutput;
+	/** Registry agent id when the manager disambiguated a colliding job id. */
+	agentId?: string;
+	/** Originating parent `task` tool call id when the spawn recorded one. */
+	taskToolCallId?: string;
 }
 
 export function snapshotJobs(
@@ -215,6 +224,16 @@ export function snapshotJobs(
 			}
 		}
 		const widget = current ? session.asyncJobManager?.widgets?.view(current) : undefined;
+		const settled =
+			latest.type === "task"
+				? settledTaskDeliveryFields({
+						id: latest.id,
+						agentId: current?.agentId ?? latest.agentId,
+						label: latest.label,
+						latestDetails: latest.latestDetails,
+					})
+				: {};
+		const taskToolCallId = latest.type === "task" ? taskToolCallIdFromJob(latest) : undefined;
 		return {
 			id: latest.id,
 			type: latest.type,
@@ -241,7 +260,11 @@ export function snapshotJobs(
 			...(!resultConsumed && options.includeResults !== false && latest.structured
 				? { structured: latest.structured }
 				: {}),
-			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.id } : {}),
+			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.agentId ?? latest.id } : {}),
+			...(settled.completionKind ? { completionKind: settled.completionKind } : {}),
+			...(settled.spawnQueueMs !== undefined ? { spawnQueueMs: settled.spawnQueueMs } : {}),
+			...(settled.requestPhaseQueueMs !== undefined ? { requestPhaseQueueMs: settled.requestPhaseQueueMs } : {}),
+			...(taskToolCallId ? { taskToolCallId } : {}),
 		};
 	});
 }
