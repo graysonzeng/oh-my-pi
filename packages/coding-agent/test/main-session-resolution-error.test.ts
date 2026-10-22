@@ -299,7 +299,8 @@ describe("createSessionManager — missing session (#2084)", () => {
 				if (!forkFile) throw new Error("Expected a persisted fork file");
 				const persistedEntries = await loadEntriesFromFile(forkFile);
 				const forkHeader = persistedEntries.find(entry => entry.type === "session");
-				expect(forkHeader?.parentSession).toBe(id);
+				// Workflow persists the canonical absolute source path (registry-free lineage).
+				expect(forkHeader?.parentSession).toBe(path.resolve(source));
 				const persistedResult = persistedEntries.find(
 					entry =>
 						entry.type === "message" &&

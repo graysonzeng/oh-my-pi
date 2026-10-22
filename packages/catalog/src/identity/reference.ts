@@ -39,7 +39,6 @@ export function isZeroCostXaiOAuthReference(candidate: Model<Api>): boolean {
 		candidate.cost.cacheWrite === 0
 	);
 }
-
 // Prefer the reference with the largest limits and complete cache pricing, then
 // first-party OpenAI entries.
 function shouldReplaceReference(existing: Model<Api> | undefined, candidate: Model<Api>): boolean {

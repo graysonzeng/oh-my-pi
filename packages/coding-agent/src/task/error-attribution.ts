@@ -12,6 +12,8 @@
  * expected provider and the one that actually errored is instantly visible.
  */
 
+import * as AIError from "@oh-my-pi/pi-ai/error";
+
 /** Minimal shape of the assistant message a failed turn leaves behind. */
 export interface FailedAssistantModelInfo {
 	provider?: string;
@@ -36,4 +38,23 @@ export function attributeSubagentError(
 	if (!identity) return text;
 	if (provider && text.toLowerCase().includes(provider.toLowerCase())) return text;
 	return `[${identity}] ${text}`;
+}
+
+/**
+ * Auth / prepaid-billing failures cannot be recovered by IRC follow-up on the
+ * same child. Keeping the session idle until `task.agentIdleTtlMs` just parks
+ * a dead agent for minutes.
+ */
+export function isTerminalSubagentCredentialFailure(message: string | undefined): boolean {
+	if (!message?.trim()) return false;
+	if (AIError.isPermanentBillingFailureText(message)) return true;
+	return AIError.is(AIError.classify({ message }), AIError.Flag.AuthFailed);
+}
+
+/** Keep-alive only when the caller asked and the child can still take a turn. */
+export function shouldKeepAliveSubagent(args: {
+	requestedKeepAlive: boolean;
+	errorMessage: string | undefined;
+}): boolean {
+	return args.requestedKeepAlive && !isTerminalSubagentCredentialFailure(args.errorMessage);
 }

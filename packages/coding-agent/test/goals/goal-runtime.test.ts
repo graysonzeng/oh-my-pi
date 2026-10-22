@@ -375,4 +375,45 @@ describe("goal runtime", () => {
 		expect(next.goal.id).not.toBe("goal-1");
 		expect(harness.persists.at(-1)?.state?.goal.objective).toBe("Second");
 	});
+
+	it("allows creating a new goal after the previous one is complete", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: false,
+				mode: "exiting",
+				reason: "completed",
+				goal: createGoal({ status: "complete" }),
+			},
+		});
+
+		const next = await harness.runtime.createGoal({ objective: "Phase 4" });
+		expect(next.goal.objective).toBe("Phase 4");
+		expect(next.goal.status).toBe("active");
+		expect(next.enabled).toBe(true);
+	});
+
+	it("completeGoalFromTool succeeds for a paused goal (enabled=false)", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: false,
+				mode: "active",
+				goal: createGoal({ status: "paused", tokensUsed: 30, timeUsedSeconds: 5 }),
+			},
+		});
+
+		const completed = await harness.runtime.completeGoalFromTool();
+		expect(completed.status).toBe("complete");
+		const state = harness.getState();
+		expect(state?.enabled).toBe(false);
+		expect(state?.mode).toBe("exiting");
+		expect(state?.goal.status).toBe("complete");
+	});
+
+	it("omits timeUsedSeconds only when the A2 arm is on", () => {
+		const goal = createGoal({ timeUsedSeconds: 12 });
+		expect(renderGoalPrompt("active", goal)).toContain("Time used: 12 seconds");
+		expect(renderGoalPrompt("active", goal, { omitTimeUsedSeconds: true })).not.toContain("Time used:");
+		expect(renderGoalPrompt("active", goal, { omitTimeUsedSeconds: true })).toContain("Tokens used:");
+		expect(renderGoalPrompt("budget-limit", goal, { omitTimeUsedSeconds: true })).toContain("Time used:");
+	});
 });

@@ -5,6 +5,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
+	getRetryFallbackChains,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
@@ -142,6 +143,65 @@ describe("retry fallback selector resolution", () => {
 		expect(expanded.judge).toEqual([]);
 		expect(expanded.image).toBeUndefined();
 		expect(expanded.web).toBeUndefined();
+	});
+
+	it("derives retry.fallbackChains tails from comma-separated modelRoles when unset", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol",
+				task: "gateway/grok-4.6:high, gateway/grok-4.5:high",
+			},
+		});
+		const chains = getRetryFallbackChains(settings);
+		expect(chains.slow).toEqual(["openai-codex/gpt-5.6-sol"]);
+		expect(chains.task).toEqual(["gateway/grok-4.5:high"]);
+	});
+
+	it("merges comma modelRoles tail then explicit retry.fallbackChains (deduped)", () => {
+		const merged = Settings.isolated({
+			modelRoles: { slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol" },
+			"retry.fallbackChains": { slow: ["openai/gpt-4o-mini", "openai-codex/gpt-5.6-sol"] },
+		});
+		expect(getRetryFallbackChains(merged).slow).toEqual(["openai-codex/gpt-5.6-sol", "openai/gpt-4o-mini"]);
+		// Empty explicit appends nothing beyond the comma-derived tail.
+		const emptyExplicit = Settings.isolated({
+			modelRoles: { slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol" },
+			"retry.fallbackChains": { slow: [] },
+		});
+		expect(getRetryFallbackChains(emptyExplicit).slow).toEqual(["openai-codex/gpt-5.6-sol"]);
+	});
+
+	it("validates derived comma-list tails and warns when comma + explicit both set", () => {
+		const chatModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!chatModel) throw new Error("Expected bundled OpenAI test model");
+		const models = [chatModel];
+		const registry = {
+			getAll: () => models,
+			getAvailable: () => models,
+			find: (provider: string, id: string) => models.find(model => model.provider === provider && model.id === id),
+			hasProvider: (provider: string) => models.some(model => model.provider === provider),
+			getProviderModels: (provider: string) => models.filter(model => model.provider === provider),
+		};
+		const warnings: string[] = [];
+		validateRetryFallbackChains(
+			Settings.isolated({
+				modelRoles: { slow: "openai/gpt-4o-mini, openai/missing-tail-model" },
+			}),
+			registry,
+			warning => warnings.push(warning),
+		);
+		expect(warnings.some(w => w.includes("missing-tail-model"))).toBe(true);
+
+		const mergeWarnings: string[] = [];
+		validateRetryFallbackChains(
+			Settings.isolated({
+				modelRoles: { slow: "openai/gpt-4o-mini, openai/gpt-4o-mini" },
+				"retry.fallbackChains": { slow: ["openai/gpt-4o-mini"] },
+			}),
+			registry,
+			warning => mergeWarnings.push(warning),
+		);
+		expect(mergeWarnings.some(w => w.includes("comma list") && w.includes("both set"))).toBe(true);
 	});
 
 	it("prefers an exact model+effort key over a different-effort key regardless of object order", () => {

@@ -17,5 +17,8 @@ export function createSessionDefaults() {
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
 		addDisposer: () => {},
+		getAsyncJobSnapshot: () => null,
+		settleAsyncWork: async () => {},
+		trackIrcReply: () => {},
 	} satisfies Partial<AgentSession>;
 }

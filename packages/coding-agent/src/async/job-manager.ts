@@ -116,6 +116,11 @@ export interface AsyncJob {
 	/** What the job's live widget reads; set by bash and task jobs. */
 	widgetInputs?: JobWidgetInputs;
 	/**
+	 * Originating parent `task` tool call id. Distinguishes reused spawn
+	 * labels across sequential task calls when persisted on delivery/hub rows.
+	 */
+	taskToolCallId?: string;
+	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
 	 * batch semaphore). Queued jobs do not count toward the running-job limit
 	 * until the caller invokes `markRunning()` from the run context.
@@ -212,7 +217,15 @@ interface AsyncJobDelivery {
 	 */
 	jobSnapshot?: Pick<
 		AsyncJob,
-		"type" | "status" | "startTime" | "endTime" | "label" | "structured" | "agentId" | "latestDetails"
+		| "type"
+		| "status"
+		| "startTime"
+		| "endTime"
+		| "label"
+		| "structured"
+		| "agentId"
+		| "latestDetails"
+		| "taskToolCallId"
 	>;
 }
 
@@ -235,6 +248,8 @@ export interface AsyncJobRegisterOptions {
 	ownerId?: string;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
+	/** Originating parent `task` tool call id; see {@link AsyncJob.taskToolCallId}. */
+	taskToolCallId?: string;
 	onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
@@ -390,6 +405,7 @@ export class AsyncJobManager {
 			agentId: options?.agentId,
 			process: options?.process,
 			widgetInputs: options?.widgetInputs,
+			taskToolCallId: options?.taskToolCallId,
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 		};
@@ -503,6 +519,21 @@ export class AsyncJobManager {
 		return this.#visibleJobs(filter).filter(job => job.status === "running");
 	}
 
+	/**
+	 * Occupancy for D8 limiter attribution. Counts running (non-queued) jobs only —
+	 * the same unit `atCapacity` / `register` use. Does not merge with provider/task.
+	 */
+	getOccupancySnapshot(): { inFlight: number; capacity: number; queued: number } {
+		let inFlight = 0;
+		let queued = 0;
+		for (const job of this.#jobs.values()) {
+			if (job.status !== "running") continue;
+			if (job.queued) queued++;
+			else inFlight++;
+		}
+		return { inFlight, capacity: this.#maxRunningJobs, queued };
+	}
+
 	/** Settled background jobs, newest first; foreground-backed jobs stay hidden. */
 	getRecentJobs(limit = 10, filter?: AsyncJobFilter): AsyncJob[] {
 		return this.#visibleJobs(filter)
@@ -613,6 +644,26 @@ export class AsyncJobManager {
 		);
 		this.#notifyDeliveryQueueChanged();
 		return before - this.#deliveries.length;
+	}
+
+	/**
+	 * Lift a foreground-wait suppression set via `acknowledgeDeliveries`. If the
+	 * job already finished while suppressed (its delivery enqueue was skipped),
+	 * re-enqueue the completion so the result is still delivered exactly once.
+	 */
+	resumeDeliveries(jobIds: string[]): void {
+		for (const rawId of jobIds) {
+			const jobId = rawId.trim();
+			if (!jobId) continue;
+			if (!this.#suppressedDeliveries.delete(jobId)) continue;
+			const job = this.#jobs.get(jobId);
+			if (!job || (job.status !== "completed" && job.status !== "failed")) continue;
+			const queued =
+				this.#deliveries.some(delivery => delivery.jobId === jobId) ||
+				this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId);
+			if (queued) continue;
+			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
+		}
 	}
 
 	/**
@@ -1134,6 +1185,7 @@ export class AsyncJobManager {
 						label: job.label,
 						structured: job.structured,
 						agentId: job.agentId,
+						taskToolCallId: job.taskToolCallId,
 						latestDetails: job.latestDetails,
 					}
 				: undefined,
@@ -1277,6 +1329,7 @@ export class AsyncJobManager {
 			resultText: delivery.text,
 			structured: snapshot.structured,
 			agentId: snapshot.agentId,
+			taskToolCallId: snapshot.taskToolCallId,
 			latestDetails: snapshot.latestDetails,
 		};
 	}
