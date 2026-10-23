@@ -67,7 +67,7 @@ describe("grep file pagination", () => {
 		expect(text).not.toContain("skip=");
 
 		const alone = textOf(await tool.execute("hot-alone", { pattern: "needle", path: "hot.txt" }));
-		expect(alone).toContain("needle 29");
+		expect(alone).toContain(`needle ${MULTI_FILE_PER_FILE_MATCHES + 9}`);
 		expect(alone).not.toContain("More than");
 	});
 
@@ -116,25 +116,32 @@ describe("grep file pagination", () => {
 		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
 	});
 
-	it("keeps the page line and names only capped files whose section survives the byte cap", async () => {
-		const filler = "x".repeat(500);
-		const names = Array.from({ length: 25 }, (_, index) => `f${String(index).padStart(2, "0")}`);
+	it("keeps the page line and names every fully-rendered capped file on the page", async () => {
+		// With workflow DEFAULT_FILE_LIMIT×MULTI_FILE_PER_FILE_MATCHES (=8×8) and the 512-byte
+		// column cap, a single page cannot reach DEFAULT_MAX_BYTES (50KB), so the multi-file
+		// byte-cap interaction main covered at 20×20 is unreachable here. Trailer survival
+		// past the byte cap is covered by the single-file test above; this case keeps the
+		// pagination line + named per-file cap notice contract under workflow caps.
+		const totalFiles = DEFAULT_FILE_LIMIT + 5;
+		const names = Array.from({ length: totalFiles }, (_, index) => `f${String(index).padStart(2, "0")}`);
 		for (const name of names) {
 			await Bun.write(
 				path.join(cwd, `${name}.txt`),
-				Array.from({ length: 21 }, (_, index) => `needle ${name} ${index} ${filler}`).join("\n"),
+				Array.from(
+					{ length: MULTI_FILE_PER_FILE_MATCHES + 1 },
+					(_, index) => `needle ${name} ${index}`,
+				).join("\n"),
 			);
 		}
 		const result = await newTool({ context: 0 }).execute("wide-many", { pattern: "needle", path: "." });
 		const text = textOf(result);
-		expect(result.details?.truncation?.truncated).toBe(true);
-		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
-		expect(text).toContain("Showing files 1-20 of 25. Use skip=20 for the next page");
-		// The byte cap drops later files whole; only files whose 20th match is still in the text are named.
-		const whole = names.filter(name => text.includes(`needle ${name} 19 `));
-		expect(whole.length).toBeGreaterThan(0);
-		expect(whole.length).toBeLessThan(5);
-		expect(text).toContain(`More than 20 matches in ${whole.map(name => `${name}.txt`).join(", ")};`);
+		expect(text).toContain(
+			`Showing files 1-${DEFAULT_FILE_LIMIT} of ${totalFiles}. Use skip=${DEFAULT_FILE_LIMIT} for the next page`,
+		);
+		// formatCappedFiles lists the first 5 then "and N more files".
+		expect(text).toContain(
+			`More than ${MULTI_FILE_PER_FILE_MATCHES} matches in f00.txt, f01.txt, f02.txt, f03.txt, f04.txt and ${DEFAULT_FILE_LIMIT - 5} more files;`,
+		);
 	});
 
 	it("names only capped files the result renders in full", async () => {
@@ -148,7 +155,7 @@ describe("grep file pagination", () => {
 		expect(limited).not.toContain("More than");
 
 		const both = textOf(await newTool().execute("both", { pattern: "needle", path: "." }));
-		expect(both).toContain("More than 20 matches in a.txt, b.txt;");
+		expect(both).toContain(`More than ${MULTI_FILE_PER_FILE_MATCHES} matches in a.txt, b.txt;`);
 	});
 
 	it("counts capped files past the fifth", async () => {
@@ -156,6 +163,6 @@ describe("grep file pagination", () => {
 			await Bun.write(path.join(cwd, `h${index}.txt`), Array.from({ length: 21 }, () => "needle").join("\n"));
 		}
 		const text = textOf(await newTool().execute("six", { pattern: "needle", path: "." }));
-		expect(text).toContain("More than 20 matches in h0.txt, h1.txt, h2.txt, h3.txt, h4.txt and 1 more file;");
+		expect(text).toContain(`More than ${MULTI_FILE_PER_FILE_MATCHES} matches in h0.txt, h1.txt, h2.txt, h3.txt, h4.txt and 1 more file;`);
 	});
 });
