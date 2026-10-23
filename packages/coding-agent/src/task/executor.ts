@@ -1,3 +1,4 @@
+import { cfgTierXai } from "../config/workflow-settings";
 /**
  * In-process execution for subagents.
  *
@@ -1085,6 +1086,7 @@ function inheritedSubagentServiceTiers(
 			cfgTierOpenai.get(baseSettings),
 			cfgTierAnthropic.get(baseSettings),
 			cfgTierGoogle.get(baseSettings),
+			cfgTierXai.get(baseSettings),
 		);
 	}
 	const tiers: ServiceTierByFamily = {};

@@ -63,6 +63,10 @@ export const frameDefs = {
 		"parentToolCallId?": "string",
 		index: "number.integer",
 		"detached?": doc("boolean", "The subagent runs as a detached background job."),
+		"completionKind?": doc(
+			"'completed' | 'budget_stop' | 'timeout' | 'hard_abort'",
+			"How a settled subagent ended, when it did not complete normally.",
+		),
 	},
 	SubagentProgressPayload: {
 		index: "number.integer",

@@ -1614,7 +1614,9 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 	? "priority"
 	: Family extends "google"
 		? "flex" | "priority"
-		: ServiceTier;
+		: Family extends "xai"
+			? "priority"
+			: ServiceTier;
 
 /**
  * ExtensionAPI passed to extension factory functions.
