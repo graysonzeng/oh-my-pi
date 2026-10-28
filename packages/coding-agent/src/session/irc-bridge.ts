@@ -260,7 +260,7 @@ export class IrcBridge {
 				from: msg.from,
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
-				interrupting: streaming,
+				interrupting: msg.interrupt === true,
 				relayOnStop,
 			}),
 			display: true,
@@ -279,7 +279,8 @@ export class IrcBridge {
 		if (peerMessage) this.#peerMessages.add(record);
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			if (fromParent && !peerMessage) {
+			// Only interrupt:true parent IRC steers; ordinary parent IRC waits as an aside.
+			if (fromParent && msg.interrupt === true) {
 				const steer: AgentMessage = {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
@@ -289,8 +290,10 @@ export class IrcBridge {
 				};
 				this.#parentSteers.add(steer);
 				this.#host.agent.steer(steer);
-			} else {
+			} else if (msg.interrupt === true) {
 				this.#interrupts.push(record);
+			} else {
+				this.#asides.push(record);
 			}
 			return "injected";
 		}

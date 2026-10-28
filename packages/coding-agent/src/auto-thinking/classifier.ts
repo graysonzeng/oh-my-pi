@@ -11,13 +11,19 @@
  * `trivial|moderate|hard` question (3-class is more reliable
  * than 4-way ordinal on sub-2B models), mapped to `low|high|xhigh`.
  *
+ * When the adaptive-thinking-context arm is on, the request is wrapped with
+ * bounded operational signals. The wrapper is a static prompt asset; it does
+ * not change the question or the judge chain.
+ *
  * Throws on any failure (no judge, no key, unparseable output, abort/timeout);
  * the caller falls back to a concrete level and continues the turn.
  */
 import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { type ChoiceQuestion, Effort, judgeQuestions, type Model, renderQuestion } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
+import adaptiveThinkingContextPrompt from "../prompts/system/auto-thinking-adaptive-context.md" with { type: "text" };
 import type { Settings } from "../config/settings";
 import { type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import questionFile from "../prompts/judge/auto-thinking.json" with { type: "json" };
@@ -115,6 +121,22 @@ export interface DifficultyInput {
 	solutionSpace?: string;
 }
 
+/** Window of recent tool-result messages used to count classifier failure signals. */
+export const ADAPTIVE_THINKING_TOOL_RESULT_WINDOW = 8;
+
+export type AdaptiveThinkingAgentRole = "main" | "sub";
+
+/**
+ * Bounded operational signals for the existing auto-thinking classifier call.
+ * Ordinary sessions omit `deadlineRemainingMs`; never invent a deadline.
+ */
+export interface AdaptiveThinkingContextSignals {
+	agentRole: AdaptiveThinkingAgentRole;
+	recentToolFailures: number;
+	contextUsagePercent?: number;
+	deadlineRemainingMs?: number;
+}
+
 export interface ClassifyDifficultyDeps {
 	settings: Settings;
 	registry: ModelRegistry;
@@ -122,8 +144,69 @@ export interface ClassifyDifficultyDeps {
 	sessionId?: string;
 	signal?: AbortSignal;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	/** Present only when the adaptive-thinking-context arm is on. */
+	adaptiveContext?: AdaptiveThinkingContextSignals;
 	onUsage?: (usage: JudgmentUsage) => void;
 	telemetry?: AgentTelemetryConfig;
+}
+
+/** Count `isError` among the most recent `window` tool-result messages. */
+export function countRecentToolResultErrors(
+	messages: ReadonlyArray<{ role: string; isError?: boolean }>,
+	window: number = ADAPTIVE_THINKING_TOOL_RESULT_WINDOW,
+): number {
+	const bound = Math.min(ADAPTIVE_THINKING_TOOL_RESULT_WINDOW, Math.max(0, Math.trunc(window)));
+	let seen = 0;
+	let failures = 0;
+	for (let i = messages.length - 1; i >= 0 && seen < bound; i--) {
+		const message = messages[i];
+		if (message?.role !== "toolResult") continue;
+		seen++;
+		if (message.isError) failures++;
+	}
+	return failures;
+}
+
+/** Normalize caller-supplied signals; drop free-form fields and invented deadlines. */
+export function normalizeAdaptiveThinkingContextSignals(
+	signals: AdaptiveThinkingContextSignals,
+): AdaptiveThinkingContextSignals {
+	const contextUsage =
+		typeof signals.contextUsagePercent === "number" && Number.isFinite(signals.contextUsagePercent)
+			? signals.contextUsagePercent
+			: undefined;
+	const deadline =
+		typeof signals.deadlineRemainingMs === "number" && Number.isFinite(signals.deadlineRemainingMs)
+			? signals.deadlineRemainingMs
+			: undefined;
+	const failures =
+		typeof signals.recentToolFailures === "number" && Number.isFinite(signals.recentToolFailures)
+			? signals.recentToolFailures
+			: 0;
+	return {
+		agentRole: signals.agentRole === "sub" ? "sub" : "main",
+		recentToolFailures: Math.min(ADAPTIVE_THINKING_TOOL_RESULT_WINDOW, Math.max(0, Math.trunc(failures))),
+		...(contextUsage !== undefined
+			? { contextUsagePercent: Math.min(100, Math.max(0, Math.trunc(contextUsage))) }
+			: {}),
+		...(deadline !== undefined && deadline >= 0 ? { deadlineRemainingMs: Math.trunc(deadline) } : {}),
+	};
+}
+
+function wrapAdaptiveThinkingClassifierInput(
+	preprocessedPrompt: string,
+	signals: AdaptiveThinkingContextSignals,
+): string {
+	const normalized = normalizeAdaptiveThinkingContextSignals(signals);
+	return prompt.render(adaptiveThinkingContextPrompt, {
+		agentRole: normalized.agentRole,
+		recentToolFailures: normalized.recentToolFailures,
+		hasContextUsage: normalized.contextUsagePercent !== undefined,
+		contextUsagePercent: normalized.contextUsagePercent,
+		hasDeadline: normalized.deadlineRemainingMs !== undefined,
+		deadlineRemainingMs: normalized.deadlineRemainingMs,
+		prompt: preprocessedPrompt,
+	});
 }
 
 /**
@@ -160,10 +243,15 @@ export async function classifyDifficulty(
 		cache: sharedJudgmentCache(),
 	});
 	const solutionSpace = input.solutionSpace?.trim();
+	const questions = solutionSpace ? SOLUTION_SPACE_QUESTIONS : REQUEST_QUESTIONS;
+	const preprocessedRequest = preprocessTinyMessage(input.request);
+	const request =
+		deps.adaptiveContext !== undefined
+			? wrapAdaptiveThinkingClassifierInput(preprocessedRequest, deps.adaptiveContext)
+			: preprocessedRequest;
 	const state: Record<string, string> = solutionSpace
 		? { solution_space: preprocessTinyMessage(solutionSpace) }
-		: { request: preprocessTinyMessage(input.request) };
-	const questions = solutionSpace ? SOLUTION_SPACE_QUESTIONS : REQUEST_QUESTIONS;
+		: { request };
 	const options = { signal: deps.signal };
 	const ceiling = autoEffortCeiling(deps);
 	const level = filterSupportedLevels(ceiling === Effort.Max ? questions.levelWithMax : questions.level, deps.model);

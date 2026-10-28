@@ -1749,7 +1749,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			requireYieldTool: true,
 			toolNames: ["read", "grep", "glob", "web_search"],
 		});
 
@@ -1764,7 +1763,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			requireYieldTool: true,
 			toolNames: ["yield"],
 		});
 
@@ -1963,15 +1961,21 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			const sessionFile = session.sessionFile;
 			if (!sessionFile) throw new Error("Expected persisted session file");
 
-			session.setTodoPhases([]);
-			expect(session.getTodoPhases()).toEqual([]);
-			expect(await session.switchSession(sessionFile)).toBe(true);
-			expect(session.getTodoPhases()).toMatchObject([
-				{
-					name: "Worker flow",
-					tasks: [{ content: "Reconcile worker result", status: "completed" }],
-				},
-			]);
+			await session.dispose();
+			const { session: resumed } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager: await SessionManager.open(sessionFile, tempDir),
+			});
+			try {
+				expect(resumed.getTodoPhases()).toMatchObject([
+					{
+						name: "Worker flow",
+						tasks: [{ content: "Reconcile worker result", status: "completed" }],
+					},
+				]);
+			} finally {
+				await resumed.dispose();
+			}
 		} finally {
 			await session.dispose();
 		}
@@ -2082,7 +2086,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			extensions: [toolActivationExtension, restrictedLateExtension],
 			customTools: [sdkCustomTool],
 			toolNames: ["read", "lsp"],
-			requireYieldTool: true,
 			restrictToolNames: true,
 			enableMCP: true,
 			mcpManager: inheritedManager,
@@ -2125,7 +2128,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			extensions: [toolActivationExtension],
 			customTools: [sdkCustomTool],
 			toolNames: ["read", "generate_image"],
-			requireYieldTool: true,
 			restrictToolNames: false,
 		});
 
@@ -2609,7 +2611,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
-				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "deny" } }),
+				settings: Settings.isolated({
+					"advisor.enabled": true,
+					"advisor.allowSameModel": true,
+					"tools.approval": { write: "deny" },
+				}),
 			});
 			try {
 				// The default advisor roster is read-only (read/grep/glob); the
@@ -2641,7 +2647,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
-				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "allow" } }),
+				settings: Settings.isolated({
+					"advisor.enabled": true,
+					"advisor.allowSameModel": true,
+					"tools.approval": { write: "allow" },
+				}),
 				toolNames: ["read"],
 			});
 			try {

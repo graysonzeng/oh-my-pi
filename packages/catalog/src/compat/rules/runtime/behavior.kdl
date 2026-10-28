@@ -401,6 +401,12 @@ behavior {
 	// Built-in default model selector chains per agent role, most preferred
 	// first; the coding agent reads them through `roleDefaultModels()`.
 	role-defaults "smol" {
+		// oh-my-pi workflow quality/cost plan: prefer deepseek flash then grok before haiku
+		model "gateway/deepseek-v4.1-flash:high"
+		model "deepseek-v4.1-flash"
+		model "gateway/deepseek-v4-flash:max"
+		model "deepseek-v4-flash"
+		model "gateway/grok-4.6:high"
 		model "claude-haiku-5-5"
 		model "claude-haiku-5.5"
 		model "haiku-5-5"

@@ -53,19 +53,26 @@ export function formatTaskResultSummary(
 	result: SingleResult,
 	options: { totalDurationMs: number; mergeSummary?: string },
 ): string {
-	const status = result.aborted
-		? "cancelled"
-		: result.exitCode === 0 && result.error
-			? "merge failed"
-			: result.exitCode === 0
-				? "completed"
-				: `failed (exit ${result.exitCode})`;
+	const completionKind = result.completionKind;
+	const status =
+		completionKind && completionKind !== "completed"
+			? completionKind
+			: result.aborted
+				? "cancelled"
+				: result.exitCode === 0 && result.error
+					? "merge failed"
+					: result.exitCode === 0
+						? "completed"
+						: `failed (exit ${result.exitCode})`;
 	const output = formatResultOutputFallback(result);
 	// The preview prefers `output` over `stderr`, so a run that failed after
-	// streaming prose (provider stream error, missing yield) would otherwise
-	// show only the half-written text and no reason. Aborts carry their own
-	// <abort-reason>; an empty output already previews the error itself.
-	const error = result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 ? result.error : undefined;
+	// streaming prose would otherwise show only the half-written text and no
+	// reason. Aborts carry their own <abort-reason>.
+	const failureReason = (result.error ?? result.stderr).trim();
+	const error =
+		result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 && failureReason.length > 0
+			? failureReason
+			: undefined;
 	const outputCharCount = result.outputMeta?.charCount ?? output.length;
 	// A stopped agent stays messageable; tell the parent so it can resume via
 	// irc instead of redoing the work. Isolated runs are parked without a

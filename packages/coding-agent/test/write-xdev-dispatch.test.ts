@@ -82,19 +82,20 @@ describe("read and write route xd:// device URLs", () => {
 			await Bun.write(filePath, "legacyWrap(x, value)\n");
 			const queue = new ToolChoiceQueue();
 
-			const tools = await createTools(
-				xdevSession(tempDir, {
-					getToolChoiceQueue: () => queue,
-					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
-					steer: () => {},
-				}),
-			);
+			const session = xdevSession(tempDir, {
+				getToolChoiceQueue: () => queue,
+				buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+				steer: () => {},
+			});
+			const tools = await createTools(session);
 			// xdev on: ast_edit is unmounted into xd://; write stays in the toolset.
 			const write = tools.find(entry => entry.name === "write");
 			const read = tools.find(entry => entry.name === "read");
 			expect(read).toBeDefined();
 			expect(write).toBeDefined();
 			expect(tools.some(entry => entry.name === "ast_edit")).toBe(false);
+			expect(tools.some(entry => entry.name === "workflow")).toBe(false);
+			expect(session.xdev?.mountedNames.has("workflow")).toBe(true);
 
 			const listing = await read!.execute("read-xd-list", { path: "xd://" });
 			expect(listing.content.find(entry => entry.type === "text")?.text).toContain("xd://ast_edit");
@@ -829,7 +830,6 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		try {
 			const activeNames = new Set(["read", "grep"]);
 			const session = xdevSession(tempDir, {
-				requireYieldTool: true,
 				isToolActive: name => activeNames.has(name),
 				setActiveToolNames: names => {
 					for (const name of names) activeNames.add(name);

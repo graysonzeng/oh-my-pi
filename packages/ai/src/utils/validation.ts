@@ -2050,6 +2050,7 @@ export function validateToolArguments(
 		const truncatedRawJson = boundRawToolArguments(String(originalArgs.__rawJson ?? ""));
 		throw new AIError.ValidationError(
 			`Validation failed for tool "${toolCall.name}": Tool call arguments are not valid JSON.\nParse Error: ${parseError}\nRaw JSON:\n${truncatedRawJson}`,
+			{ fieldPath: "$", expectedType: "valid JSON object" },
 		);
 	}
 	const ctx = getValidationContext(tool);
@@ -2175,7 +2176,11 @@ export function validateToolArguments(
 		toolCall.name
 	}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(receivedArgs, null, 2)}`;
 
-	throw new AIError.ValidationError(errorMessage);
+	const primaryIssue = result.flatIssues.find(issue => issue.instancePath || issue.expectedTypes.length > 0);
+	throw new AIError.ValidationError(errorMessage, {
+		fieldPath: primaryIssue?.instancePath || "$",
+		expectedType: primaryIssue?.expectedTypes.join(" | ") || null,
+	});
 }
 
 /**

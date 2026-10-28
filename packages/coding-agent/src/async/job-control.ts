@@ -8,7 +8,13 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
 import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
 
-import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
+import {
+	renderStructuredJson,
+	settledTaskDeliveryFields,
+	structuredStatusLabel,
+	taskAgentHandles,
+	taskToolCallIdFromJob,
+} from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -157,9 +163,17 @@ interface TrackedJobLike {
 	structured?: StructuredSubagentOutput;
 	/** See {@link AsyncJob.agentOutputPublished}. */
 	agentOutputPublished?: boolean;
+	/** Registry agent id when the manager disambiguated a colliding job id. */
+	agentId?: string;
+	/** Originating parent `task` tool call id when the spawn recorded one. */
+	taskToolCallId?: string;
 }
 
-export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
+export function snapshotJobs(
+	session: ToolSession,
+	jobs: TrackedJobLike[],
+	options: { includeResults?: boolean } = {},
+): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
 		const current = session.asyncJobManager?.getJob(j.id);
@@ -224,6 +238,16 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		}
 		const running = latest.status === "running";
 		const widget = current ? session.asyncJobManager?.widgets?.view(current) : undefined;
+		const settled =
+			latest.type === "task"
+				? settledTaskDeliveryFields({
+						id: latest.id,
+						agentId: current?.agentId ?? latest.agentId,
+						label: latest.label,
+						latestDetails: latest.latestDetails,
+					})
+				: {};
+		const taskToolCallId = latest.type === "task" ? taskToolCallIdFromJob(latest) : undefined;
 		return {
 			id: latest.id,
 			type: latest.type,
@@ -242,12 +266,24 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(contextTokens !== undefined && running ? { contextTokens } : {}),
 			...(contextWindow !== undefined && running ? { contextWindow } : {}),
 			...(widget ? { widget } : {}),
-			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
-			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
-			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
-			...(!resultConsumed && latest.structured ? { structured: latest.structured } : {}),
-			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.id } : {}),
+			...(!resultConsumed && options.includeResults !== false && latest.resultText
+				? { resultText: latest.resultText }
+				: {}),
+			...(!resultConsumed && options.includeResults !== false && latest.errorText
+				? { errorText: latest.errorText }
+				: {}),
+			...((options.includeResults === false || !resultConsumed) && latest.latestDetails?.meta
+				? { meta: latest.latestDetails.meta }
+				: {}),
+			...(!resultConsumed && options.includeResults !== false && latest.structured
+				? { structured: latest.structured }
+				: {}),
+			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.agentId ?? latest.id } : {}),
 			...(latest.agentOutputPublished !== undefined ? { agentOutputPublished: latest.agentOutputPublished } : {}),
+			...(settled.completionKind ? { completionKind: settled.completionKind } : {}),
+			...(settled.spawnQueueMs !== undefined ? { spawnQueueMs: settled.spawnQueueMs } : {}),
+			...(settled.requestPhaseQueueMs !== undefined ? { requestPhaseQueueMs: settled.requestPhaseQueueMs } : {}),
+			...(taskToolCallId ? { taskToolCallId } : {}),
 		};
 	});
 }
