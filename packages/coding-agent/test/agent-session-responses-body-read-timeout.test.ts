@@ -196,6 +196,9 @@ async function createSessionHarness(options: SessionHarnessOptions = {}): Promis
 	const settings = Settings.isolated({
 		"compaction.enabled": options.compactionEnabled ?? true,
 		"compaction.methodOrder": options.methodOrder ?? ["shake"],
+		// Workflow defaults the trigger to 60% of the window, which would shake the
+		// seeded history before the first request; keep the upstream usable-window trigger.
+		"compaction.thresholdPercent": -1,
 		"retry.enabled": options.retryEnabled ?? true,
 		"retry.maxRetries": options.maxRetries ?? 10,
 		"retry.baseDelayMs": 1,

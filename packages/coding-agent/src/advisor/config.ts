@@ -35,9 +35,11 @@ export type {
  *   it is reset or rebuilt (compaction, image drop, shake, session switch,
  *   `/advisor` rebuild, config reload, restart). No timer resumes it.
  * - `error` — repeated transient failures; backlog dropped to prevent stall
- * - `no_model` — no model resolved for this advisor's role/explicit model
+ * - `same_model` — the resolved advisor model equals the primary's active
+ *   model and `advisor.allowSameModel` is off; the runtime stays suspended
+ *   (enabled config preserved) until the models diverge or the setting flips
  */
-export type AdvisorRuntimeStatus = "running" | "paused" | "quota_exhausted" | "error" | "no_model";
+export type AdvisorRuntimeStatus = "running" | "paused" | "quota_exhausted" | "error" | "no_model" | "same_model";
 
 /**
  * The result of walking the `WATCHDOG.yml`/`WATCHDOG.yaml` search path: the
@@ -182,6 +184,12 @@ function filterAdvisorTools(tools: string[] | undefined, sourcePath: string): st
 	if (tools.length === 0) return [];
 	// Normalize legacy aliases (search→grep, find→glob) and dedupe before validating.
 	const filtered = normalizeToolNames(tools).filter(name => {
+		if (name === "consult") {
+			logger.warn("Advisor config: dropping consult; advisors cannot grant the executor consult tool", {
+				path: sourcePath,
+			});
+			return false;
+		}
 		if (KNOWN_TOOL_NAMES.has(name)) return true;
 		logger.warn("Advisor config: dropping unknown tool", { path: sourcePath, tool: name });
 		return false;

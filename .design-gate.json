@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "designDoc": "docs/superpowers/specs/2026-07-28-capability-compiled-per-model-output-quality-design.md",
+  "designAuthor": "gpt",
+  "reviewer": "agent://DesignGateRecheck",
+  "reviewedAt": "2026-07-28",
+  "verdict": "PASS_WITH_NOTES",
+  "ok": true,
+  "allowImplementation": true,
+  "blockingFindings": [],
+  "notes": [
+    "Ordinary tool-output consumer anchor clarified through applySessionToolOutput.",
+    "Ordinary context consumer anchored at sdk transformContext.",
+    "Gemini descriptor policy made mutable and per-request.",
+    "Ordinary completion obligations limited to explicit bounded sources.",
+    "Every ModelFacts field now has a compiled consumer.",
+    "All cohorts now have deterministic unknown fallbacks."
+  ]
+}

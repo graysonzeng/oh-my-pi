@@ -310,6 +310,8 @@ export function formatStatusIcon(status: ToolUIStatus, theme: Theme, spinnerFram
 			return theme.styledSymbol("status.running", "accent");
 		case "aborted":
 			return theme.styledSymbol("status.aborted", "error");
+		case "skipped":
+			return theme.styledSymbol("status.skipped", "muted");
 	}
 }
 
@@ -458,7 +460,16 @@ export function formatCodeFrameLine(
 // =============================================================================
 
 /** Status states supported by shared tool renderer icons. */
-export type ToolUIStatus = "success" | "done" | "error" | "warning" | "info" | "pending" | "running" | "aborted";
+export type ToolUIStatus =
+	| "success"
+	| "done"
+	| "error"
+	| "warning"
+	| "info"
+	| "pending"
+	| "running"
+	| "aborted"
+	| "skipped";
 /** Semantic foreground colors used by tool renderer labels. */
 export type ToolUIColor = "success" | "error" | "warning" | "accent" | "muted";
 

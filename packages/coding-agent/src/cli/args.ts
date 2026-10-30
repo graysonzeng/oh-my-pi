@@ -56,6 +56,8 @@ export interface Args {
 	advisor?: boolean;
 	/** Print mode: wake the session with background-job results before exiting (`async.printWake`). */
 	waitAsync?: boolean;
+	consult?: boolean;
+	consultModel?: string;
 	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
@@ -98,6 +100,7 @@ export interface Args {
 	noUi?: boolean;
 	autoApprove?: boolean;
 	approvalMode?: ApprovalMode;
+	ptc?: "off" | "on" | "auto";
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
@@ -367,6 +370,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.advisor = true;
 		} else if (arg === "--wait-async") {
 			result.waitAsync = true;
+		} else if (arg === "--consult") {
+			result.consult = true;
 		} else if (arg === "--external-thinking") {
 			result.externalThinking = true;
 		} else if (arg === "--prewalk") {

@@ -6,6 +6,7 @@ import {
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	generateHandoff,
+	REQUIRED_CHECKPOINT_SUMMARY_HEADINGS,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
@@ -50,6 +51,10 @@ function createAssistantMessage(content: AssistantMessage["content"]): Assistant
 		},
 		stopReason: "stop",
 	};
+}
+
+function checkpointSummary(body: string): string {
+	return REQUIRED_CHECKPOINT_SUMMARY_HEADINGS.map(heading => `${heading}\n${body}`).join("\n\n");
 }
 
 function getAnthropicModel(): Model {
@@ -192,7 +197,7 @@ describe("compact() propagates thinkingLevel to all three summarizers (regressio
 	test("ThinkingLevel.Off → every fan-out call gets reasoning=undefined", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "summary" }]));
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: checkpointSummary("summary") }]));
 
 		await compact(makePreparation(), getAnthropicModel(), "test-key", undefined, undefined, {
 			thinkingLevel: ThinkingLevel.Off,
@@ -208,7 +213,7 @@ describe("compact() propagates thinkingLevel to all three summarizers (regressio
 	test("ThinkingLevel.Low → every fan-out call gets reasoning=low", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "summary" }]));
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: checkpointSummary("summary") }]));
 
 		await compact(makePreparation(), getAnthropicModel(), "test-key", undefined, undefined, {
 			thinkingLevel: ThinkingLevel.Low,
@@ -223,7 +228,7 @@ describe("compact() propagates thinkingLevel to all three summarizers (regressio
 	test("undefined thinkingLevel → every fan-out call still gets reasoning=high (historical default)", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "summary" }]));
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: checkpointSummary("summary") }]));
 
 		await compact(makePreparation(), getAnthropicModel(), "test-key", undefined, undefined);
 
@@ -236,7 +241,7 @@ describe("compact() propagates thinkingLevel to all three summarizers (regressio
 	test("xai-oauth/grok-build + ThinkingLevel.High → every fan-out call gets reasoning=undefined (clamp)", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "summary" }]));
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: checkpointSummary("summary") }]));
 
 		await compact(makePreparation(), getGrokBuildModel(), "test-key", undefined, undefined, {
 			thinkingLevel: ThinkingLevel.High,

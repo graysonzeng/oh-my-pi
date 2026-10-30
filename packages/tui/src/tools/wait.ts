@@ -95,6 +95,16 @@ export interface JobSnapshot {
 	 * turn's output; undefined where the body does not report it.
 	 */
 	agentOutputPublished?: boolean;
+	/** Live tool activity for a running task job, when the progress snapshot has one. */
+	liveActivity?: { tool?: string; detail?: string; elapsedMs?: number };
+	/** Terminal provenance copied from task progress. */
+	completionKind?: string;
+	/** Milliseconds spent waiting for a spawn permit. */
+	spawnQueueMs?: number;
+	/** First request-phase provider queue wait (ms), when reviewMetrics recorded one. */
+	requestPhaseQueueMs?: number;
+	/** Originating parent task tool call id. */
+	taskToolCallId?: string;
 }
 
 /** Outcome of cancelling one background job. */

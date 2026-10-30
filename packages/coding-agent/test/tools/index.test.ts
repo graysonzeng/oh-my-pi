@@ -166,7 +166,6 @@ describe("createTools", () => {
 	it("updates an already-created yield tool to the active workpool key schema", async () => {
 		let items: Array<{ id: string; index: number }> = [];
 		const session = createTestSession({
-			requireYieldTool: true,
 			getWorkPoolYieldItems: () => items,
 		});
 		const tools = await createTools(session);

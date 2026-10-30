@@ -55,6 +55,7 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { appendEntryViaOrdinaryAcceptanceSink } from "../../latency/ordinary-acceptance-sink";
 import { parseSkillInvocation } from "../../extensibility/skills";
 import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
@@ -2988,7 +2989,7 @@ export class AcpAgent implements Agent {
 					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
 				},
 				appendEntry: (customType, data) => {
-					record.session.sessionManager.appendCustomEntry(customType, data);
+					appendEntryViaOrdinaryAcceptanceSink(record.session, customType, data);
 				},
 				setLabel: (targetId, label) => {
 					record.session.sessionManager.appendLabelChange(targetId, label);

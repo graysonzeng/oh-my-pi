@@ -121,7 +121,7 @@ built-in defaults  <-  global config  <-  project config  <-  CLI overlays  <-  
 From highest to lowest:
 
 1. **Setting env var** — an environment variable declared on the setting's definition (for example `PI_PY` for `eval.py`, `OMP_AUTH_BROKER_URL` for `auth.broker.url`). Parsed by the setting's type unless it declares a custom parser; unparseable text (such as `PI_EDIT_VARIANT=auto`) counts as unset. Booleans follow the `parseFlag` convention: empty counts as unset, `1`/`y`/`true`/`yes`/`on` (all-lowercase or all-uppercase) mean true, and any other value means false. A few are declared as fallbacks instead (`SEARXNG_*`, `MNEMOPI_EMBEDDING_MODEL`): they only replace the built-in default, so any configured layer wins over them — except a configured `null`, which counts as unset. `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`, and `MNEMOPI_EMBEDDING_MODEL` also apply when the setting is a blank string.
-2. **Runtime overrides** — settings applied in memory for the current process, including `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--external-thinking`, and protocol-mode defaults. Never persisted. Other one-shot options such as `--model`, `--thinking`, `--service-tier`, `--no-lsp`, `--no-pty`, and `--api-key` affect session/model/transport options rather than all being registry settings. Protocol-mode defaults (RPC/ACP) hold only while nothing else configures the setting: a settings write or reset of it, a `config.yml` or project edit picked up by a reload, or an ACP session's own project config replaces them.
+2. **Runtime overrides** — settings applied in memory for the current process, including `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--consult`, `--consult-model`, `--external-thinking`, and protocol-mode defaults. Never persisted. Other one-shot options such as `--model`, `--thinking`, `--service-tier`, `--no-lsp`, `--no-pty`, and `--api-key` affect session/model/transport options rather than all being registry settings. Protocol-mode defaults (RPC/ACP) hold only while nothing else configures the setting: a settings write or reset of it, a `config.yml` or project edit picked up by a reload, or an ACP session's own project config replaces them.
 3. **CLI config overlays** — each `--config <file>`; later overlay files override earlier ones.
 4. **Project settings** — `<cwd>/.omp/settings.json` then `<cwd>/.omp/config.yml` (and contributions from other discovery providers at project level).
 5. **Global settings** — the active agent/profile directory's `config.yml` (or existing `config.yaml`).
@@ -484,6 +484,23 @@ Advisors review primary turns on a configurable cadence and can inject advice. E
 | `advisor.reviewInterval`    | number  | `1`       | Default advisor only: review every Nth eligible update. Skipped updates are sent with the next scheduled review; pending advice delivery never depends on cadence. Applies live.                                                                                                                                                                 |
 | `advisor.maxNotesPerUpdate` | number  | `4`       | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default.                                                                                                                                       |
 | `advisor.evictStaleResults` | boolean | `true`    | Before each review, replace the advisor's `read`/`grep`/`glob` output from older reviews with a short placeholder. The latest review is kept.                                                                                                                                                                                                    |
+
+### Consult
+
+Consult is a mid-turn tool that asks a stronger model for strategic guidance. It is independent of the turn-by-turn advisor. Enable it with `consult.enabled`, `/consult on`, `--consult`, or `--consult-model`.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `consult.enabled` | boolean | `false` | Expose the `consult` tool on top-level sessions. Subagents never receive it. |
+| `consult.model` | string | unset | Optional model pattern. Empty uses `modelRoles.advisor`, then the slow chain. Never inherits the primary model. |
+| `consult.allowSameModel` | boolean | `false` | Allow consult when the resolved model is the same as the primary. |
+| `consult.maxUsesPerTurn` | number | `2` | Successful plus failed consult executes in the current primary turn. |
+| `consult.maxUsesPerSession` | number | `12` | Cumulative consult executes in this session. |
+| `consult.timeoutMs` | number | `300000` | Wall-clock timeout for the entire consult oneshot, including first-token wait and answer generation. `0` disables. |
+| `consult.firstEventTimeoutMs` | number | `60000` | Timeout waiting for the first model event (thinking or text). `0` disables. |
+| `consult.maxTokens` | number | `2048` | Hard output token budget passed to the consult oneshot. |
+| `consult.maxFocusChars` | number | `2000` | Maximum characters for the optional `focus` argument. |
+
 
 ### Thinking
 
@@ -1035,6 +1052,7 @@ Every schema path not individually tabulated in this catalog is explicitly defer
 - Interface and startup: `composer.*`, `display.*`, `extensionRenderers.*`, `input.*`, `marketplace.*`, `spelling.*`, `statusLine.*`, `startup.*`, `stt.*`, `tui.*`, `ttsr.*`, and `update.*`. `extensionRenderers.assistantText` (default `false`) enables [assistant text renderers](./extensions.md#assistant-text-renderer) and [extension link schemes](./extensions.md#extension-link-schemes).
 - Discovery, sharing, and auth: `auth.*`, `browser.*`, `claudeResets.*`, `codexResets.*`, `collab.*`, `commands.*`, `contextFiles.*`, `gc.*`, `ida.*`, `mcp.*`, `share.*`, `skills.*`, `stream.*`, and `telemetry.*`. `contextFiles.extra` is documented in [Context files](./context-files.md#extra-filenames).
 - Ungrouped keys: `setupVersion`, `proseOnlyThinking`, `omitThinking`, `externalThinking`, `includeWorkspaceTree`, `autocompleteMaxVisible`, `emojiAutocomplete`, `disabledExtensions`, `inlineToolDescriptors`, and `treeFilterMode`.
+- Integrations, storage, and discovery: `async.*`, `bashInterceptor.*`, `codexResets.*`, `collab.*`, `commands.*`, `dev.*`, `exa.*`, `gc.*`, `github.*`, `hindsight.*`, `magicKeywords.*`, `mcp.*`, `memories.*`, `mnemopi.*`, `providers.*`, `searxng.*`, `share.*`, `skills.*`, `task.*`, `todo.*`, `tts.*`, `workflow.*` (multi-model coding workflow; see [workflow.md](./workflow.md)), and `workspace.*`.
 
 These settings follow the same schema-defined type and default rules shown above.
 

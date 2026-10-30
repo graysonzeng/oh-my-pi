@@ -245,6 +245,7 @@ export interface ModelPatch {
 	name?: string;
 	api?: Api;
 	kind?: ModelKind;
+	requestModelId?: string;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
@@ -286,6 +287,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.kind = patch.kind;
 		result.kindConfig = patch.kind;
 	}
+	if (patch.requestModelId !== undefined) result.requestModelId = patch.requestModelId;
 	if (patch.reasoning !== undefined) {
 		result.reasoning = patch.reasoning;
 		// A configured capability replaces the catalog's unverified guess.

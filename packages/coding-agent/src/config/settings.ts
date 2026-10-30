@@ -58,6 +58,11 @@ import "./all-settings";
 import { cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
 
+/** Registered default for a dotted setting id. Missing ids return undefined. */
+export function getDefault(id: string): unknown {
+	return lookupSetting(id)?.default;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1594,6 +1599,31 @@ export class Settings {
 		return path.join(this.#agentDir, "plans");
 	}
 
+	/** Dotted-id read. Registered ids return the effective value, including the default. Unknown ids return undefined. */
+	get(id: string): unknown {
+		const setting = lookupSetting(id);
+		return setting ? setting.get(this) : undefined;
+	}
+
+	/** Runtime override by dotted id. Unknown ids are ignored. */
+	override(id: string, value: unknown): void {
+		const setting = lookupSetting(id);
+		if (!setting) return;
+		if (value === undefined) setting.clearOverride(this);
+		else setting.override(this, value as never);
+	}
+
+	/** Effective values under a dotted prefix, keyed by the suffix. */
+	getGroup(prefix: string): Record<string, unknown> {
+		const result: Record<string, unknown> = {};
+		const needle = `${prefix}.`;
+		for (const setting of allSettings()) {
+			if (!setting.id.startsWith(needle)) continue;
+			result[setting.id.slice(needle.length)] = setting.get(this);
+		}
+		return result;
+	}
+
 	/**
 	 * Get shell configuration based on settings.
 	 */
@@ -3121,7 +3151,8 @@ export class Settings {
 		// serviceTier (single enum with scoped openai-only/claude-only sentinels)
 		// → per-family tier.openai/tier.anthropic/tier.google; serviceTierSubagent
 		// → tier.subagent; serviceTierAdvisor → tier.advisor. `fastModeScope` is
-		// dropped — per-family scoping is now expressed by the three tier settings.
+		// dropped — per-family scoping is now expressed by the family tier settings.
+		// Legacy unscoped `priority` does not fill tier.xai (no retroactive xAI 2×).
 		const tierObj = isRecord(raw.tier) ? raw.tier : {};
 		let tierTouched = false;
 		const setTier = (family: string, value: unknown): void => {
@@ -3967,6 +3998,7 @@ export class Settings {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+
 // Global Singleton
 // ═══════════════════════════════════════════════════════════════════════════
 

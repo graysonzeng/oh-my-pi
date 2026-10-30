@@ -14,6 +14,8 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Skip the current batch when the bridge already has an interrupt path. */
+	interrupt?: boolean;
 	/**
 	 * Automated wake-turn relay of a woken subagent's stop output (task executor
 	 * `relayWakeTurnOutput`). Relays are answers, never wake sources: the

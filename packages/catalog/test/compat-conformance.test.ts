@@ -8,6 +8,8 @@ import { getBundledModels, getBundledProviders } from "../src/models";
  * Additions require a comment naming the runtime path that resolves them.
  */
 const RUNTIME_ONLY_PROVIDERS = new Set([
+	// User-defined models.yml provider resolved by coding-agent/config/model-registry.ts.
+	"gateway",
 	"kimi-search",
 	"ollama",
 	"siliconflow",

@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { checkpointSummary } from "./helpers";
 
 function getModel(): Model {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -30,7 +31,7 @@ describe("compaction summary boundaries", () => {
 				remoteEndpoint: "https://compaction.example.test/summarize",
 				fetch: async (_input, init) => {
 					requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-					return new Response(JSON.stringify({ summary: "summary" }));
+					return new Response(JSON.stringify({ summary: checkpointSummary() }));
 				},
 			},
 		);
@@ -64,7 +65,7 @@ describe("compaction summary boundaries", () => {
 		await compact(preparation, getModel(), "test-key", undefined, undefined, {
 			fetch: async (_input, init) => {
 				requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-				return new Response(JSON.stringify({ summary: "summary" }));
+				return new Response(JSON.stringify({ summary: checkpointSummary() }));
 			},
 		});
 
