@@ -85,6 +85,19 @@ interface EditorCall {
 	editorOptions: { promptStyle?: boolean } | undefined;
 }
 
+function makeManyFileDiff(fileCount: number): string {
+	return Array.from(
+		{ length: fileCount },
+		(_, idx) => `diff --git a/src/pr-${idx}.ts b/src/pr-${idx}.ts
+--- a/src/pr-${idx}.ts
++++ b/src/pr-${idx}.ts
+@@ -1 +1 @@
+-export const pr${idx} = false;
++export const pr${idx} = true;
+`,
+	).join("\n");
+}
+
 describe("ReviewCommand", () => {
 	let tmpDir: string;
 	let retainGeneration!: Mock<typeof gh.retainPrDiffGeneration>;
@@ -124,6 +137,7 @@ describe("ReviewCommand", () => {
 		onStatusCall?: (call: StatusCall) => void;
 		onNotify?: (call: NotifyCall) => void;
 		cwd?: string;
+		onSaveArtifact?: (content: string, toolType: string) => void;
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
 		const inputResults = [...(options?.inputResults ?? [])];
@@ -133,6 +147,10 @@ describe("ReviewCommand", () => {
 				getEntries: () => options?.sessionEntries ?? [],
 				getBranch: () => options?.branchEntries ?? options?.sessionEntries ?? [],
 				getCwd: () => options?.cwd,
+				saveArtifact: async (content: string, toolType: string) => {
+					options?.onSaveArtifact?.(content, toolType);
+					return "review-evidence";
+				},
 			},
 			ui: {
 				select: (title: string, selectOptions: string[]) => {
@@ -186,6 +204,21 @@ describe("ReviewCommand", () => {
 		expect(result).toContain("Check authentication boundaries");
 	});
 
+	it("renders custom review instructions through the reviewer task prompt when no diff is available", async () => {
+		const dir = await createTempDir();
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			editorValue: "Check authentication boundaries",
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		const promptText = result!;
+		expect(promptText).toContain("Check authentication boundaries");
+		expect(promptText).toContain('Use `effort: "high"`');
+		expect(promptText).toContain("no automatic effort escalation");
+	});
 	it("does not submit empty custom review instructions", async () => {
 		const values = [undefined, "", "   \n\t  "];
 
@@ -208,10 +241,14 @@ describe("ReviewCommand", () => {
 			uncommittedDiff: jjDiffSpy,
 		} as unknown as VcsRepo);
 		const gitRepoSpy = spyOn(vcs, "requireGit");
+		let savedArtifact: { content: string; toolType: string } | undefined;
 		try {
 			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 			const ctx = createContext({
 				selectedMode: "2. Review uncommitted changes",
+				onSaveArtifact: (content, toolType) => {
+					savedArtifact = { content, toolType };
+				},
 			});
 
 			const result = await command.execute([], ctx);
@@ -220,7 +257,19 @@ describe("ReviewCommand", () => {
 			const promptText = result!;
 			expect(promptText).toContain("src/workspace.ts");
 			expect(promptText).toContain("+1/-1");
-			expect(promptText).toContain("MAY read full file context as needed via `read`");
+			expect(promptText).toContain(
+				"Focus ONLY on assigned files, plus direct producer/consumer or dispatch call sites required to prove a finding",
+			);
+			expect(promptText).toContain(
+				`Snapshot ID: \`sha256:${new Bun.CryptoHasher("sha256").update(SAMPLE_JJ_DIFF).digest("hex")}\``,
+			);
+			expect(promptText).toContain('Every reviewer task SHOULD use `effort: "high"`');
+			expect(promptText).toContain("no automatic effort escalation");
+			expect(promptText).toContain(
+				"Put the snapshot ID, captured diff reference, manifest, and instructions in `context` once",
+			);
+			expect(promptText).toContain("Captured full diff: `artifact://review-evidence`");
+			expect(savedArtifact).toEqual({ content: SAMPLE_JJ_DIFF, toolType: "review-diff" });
 			expect(jjDiffSpy).toHaveBeenCalledWith([]);
 			expect(gitRepoSpy).not.toHaveBeenCalled();
 		} finally {
@@ -420,6 +469,42 @@ describe("ReviewCommand", () => {
 			}
 		},
 	);
+	it("prevents local file reads for PR URL reviews", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("MUST NOT read local workspace files for PR file context");
+		expect(result!).toContain("`pr://owner/repo/123/diff/all`");
+		expect(result!).toContain("per-file `pr://owner/repo/123/diff/<index>`");
+		expect(result!).not.toContain("MAY read full file context as needed via `read`");
+	});
+
+	it("uses one frozen artifact for omitted large PR diffs", async () => {
+		const dir = await createTempDir();
+		const largeDiff = makeManyFileDiff(21);
+		let savedArtifact: { content: string; toolType: string } | undefined;
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(largeDiff));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			onSaveArtifact: (content, toolType) => {
+				savedArtifact = { content, toolType };
+			},
+		});
+
+		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("Captured full diff: `artifact://review-evidence`");
+		expect(result!).toContain("MUST read the full captured diff from `artifact://review-evidence`");
+		expect(result!).toContain("Spawn exactly **3 reviewer agents** in parallel");
+		expect(result!).toContain("Every file belongs to exactly one task");
+		expect(savedArtifact).toEqual({ content: largeDiff, toolType: "review-diff" });
+	});
 
 	it("rejects unsupported PR-like URL formats as normal instructions", async () => {
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));

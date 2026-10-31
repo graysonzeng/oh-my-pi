@@ -40,7 +40,16 @@ import {
 	seedAlreadyExists,
 	summarizeMentalModel,
 } from "../../hindsight";
-import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
+import {
+	applyMemoryPackageFile,
+	exportMemoryPackage,
+	memoryStatsUnavailableMessage,
+	parseMemoryImportApplyArgs,
+	previewMemoryPackageFile,
+	resolveMemoryBackend,
+} from "../../memory-backend";
+import { observeLimiterAttribution } from "../../latency/limiter-observation";
+import { AsyncJobManager } from "../../async/job-manager";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
@@ -715,6 +724,7 @@ export class CommandController {
 		running: "●",
 		paused: "○",
 		no_model: "○",
+		same_model: "○",
 		quota_exhausted: "✕",
 		error: "✕",
 	};
@@ -723,6 +733,7 @@ export class CommandController {
 		running: "running",
 		paused: "off",
 		no_model: "no model",
+		same_model: "same model — paused",
 		quota_exhausted: "quota exhausted",
 		error: "error",
 	};
@@ -1087,12 +1098,80 @@ export class CommandController {
 			return;
 		}
 
+		if (action === "export") {
+			const dest = argumentText.slice(action.length).trim() || undefined;
+			try {
+				const result = await exportMemoryPackage(
+					backend,
+					{ agentDir, cwd: this.ctx.sessionManager.getCwd(), session: this.ctx.session },
+					dest,
+				);
+				if (result.unsupported) {
+					this.ctx.showWarning(result.text);
+					return;
+				}
+				this.#showMarkdownPanel("Memory Export", result.text);
+			} catch (error) {
+				this.ctx.showError(`Memory export failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
+
+		if (action === "import-preview") {
+			const filePath = argumentText.slice(action.length).trim();
+			if (!filePath) {
+				this.ctx.showError("Usage: /memory import-preview <path>");
+				return;
+			}
+			try {
+				const text = await previewMemoryPackageFile(
+					backend,
+					{ agentDir, cwd: this.ctx.sessionManager.getCwd(), session: this.ctx.session },
+					filePath,
+				);
+				this.#showMarkdownPanel("Memory Import Preview", text);
+			} catch (error) {
+				this.ctx.showError(
+					`Memory import-preview failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			return;
+		}
+
+		if (action === "import-apply") {
+			const parsed = parseMemoryImportApplyArgs(argumentText.slice(action.length).trim().split(/\s+/));
+			if (!parsed.filePath) {
+				this.ctx.showError(
+					"Usage: /memory import-apply <path> [--confirm-cross-scope=<binding>] [--replace-system]",
+				);
+				return;
+			}
+			try {
+				const text = await applyMemoryPackageFile(
+					backend,
+					{ agentDir, cwd: this.ctx.sessionManager.getCwd(), session: this.ctx.session },
+					parsed.filePath,
+					{
+						confirmCrossScope: parsed.confirmCrossScope,
+						confirmBinding: parsed.confirmBinding,
+						replaceSystemArtifacts: parsed.replaceSystemArtifacts,
+					},
+				);
+				this.#showMarkdownPanel("Memory Import Apply", text);
+			} catch (error) {
+				this.ctx.showError(`Memory import-apply failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
+
 		if (action === "mm") {
 			await this.#handleMentalModelsSubcommand(argumentText);
 			return;
 		}
 
-		this.ctx.showError("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|mm ...>");
+		this.ctx.showError(
+			"Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|export|import-preview|import-apply|mm ...>",
+		);
 	}
 
 	async #handleMentalModelsSubcommand(argumentText: string): Promise<void> {

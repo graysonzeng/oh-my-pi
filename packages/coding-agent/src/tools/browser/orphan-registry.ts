@@ -134,7 +134,7 @@ export async function forgetSharedTargets(scope: SharedTargetScope): Promise<voi
 }
 
 /** True when `pid` names a live process; non-`ESRCH` probe failures are treated as alive (safe direction). */
-function isPidAlive(pid: number): boolean {
+export function isPidAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;

@@ -211,6 +211,15 @@ export class Semaphore {
 			next();
 		}
 	}
+
+	/** Occupancy snapshot for limiter attribution (D8). Does not merge owners. */
+	snapshot(): { inFlight: number; capacity: number; queued: number } {
+		return {
+			inFlight: this.#current,
+			capacity: this.#max,
+			queued: this.#queue.length,
+		};
+	}
 }
 
 function semaphoreAbortReason(signal: AbortSignal): unknown {
