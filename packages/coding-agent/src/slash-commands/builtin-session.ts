@@ -11,7 +11,8 @@ import {
 	selectChangelogEntries,
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
-import { buildContextReportText } from "./helpers/context-report";
+import { appendContextDiagnosisSections, buildContextReportText } from "./helpers/context-report";
+import { observeLimiterAttribution } from "../latency/limiter-observation";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
@@ -553,7 +554,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return `Context: ${Math.round(usage.percent)}% (${formatTokenCount(usage.tokens)}/${formatTokenCount(usage.contextWindow)})`;
 		},
 		handle: async (_command, runtime) => {
-			await runtime.output(buildContextReportText(runtime));
+			const base = buildContextReportText(runtime);
+			await runtime.output(await appendContextDiagnosisSections(runtime, base));
 			return commandConsumed();
 		},
 		handleTui: (_command, runtime) => {

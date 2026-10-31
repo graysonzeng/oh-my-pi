@@ -31,6 +31,7 @@ import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
+import { appendEntryViaOrdinaryAcceptanceSink } from "../../latency/ordinary-acceptance-sink";
 import {
 	type AskDialogPrompt,
 	type AskDialogPromptValue,
@@ -252,7 +253,7 @@ export class ExtensionUiController {
 			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
-				this.ctx.sessionManager.appendCustomEntry(customType, data);
+				appendEntryViaOrdinaryAcceptanceSink(this.ctx.session, customType, data);
 			},
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
@@ -485,7 +486,7 @@ export class ExtensionUiController {
 			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
-				this.ctx.sessionManager.appendCustomEntry(customType, data);
+				appendEntryViaOrdinaryAcceptanceSink(this.ctx.session, customType, data);
 			},
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);

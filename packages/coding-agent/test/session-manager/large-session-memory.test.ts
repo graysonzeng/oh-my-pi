@@ -102,7 +102,7 @@ describe("large session memory guards", () => {
 		expect(supersededDisplay.summary).toContain("Superseded compaction");
 		expect((supersededDisplay.blocks ?? []).some(block => block.type === "image")).toBeFalse();
 
-		session.branch(rewindId);
+		await session.branch(rewindId);
 		const rewoundSummary = session.buildSessionContext().messages[0];
 		if (rewoundSummary?.role !== "compactionSummary") throw new Error("Expected rewound compaction summary");
 		expect(rewoundSummary.summary).toBe(firstSummary);
@@ -188,7 +188,7 @@ describe("large session memory guards", () => {
 		const branchACompactionId = session.getLeafId();
 		if (!branchACompactionId) throw new Error("Expected branch A compaction id");
 
-		session.branch(rootId);
+		await session.branch(rootId);
 		session.appendMessage(makeAssistantMessage("branch B reply"));
 		const branchBCompactionSummary = `branch-b-${"y".repeat(1024)}`;
 		session.appendCompaction(branchBCompactionSummary, undefined, rootId, 1000);

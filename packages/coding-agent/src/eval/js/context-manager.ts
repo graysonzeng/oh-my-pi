@@ -22,6 +22,7 @@ import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
+import type { NestedToolToken } from "./nested-scheduler";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
 import type {
@@ -34,6 +35,22 @@ import type {
 } from "./worker-protocol";
 
 export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
+
+function jsSnapshot(
+	cwd: string,
+	sessionId: string,
+	localRoots: Record<string, string> | undefined,
+	session?: ToolSession,
+	extra?: Pick<SessionSnapshot, "preludes">,
+): SessionSnapshot {
+	return {
+		cwd,
+		sessionId,
+		localRoots,
+		restrictedIo: session?.getCodeModeDirectToolNames?.() !== undefined,
+		...extra,
+	};
+}
 
 export interface VmRunState {
 	signal?: AbortSignal;
@@ -86,6 +103,8 @@ interface PendingRun {
 	 */
 	heldResult?: Extract<WorkerOutbound, { type: "result" }>;
 	settled: boolean;
+	/** Scheduler tokens of exclusive/shared parents that created this run. */
+	ancestorTokens: ReadonlySet<NestedToolToken>;
 }
 
 interface JsSession {
@@ -188,9 +207,7 @@ export async function executeInVmContext(options: {
 	const session = await acquireSession(
 		sessionKey,
 		{
-			cwd: options.cwd,
-			sessionId: options.sessionId,
-			localRoots: options.localRoots,
+			...jsSnapshot(options.cwd, options.sessionId, options.localRoots, options.session),
 			packageRoot: options.packageRoot,
 			packageEnvironment: options.packageEnvironment,
 		},
@@ -239,6 +256,7 @@ export async function invokeJsTool(
 		deferDepth: 0,
 		aborted: false,
 		settled: false,
+		ancestorTokens: new Set(options.session.getNestedToolScheduler?.()?.runningTokens() ?? []),
 	};
 	session.pending.set(runId, pending);
 
@@ -512,6 +530,7 @@ async function runOnce(
 		deferDepth: 0,
 		aborted: false,
 		settled: false,
+		ancestorTokens: new Set(options.session.getNestedToolScheduler?.()?.runningTokens() ?? []),
 	};
 	session.pending.set(runId, pending);
 
@@ -546,10 +565,9 @@ async function runOnce(
 		if (options.packageRoot !== undefined) session.packageRoot = options.packageRoot;
 		if (options.packageEnvironment !== undefined) session.packageEnvironment = options.packageEnvironment;
 		const snapshot = {
-			cwd: options.cwd,
-			sessionId: options.sessionId,
-			localRoots: options.localRoots,
-			preludes: javascriptPreludeSources(options.session),
+			...jsSnapshot(options.cwd, options.sessionId, options.localRoots, options.session, {
+				preludes: javascriptPreludeSources(options.session),
+			}),
 			packageRoot: session.packageRoot,
 			packageEnvironment: session.packageEnvironment,
 		};
@@ -814,6 +832,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			signal: ctrl.signal,
 			identity: msg.identity,
 			shadowCell: pending.shadowCell,
+			ancestors: pending.ancestorTokens,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });

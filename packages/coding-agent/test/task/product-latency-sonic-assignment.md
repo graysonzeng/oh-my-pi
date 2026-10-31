@@ -1,0 +1,1 @@
+In add.ts, change the `add` implementation so it returns the sum of `left` and `right`. Replace the subtraction operator with addition. Do not change the function signature. Stop as soon as the file is correct.

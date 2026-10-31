@@ -143,6 +143,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 
 - [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md)
 - [collab.md](../../docs/collab.md), [agent-hub.md](../../docs/agent-hub.md), [tools/wait.md](../../docs/tools/wait.md)
+- Multi-model workflow: [workflow.md](../../docs/workflow.md) (`src/workflow/`, tool `workflow`)
 
 ### Web I/O and retrieval
 

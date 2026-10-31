@@ -82,7 +82,7 @@ describe("AgentSession advisor descriptor thinking level", () => {
 				messages: [],
 			},
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false });
+		const settings = Settings.isolated({ "compaction.enabled": false, "advisor.allowSameModel": true });
 		session = new AgentSession({
 			agent,
 			sessionManager,

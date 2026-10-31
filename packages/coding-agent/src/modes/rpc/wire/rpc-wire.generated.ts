@@ -441,6 +441,10 @@ export interface Goal {
 	createdAt: number;
 	updatedAt: number;
 	tokenBudget?: number;
+	/** Headless auto-continuations spent on this goal. */
+	headlessContinuationCount?: number;
+	/** Host completion-gate state (verification, decisions, no-progress). */
+	hostGate?: unknown;
 }
 
 /** Session goal mode; `mode` is `"exiting"` while a completed goal unwinds. */
@@ -777,7 +781,7 @@ export interface PromptAck {
 
 export type AutoCompactionReason = "threshold" | "overflow" | "idle" | "incomplete";
 
-export type AutoCompactionAction = "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+export type AutoCompactionAction = "context-full" | "remote" | "handoff" | "shake" | "snapcompact" | "structured";
 
 export type CacheWarmingPhase = "streaming" | "idle";
 
@@ -799,6 +803,8 @@ export interface AgentEndEvent {
 	messageCount?: number;
 	/** False when a continuation or async delivery remains. */
 	isTerminal?: boolean;
+	/** Async-job delivery that produced this run, when one did. */
+	deliveryId?: string;
 	/** The agent finished its turn and resumes only for queued input or background-job results. */
 	yielded?: boolean;
 	/** Non-terminal end whose only possible resume is a background-job result. */
@@ -992,6 +998,11 @@ export interface TodoAutoClearEvent {
 	type: "todo_auto_clear";
 }
 
+export interface TodoUpdatedEvent {
+	type: "todo_updated";
+	phases: TodoPhase[];
+}
+
 export interface IrcMessageEvent {
 	type: "irc_message";
 	message: CustomMessage;
@@ -1031,7 +1042,7 @@ export interface QueueUpdateEvent {
 }
 
 /** A session event, discriminated by `type`; `set_event_filter` selects which are sent. */
-export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
+export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | TodoUpdatedEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
 
 /** First frame after startup; transport fields are absent on servers without protocol v2. */
 export interface ReadyEvent {
@@ -1098,6 +1109,8 @@ export interface SubagentLifecyclePayload {
 	parentToolCallId?: string;
 	/** The subagent runs as a detached background job. */
 	detached?: boolean;
+	/** How a settled subagent ended, when it did not complete normally. */
+	completionKind?: "completed" | "budget_stop" | "timeout" | "hard_abort";
 }
 
 export interface SubagentProgressPayload {
@@ -1569,6 +1582,15 @@ export interface SetFastModeParams {
 	enabled: boolean;
 }
 
+export interface SetPtcModeParams {
+	mode: "off" | "on" | "auto";
+}
+
+export interface SetPtcModeResult {
+	mode: "off" | "on" | "auto";
+	active: boolean;
+}
+
 export interface SetSlowModeParams {
 	enabled: boolean;
 }
@@ -1903,6 +1925,7 @@ export interface RpcWireCommands {
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };
 	set_fast_mode: { params: SetFastModeParams; result: FastModeResult };
+	set_ptc_mode: { params: SetPtcModeParams; result: SetPtcModeResult };
 	set_slow_mode: { params: SetSlowModeParams; result: SetSlowModeResult };
 	goal: { params: GoalParams; result: GoalResult };
 	set_ask_dialog: { params: SetAskDialogParams; result: SetAskDialogResult };

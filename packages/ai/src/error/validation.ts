@@ -8,10 +8,21 @@ import { attach, create, Flag } from "./flags";
  * This is a programmer/config/contract error, not a transient provider fault —
  * it is never retried.
  */
+export interface ValidationErrorOptions {
+	cause?: unknown;
+	fieldPath?: string | null;
+	expectedType?: string | null;
+}
+
 export class ValidationError extends Error {
-	constructor(message: string, options?: { cause?: unknown }) {
+	readonly fieldPath: string | null;
+	readonly expectedType: string | null;
+
+	constructor(message: string, options?: ValidationErrorOptions) {
 		super(message, options?.cause === undefined ? undefined : { cause: options.cause });
 		this.name = "ValidationError";
+		this.fieldPath = options?.fieldPath ?? null;
+		this.expectedType = options?.expectedType ?? null;
 	}
 }
 

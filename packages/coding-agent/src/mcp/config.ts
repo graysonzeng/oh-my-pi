@@ -47,6 +47,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		instructions: server.instructions,
 		auth: server.auth,
 		oauth: server.oauth,
+		...(server.lazy !== undefined ? { lazy: server.lazy } : {}),
 	};
 
 	if (transport === "stdio") {

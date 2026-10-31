@@ -1,0 +1,7 @@
+// The custom gateway streams Grok reasoning as repeated full-prefix snapshots.
+// This is a deployment contract, not a model-lineage property of every Grok host.
+provider "gateway" {
+	class "xai" {
+		reasoning-deltas-may-be-cumulative #true
+	}
+}

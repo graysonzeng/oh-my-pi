@@ -35,6 +35,7 @@ import { isCompletionProbeEnabled } from "./completion-probe";
 import { cfgTaskAgentAccountPools } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
+import { resolveRequireYieldTool, resolveSubagentPerformanceClass } from "./review-performance";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -132,6 +133,10 @@ export function createPersistedSubagentReviverFactory(
 		} catch {
 			return undefined;
 		}
+		const init = peek.init;
+		const performanceClass =
+			init.performanceClass ?? resolveSubagentPerformanceClass({ agentName: init.agent ?? ref.displayName });
+		const requireYieldTool = resolveRequireYieldTool(performanceClass);
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
 		// assuming a fixed level.
@@ -173,6 +178,7 @@ export function createPersistedSubagentReviverFactory(
 			// createSubagentSettings default).
 			const subagentSettings = createSubagentSettings(ctx.settings, {
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+				...(init.outputTruncation === false ? { "modelOptimization.outputTruncation.enabled": false } : undefined),
 				...(init.advisor
 					? {
 							"advisor.enabled": true,
@@ -275,7 +281,8 @@ export function createPersistedSubagentReviverFactory(
 					outputSchema: init.outputSchema,
 					outputSchemaMode: init.outputSchemaMode,
 					restrictToolNames: restrictToolNames || undefined,
-					requireYieldTool: structured,
+					requireYieldTool,
+					workerClass: performanceClass === "worker",
 					systemPrompt: () => [...init.systemPrompt],
 					// Inherit current owner policy, never extension authority from a transcript.
 					extensionRoots: () => ctx.session.effectiveExtensionRoots,

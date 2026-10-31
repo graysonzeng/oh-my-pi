@@ -2,7 +2,7 @@
  * Tool output pruning utilities for compaction.
  */
 
-import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
@@ -53,6 +53,17 @@ export interface PruneConfig extends CacheLookbackConfig {
 	supersedeComplete?: SupersedeCompleteFn;
 	/** Useless-flagged results bypass the protect window (see {@link USELESS_NOTICE}). Default true. */
 	pruneUseless?: boolean;
+	/**
+	 * Addressable omission mode (structured compaction). When true, a pruned
+	 * result's original content is recorded on `omittedOriginal` before the
+	 * visible `content` is replaced with a short placeholder that carries the
+	 * entry ID and the `read_omitted_content` recovery usage, and savings are
+	 * computed from that actual placeholder. Results already omitted
+	 * (`prunedAt` set) or already carrying an `omittedOriginal` are never
+	 * re-pruned. Superseded/useless notices do not apply in this mode.
+	 * Existing false/absent behavior is unchanged.
+	 */
+	addressable?: boolean;
 	/**
 	 * Compaction boundary: the `firstKeptEntryId` of the latest compaction on
 	 * the branch. Entries at indices BEFORE this id are summarized away and never
@@ -119,6 +130,26 @@ export const SUPERSEDED_NOTICE = "[Superseded by a newer read of this file]";
 
 /** Exact placeholder written over an elided useless tool result. */
 export const USELESS_NOTICE = "[Uneventful result elided]";
+
+/**
+ * Placeholder written over an addressable-pruned tool result: a short pointer
+ * carrying the entry ID and the `read_omitted_content` recovery call, so the
+ * model (and persistence) can page the original content back on demand.
+ * Savings are computed from this actual placeholder, not a generic notice.
+ */
+export function createAddressableNotice(entryId: string, tokens: number): string {
+	return `[Tool output omitted - ${tokens} tokens; recover via read_omitted_content {"id":"${entryId}"}]`;
+}
+
+/**
+ * Deep clone of tool-result content blocks for {@link ToolResultMessage.omittedOriginal}.
+ * Image blocks may nest a {@link ProviderFileReference} (`providerFile`), so a
+ * shallow spread would alias the live message — the stored original must be a
+ * fully independent copy.
+ */
+export function cloneContentBlocks(content: readonly (TextContent | ImageContent)[]): (TextContent | ImageContent)[] {
+	return structuredClone(content) as (TextContent | ImageContent)[];
+}
 
 /**
  * Maps a tool call to a supersede key. Results sharing a key form a group in
@@ -534,6 +565,21 @@ export function pruneSupersededToolResults(
 	return { prunedCount: toPrune.length, tokensSaved, undo: undoAll(steps) };
 }
 
+/**
+ * The exact placeholder a candidate is rewritten to. Kept in one place so the
+ * savings estimate and the applied rewrite can never drift apart; addressable
+ * candidates carry their entry ID (see {@link createAddressableNotice}).
+ */
+function noticeForCandidate(
+	candidate: { entry: SessionMessageEntry; tokens: number; superseded: boolean; useless: boolean },
+	addressable: boolean,
+): string {
+	if (addressable) return createAddressableNotice(candidate.entry.id, candidate.tokens);
+	if (candidate.superseded) return SUPERSEDED_NOTICE;
+	if (candidate.useless) return USELESS_NOTICE;
+	return createPrunedNotice(candidate.tokens);
+}
+
 export function pruneToolOutputs(
 	entries: readonly SessionEntry[],
 	tokenizer: Tokenizer,
@@ -541,27 +587,29 @@ export function pruneToolOutputs(
 ): PruneResult {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
+	const addressable = config.addressable === true;
 
 	const candidates: Array<{ entry: SessionMessageEntry; tokens: number; superseded: boolean; useless: boolean }> = [];
 	// Entries before the compaction boundary are summarized away (never sent)
 	// and are never prune candidates, so no pass below walks them.
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
 	const toolCalls = new SentToolCalls(entries, boundaryIndex);
-	const supersededMessages = config.supersedeKey
-		? new Set(
-				collectSupersededResults(
-					entries,
-					boundaryIndex,
-					tokenizer,
-					toolCalls,
-					config.supersedeKey,
-					config.supersedeComplete,
-					config.protectedTools,
-				).map(candidate => candidate.message),
-			)
-		: undefined;
+	const supersededMessages =
+		!addressable && config.supersedeKey
+			? new Set(
+					collectSupersededResults(
+						entries,
+						boundaryIndex,
+						tokenizer,
+						toolCalls,
+						config.supersedeKey,
+						config.supersedeComplete,
+						config.protectedTools,
+					).map(candidate => candidate.message),
+				)
+			: undefined;
 	const uselessMessages =
-		config.pruneUseless !== false
+		!addressable && config.pruneUseless !== false
 			? new Set(
 					collectUselessResults(
 						entries,
@@ -610,7 +658,7 @@ export function pruneToolOutputs(
 		// compaction/shake.
 		if (cacheWarmSuffixTokens !== undefined && (suffixAfter > cacheWarmSuffixTokens || i < lookbackFloor)) break;
 
-		if (message.prunedAt !== undefined) {
+		if (message.prunedAt !== undefined || (addressable && message.omittedOriginal !== undefined)) {
 			accumulatedTokens += tokens;
 			continue;
 		}
@@ -619,8 +667,10 @@ export function pruneToolOutputs(
 		// (a stale re-read copy, or a result the tool flagged as uninformative,
 		// is dead weight at any age) — but only within the cache-warm tail: the
 		// guard above already excluded deeper, still-cached copies.
-		const superseded = supersededMessages?.has(message) ?? false;
-		const useless = uselessMessages?.has(message) ?? false;
+		// Addressable (structured) mode never applies those notices: candidates
+		// must be recoverable via `omittedOriginal`, not blanked to a dead notice.
+		const superseded = !addressable && (supersededMessages?.has(message) ?? false);
+		const useless = !addressable && (uselessMessages?.has(message) ?? false);
 		const tooSmall = tokens < MIN_PRUNE_TOKENS;
 		if (
 			!superseded &&
@@ -633,19 +683,18 @@ export function pruneToolOutputs(
 			continue;
 		}
 
-		candidates.push({ entry: entry as SessionMessageEntry, tokens, superseded, useless });
+		const candidate = { entry: entry as SessionMessageEntry, tokens, superseded, useless };
+		const notice = noticeForCandidate(candidate, addressable);
+		const savings = addressable
+			? tokens - tokenizer.countMessage({ ...message, content: [{ type: "text", text: notice }] })
+			: estimatePrunedSavings(tokens, notice);
+		if (addressable && savings <= 0) {
+			accumulatedTokens += tokens;
+			continue;
+		}
+		tokensSaved += savings;
+		candidates.push(candidate);
 		accumulatedTokens += tokens;
-	}
-
-	for (const candidate of candidates) {
-		tokensSaved += estimatePrunedSavings(
-			candidate.tokens,
-			candidate.superseded
-				? SUPERSEDED_NOTICE
-				: candidate.useless
-					? USELESS_NOTICE
-					: createPrunedNotice(candidate.tokens),
-		);
 	}
 
 	if (tokensSaved < config.minimumSavings || candidates.length === 0) {
@@ -654,12 +703,14 @@ export function pruneToolOutputs(
 
 	const prunedAt = Date.now();
 	const steps = candidates.map(candidate => {
-		const notice = candidate.superseded
-			? SUPERSEDED_NOTICE
-			: candidate.useless
-				? USELESS_NOTICE
-				: createPrunedNotice(candidate.tokens);
-		return blankToolResult(candidate.entry.message as ToolResultMessage, notice, prunedAt);
+		const message = candidate.entry.message as ToolResultMessage;
+		const notice = noticeForCandidate(candidate, addressable);
+		if (addressable) {
+			// Record the exact original bytes before the visible content is replaced
+			// so `read_omitted_content` can page them back later.
+			message.omittedOriginal = cloneContentBlocks(message.content);
+		}
+		return blankToolResult(message, notice, prunedAt);
 	});
 
 	return { prunedCount: candidates.length, tokensSaved, undo: undoAll(steps) };

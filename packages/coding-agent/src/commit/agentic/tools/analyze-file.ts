@@ -42,6 +42,7 @@ function buildToolSession(
 		// model choosing further spawns, so the specialization nudge is noise here.
 		suppressSpawnAdvisory: true,
 		getSessionFile: () => ctx.sessionManager.getSessionFile() ?? null,
+		getLineageContext: () => ctx.sessionManager.getLineageContext(),
 		getSessionSpawns: () => options.spawns,
 		settings: options.settings,
 		authStorage: options.authStorage,

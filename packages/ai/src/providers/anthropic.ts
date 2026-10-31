@@ -2625,11 +2625,21 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
-					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
 						if (slowSignal) slowMode.observe(slowSignal, slowLane);
 					}
+					let responseNotified = false;
+					const notifyResponse = async (event?: AnthropicStreamEvent): Promise<void> => {
+						if (responseNotified) return;
+						responseNotified = true;
+						const responseModel = event?.type === "message_start" ? event.message?.model : undefined;
+						const metadata =
+							typeof responseModel === "string" && responseModel.length > 0
+								? { model: responseModel }
+								: undefined;
+						await notifyProviderResponse(options, response, model, requestId, metadata);
+					};
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
@@ -2706,7 +2716,17 @@ const streamAnthropicOnce = (
 						rawSseObserver && !recordsRawSseEvents
 							? observeDecodedAnthropicEvents(drainedAnthropicStream, rawSseObserver)
 							: drainedAnthropicStream;
-					for await (const event of observedAnthropicStream) {
+					const responseObservedAnthropicStream = (async function* (): AsyncGenerator<AnthropicStreamEvent> {
+						try {
+							for await (const event of observedAnthropicStream) {
+								if (event.type === "message_start") await notifyResponse(event);
+								yield event;
+							}
+						} finally {
+							await notifyResponse();
+						}
+					})();
+					for await (const event of responseObservedAnthropicStream) {
 						sawEvent = true;
 
 						if (event.type === "message_start") {
@@ -5486,7 +5506,14 @@ function buildToolResultBlock(
 	msg: ToolResultMessage,
 	hoistedImages: ContentBlockParam[],
 ): ContentBlockParam {
-	let content = convertContentBlocks(msg.content, { supportsImages: model.input.includes("image") });
+	// A recovery text page may consist entirely of whitespace. Keep it joined
+	// to its explicit metadata envelope so normal empty-block filtering cannot
+	// discard delivered bytes (or send an invalid whitespace-only API block).
+	const contentBlocks: (TextContent | ImageContent)[] =
+		msg.toolName === "read_omitted_content" && msg.content.every(block => block.type === "text")
+			? [{ type: "text", text: msg.content.map(block => (block as TextContent).text).join("\n") }]
+			: msg.content;
+	let content = convertContentBlocks(contentBlocks, { supportsImages: model.input.includes("image") });
 	// Anthropic rejects images inside error tool results ("all content must be
 	// type `text` if `is_error` is true") — keep the text in the block and
 	// hoist the images after the message's tool_result run.
