@@ -389,8 +389,14 @@ describe("task spawn validation", () => {
 		);
 		const text = tool.description;
 		for (const advertised of ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) expect(text).toContain(advertised);
+		// Restrict omit checks to the per-call Approved: advertisement. Workflow task.md
+		// legitimately mentions `@smol` in Delegation scout guidance outside that clause.
+		const approvedStart = text.indexOf("Approved:");
+		expect(approvedStart).toBeGreaterThanOrEqual(0);
+		const approvedEnd = text.indexOf(".", approvedStart);
+		const approved = text.slice(approvedStart, approvedEnd === -1 ? undefined : approvedEnd);
 		for (const omitted of ["hidden/image", "hidden/judge", "`@smol`", "`pi/slow`", "`*`", "`default`", "`inherit`"]) {
-			expect(text).not.toContain(omitted);
+			expect(approved).not.toContain(omitted);
 		}
 	});
 
