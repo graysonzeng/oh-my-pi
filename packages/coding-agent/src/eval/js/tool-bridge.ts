@@ -11,12 +11,19 @@ import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
 import { isReplyWrite, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { PtcCatalogDescriptor, PtcCatalogSearchHit } from "../../tools/ptc-catalog";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { withBridgeTimeoutPause } from "../bridge-timeout";
+import {
+	EVAL_CATALOG_DESCRIBE_BRIDGE_NAME,
+	EVAL_CATALOG_SEARCH_BRIDGE_NAME,
+	runEvalCatalogDescribe,
+	runEvalCatalogSearch,
+} from "../catalog-bridge";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
 import {
 	EVAL_JUDGMENT_BATCH_BRIDGE_NAME,
@@ -38,6 +45,7 @@ import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { RuntimeCallIdentity } from "./shared/runtime";
+import type { NestedToolConcurrency, NestedToolToken } from "./nested-scheduler";
 import type { JsStatusEvent } from "./shared/types";
 
 /** These tools await delegated subagents/jobs, not the cell runtime's own work. */
@@ -60,6 +68,8 @@ export interface ToolBridgeOptions {
 	 * would draw them, so such calls fail instead of reporting a reply nobody sees.
 	 */
 	onReply?: (text: string) => void;
+	/** Ancestor scheduler tokens captured when the child eval run started. */
+	ancestors?: ReadonlySet<NestedToolToken>;
 }
 
 type ToolValue =
@@ -71,6 +81,8 @@ type ToolValue =
 	| EvalJudgmentBatchResult
 	| EvalHandleSnapshot
 	| EvalWorkpoolResult
+	| PtcCatalogSearchHit[]
+	| Record<string, PtcCatalogDescriptor | null>
 	| { items: EvalHandleSnapshot[] }
 	| { cancelled: boolean }
 	| {
@@ -126,6 +138,7 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
 				op: "write",
 				path: record.path,
 				chars: typeof record.content === "string" ? record.content.length : 0,
+				...(isRecord(details.xdev) ? { xdev: details.xdev } : {}),
 			});
 		case "grep":
 			return withError({
@@ -151,7 +164,11 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
 		case "todo":
 			return withError({ op: "todo", chars: text.length, committed: committedTodoPhases(result) !== undefined });
 		default:
-			return withError({ op: name, chars: text.length });
+			return withError({
+				op: name,
+				chars: text.length,
+				...(isRecord(details.xdev) ? { xdev: details.xdev } : {}),
+			});
 	}
 };
 
@@ -279,6 +296,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_WORKPOOL_BRIDGE_NAME) {
 		return await runEvalWorkpool(args, options);
 	}
+	if (name === EVAL_CATALOG_SEARCH_BRIDGE_NAME) {
+		return runEvalCatalogSearch(args, options.session);
+	}
+	if (name === EVAL_CATALOG_DESCRIBE_BRIDGE_NAME) {
+		return runEvalCatalogDescribe(args, options.session);
+	}
 	const tool = getTool(options.session, name);
 	// Wire aliases share every guard, status and bookkeeping path with the canonical tool.
 	name = tool.name;
@@ -337,43 +360,85 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 					if (progress) options.emitStatus?.({ op: "mcp_progress", id: toolCallId, tool: name, ...progress });
 				}
 			: undefined;
-	try {
-		// A delegated-work tool pauses only the cell's runtime-work watchdog; the turn's
-		// signal still reaches it. Without a status sink the pause wrapper is a no-op.
-		const result = await withBridgeTimeoutPause(
-			DELEGATED_WORK_TOOLS.has(name) ? options.emitStatus : undefined,
-			async () => {
-				try {
-					return await tool.execute(
-						toolCallId,
-						validatedArgs,
-						options.signal,
-						onUpdate,
-						options.session.getToolContext?.(),
-					);
-				} finally {
-					settled = true;
-				}
-			},
-		);
-		if (name === "todo") {
-			// A bridged call emits no `todo` toolResult entry, the only thing branch
-			// rehydration reads; without this the in-memory update is lost on the
-			// next resume/rewind/fork and stale todos trigger a false reminder.
-			const phases = committedTodoPhases(result);
-			if (phases) options.session.persistTodoPhases?.(phases);
-		}
-		const replies = reply === undefined ? toolResultReplies(result.details) : [reply];
-		if (replies.length > 0) {
-			if (!options.onReply) throw new ToolError(NO_REPLY_SINK);
-			for (const text of replies) options.onReply(text);
-		}
-		return bridgeValueFromToolResult(name, validatedArgs, result, options.emitStatus);
-	} catch (error) {
-		options.emitStatus?.({
-			op: name,
-			error: error instanceof Error ? error.message : String(error),
+	const execute = async (): Promise<ToolValue> => {
+		await options.session.emitNestedToolExecution?.({
+			type: "tool_execution_start",
+			toolCallId,
+			toolName: name,
+			args: validatedArgs,
 		});
-		throw error;
+		try {
+			// A delegated-work tool pauses only the cell's runtime-work watchdog; the turn's
+			// signal still reaches it. Without a status sink the pause wrapper is a no-op.
+			const result = await withBridgeTimeoutPause(
+				DELEGATED_WORK_TOOLS.has(name) ? options.emitStatus : undefined,
+				async () => {
+					try {
+						return await tool.execute(
+							toolCallId,
+							validatedArgs,
+							options.signal,
+							onUpdate,
+							options.session.getToolContext?.(),
+						);
+					} finally {
+						settled = true;
+					}
+				},
+			);
+			if (name === "todo") {
+				// A bridged call emits no `todo` toolResult entry, the only thing branch
+				// rehydration reads; without this the in-memory update is lost on the
+				// next resume/rewind/fork and stale todos trigger a false reminder.
+				const phases = committedTodoPhases(result);
+				if (phases) options.session.persistTodoPhases?.(phases);
+			}
+			const replies = reply === undefined ? toolResultReplies(result.details) : [reply];
+			if (replies.length > 0) {
+				if (!options.onReply) throw new ToolError(NO_REPLY_SINK);
+				for (const text of replies) options.onReply(text);
+			}
+			const value = bridgeValueFromToolResult(name, validatedArgs, result, options.emitStatus);
+			await options.session.emitNestedToolExecution?.({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: name,
+				result,
+				isError: toolResultHasError(result),
+			});
+			return value;
+		} catch (error) {
+			options.emitStatus?.({
+				op: name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			await options.session.emitNestedToolExecution?.({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: name,
+				result: { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] },
+				isError: true,
+			});
+			throw error;
+		}
+	};
+	const scheduler = options.session.getNestedToolScheduler?.();
+	return scheduler
+		? scheduler.run(resolveNestedConcurrency(tool, validatedArgs), execute, {
+				signal: options.signal,
+				ancestors: options.ancestors,
+			})
+		: execute();
+}
+
+function resolveNestedConcurrency(tool: AgentTool, args: unknown): NestedToolConcurrency {
+	const mode = tool.concurrency;
+	if (typeof mode === "function") {
+		try {
+			return mode(args as never) === "exclusive" ? "exclusive" : "shared";
+		} catch {
+			return "exclusive";
+		}
 	}
+	return mode === "exclusive" ? "exclusive" : "shared";
 }

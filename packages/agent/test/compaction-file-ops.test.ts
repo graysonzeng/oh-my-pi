@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { validateCompactionEvidenceFidelity } from "../src/compaction/compaction";
 import {
 	computeFileLists,
 	createFileOps,
@@ -142,5 +143,38 @@ describe("isUrlSchemePath", () => {
 		expect(isUrlSchemePath("db.sqlite:users")).toBe(false);
 		expect(isUrlSchemePath("archive.zip:dir/file.ts")).toBe(false);
 		expect(isUrlSchemePath("docs/compaction.md:100-170:raw")).toBe(false);
+	});
+});
+
+describe("compaction evidence fidelity", () => {
+	it("reports omitted file, artifact, and unresolved-failure anchors", () => {
+		const receipt = validateCompactionEvidenceFidelity({
+			summary: "Implementation continued after compaction.",
+			filePaths: ["src/session.ts"],
+			artifactReferences: ["artifact://failure-log"],
+			unresolvedFailureAnchors: ["TS2322"],
+		});
+
+		expect(receipt.status).toBe("fail");
+		expect(receipt.missing).toEqual({
+			file_paths: ["src/session.ts"],
+			artifact_references: ["artifact://failure-log"],
+			unresolved_failures: ["TS2322"],
+		});
+		expect(receipt.checked).toEqual({ file_paths: 1, artifact_references: 1, unresolved_failures: 1 });
+		expect(receipt.summarySha256).toMatch(/^[a-f0-9]{64}$/);
+	});
+
+	it("fails open as unavailable when unresolved task state cannot be proven", () => {
+		const receipt = validateCompactionEvidenceFidelity({
+			summary: "Read src/session.ts; recover artifact://failure-log.",
+			filePaths: ["src/session.ts"],
+			artifactReferences: ["artifact://failure-log"],
+		});
+
+		expect(receipt.status).toBe("unavailable");
+		expect(receipt.missing.file_paths).toEqual([]);
+		expect(receipt.missing.artifact_references).toEqual([]);
+		expect(receipt.unavailableKinds).toEqual(["unresolved_failures"]);
 	});
 });

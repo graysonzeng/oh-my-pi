@@ -54,6 +54,7 @@ export class LspRequestTimeoutError extends Error {
 // Client State
 // =============================================================================
 
+const applyEditHolds = new Map<string, number>();
 const clients = new Map<string, LspClient>();
 interface PendingClient {
 	promise: Promise<LspClient>;
@@ -769,6 +770,15 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
  * Handle workspace/applyEdit requests from the server.
  */
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
+	if ((applyEditHolds.get(client.name) ?? 0) > 0) {
+		await sendResponse(
+			client,
+			message.id,
+			{ applied: false, failureReason: "workspace/applyEdit refused during read-only navigation" },
+			"workspace/applyEdit",
+		);
+		return;
+	}
 	const params = message.params as { edit?: WorkspaceEdit };
 	if (!params?.edit) {
 		await sendResponse(
@@ -1186,6 +1196,29 @@ function clientKey(config: ServerConfig, cwd: string): string {
 		config.languageId ?? null,
 	]);
 	return `${spawnCommand}:${cwd}:${identity}`;
+}
+
+/** Increment the inbound workspace/applyEdit hold for a client identity. */
+function acquireApplyEditHold(key: string): () => void {
+	applyEditHolds.set(key, (applyEditHolds.get(key) ?? 0) + 1);
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		const next = (applyEditHolds.get(key) ?? 1) - 1;
+		if (next <= 0) applyEditHolds.delete(key);
+		else applyEditHolds.set(key, next);
+	};
+}
+
+/** Hold inbound workspace/applyEdit on a live client for read-only navigation. */
+export function holdLspApplyEdits(client: LspClient): () => void {
+	return acquireApplyEditHold(client.name);
+}
+
+/** Hold inbound workspace/applyEdit before a configured client process exists. */
+export function holdLspApplyEditsForConfig(config: ServerConfig, cwd: string): () => void {
+	return acquireApplyEditHold(clientKey(config, cwd));
 }
 
 /**

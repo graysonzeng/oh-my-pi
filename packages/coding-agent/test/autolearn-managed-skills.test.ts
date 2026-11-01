@@ -10,6 +10,7 @@ import {
 	toSkillFrontmatter,
 	writeManagedSkill,
 } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import { MAX_SKILL_DESCRIPTION_CHARS } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { parseFrontmatter, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
@@ -99,10 +100,18 @@ describe("managed-skills primitives", () => {
 		});
 
 		it("caps on the FINAL serialized size (body under cap but description pushes it over)", async () => {
-			const body = "a".repeat(MAX_MANAGED_SKILL_BYTES - 200); // body alone is under the cap
-			const description = "b".repeat(500); // body + description + frontmatter exceeds it
+			const body = "a".repeat(MAX_MANAGED_SKILL_BYTES - 40); // body alone is under the cap
+			const description = "b".repeat(MAX_SKILL_DESCRIPTION_CHARS); // listing budget; body + description + frontmatter exceeds the byte cap
 			await expect(writeManagedSkill({ action: "create", name: "fin", description, body })).rejects.toThrow(/bytes/);
 			expect(await Bun.file(skillFile("fin")).exists()).toBe(false);
+		});
+
+		it("rejects a description over the listing budget without writing", async () => {
+			const description = "d".repeat(MAX_SKILL_DESCRIPTION_CHARS + 1);
+			await expect(
+				writeManagedSkill({ action: "create", name: "long-desc", description, body: "body" }),
+			).rejects.toThrow(String(MAX_SKILL_DESCRIPTION_CHARS));
+			expect(await Bun.file(skillFile("long-desc")).exists()).toBe(false);
 		});
 
 		it("neutralizes prompt-injection metacharacters in the persisted description", async () => {

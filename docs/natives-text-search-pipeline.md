@@ -272,9 +272,10 @@ The palette requires nine core semantic colors (`comment`, `keyword`, `function`
 | `countTokens`                | No                | No           | tokenization only                                                      |
 | `astMatch`                   | No                | No           | in-memory syntax-aware match (no disk)                                 |
 | `astGrep` / `astEdit`        | Yes               | Native-only  | directory discovery requests caching; direct files/providers bypass it |
-| `glob`                       | Yes               | Optional     | directory scans + glob filtering (`cache` opt-in)                      |
-| `fuzzyFind`                  | Yes               | Optional     | directory scans + fuzzy scoring (`cache` opt-in)                       |
-| `grep` (file/dir path)       | Yes               | Never        | uncached parallel walk/search, results in path order                   |
+| `glob`                       | Yes               | Optional     | directory scans + glob filtering (`cache` opt-in)            |
+| `fuzzyFind`                  | Yes               | Optional     | directory scans + fuzzy scoring (`cache` opt-in)             |
+| `grep` (file/dir path)       | Yes               | Never        | streaming uncached walk feeding searchers                    |
+| `codeIntel*`                 | Yes               | No                        | tags / call-expression / PageRank generation snapshots               |
 
 ## End-to-end lifecycle summary
 
