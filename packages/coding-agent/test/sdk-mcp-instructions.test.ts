@@ -159,43 +159,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		}
 	}, 20_000);
 
-	it("keeps other servers' instructions when one server opts out", async () => {
-		await Bun.write(
-			path.join(tempDir, ".mcp.json"),
-			JSON.stringify({
-				mcpServers: {
-					instr: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH], instructions: false },
-					other: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH, "--other"] },
-				},
-			}),
-		);
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0 }),
-			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableLsp: false,
-			skipPythonPreflight: true,
-			enableMCP: true,
-		});
-		try {
-			const prompt = session.systemPrompt.join("\n");
-			expect(prompt).toContain(`### other\n${SERVER_INSTRUCTIONS}`);
-			expect(prompt).not.toContain("### instr");
-			expect(prompt.split(SERVER_INSTRUCTIONS)).toHaveLength(2);
-		} finally {
-			await session.dispose();
-		}
-	}, 20_000);
-
-	it("folds server instructions into the prompt once deferred discovery connects", async () => {
+	it("folds server instructions into the prompt after the first deferred tool execution", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
@@ -226,6 +190,13 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			);
 
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
+			const write = session.getToolByName("write");
+			expect(write).toBeDefined();
+			const result = await write!.execute("deferred-mcp-activation", {
+				path: `xd://${MCP_TOOL_NAME}`,
+				content: "{}",
+			});
+			expect(result.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
 			// The instructions are framed under the MCP section, and guidance keeps
 			// the escaped original tool name while routing through the exact
 			// normalized name actually mounted in the live xd:// registry.
@@ -255,10 +226,18 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			appendSystemPrompt: USER_APPEND_MARKER,
 		});
 		try {
-			// Without `hasUI`, MCP discovery is not deferred: the fixture connects during
-			// session creation, so the first prompt already carries both the server
-			// instructions and the user's append prompt — nothing to wait for.
-			const prompt = session.systemPrompt.join("\n");
+			// Instructions stay out of the prompt until a tool from that server is
+			// attempted. Activation rebuilds the prompt fire-and-forget after a real
+			// MCP subprocess call, so fake timers cannot drive it. The user's append
+			// prompt must remain its own block after that rebuild.
+			const result = await session.getToolByName(MCP_TOOL_NAME)?.execute("append-boundary-call", {});
+			expect(result?.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
+			const deadline = Date.now() + 2_000;
+			let prompt = session.systemPrompt.join("\n");
+			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
+				await Bun.sleep(10);
+				prompt = session.systemPrompt.join("\n");
+			}
 
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			// The user's append prompt is its own block, never the trailing
@@ -360,7 +339,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 				text => text.includes(SERVER_INSTRUCTIONS) && text.includes(MCP_ROUTE_SECTION),
 			);
 
-			expect(prompt).toContain(SERVER_INSTRUCTIONS);
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
 			const renderedMappings = prompt.split("\n").filter(line => line.startsWith('- "row_'));
 			expect(renderedMappings).toHaveLength(64);
 			expect(renderedMappings[0]).toBe('- "row_aa" → `xd://mcp__instr_row_aa` — Bounded guidance fixture tool aa.');

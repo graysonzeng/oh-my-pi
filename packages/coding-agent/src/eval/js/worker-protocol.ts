@@ -22,6 +22,8 @@ export interface SessionSnapshot {
 	packageRoot?: string;
 	/** Model-visible description of the selected package environment. */
 	packageEnvironment?: string;
+	/** PTC restricted I/O profile for this cell. */
+	restrictedIo?: boolean;
 }
 
 export interface RunErrorPayload {

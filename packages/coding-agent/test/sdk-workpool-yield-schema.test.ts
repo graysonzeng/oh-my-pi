@@ -93,7 +93,6 @@ describe("SDK workpool yield schema", () => {
 				enableMCP: false,
 				enableLsp: false,
 				skipPythonPreflight: true,
-				requireYieldTool: true,
 				toolNames: ["yield"],
 				outputSchema: {
 					type: "object",
@@ -148,7 +147,6 @@ describe("SDK workpool yield schema", () => {
 				enableMCP: false,
 				enableLsp: false,
 				skipPythonPreflight: true,
-				requireYieldTool: true,
 				toolNames: ["yield"],
 				outputSchema: {
 					type: "object",
@@ -188,7 +186,6 @@ describe("SDK workpool yield schema", () => {
 				enableMCP: false,
 				enableLsp: false,
 				skipPythonPreflight: true,
-				requireYieldTool: true,
 				toolNames: ["yield"],
 				outputSchema: {
 					type: "object",
@@ -232,7 +229,6 @@ describe("SDK workpool yield schema", () => {
 				enableMCP: false,
 				enableLsp: false,
 				skipPythonPreflight: true,
-				requireYieldTool: true,
 				toolNames: ["yield"],
 				outputSchema: {
 					type: "object",
@@ -278,7 +274,6 @@ describe("SDK workpool yield schema", () => {
 				enableMCP: false,
 				enableLsp: false,
 				skipPythonPreflight: true,
-				requireYieldTool: true,
 				toolNames: ["yield"],
 				outputSchema: {
 					type: "object",
@@ -333,7 +328,6 @@ describe("SDK workpool yield schema", () => {
 				enableMCP: false,
 				enableLsp: false,
 				skipPythonPreflight: true,
-				requireYieldTool: true,
 				toolNames: ["yield"],
 				outputSchema: {
 					type: "object",

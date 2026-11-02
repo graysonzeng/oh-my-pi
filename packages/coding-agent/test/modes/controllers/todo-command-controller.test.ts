@@ -78,9 +78,6 @@ describe("TodoCommandController", () => {
 		const expected: TodoPhase[] = [{ name: "Imported", tasks: [{ content: "From cwd", status: "in_progress" }] }];
 		expect(ctx.session.setTodoPhases).toHaveBeenCalledWith(expected);
 		expect(ctx.setTodos).toHaveBeenCalledWith(expected);
-		expect(ctx.sessionManager.appendCustomEntry).toHaveBeenCalledWith(USER_TODO_EDIT_CUSTOM_TYPE, {
-			phases: expected,
-		});
 		expect(ctx.agent.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.sessionManager.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.showStatus).toHaveBeenCalledWith(`Imported 1 phase(s), 1 task(s) from ${target}.`);

@@ -51,14 +51,13 @@ import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import writeDeviceOnlyRefusal from "../prompts/tools/write-device-only-refusal.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-
+import { assertWorkflowPathAllowed } from "../workflow/tool-policy";
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { formatApprovalArguments, truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
+import { getConflictHistory, parseConflictUri, recoverConflictUriPrefix } from "./conflict-detect";
 import { assertEditableFile } from "./auto-generated-guard";
-
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import { recoverConflictUriPrefix } from "./conflict-detect";
 import { outputMeta } from "./output-meta";
 import { formatPathRelativeToCwd, probeLiteralPathExists, specialFileKind } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
@@ -96,6 +95,16 @@ import {
 const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
 const URI_LIKE_WRITE_PATH_RE = /^([a-z][a-z0-9+.-]*):\/{1,2}(.*)$/i;
 const MISSING_DELIMITER_RE = /^([a-z][a-z0-9+.-]*)\/+(.*)$/i;
+
+/** Device name for a workflow catalog allowlist check. `undefined` when the path is not `xd://`. */
+function workflowXdDeviceName(path: string): string | undefined {
+	if (!path.toLowerCase().startsWith("xd://")) return undefined;
+	const rest = path.slice("xd://".length).replace(/^\/+/, "");
+	const tools = /^tools\/([^/?#]+)/.exec(rest);
+	if (tools?.[1]) return tools[1];
+	const name = rest.split(/[/?#]/)[0];
+	return name || undefined;
+}
 
 /** True when `typo` is exactly one insertion, deletion, substitution, or adjacent swap away from `word`. */
 function isOneEditAway(typo: string, word: string): boolean {
@@ -202,11 +211,15 @@ function throwReadSelectorListMisfire(target: string, count: number): never {
 	);
 }
 
-async function assertNotReadSelectorMisfire(target: string, content: string, cwd: string): Promise<void> {
+async function assertNotReadSelectorListMisfire(target: string, cwd: string): Promise<void> {
 	const listCount = readSelectorListMisfire(target);
 	if (listCount !== undefined && (await probeLiteralPathExists(target, cwd)) === "missing") {
 		throwReadSelectorListMisfire(target, listCount);
 	}
+}
+
+async function assertNotReadSelectorMisfire(target: string, content: string, cwd: string): Promise<void> {
+	await assertNotReadSelectorListMisfire(target, cwd);
 	const sel = readSelectorForEmptyWrite(target, content);
 	if (sel === undefined) return;
 	if ((await probeLiteralPathExists(target, cwd)) !== "missing") return;
@@ -966,6 +979,27 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					canYield: this.session.isToolActive?.("yield") === true,
 				}),
 			);
+		}
+		const writePolicy = this.session.workflowWritePolicy;
+		if (writePolicy) {
+			const conflict = parseConflictUri(path);
+			if (conflict === null) {
+				assertWorkflowPathAllowed(path, writePolicy);
+			} else if (conflict.id === "*") {
+				for (const entry of getConflictHistory(this.session).entries()) {
+					assertWorkflowPathAllowed(entry.absolutePath, writePolicy);
+				}
+			} else {
+				const entry = getConflictHistory(this.session).get(conflict.id);
+				if (entry) assertWorkflowPathAllowed(entry.absolutePath, writePolicy);
+			}
+		}
+		const presentationAllow = this.session.workflowToolOptimization?.presentationAllowedTools;
+		if (presentationAllow) {
+			const xdName = workflowXdDeviceName(path);
+			if (xdName && !presentationAllow.includes(xdName)) {
+				throw new ToolError(`Tool "${xdName}" is outside the role allowlist; catalog expand/dispatch refused.`);
+			}
 		}
 		return untilAborted(signal, async () => {
 			// Text payloads get hashline display prefixes ([PATH#HASH] + LINE:) stripped if the model

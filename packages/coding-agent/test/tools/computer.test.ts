@@ -4942,3 +4942,20 @@ describe("window() waiting for a window to appear", () => {
 		expect(native.listings).toBe(3);
 	});
 });
+
+describe("computer worker module graph", () => {
+	// Spawned subprocess: the specifier must stay dynamic so this file's static graph cannot hide a TDZ.
+	it("keeps the eval worker graph importable after computer renderer registration", async () => {
+		const processHandle = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				'await import("./src/eval/js/context-manager.ts"); const { toolRenderers } = await import("../tui/src/tools/index.ts"); if (typeof toolRenderers.wait.renderCall !== "function") process.exit(2)',
+			],
+			{ cwd: path.resolve(import.meta.dir, "../.."), stdout: "ignore", stderr: "pipe" },
+		);
+		const [exitCode, stderr] = await Promise.all([processHandle.exited, new Response(processHandle.stderr).text()]);
+		if (exitCode !== 0) throw new Error(`eval worker graph import failed:\n${stderr}`);
+		expect(exitCode).toBe(0);
+	});
+});
