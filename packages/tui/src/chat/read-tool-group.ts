@@ -1305,5 +1305,4 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#shouldRenderPreview(entry: ReadEntry): boolean {
 		return this.#showContentPreview && entry.contentText !== undefined;
 	}
-
 }

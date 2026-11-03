@@ -651,7 +651,8 @@ export class ReviewCommand implements CustomCommand {
 		if (prRef) {
 			try {
 				const target = await resolvePrReviewTarget(request.cwd, ctx, prRef);
-				const result = target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;				return (
+				const result = target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
+				return (
 					result ??
 					(ctx.hasUI ? undefined : `Unable to review ${formatReviewRefLabel(prRef)}: no diff content available.`)
 				);
@@ -668,7 +669,8 @@ export class ReviewCommand implements CustomCommand {
 		const repository = reviewRepository(cwd, sessionCwd);
 		if (choice.kind === "pr") {
 			const target = await resolvePrReviewTarget(cwd, ctx, choice.ref);
-			return target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;		}
+			return target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
+		}
 		if (choice.kind === "custom") {
 			const instructions = await ctx.ui.editor(
 				"Enter custom review instructions",
@@ -680,13 +682,15 @@ export class ReviewCommand implements CustomCommand {
 			const target = await readUncommittedReviewTarget(cwd).catch(() => undefined);
 			if (target?.rawDiff.trim()) {
 				return buildReviewPrompt(
-					{ ...target, mode: `Custom review: ${instructions.split("\n")[0].slice(0, 60)}…`, repository },					instructions,
+					{ ...target, mode: `Custom review: ${instructions.split("\n")[0].slice(0, 60)}…`, repository },
+					instructions,
 				);
 			}
 			return buildCustomReviewPrompt(instructions, repository);
 		}
 		const target = await resolveLocalReviewTarget(choice.kind, cwd, ctx.ui);
-		return target ? reviewTargetPrompt(ctx, { ...target, repository }, extraInstructions) : undefined;	}
+		return target ? reviewTargetPrompt(ctx, { ...target, repository }, extraInstructions) : undefined;
+	}
 }
 
 export default ReviewCommand;
