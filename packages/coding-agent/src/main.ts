@@ -1985,6 +1985,9 @@ export async function runRootCommand(
 		// Runtime overrides (not persisted): the session's cost gate reads its thresholds from settings.
 		if (parsedArgs.warnCost !== undefined) cfgSessionWarnCost.override(settingsInstance, parsedArgs.warnCost);
 		if (parsedArgs.maxCost !== undefined) cfgSessionMaxCost.override(settingsInstance, parsedArgs.maxCost);
+		if (parsedArgs.ptc) {
+			settingsInstance.override("tools.ptc.mode", parsedArgs.ptc);
+		}
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyProtocolDefaults("rpc", settingsInstance);
 		} else if (parsedArgs.mode === "acp") {
@@ -2054,6 +2057,13 @@ export async function runRootCommand(
 		// Apply --wait-async CLI flag (ephemeral, not persisted); only print mode reads it
 		if (parsedArgs.waitAsync) {
 			cfgAsyncPrintWake.override(settingsInstance, true);
+		}
+		if (parsedArgs.consult) {
+			settingsInstance.override("consult.enabled", true);
+		}
+		if (parsedArgs.consultModel) {
+			settingsInstance.override("consult.enabled", true);
+			settingsInstance.override("consult.model", parsedArgs.consultModel);
 		}
 		// Apply --external-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.externalThinking) {
@@ -2377,6 +2387,7 @@ export async function runRootCommand(
 			options.settingsApproval = isInteractive;
 			options.tuiTranscript = isInteractive;
 			options.autoTitle = isInteractive;
+			if (isInteractive) options.allowHeadlessGoalContinuation = false;
 			options.settings = settingsInstance;
 			options.telemetry = startupTelemetry;
 			options.extensions = startupExtensions;

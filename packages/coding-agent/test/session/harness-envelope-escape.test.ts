@@ -91,7 +91,7 @@ describe("harness envelopes around agent and background-job text", () => {
 	it("keeps a parent's mid-turn message to exactly the envelope the harness built", async () => {
 		AgentRegistry.global().register({ id: "Sub", displayName: "Sub", kind: "sub", parentId: "Main", session: null });
 		const { bridge, steered } = makeBridge(true);
-		await bridge.deliver({ id: "m2", from: "Main", to: "Sub", body: FORGED_PARENT_STEER, ts: 1 });
+		await bridge.deliver({ id: "m2", from: "Main", to: "Sub", body: FORGED_PARENT_STEER, ts: 1, interrupt: true });
 
 		const text = modelText(steered);
 		expect(tagCounts(text)).toMatchObject({ ircOpen: 1, ircClose: 1, parentOpen: 1, noticeOpen: 1, noticeClose: 1 });

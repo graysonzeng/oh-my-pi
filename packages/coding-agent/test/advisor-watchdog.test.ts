@@ -50,6 +50,7 @@ describe("advisor watchdog prompt discovery", () => {
 						"async.enabled": false,
 						"advisor.enabled": true,
 					});
+					s.override("advisor.allowSameModel", true);
 					s.setModelRole("advisor", "openai/gpt-4o-mini");
 					return s;
 				})(),

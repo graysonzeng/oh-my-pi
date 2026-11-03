@@ -56,7 +56,7 @@ export function markRawSuffixResolution(resolution: ReadToolDetails["suffixResol
 	if (resolution && raw) resolution.raw = true;
 }
 
-function prependLineNumbers(text: string, startNum: number): string {
+export function prependLineNumbers(text: string, startNum: number): string {
 	const textLines = text.split("\n");
 	return textLines.map((line, i) => `${startNum + i}|${line}`).join("\n");
 }

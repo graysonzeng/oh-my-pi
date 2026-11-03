@@ -85,7 +85,45 @@ describe("SessionManager labels", () => {
 		expect(msg2Node?.label).toBe("response");
 	});
 
-	it("labels not on path are not preserved in createBranchedSession", () => {
+	it("labels are preserved in createBranchedSession", async () => {
+		const session = SessionManager.inMemory();
+
+		const msg1Id = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msg2Id = session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+
+		session.appendLabelChange(msg1Id, "important");
+		session.appendLabelChange(msg2Id, "also-important");
+
+		// Branch from msg2 (in-memory mode returns null, but updates internal state)
+		await session.createBranchedSession(msg2Id);
+
+		// Labels should be preserved
+		expect(session.getLabel(msg1Id)).toBe("important");
+		expect(session.getLabel(msg2Id)).toBe("also-important");
+
+		// New label entries should exist
+		const entries = session.getEntries();
+		const labelEntries = entries.filter(e => e.type === "label") as LabelEntry[];
+		expect(labelEntries).toHaveLength(2);
+	});
+
+	it("labels not on path are not preserved in createBranchedSession", async () => {
 		const session = SessionManager.inMemory();
 
 		const msg1Id = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
@@ -114,7 +152,7 @@ describe("SessionManager labels", () => {
 		session.appendLabelChange(msg3Id, "third");
 
 		// Branch from msg2 (excludes msg3)
-		session.createBranchedSession(msg2Id);
+		await session.createBranchedSession(msg2Id);
 
 		// Only labels for msg1 and msg2 should be preserved
 		expect(session.getLabel(msg1Id)).toBe("first");

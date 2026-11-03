@@ -591,3 +591,5 @@ export function cacheStats(): { content: number; dir: number } {
 // =============================================================================
 
 export type * from "./types";
+// Do not star-re-export rule-source-diagnosis: it imports discovery helpers that
+// import this barrel, and a value re-export creates a TDZ cycle under Bun.

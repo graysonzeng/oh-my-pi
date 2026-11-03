@@ -17,6 +17,8 @@
  * - history://<agentId> - Concise markdown transcript of that agent
  * - history://current/full - Full, caller-bound current branch history (experimental)
  */
+import * as path from "node:path";
+
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -87,6 +89,30 @@ function isCurrentFullRoute(url: InternalUrl): boolean {
 		throw new Error("Invalid history://current route; use exactly history://current/full (selectors may follow it)");
 	}
 	return true;
+}
+
+/**
+ * Session-scoped lineage session files: the current session plus its explicit
+ * bounded ancestors (nearest-first). `history://` searches these before any
+ * registry-derived or disk-scanned roots, so a fresh process without a
+ * registered `Main` still reaches persisted ancestors.
+ */
+function sessionFilesFromLineage(context: ResolveContext | undefined): Array<{ id: string; file: string }> {
+	const files: Array<{ id: string; file: string }> = [];
+	const seen = new Set<string>();
+	const add = (file: string | null | undefined, id: string | undefined) => {
+		if (!file || !id || seen.has(file)) return;
+		seen.add(file);
+		files.push({ id, file });
+	};
+	const lineage = context?.lineage;
+	if (lineage?.currentSessionFile) {
+		add(lineage.currentSessionFile, path.basename(lineage.currentSessionFile, ".jsonl"));
+	}
+	for (const root of lineage?.lineageRoots ?? []) {
+		add(root.canonicalPath, path.basename(root.canonicalPath, ".jsonl"));
+	}
+	return files;
 }
 
 /** Humanize a last-activity timestamp as `Ns/Nm/Nh/Nd ago`. */
@@ -400,12 +426,32 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) {
 			const { visible, preferredArtifactDir, onlyPreferred } = await this.#roster(context);
-			const content = await this.#renderIndex(visible, preferredArtifactDir, onlyPreferred);
+			const content = await this.#renderIndex(visible, preferredArtifactDir, onlyPreferred, context);
 			return {
 				url: url.href,
 				content,
 				contentType: "text/markdown",
 				size: Buffer.byteLength(content, "utf-8"),
+			};
+		}
+
+		// Session-scoped lineage roots win over registry-derived and disk-scanned
+		// artifacts: a fresh process without `Main` still reaches ancestors, and
+		// two top-level sessions never cross-prioritize each other's lineage.
+		const lineageFiles = sessionFilesFromLineage(context);
+		const lineageHit = lineageFiles.find(
+			entry => entry.id === agentId || entry.id.toLowerCase() === agentId.toLowerCase(),
+		);
+		if (lineageHit) {
+			const messages = await loadSessionMessagesReadOnly(lineageHit.file);
+			const content = formatSessionHistoryMarkdown(messages, { title: `${lineageHit.id} (lineage)` });
+			return {
+				url: url.href,
+				content,
+				contentType: "text/markdown",
+				size: Buffer.byteLength(content, "utf-8"),
+				sourcePath: lineageHit.file,
+				notes: ["Source: session file (read-only, lineage)"],
 			};
 		}
 
@@ -516,6 +562,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		refs: AgentRef[],
 		preferredArtifactDir: string | undefined,
 		onlyPreferred = false,
+		context?: ResolveContext,
 	): Promise<string> {
 		const entries: IndexEntry[] = refs.map(ref => ({
 			id: ref.id,
@@ -532,6 +579,12 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		for (const id of disk.keys()) {
 			if (registered.has(id)) continue;
 			entries.push({ id, status: "on disk", kind: "—", parent: "—", lastActivity: "—" });
+		}
+		// Merge session-scoped lineage roots (fresh-process ancestors).
+		for (const entry of sessionFilesFromLineage(context)) {
+			if (registered.has(entry.id)) continue;
+			if (entries.some(existing => existing.id === entry.id)) continue;
+			entries.push({ id: entry.id, status: "lineage", kind: "—", parent: "—", lastActivity: "—" });
 		}
 
 		const lines: string[] = ["# Agents", ""];

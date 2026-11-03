@@ -28,6 +28,7 @@ import {
 	type OutputMeta,
 	type TruncationMeta,
 } from "@oh-my-pi/pi-tui/tools/output-meta";
+export type { OutputMeta };
 import { renderError } from "./tool-errors";
 import {
 	cfgToolsArtifactHeadBytes,
@@ -571,6 +572,9 @@ async function spillLargeResultToArtifact(
 	toolName: string,
 	context: AgentToolContext | undefined,
 ): Promise<AgentToolResult> {
+	// Recovery pages own their byte cap and final request admission. Generic
+	// spilling would merge/truncate the data and its authoritative cursor.
+	if (toolName === "read_omitted_content") return result;
 	const sessionManager = context?.sessionManager;
 	if (!sessionManager) return result;
 	const { threshold, tailBytes, tailLines, headBytes } = getSpillConfig(context?.settings);
