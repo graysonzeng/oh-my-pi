@@ -647,8 +647,7 @@ export class Agent {
 		this.#suggestFallbackToolNames = opts.suggestFallbackToolNames;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#intentDescription = opts.intentDescription;
-		this.#pruneToolDescriptions =
-			opts.pruneToolDescriptions === undefined ? false : opts.pruneToolDescriptions;
+		this.#pruneToolDescriptions = opts.pruneToolDescriptions === undefined ? false : opts.pruneToolDescriptions;
 		this.#dialect = opts.dialect;
 		this.#dialectResolver = opts.dialectResolver;
 		this.#abortOnFabricatedToolResult = opts.abortOnFabricatedToolResult;
