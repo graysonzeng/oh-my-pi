@@ -524,7 +524,7 @@ export class Agent {
 	#suggestFallbackToolNames?: () => Iterable<string>;
 	#intentTracing: boolean;
 	#intentDescription?: string;
-	#pruneToolDescriptions: boolean;
+	#pruneToolDescriptions: boolean | (() => boolean);
 	#dialect?: Dialect;
 	#dialectResolver?: (model: Model) => Dialect | undefined;
 	#abortOnFabricatedToolResult?: boolean;
@@ -647,7 +647,8 @@ export class Agent {
 		this.#suggestFallbackToolNames = opts.suggestFallbackToolNames;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#intentDescription = opts.intentDescription;
-		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
+		this.#pruneToolDescriptions =
+			opts.pruneToolDescriptions === undefined ? false : opts.pruneToolDescriptions;
 		this.#dialect = opts.dialect;
 		this.#dialectResolver = opts.dialectResolver;
 		this.#abortOnFabricatedToolResult = opts.abortOnFabricatedToolResult;
@@ -893,7 +894,11 @@ export class Agent {
 	 * Context accounting reads this instead of the raw setting.
 	 */
 	prunesToolDescriptions(model: Model | undefined): boolean {
-		return this.#pruneToolDescriptions && model !== undefined && !this.#ownedDialect(model);
+		const prune =
+			typeof this.#pruneToolDescriptions === "function"
+				? this.#pruneToolDescriptions()
+				: this.#pruneToolDescriptions;
+		return prune && model !== undefined && !this.#ownedDialect(model);
 	}
 
 	#ownedDialect(model: Model): Dialect | undefined {
@@ -1024,7 +1029,10 @@ export class Agent {
 			: (normalizeTools(this.#toolsForModel(model), {
 					injectIntent: this.#intentTracing,
 					intentDescription: this.#intentDescription,
-					pruneDescriptions: this.#pruneToolDescriptions,
+					pruneDescriptions:
+						typeof this.#pruneToolDescriptions === "function"
+							? this.#pruneToolDescriptions()
+							: this.#pruneToolDescriptions,
 				}) ?? []);
 		let context: Context = { systemPrompt, messages, tools };
 		// Side requests reuse the main loop's sent definitions without recording their own; attached before the
