@@ -7528,7 +7528,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.reconcileBuiltinTools(options);
 	}
 
-	async #syncAfterModelChange(previousEditMode: EditMode, options?: { retryFallback?: boolean }): Promise<void> {
+	async #syncAfterModelChange(
+		previousEditMode: EditModeSetting,
+		options?: { retryFallback?: boolean },
+	): Promise<void> {
 		const previousInline = this.#pruneToolDescriptions;
 		this.#refreshInlineToolDescriptors();
 		await this.#ensureModelOptimizationReconciled();

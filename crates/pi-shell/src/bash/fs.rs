@@ -295,22 +295,22 @@ impl OpenFlags {
 	pub const CREATE: Self = Self(1 << 2);
 	/// Fail if it exists (`set -o noclobber`).
 	pub const EXCL: Self = Self(1 << 5);
+	/// Do not update the access time (`O_NOATIME`; Linux, ignored
+	/// elsewhere).
+	pub const NOATIME: Self = Self(1 << 8);
+	/// Fail on a symbolic link as last component (`O_NOFOLLOW`; zsh's
+	/// `sysopen -o nofollow`).
+	pub const NOFOLLOW: Self = Self(1 << 6);
+	/// Non-blocking open and I/O (`O_NONBLOCK`).
+	pub const NONBLOCK: Self = Self(1 << 9);
 	/// Open for reading.
 	pub const READ: Self = Self(1);
+	/// Synchronous writes (`O_SYNC`).
+	pub const SYNC: Self = Self(1 << 7);
 	/// Truncate to zero length.
 	pub const TRUNC: Self = Self(1 << 3);
 	/// Open for writing.
 	pub const WRITE: Self = Self(1 << 1);
-	/// Fail on a symbolic link as last component (`O_NOFOLLOW`; zsh's
-	/// `sysopen -o nofollow`).
-	pub const NOFOLLOW: Self = Self(1 << 6);
-	/// Synchronous writes (`O_SYNC`).
-	pub const SYNC: Self = Self(1 << 7);
-	/// Do not update the access time (`O_NOATIME`; Linux, ignored
-	/// elsewhere).
-	pub const NOATIME: Self = Self(1 << 8);
-	/// Non-blocking open and I/O (`O_NONBLOCK`).
-	pub const NONBLOCK: Self = Self(1 << 9);
 
 	/// Union of two flag sets.
 	pub const fn with(self, other: Self) -> Self {

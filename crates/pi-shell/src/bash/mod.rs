@@ -87,8 +87,8 @@ pub use crate::bash::{
 	signal::{SigSet, SigTarget, Signal},
 	snapshot::{ExternalizeReport, Lost, RestoreOpts, RestoreReport},
 	socket::{Accepted, IpFamily, ListenError, ListenStage, SockAddr, Sockets},
-	term::{CtlChar, Pty, SetWhen, Shtty, TermFlag, Termios, Terminal},
 	store::{Attrs, StateStore, StoreError, VarValue},
+	term::{CtlChar, Pty, SetWhen, Shtty, TermFlag, Terminal, Termios},
 	vm::{
 		Budget, CallOutcome, ControlHandle, Cx, IoPoll, Profile, RunStdio, Script, Shell, ShellApi,
 		ShellInit, Step, ToolCall, VprocSel, WakeToken, vproc_layout,
