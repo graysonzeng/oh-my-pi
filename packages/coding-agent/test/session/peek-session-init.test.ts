@@ -65,6 +65,7 @@ describe("SessionManager.peekSessionInit", () => {
 			readSummarize: false,
 			outputTruncation: false,
 			restrictToolNames: true,
+			performanceClass: "review",
 		});
 		// Flush buffered entries (header + inits) so the lock-free peek can read them off disk.
 		manager.appendMessage(assistantMessage("flush"));

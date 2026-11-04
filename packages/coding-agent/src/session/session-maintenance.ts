@@ -1501,7 +1501,7 @@ export class SessionMaintenance {
 			apiKey: this.#host.modelRegistry.resolver(model, this.#host.sessionId()),
 			sessionId: `${this.#host.sessionId()}:struct:${Snowflake.next()}`,
 			promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
-			preferWebsockets: this.#host.preferWebsockets(),
+			preferWebsockets: this.#host.preferWebsockets(model),
 			providerSessionState: this.#host.providerSessionState,
 			disableReasoning: true,
 			maxTokens,

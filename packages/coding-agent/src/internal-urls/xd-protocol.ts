@@ -255,6 +255,9 @@ function skillResource(url: InternalUrl, content: string, sourcePath?: string): 
 		content,
 		contentType: "text/markdown",
 		size: Buffer.byteLength(content),
+		// Same contract as skill://: prepared / SKILL.md bodies must not be cut by
+		// the ordinary read result cap, or catalog expand returns an incomplete body.
+		unbounded: true,
 		...(typeof sourcePath === "string" && sourcePath.length > 0 ? { sourcePath } : {}),
 	};
 }

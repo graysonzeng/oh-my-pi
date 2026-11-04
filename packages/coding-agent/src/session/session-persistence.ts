@@ -445,7 +445,11 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 				return true;
 			}
 		}
-		if (shouldExternalizeImagePayload(obj, key)) return true;
+		// omittedOriginal recovery images only externalize when the truncate
+		// pass is in recoveryElement stage; the scan has no stage, so treat
+		// key==="omittedOriginal" as the recovery position (false positives
+		// only force a rebuild that then applies the real stage rules).
+		if (shouldExternalizeImagePayload(obj, key, key === "omittedOriginal")) return true;
 		if (isAtomicPersistenceNode(obj, key)) return false;
 		for (const childKey in obj) {
 			if (!Object.hasOwn(obj, childKey)) continue;

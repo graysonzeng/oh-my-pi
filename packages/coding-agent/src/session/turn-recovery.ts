@@ -3794,8 +3794,8 @@ export class TurnRecovery {
 					this.#isSameAssistantMessage(entry.message as AssistantMessage, anchor),
 			);
 		if (anchorEntry) {
-			await this.#host.withBashBranchTransition(() => {
-				this.#host.sessionManager.branch(anchorEntry.id);
+			await this.#host.withBashBranchTransition(async () => {
+				await this.#host.sessionManager.branch(anchorEntry.id);
 			});
 		}
 		this.#host.agent.replaceMessages(messages.slice(0, replayStart));

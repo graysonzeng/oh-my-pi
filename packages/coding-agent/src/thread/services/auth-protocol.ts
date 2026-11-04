@@ -61,6 +61,7 @@ import type {
 	ResetCreditRedeemOutcome,
 	ResolvedApiKey,
 	RotateCredentialOptions,
+	SelectedCredentialRoute,
 	StoredAuthCredential,
 	StoredCredentialBlock,
 	UsageHistoryEntry,
@@ -175,6 +176,11 @@ export type AuthStorageProtocol = {
 	 */
 	"keys.availability": RpcMethod<[providers: readonly string[]], AuthAvailabilityTable>;
 	"keys.describe": RpcMethod<[provider: string, sessionId?: string], string | undefined>;
+	"keys.overrideEpoch": RpcMethod<[], number>;
+	"keys.selectedRoute": RpcMethod<
+		[provider: string, options?: { sessionId?: string | null }],
+		SelectedCredentialRoute | undefined
+	>;
 	"keys.setRuntime": RpcMethod<[provider: string, apiKey: string], void>;
 	"keys.removeRuntime": RpcMethod<[provider: string], void>;
 	"keys.setConfig": RpcMethod<[provider: string, apiKeyConfig: string, options?: { fallback?: boolean }], void>;

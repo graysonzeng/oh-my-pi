@@ -1,5 +1,7 @@
 import type { SessionEntry } from "@oh-my-pi/pi-agent-core/compaction/entries";
+import { ADMIT_TOOL_RESULT_TERMINAL, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { isBlobRef } from "./blob-store";
 
 export const DEFAULT_OMITTED_CONTENT_MAX_BYTES = 8192;
@@ -247,4 +249,206 @@ export function readOmittedContentPage(
 		}
 	}
 	return accepted;
+}
+
+/** Wire name of the structured-compaction recovery tool admitted by the loop. */
+export const READ_OMITTED_CONTENT_TOOL_NAME = "read_omitted_content";
+
+/**
+ * Structured metadata carried on `read_omitted_content` results (tool-side
+ * authoritative continuation state; the loop re-derives it after shortening).
+ */
+export interface RecoveryPageDetails {
+	kind: "text" | "image" | "description" | "deferred";
+	/** Index of the original content block being recovered. */
+	block: number;
+	/** UTF-8 byte offset within that block where the page starts. */
+	offset: number;
+	/** UTF-8 byte length of the original text page (text pages only). */
+	originalBytes?: number;
+	/** Byte size of the original image (image pages only). */
+	imageBytes?: number;
+	/** True only when the last original data page has been fully delivered. */
+	eof: boolean;
+}
+
+/**
+ * Parse the model-visible continuation envelope of a recovery page. The
+ * envelope is the explicitly delimited last text block
+ * (`<omitted_content_meta>{"next":...}</omitted_content_meta>`). Returns the
+ * next cursor, `"eof"`, or `undefined` when no valid envelope is present.
+ */
+export function parseRecoveryEnvelope(
+	content: readonly (TextContent | ImageContent)[],
+): { block: number; offset: number } | "eof" | undefined {
+	const last = content[content.length - 1];
+	if (last?.type !== "text" || !isOmittedContentEnvelopeBlock(last)) return undefined;
+	const text = last.text.slice(
+		OMITTED_CONTENT_META_PREFIX.length,
+		last.text.length - OMITTED_CONTENT_META_SUFFIX.length,
+	);
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(parsed) || Object.keys(parsed).length !== 1 || !("next" in parsed)) return undefined;
+	const next = (parsed as { next?: unknown }).next;
+	if (next === null) return "eof";
+	if (isRecord(next) && typeof next.block === "number" && typeof next.offset === "number") {
+		return { block: next.block, offset: next.offset };
+	}
+	return undefined;
+}
+
+/**
+ * Read the structured recall metadata mirrored on a recovery result's details.
+ * Absent when the result is not a `read_omitted_content` page.
+ */
+export function recallDetailsOf(result: AgentToolResult): RecoveryPageDetails | undefined {
+	const details = result.details;
+	if (!isRecord(details) || !isRecord(details.recall)) return undefined;
+	const recall = details.recall;
+	const kind = recall.kind;
+	if (kind !== "text" && kind !== "image" && kind !== "description" && kind !== "deferred") return undefined;
+	if (typeof recall.block !== "number" || typeof recall.offset !== "number") return undefined;
+	return {
+		kind,
+		block: recall.block,
+		offset: recall.offset,
+		originalBytes: typeof recall.originalBytes === "number" ? recall.originalBytes : undefined,
+		imageBytes: typeof recall.imageBytes === "number" ? recall.imageBytes : undefined,
+		eof: recall.eof === true,
+	};
+}
+
+function trimOneCodePoint(text: string): string {
+	if (text.length === 0) return "";
+	let index = text.length - 1;
+	while (index > 0 && (text.charCodeAt(index) & 0xfc00) === 0xdc00) index--;
+	return text.slice(0, index);
+}
+
+function boundedImageDescription(image: ImageContent | undefined): string {
+	if (!image) return "[image omitted: provider image budget]";
+	const mime = image.mimeType.slice(0, 120) || "image";
+	const kilobytes = Math.max(1, Math.round((image.data.length * 3) / 4 / 1024));
+	return `[image omitted: provider image budget — ${mime}, ≈${kilobytes} KB; request with image:true when the budget allows]`;
+}
+
+function metadataOnlyRecoveryPage(result: AgentToolResult, details: RecoveryPageDetails): AgentToolResult {
+	return {
+		...result,
+		content: [{ type: "text", text: formatOmittedContentEnvelope({ block: details.block, offset: details.offset }) }],
+		details: {
+			...(isRecord(result.details) ? result.details : {}),
+			recall: { ...details, kind: "deferred", eof: false },
+		},
+	};
+}
+
+/**
+ * Serialized final admission for a `read_omitted_content` result at the loop's
+ * tool-result emission point.
+ */
+export function admitRecoveryToolResult(
+	result: AgentToolResult,
+	count: (content: readonly (TextContent | ImageContent)[]) => { tokens: number; images: number },
+	budget: { remainingTokens: number; remainingImages: number },
+): AgentToolResult | typeof ADMIT_TOOL_RESULT_TERMINAL | undefined {
+	const details = recallDetailsOf(result);
+	const fits = (content: readonly (TextContent | ImageContent)[]): boolean => {
+		const used = count(content);
+		return used.tokens <= budget.remainingTokens && used.images <= budget.remainingImages;
+	};
+	if (fits(result.content)) return undefined;
+	if (!details) return ADMIT_TOOL_RESULT_TERMINAL;
+	if (details.kind === "deferred") return ADMIT_TOOL_RESULT_TERMINAL;
+
+	if (details.kind === "text") {
+		const envelopeIndex = result.content.length - 1;
+		if (result.content.length < 2 || result.content[0].type !== "text") {
+			return fallbackRecoveryPage(result, details, fits);
+		}
+		const dataText = (result.content[0] as TextContent).text;
+		const envelopeBlock = result.content[envelopeIndex] as TextContent;
+		const fullBytes = utf8ByteLength(dataText);
+		let best: string | undefined;
+		let lo = 1;
+		let hi = fullBytes;
+		while (lo <= hi) {
+			const mid = Math.floor((lo + hi) / 2);
+			const truncated = cutUtf8Prefix(dataText, mid);
+			if (truncated === "") {
+				lo = mid + 1;
+			} else if (!fits([{ type: "text", text: truncated }, envelopeBlock])) {
+				hi = mid - 1;
+			} else {
+				best = truncated;
+				lo = mid + 1;
+			}
+		}
+		if (best === undefined) return fallbackRecoveryPage(result, details, fits);
+		let pageText = best;
+		let envelope: TextContent = {
+			type: "text",
+			text: formatOmittedContentEnvelope({
+				block: details.block,
+				offset: details.offset + utf8ByteLength(pageText),
+			}),
+		};
+		let content: (TextContent | ImageContent)[] = [{ type: "text", text: pageText }, envelope];
+		while (!fits(content)) {
+			pageText = trimOneCodePoint(pageText);
+			if (pageText === "") return fallbackRecoveryPage(result, details, fits);
+			envelope = {
+				type: "text",
+				text: formatOmittedContentEnvelope({
+					block: details.block,
+					offset: details.offset + utf8ByteLength(pageText),
+				}),
+			};
+			content = [{ type: "text", text: pageText }, envelope];
+		}
+		const deliveredBytes = utf8ByteLength(pageText);
+		return {
+			...result,
+			content,
+			details: {
+				...(isRecord(result.details) ? result.details : {}),
+				recall: { ...details, kind: "text", offset: details.offset, originalBytes: deliveredBytes, eof: false },
+			},
+		};
+	}
+
+	if (details.kind === "image") {
+		const image = result.content.find(block => block.type === "image");
+		const envelope: TextContent = {
+			type: "text",
+			text: formatOmittedContentEnvelope({ block: details.block, offset: details.offset }),
+		};
+		const denied: AgentToolResult = {
+			...result,
+			content: [{ type: "text", text: boundedImageDescription(image) }, envelope],
+			details: {
+				...(isRecord(result.details) ? result.details : {}),
+				recall: { ...details, kind: "description", offset: details.offset, eof: false },
+			},
+		};
+		if (fits(denied.content)) return denied;
+		return fallbackRecoveryPage(result, details, fits);
+	}
+
+	return fallbackRecoveryPage(result, details, fits);
+}
+
+function fallbackRecoveryPage(
+	result: AgentToolResult,
+	details: RecoveryPageDetails,
+	fits: (content: readonly (TextContent | ImageContent)[]) => boolean,
+): AgentToolResult | typeof ADMIT_TOOL_RESULT_TERMINAL {
+	const metadataOnly = metadataOnlyRecoveryPage(result, details);
+	if (fits(metadataOnly.content)) return metadataOnly;
+	return ADMIT_TOOL_RESULT_TERMINAL;
 }

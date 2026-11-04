@@ -1,4 +1,4 @@
-import { isReadableUrlPath, type ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath, type ReadToolDetails as TuiReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
@@ -41,6 +41,7 @@ import {
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
+import { resolveWorkflowCatalogToolDocs } from "../internal-urls/xd-protocol";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -159,6 +160,7 @@ import {
 } from "../utils/video";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import {
+	composeReadPaginationArgs,
 	isMultiRange,
 	isRawSelector,
 	type ParsedSelector,
@@ -888,10 +890,28 @@ function isMediaQuestionTarget(readPath: string): boolean {
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
 const readSchema = type({
-	path: type("string").describe("Local path, internal URI, or URL; selectors inline."),
+	path: type("string").describe(
+		"Local path, internal URI, or URL; page via inline selectors (preferred: path:301 or path:raw:301-).",
+	),
+	"offset?": type("number.integer>=0").describe(
+		"Optional 1-indexed start line. 0 is treated as omitted. Composed onto path when no range selector is present; prefer embedding :N in path.",
+	),
+	"limit?": type("number.integer>=0").describe(
+		"Optional line count. 0 is treated as omitted. Composed onto path when no range selector is present; prefer embedding :N+K in path.",
+	),
 });
 
 export type ReadToolInput = typeof readSchema.infer;
+
+export { resolveWorkflowCatalogToolDocs };
+
+export interface ReadToolDetails extends TuiReadToolDetails {
+	branchOrWorktreeScope?: string;
+	providerViewIdentity?: string;
+	contentOrRevisionIdentity?: string;
+	canonicalSource?: string;
+	outputMode?: "raw" | "converted" | "decoded" | "summary" | "unknown";
+}
 
 type ReadParams = ReadToolInput;
 
@@ -1863,12 +1883,23 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const inner = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
+		const composed = composeReadPaginationArgs({
+			path: params.path,
+			offset: params.offset,
+			limit: params.limit,
+		});
+		const effectiveParams: ReadParams = { ...params, path: composed.path };
+		const inner = await this.#executeInner(toolCallId, effectiveParams, signal, onUpdate, toolContext);
 		const innerDetails: ReadDetailsWithWindow | undefined = inner.details;
 		const result = await shapeToolResult(
 			this.session,
 			toolCallId,
-			{ tool: "read", source: `read ${params.path}`, path: params.path, read: innerDetails?.[kSpotlightWindow] },
+			{
+				tool: "read",
+				source: `read ${effectiveParams.path}`,
+				path: effectiveParams.path,
+				read: innerDetails?.[kSpotlightWindow],
+			},
 			inner,
 			signal,
 			{
@@ -1876,7 +1907,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					? () =>
 							this.#executeInner(
 								toolCallId,
-								params,
+								effectiveParams,
 								signal,
 								undefined,
 								toolContext,
@@ -1888,9 +1919,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					: undefined,
 			},
 		);
-		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
+		const displayTarget = InternalUrlRouter.instance().locateSync(effectiveParams.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
-		appendRepeatReadHint(this.session, params.path, result);
+		appendRepeatReadHint(this.session, effectiveParams.path, result);
 		return result;
 	}
 
