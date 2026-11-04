@@ -4,6 +4,7 @@ import { type Component } from "../tui";
 import { Container } from "../tui";
 import { Text } from "../components/text";
 import { getLanguageFromPath, theme, type ThemeColor } from "../theme";
+import { classifyToolPresentation } from "../render/tool-presentation";
 import { parseLineRanges, selectorLineRanges } from "../tools/line-ranges";
 import {
 	type ReadRenderArgs,
@@ -128,7 +129,7 @@ type ReadEntry = {
 	path: string;
 	displayPaths?: ReadDisplayPathSpec[];
 	linkPath?: string;
-	status: "pending" | "success" | "warning" | "error";
+	status: "pending" | "success" | "warning" | "error" | "skipped" | "aborted";
 	correctedFrom?: string;
 	contentText?: string;
 	/** The result's `details.contentType`; see {@link previewsMarkdown}. */
@@ -186,6 +187,8 @@ const READ_STATUS_TONE: Record<ReadEntry["status"], "pending" | "warning" | "err
 	success: undefined,
 	pending: "pending",
 	warning: "warning",
+	skipped: "pending",
+	aborted: "error",
 	error: "error",
 };
 
@@ -207,7 +210,9 @@ const READ_STATUS_RANK: Record<ReadEntry["status"], number> = {
 	success: 0,
 	pending: 1,
 	warning: 2,
-	error: 3,
+	skipped: 3,
+	aborted: 4,
+	error: 5,
 };
 
 function getDisplayReadTargets(
@@ -533,7 +538,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const conflictCount =
 			typeof details?.conflictCount === "number" && details.conflictCount > 0 ? details.conflictCount : undefined;
 		entry.conflictCount = conflictCount;
-		entry.status = result.isError ? "error" : suffixResolution ? "warning" : "success";
+		const presentation = classifyToolPresentation(result);
+		entry.status =
+			presentation === "skipped"
+				? "skipped"
+				: presentation === "aborted"
+					? "aborted"
+					: result.isError
+						? "error"
+						: suffixResolution
+							? "warning"
+							: "success";
 		entry.contentType = details?.contentType;
 		// Store clean display content for preview/expanded display when the read
 		// tool provides it; fall back to model-facing text for legacy results.
@@ -1240,7 +1255,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const component: Component = {
 			render: (width: number) => {
 				if (cachedLines && cachedWidth === width) return cachedLines;
-				const status = entry.status === "success" ? "complete" : entry.status;
+				const status =
+					entry.status === "success"
+						? "complete"
+						: entry.status === "skipped" || entry.status === "aborted"
+							? "pending"
+							: entry.status;
 				cachedLines = previewsMarkdown(entry)
 					? renderMarkdownCell(
 							{

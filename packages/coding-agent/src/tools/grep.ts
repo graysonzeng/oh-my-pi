@@ -27,6 +27,7 @@ import {
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
+import { applySessionToolOutput, workflowToolWireName } from "../workflow/tool-optimization";
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
@@ -81,10 +82,10 @@ export type GrepToolInput = typeof searchSchema.infer;
 
 /** Maximum number of distinct files surfaced in a single response. The
  * agent paginates further pages via `skip`. */
-export const DEFAULT_FILE_LIMIT = 20;
+export const DEFAULT_FILE_LIMIT = 8;
 /** Per-file match cap for multi-file searches — keeps a single hot file
  * from crowding out diverse hits. Applied in JS after grep returns. */
-export const MULTI_FILE_PER_FILE_MATCHES = 20;
+export const MULTI_FILE_PER_FILE_MATCHES = 8;
 /** Per-file match cap for single-file searches — there's no diversity
  * concern when the scope is one file. */
 export const SINGLE_FILE_MATCHES = 200;
@@ -594,6 +595,10 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			skipCandidate,
 		);
 	};
+	/** Model wire name when workflow toolAliases remaps grep. */
+	get customWireName(): string | undefined {
+		return workflowToolWireName(this.session, this.name);
+	}
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
 	readonly summary = "Search file contents by regex";
@@ -1298,7 +1303,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				if (truncation.truncated) details.truncation = truncation;
 				if (linesTruncated) details.linesTruncated = true;
 				const resultBuilder = toolResult(details)
-					.text(output)
+					.text(applySessionToolOutput(this.session, "grep", output, { path: searchPath }))
 					.limits({ columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined, columnUnit: "bytes" });
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });
