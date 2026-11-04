@@ -206,8 +206,10 @@ describe("failed child evidence", () => {
 			});
 			await manager.getJob("Builder")?.promise;
 
-			// The blocking child ran inline and the other became a background job.
-			expect(result.details?.results.map(row => row.id)).toEqual(["Reviewer"]);
+			// The blocking child ran inline (first row) and the other became a background job;
+			// workflow appends settled background rows after the inline ones.
+			expect(result.details?.results[0]?.id).toBe("Reviewer");
+			expect(result.content[0]?.type === "text" && result.content[0].text).toContain("`Builder` (job `Builder`)");
 			expect(result.isError).toBe(true);
 		} finally {
 			await manager.dispose({ timeoutMs: 1000 });

@@ -1,0 +1,27 @@
+// Conservative tool/output surface for the pre-KDL isTinyOrLocal *provider*
+// contracts only: tiny, local, ollama, lmstudio. `lm-studio` is the catalog
+// canonical id (the old checker compared `provider === "lmstudio"` and never
+// matched bundled lm-studio). llama.cpp and vllm are intentionally absent —
+// those hosts were not downgraded by provider id alone. Model-name `tiny`
+// substrings are not a contract; nested `tiny-local-surface #false` still
+// overrides a host assignment.
+
+provider "tiny" {
+	tiny-local-surface #true
+}
+
+provider "local" {
+	tiny-local-surface #true
+}
+
+provider "ollama" {
+	tiny-local-surface #true
+}
+
+provider "lmstudio" {
+	tiny-local-surface #true
+}
+
+provider "lm-studio" {
+	tiny-local-surface #true
+}

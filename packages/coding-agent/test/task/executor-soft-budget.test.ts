@@ -112,6 +112,7 @@ function createMockSession(
 		sendUserMessage: async (content, options) => {
 			sentUserMessages.push({ content, options });
 		},
+		hasPendingAsyncWork: () => false,
 		setIrcWakeTurnObserver: observer => {
 			ircWakeTurnObserver = observer;
 		},
