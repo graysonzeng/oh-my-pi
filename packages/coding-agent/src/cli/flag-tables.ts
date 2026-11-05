@@ -214,6 +214,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},
+	"--consult-model": (result, value) => {
+		result.consultModel = value;
+		result.consult = true;
+	},
 	"--system-prompt": (result, value) => {
 		result.systemPrompt = value;
 	},
@@ -284,6 +288,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		} else {
 			result.invalidFlagValues.push(
 				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, always-ask-cached, write, yolo.`,
+			);
+		}
+	},
+	"--ptc": (result, value) => {
+		if (value === "off" || value === "on" || value === "auto") {
+			result.ptc = value;
+		} else {
+			result.invalidFlagValues.push(
+				`Invalid --ptc value: ${JSON.stringify(value)}. Expected one of: off, on, auto.`,
 			);
 		}
 	},
@@ -359,6 +372,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--hide-thinking",
 	"--advisor",
 	"--wait-async",
+	"--consult",
 	"--external-thinking",
 	"--prewalk",
 	"--no-prewalk",

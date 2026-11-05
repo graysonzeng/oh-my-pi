@@ -75,6 +75,8 @@ export type {
 export * from "./tools";
 export * from "./tools/hashline-header-path";
 export * from "./utils/github";
+// Workflow (single barrel — workflow/index re-exports runtime-adapter)
+export * from "./workflow";
 // UI components for extensions
 export {
 	HookEditorComponent as ExtensionEditorComponent,

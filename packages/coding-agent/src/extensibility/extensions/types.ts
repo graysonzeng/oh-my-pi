@@ -1799,7 +1799,9 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 	? "priority"
 	: Family extends "google"
 		? "flex" | "priority"
-		: ServiceTier;
+		: Family extends "xai"
+			? "priority"
+			: ServiceTier;
 
 /**
  * What holds a keyboard chord, as reported by {@link ExtensionAPI.getShortcutConflict}.
