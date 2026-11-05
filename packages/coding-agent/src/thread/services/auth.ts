@@ -216,6 +216,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"keys.source": (storage, provider, options) => storage.keys.source(provider, options),
 		"keys.availability": (storage, providers) => authAvailability(storage, providers),
 		"keys.describe": (storage, provider, sessionId) => storage.keys.describe(provider, sessionId),
+		"keys.overrideEpoch": storage => storage.keys.overrideEpoch,
+		"keys.selectedRoute": (storage, provider, options) => storage.keys.selectedRoute(provider, options),
 		"keys.setRuntime": (storage, provider, apiKey) => storage.keys.setRuntime(provider, apiKey),
 		"keys.removeRuntime": (storage, provider) => storage.keys.removeRuntime(provider),
 		"keys.setConfig": (storage, provider, config, options) => storage.keys.setConfig(provider, config, options),

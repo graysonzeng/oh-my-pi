@@ -40,6 +40,7 @@ import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "..
 import { generateTaskName, sanitizeAgentId } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition } from "../task/types";
+import { resolveSubagentPerformanceClass } from "../task/review-performance";
 import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -60,7 +61,7 @@ import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 import { cfgTaskAgentAccountPools, cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
- * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
+ * carries `gateway/deepseek-v4-flash:high` then `gateway/grok-4.6:high`, and `task`
  * carries `model: "@task"` (inherits the session's strong model).
  * Resolution goes through {@link resolveAgentModelSelection} exactly like a
  * `task` spawn, so `task.agentModelOverrides` and model-role settings apply.
@@ -363,7 +364,6 @@ export class VibeSessionRegistry {
 		const { patterns, role } = resolveAgentModelSelection({
 			settingsOverride: agentModelOverrides[agentName],
 			agentModel: agent.model,
-			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
 		});
@@ -1308,7 +1308,6 @@ export class VibeSessionRegistry {
 			onProgress,
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
-			settings: session.settings,
 			asyncJobManager: session.asyncJobManager,
 			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),

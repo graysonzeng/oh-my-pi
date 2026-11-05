@@ -17,8 +17,19 @@ type MCPToolCachePayload = {
 	tools: MCPToolDefinition[];
 };
 
+/**
+ * Endpoint identity for the tool cache. `lazy` only controls when OMP opens
+ * the transport — not which tools the server exposes — so toggling it must
+ * not invalidate an existing cache entry for the same endpoint.
+ */
+function configIdentityForCache(config: MCPServerConfig): MCPServerConfig {
+	if (!("lazy" in config)) return config;
+	const { lazy: _lazy, ...rest } = config;
+	return rest;
+}
+
 function hashConfig(config: MCPServerConfig): string {
-	return Bun.SHA256.hash(stableStringifyJson(config), "hex");
+	return Bun.SHA256.hash(stableStringifyJson(configIdentityForCache(config)), "hex");
 }
 
 function cacheKey(serverName: string): string {
