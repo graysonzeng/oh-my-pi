@@ -722,7 +722,7 @@ describe("executor live-tool progress snapshots", () => {
 				settings: Settings.isolated({ "startup.quiet": true }),
 				modelRegistry,
 			});
-			mode = new InteractiveMode(parentSession, "test", undefined, undefined, undefined, undefined, eventBus);
+			mode = new InteractiveMode(parentSession, "test", undefined, undefined, undefined, eventBus);
 			const hudMode = mode;
 			await hudMode.init({ suppressWelcomeIntro: true });
 			vi.spyOn(hudMode.ui, "requestRender").mockImplementation(() => {});
@@ -896,7 +896,7 @@ describe("executor live-tool progress snapshots", () => {
 				settings: Settings.isolated({ "startup.quiet": true }),
 				modelRegistry,
 			});
-			mode = new InteractiveMode(parentSession, "test", undefined, undefined, undefined, undefined, eventBus);
+			mode = new InteractiveMode(parentSession, "test", undefined, undefined, undefined, eventBus);
 			const hudMode = mode;
 			await hudMode.init({ suppressWelcomeIntro: true });
 			vi.spyOn(hudMode.ui, "requestRender").mockImplementation(() => {});
