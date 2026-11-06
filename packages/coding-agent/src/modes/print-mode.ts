@@ -57,10 +57,9 @@ export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 /** Error exits cannot hold automation for the full normal drain budget. */
 export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
 /**
- * How often text print mode reminds that it is still waiting for model output.
- * A single `Working...` line is easy to confuse with a hung process during
- * multi-minute first-token waits (history-review B2/B3); the heartbeat keeps
- * the wait distinguishable without inventing progress the provider has not sent.
+ * How often text print mode reminds that it is still waiting for the first
+ * model stream event. Cleared as soon as stream progress arrives (or the turn
+ * ends), so the line cannot outlive a real first event and mislabel later work.
  */
 export const PRINT_MODE_WAITING_HEARTBEAT_MS = 60_000;
 /** Largest setTimeout delay before 32-bit overflow (Node/Bun fire in ~1 ms past this). */
@@ -238,6 +237,22 @@ async function runPrintModeCore(
 			// every later diagnostic and reject the awaited tail below.
 			.catch(() => {});
 	};
+	// Text-mode first-event wait heartbeat. Declared before dispatch/subscribe
+	// so abort, retry, and stream-progress paths can clear the same timer.
+	let waitingHeartbeat: ReturnType<typeof setInterval> | undefined;
+	const clearWaitingHeartbeat = (): void => {
+		if (waitingHeartbeat === undefined) return;
+		clearInterval(waitingHeartbeat);
+		waitingHeartbeat = undefined;
+	};
+	const armWaitingHeartbeat = (): void => {
+		if (mode !== "text") return;
+		clearWaitingHeartbeat();
+		waitingHeartbeat = setInterval(() => {
+			writeStderrLine("Still waiting for the first model event...");
+		}, PRINT_MODE_WAITING_HEARTBEAT_MS);
+		waitingHeartbeat.unref?.();
+	};
 	// Route slash input through the shared dispatcher so builtins run locally
 	// (e.g. `/mcp reauth <name>` opens the browser) instead of prompting the
 	// model with the literal text. Unknown or non-slash input falls through to
@@ -371,6 +386,17 @@ async function runPrintModeCore(
 
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
+		// First semantic stream progress ends the pre-first-event wait; keep the
+		// heartbeat wording accurate and stop it on abort/completion markers too.
+		if (
+			event.type === "message_start" ||
+			event.type === "message_update" ||
+			event.type === "tool_execution_start" ||
+			event.type === "turn_end" ||
+			event.type === "agent_end"
+		) {
+			clearWaitingHeartbeat();
+		}
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
@@ -388,10 +414,12 @@ async function runPrintModeCore(
 		} else if (event.type === "auto_retry_start") {
 			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying
 			// (offline, an outage) must say why instead of looking like a slow answer.
+			clearWaitingHeartbeat();
 			writeStderrLine(`Retrying (${event.attempt}/${event.maxAttempts}): ${singleLine(event.errorMessage)}`);
 		} else if (event.type === "retry_fallback_applied") {
 			// A silent model swap would mask live-suite pin failures (acceptance A3) and
 			// hide the effective model on authorized hang fallbacks (acceptance B3).
+			// JSON mode already emitted this event on stdout above; text mode logs the swap.
 			const reason = event.reason ? ` (${singleLine(event.reason)})` : "";
 			writeStderrLine(
 				`Falling back (${singleLine(event.role)}): ${singleLine(event.from)} → ${singleLine(event.to)}${reason}`,
@@ -452,20 +480,6 @@ async function runPrintModeCore(
 	};
 
 	let wroteTextWorkingIndicator = false;
-	let waitingHeartbeat: ReturnType<typeof setInterval> | undefined;
-	const clearWaitingHeartbeat = (): void => {
-		if (waitingHeartbeat === undefined) return;
-		clearInterval(waitingHeartbeat);
-		waitingHeartbeat = undefined;
-	};
-	const armWaitingHeartbeat = (): void => {
-		if (mode !== "text") return;
-		clearWaitingHeartbeat();
-		waitingHeartbeat = setInterval(() => {
-			writeStderrLine("Still waiting for the first model event...");
-		}, PRINT_MODE_WAITING_HEARTBEAT_MS);
-		waitingHeartbeat.unref?.();
-	};
 	const writeTextWorkingIndicator = (): void => {
 		if (mode !== "text" || wroteTextWorkingIndicator) return;
 		process.stderr.write("Working...\n");
@@ -652,6 +666,9 @@ async function runPrintModeCore(
 	// agent_end and late JSON advisor events) has drained; process.exit would
 	// otherwise discard the buffered tail and truncate the last record.
 	await stdoutTail;
+	// Safety net: prompt/retry finally and stream-progress clears cover the live
+	// turn; dispose still clears any stray interval after advisor drain.
+	clearWaitingHeartbeat();
 	// Dispose before returning the status instead of hard-exiting ahead of it:
 	// the awaited `dispose()` runs the browser reaper (releaseTabsForOwner), so
 	// an OMP-owned Chromium cannot survive the exit (issue #5643).
