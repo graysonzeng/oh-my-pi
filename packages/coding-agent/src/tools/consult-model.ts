@@ -1,6 +1,11 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { formatModelString, resolveAdvisorRoleSelection, resolveModelOverride } from "../config/model-resolver";
+import {
+	formatModelString,
+	resolveAdvisorRoleSelection,
+	resolveConfiguredModelPatterns,
+	resolveModelOverride,
+} from "../config/model-resolver";
 import { cfgConsultModel } from "../config/workflow-settings";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -27,6 +32,7 @@ export type ConsultResolution =
 			pattern: string;
 			apiKey: string;
 			sameModel: boolean;
+			fallbacks?: Array<{ model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel }>;
 	  }
 	| {
 			ok: false;
@@ -53,40 +59,46 @@ export type ConsultModelSelection =
 	  }
 	| { ok: false; error: "no_model"; pattern?: string };
 
-export function resolveConsultModel(session: ConsultSelectionHost): ConsultModelSelection {
+function resolveConsultCandidates(session: ConsultSelectionHost): {
+	pattern?: string;
+	candidates: Array<{ model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel }>;
+} {
+	const candidates: Array<{ model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel }> = [];
 	const registry = session.modelRegistry;
-	if (!registry) return { ok: false, error: "no_model" };
+	if (!registry) return { candidates };
 
 	const available = registry.getAvailable();
-	if (available.length === 0) return { ok: false, error: "no_model" };
+	if (available.length === 0) return { candidates };
 
 	const override = session.getConsultModelOverride?.()?.trim();
 	const settingModel = cfgConsultModel.get(session.settings)?.trim();
-	const pattern = override || settingModel || undefined;
-
-	let model: Model<Api> | undefined;
-	let thinkingLevel: ConfiguredThinkingLevel | undefined;
-	let resolvedPattern = pattern;
-
-	if (pattern) {
-		const resolved = resolveModelOverride([pattern], registry, session.settings);
-		model = resolved.model;
-		thinkingLevel = resolved.thinkingLevel;
-	} else {
-		const selection = resolveAdvisorRoleSelection(session.settings, available);
-		model = selection?.model;
-		thinkingLevel = selection?.thinkingLevel;
-		resolvedPattern = formatModelRoleAlias("advisor");
+	const pattern = override || settingModel || formatModelRoleAlias("advisor");
+	for (const entry of resolveConfiguredModelPatterns([pattern], session.settings)) {
+		const { model, thinkingLevel } = resolveModelOverride([entry], registry, session.settings);
+		if (model && !candidates.some(candidate => modelsAreEqual(candidate.model, model))) {
+			candidates.push({ model, thinkingLevel });
+		}
 	}
+	if (!override && !settingModel && candidates.length === 0) {
+		const selection = resolveAdvisorRoleSelection(session.settings, available);
+		if (selection) candidates.push(selection);
+	}
+	return { pattern, candidates };
+}
 
-	if (!model) return { ok: false, error: "no_model", pattern: resolvedPattern };
+export function resolveConsultModel(session: ConsultSelectionHost): ConsultModelSelection {
+	const { pattern, candidates } = resolveConsultCandidates(session);
+	const selection =
+		(!session.settings.get("consult.allowSameModel") &&
+			candidates.find(candidate => !isConsultSameModel(session, candidate.model))) ||
+		candidates[0];
+	if (!selection) return { ok: false, error: "no_model", pattern };
 
 	return {
 		ok: true,
-		model,
-		thinkingLevel,
-		pattern: resolvedPattern ?? formatModelString(model),
-		sameModel: isConsultSameModel(session, model),
+		...selection,
+		pattern: pattern ?? formatModelString(selection.model),
+		sameModel: isConsultSameModel(session, selection.model),
 	};
 }
 
@@ -124,28 +136,25 @@ export async function resolveConsultSelection(
 	const registry = session.modelRegistry;
 	if (!registry) return { ok: false, error: "no_model" };
 
-	const selection = resolveConsultModel(session);
-	if (!selection.ok) return { ok: false, error: "no_model", pattern: selection.pattern };
-
-	const { model, thinkingLevel, pattern } = selection;
-	const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
-	// The primary model can switch while the credential lookup is in flight, so
-	// the same-model gate is re-evaluated against the CURRENT primary after the
-	// await — the pre-call guard for requests racing a model switch.
-	const sameModel = isConsultSameModel(session, model);
-	if (!apiKey) {
-		return { ok: false, error: "no_credentials", model, pattern, sameModel };
+	const { pattern, candidates } = resolveConsultCandidates(session);
+	let failure: ConsultResolution | undefined;
+	for (const [index, { model, thinkingLevel }] of candidates.entries()) {
+		const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
+		// The primary can switch during credential lookup; gate against its current identity.
+		const sameModel = isConsultSameModel(session, model);
+		if (!apiKey || (sameModel && !session.settings.get("consult.allowSameModel"))) {
+			failure ??= { ok: false, error: apiKey ? "same_model" : "no_credentials", model, pattern, sameModel };
+			continue;
+		}
+		return {
+			ok: true,
+			model,
+			thinkingLevel,
+			pattern: pattern ?? formatModelString(model),
+			apiKey,
+			sameModel,
+			...(index + 1 < candidates.length ? { fallbacks: candidates.slice(index + 1) } : {}),
+		};
 	}
-	if (sameModel && !session.settings.get("consult.allowSameModel")) {
-		return { ok: false, error: "same_model", model, pattern, sameModel: true };
-	}
-
-	return {
-		ok: true,
-		model,
-		thinkingLevel,
-		pattern,
-		apiKey,
-		sameModel,
-	};
+	return failure ?? { ok: false, error: "no_model", pattern };
 }

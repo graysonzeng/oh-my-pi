@@ -220,7 +220,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 						}
 					: {
 							role: "assistant" as const,
-							content: [{ type: "text" as const, text: "Next turn." }],
+							content: [{ type: "text" as const, text: "All done." }],
 							api: "anthropic-messages" as const,
 							provider: "anthropic" as const,
 							model: "claude-sonnet-4-5",

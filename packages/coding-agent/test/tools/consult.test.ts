@@ -288,6 +288,31 @@ describe("resolveConsultSelection", () => {
 		if (!resolved.ok) expect(resolved.error).toBe("no_credentials");
 	});
 
+	it("skips earlier same-model or credentialless comma-separated candidates", async () => {
+		for (const failure of ["same_model", "no_credentials"] as const) {
+			const credentialModels: string[] = [];
+			const session = makeSession({
+				settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/gpt-4.1,openai/o3" }),
+				active: failure === "same_model" ? primary : { ...primary, id: "other-primary" },
+				getApiKey: async model => {
+					credentialModels.push(model.id);
+					return failure === "no_credentials" && model.id === primary.id ? undefined : "test-key";
+				},
+			});
+			const selection = resolveConsultModel(session);
+			expect(selection.ok).toBe(true);
+			if (selection.ok) expect(selection.sameModel).toBe(false);
+			expect(isConsultActivationAllowed(session)).toBe(true);
+			const resolved = await resolveConsultSelection(session);
+			expect(resolved.ok).toBe(true);
+			if (resolved.ok) {
+				expect(formatModelString(resolved.model)).toBe("openai/o3");
+				expect(resolved.apiKey).toBe("test-key");
+			}
+			expect(credentialModels).toEqual([primary.id, advisor.id]);
+		}
+	});
+
 	it("forwards the abort signal to getApiKey", async () => {
 		const controller = new AbortController();
 		let seen: AbortSignal | undefined;
@@ -717,6 +742,40 @@ describe("ConsultTool.execute", () => {
 		const result = await tool.execute("c1", {});
 		expect(result.isError).toBe(true);
 		expect(toolText(result)).toContain("provider_error");
+	});
+
+	it("falls back to the next comma-separated model after returned or thrown provider errors", async () => {
+		const fallback: Model<"openai-responses"> = { ...advisor, id: "o4-mini", name: "o4-mini" };
+		for (const failure of ["response", "throw"] as const) {
+			const failed = completeStub("", "error", "429 provider cooldown");
+			const success = completeStub("fallback advice");
+			const requestedModels: string[] = [];
+			const credentialModels: string[] = [];
+			const fn: typeof completeSimple = async (model, context, options) => {
+				requestedModels.push(model.id);
+				if (model.id === advisor.id) {
+					if (failure === "throw") throw new Error("429 provider cooldown");
+					return failed.fn(model, context, options);
+				}
+				return success.fn(model, context, options);
+			};
+			const session = makeSession({
+				settings: Settings.isolated({ "consult.enabled": true, "consult.model": "openai/o3,openai/o4-mini" }),
+				models: [primary, advisor, fallback],
+				snapshot: { systemPrompt: ["keep"], messages: [userMessage("task")] },
+				getApiKey: async model => {
+					credentialModels.push(model.id);
+					return "test-key";
+				},
+			});
+			const result = await new ConsultTool(session, fn).execute("c1", {});
+			expect(result.isError).toBeUndefined();
+			expect(toolText(result)).toBe("fallback advice");
+			expect(result.details?.model).toBe("openai/o4-mini");
+			expect(requestedModels).toEqual([advisor.id, fallback.id]);
+			expect(credentialModels).toEqual([advisor.id, fallback.id]);
+			expect(session.consultUsage?.session).toBe(1);
+		}
 	});
 
 	it("rejects same-model at execute with zero complete calls", async () => {

@@ -14,7 +14,7 @@ import {
 import consultDescription from "../prompts/tools/consult.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
-import { type ConsultResolution, resolveConsultSelection } from "./consult-model";
+import { type ConsultResolution, isConsultSameModel, resolveConsultSelection } from "./consult-model";
 import { type ConsultDetails, getConsultUsage, recordConsultAttempt } from "./consult-state";
 import { CONSULT_TOOL_RESULT_CHARS, projectConsultContext } from "./consult-transcript";
 import type { ToolSession } from "./index";
@@ -147,89 +147,103 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 
 		const secretsEnabled = this.session.settings.get("secrets.enabled") === true;
 		const obfuscator = this.session.getSecretObfuscator?.();
-		const activeModel = this.session.getActiveModel?.();
-		const projection = projectConsultContext({
-			snapshot,
-			model: resolved.model,
-			primaryModel: activeModel
-				? formatModelString(activeModel)
-				: (this.session.getActiveModelString?.() ?? "unknown"),
-			focus: focus || undefined,
-			maxTokens,
-			secretsEnabled,
-			obfuscator,
-		});
-		if ("error" in projection) {
-			recordConsultAttempt(this.session, {
-				error: projection.error,
-				maxTokens,
-				model: formatModelString(resolved.model),
-			});
-			return consultError(projection.error, { maxTokens, model: formatModelString(resolved.model) });
-		}
-
 		const telemetry = resolveTelemetry(this.session.getTelemetry?.(), this.session.getSessionId?.() ?? undefined);
-		const reasoning = toReasoningEffort(
-			resolveThinkingLevelForModel(resolved.model, concreteThinkingLevel(resolved.thinkingLevel)),
-		);
-
-		let response: AssistantMessage;
-		try {
-			response = await instrumentedCompleteSimple(
-				resolved.model,
-				{
-					systemPrompt: [projection.systemPrompt],
-					messages: [
-						{
-							role: "user",
-							content: projection.userPrompt,
-							timestamp: Date.now(),
-						},
-					],
-				},
-				{
-					apiKey: resolved.apiKey,
-					signal: effectiveSignal,
-					reasoning,
+		let model = resolved.model;
+		let response: AssistantMessage | undefined;
+		let providerErrorMessage: string | undefined;
+		for (const [index, candidate] of [resolved, ...(resolved.fallbacks ?? [])].entries()) {
+			try {
+				let apiKey = resolved.apiKey;
+				if (index > 0) {
+					if (
+						isConsultSameModel(this.session, candidate.model) &&
+						!this.session.settings.get("consult.allowSameModel")
+					) {
+						continue;
+					}
+					const key = await this.session.modelRegistry?.getApiKey(
+						candidate.model,
+						this.session.getSessionId?.() ?? undefined,
+						{ signal: effectiveSignal },
+					);
+					if (
+						!key ||
+						(isConsultSameModel(this.session, candidate.model) && !this.session.settings.get("consult.allowSameModel"))
+					) {
+						continue;
+					}
+					apiKey = key;
+				}
+				model = candidate.model;
+				const activeModel = this.session.getActiveModel?.();
+				const projection = projectConsultContext({
+					snapshot,
+					model,
+					primaryModel: activeModel
+						? formatModelString(activeModel)
+						: (this.session.getActiveModelString?.() ?? "unknown"),
+					focus: focus || undefined,
 					maxTokens,
-					...(typeof firstEventTimeoutMs === "number" &&
-					Number.isFinite(firstEventTimeoutMs) &&
-					firstEventTimeoutMs >= 0
-						? { streamFirstEventTimeoutMs: firstEventTimeoutMs }
-						: {}),
-				},
-				{ telemetry, oneshotKind: "consult", completeImpl: this.completeConsultRequest },
-			);
-		} catch (error) {
-			const code = isAbortError(error) ? consultTimeoutCode(error, timedOut()) : "provider_error";
-			const model = formatModelString(resolved.model);
-			recordConsultAttempt(this.session, { error: code, maxTokens, model });
-			return consultError(code, { maxTokens, model }, truncatedConsultErrorMessage(error));
+					secretsEnabled,
+					obfuscator,
+				});
+				if ("error" in projection) {
+					recordConsultAttempt(this.session, { error: projection.error, maxTokens, model: formatModelString(model) });
+					return consultError(projection.error, { maxTokens, model: formatModelString(model) });
+				}
+				const reasoning = toReasoningEffort(
+					resolveThinkingLevelForModel(model, concreteThinkingLevel(candidate.thinkingLevel)),
+				);
+				const result = await instrumentedCompleteSimple(
+					model,
+					{
+						systemPrompt: [projection.systemPrompt],
+						messages: [{ role: "user", content: projection.userPrompt, timestamp: Date.now() }],
+					},
+					{
+						apiKey,
+						signal: effectiveSignal,
+						reasoning,
+						maxTokens,
+						...(typeof firstEventTimeoutMs === "number" &&
+						Number.isFinite(firstEventTimeoutMs) &&
+						firstEventTimeoutMs >= 0
+							? { streamFirstEventTimeoutMs: firstEventTimeoutMs }
+							: {}),
+					},
+					{ telemetry, oneshotKind: "consult", completeImpl: this.completeConsultRequest },
+				);
+				if (result.stopReason === "error") {
+					const firstEventTimedOut =
+						typeof result.errorMessage === "string" &&
+						/timed out while waiting for the first event/i.test(result.errorMessage);
+					providerErrorMessage = truncate(
+						result.errorMessage ?? (firstEventTimedOut ? "consult request timed out" : "consult request failed"),
+						CONSULT_TOOL_RESULT_CHARS,
+					);
+					if (!firstEventTimedOut) continue;
+					recordConsultAttempt(this.session, { error: "timeout", maxTokens, model: formatModelString(model) });
+					return consultError("timeout", { maxTokens, model: formatModelString(model) }, providerErrorMessage);
+				}
+				if (result.stopReason === "aborted") {
+					const code = timedOut() ? "timeout" : "aborted";
+					recordConsultAttempt(this.session, { error: code, maxTokens, model: formatModelString(model) });
+					return consultError(code, { maxTokens, model: formatModelString(model) });
+				}
+				response = result;
+				break;
+			} catch (error) {
+				model = candidate.model;
+				const code = isAbortError(error) ? consultTimeoutCode(error, timedOut()) : "provider_error";
+				providerErrorMessage = truncatedConsultErrorMessage(error);
+				if (code === "provider_error") continue;
+				recordConsultAttempt(this.session, { error: code, maxTokens, model: formatModelString(model) });
+				return consultError(code, { maxTokens, model: formatModelString(model) }, providerErrorMessage);
+			}
 		}
-
-		if (response.stopReason === "error") {
-			const firstEventTimedOut =
-				typeof response.errorMessage === "string" &&
-				/timed out while waiting for the first event/i.test(response.errorMessage);
-			const errorCode = firstEventTimedOut ? "timeout" : "provider_error";
-			recordConsultAttempt(this.session, {
-				error: errorCode,
-				maxTokens,
-				model: formatModelString(resolved.model),
-			});
-			return consultError(
-				errorCode,
-				{ maxTokens, model: formatModelString(resolved.model) },
-				truncate(
-					response.errorMessage ?? (firstEventTimedOut ? "consult request timed out" : "consult request failed"),
-					CONSULT_TOOL_RESULT_CHARS,
-				),
-			);
-		}
-		if (response.stopReason === "aborted") {
-			const code = timedOut() ? "timeout" : "aborted";
-			recordConsultAttempt(this.session, { error: code, maxTokens, model: formatModelString(resolved.model) });
-			return consultError(code, { maxTokens, model: formatModelString(resolved.model) });
+		if (!response) {
+			recordConsultAttempt(this.session, { error: "provider_error", maxTokens, model: formatModelString(model) });
+			return consultError("provider_error", { maxTokens, model: formatModelString(model) }, providerErrorMessage);
 		}
 
 		const text = extractTextContent(response);
@@ -237,14 +251,14 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 			recordConsultAttempt(this.session, {
 				error: "empty_response",
 				maxTokens,
-				model: formatModelString(resolved.model),
+				model: formatModelString(model),
 				tokensIn: response.usage.input,
 				tokensOut: response.usage.output,
 				costUsd: usageCostUsd(response),
 			});
 			return consultError("empty_response", {
 				maxTokens,
-				model: formatModelString(resolved.model),
+				model: formatModelString(model),
 				tokensIn: response.usage.input,
 				tokensOut: response.usage.output,
 				costUsd: usageCostUsd(response),
@@ -265,7 +279,7 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 		});
 		const truncated = response.stopReason === "length" || capped !== text;
 		const details: ConsultDetails = {
-			model: formatModelString(resolved.model),
+			model: formatModelString(model),
 			tokensIn: response.usage.input,
 			tokensOut: response.usage.output,
 			costUsd: usageCostUsd(response),

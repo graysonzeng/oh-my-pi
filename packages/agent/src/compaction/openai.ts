@@ -58,6 +58,8 @@ import {
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
+	type CodexResponsesEndpoint,
+	resolveCodexResponsesUrl,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { dataUrlImageSize } from "../image-tokens";
@@ -413,7 +415,9 @@ function resolveOpenAiCompactEndpoint(model: Model): string {
 	}
 	if (configuredEndpoint && configuredEndpoint.length > 0) return configuredEndpoint;
 	if (model.provider === "openai-codex" || compactionApi === "openai-codex-responses") {
-		return resolveOpenAiCodexCompactEndpoint(model.baseUrl);
+		const endpointMode =
+			model.compat && "codexResponsesEndpoint" in model.compat ? model.compat.codexResponsesEndpoint : undefined;
+		return resolveOpenAiCodexCompactEndpoint(model.baseUrl, endpointMode);
 	}
 
 	const defaultBase = "https://api.openai.com/v1";
@@ -439,7 +443,13 @@ function resolveOpenAiCompactModel(model: Model): string {
 	return mappedDeployment ?? requestModel;
 }
 
-function resolveOpenAiCodexCompactEndpoint(baseUrl: string | undefined): string {
+function resolveOpenAiCodexCompactEndpoint(
+	baseUrl: string | undefined,
+	endpoint: CodexResponsesEndpoint = "codex",
+): string {
+	if (endpoint === "standard") {
+		return `${resolveCodexResponsesUrl(baseUrl, "standard")}/compact`;
+	}
 	const rawBase = baseUrl && baseUrl.length > 0 ? baseUrl : CODEX_BASE_URL;
 	const normalizedBase = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase;
 	if (/\/codex(?:\/v\d+)?$/.test(normalizedBase)) return `${normalizedBase}/responses/compact`;
