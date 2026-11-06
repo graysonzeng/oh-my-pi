@@ -435,6 +435,8 @@ export interface ToolSession {
 	getToolContext?: () => AgentToolContext | undefined;
 	/** Tool names the eval description advertises as callable from cells; frozen with the cached prompt prefix. */
 	getAdvertisedEvalToolNames?: () => readonly string[];
+	/** Names currently authorized for invocation through the eval bridge (live set; may differ from the frozen advertisement). */
+	getEvalBridgeToolNames?: () => readonly string[];
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
