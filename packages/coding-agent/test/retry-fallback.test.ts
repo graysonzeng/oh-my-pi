@@ -183,6 +183,21 @@ describe("retry fallback selector resolution", () => {
 		expect(chains.task).toEqual(["gateway/grok-4.5:high"]);
 	});
 
+	it("CLI --model style single-selector override drops the comma-derived default fallback tail", () => {
+		// main.ts rewrite of modelRoles.default via overrideModelRoles pins one
+		// selector. Without an explicit retry.fallbackChains.default, prolonged
+		// first-event stalls on that pin cannot walk the prior comma list
+		// (history-review B3: gateway/gemini-4:high stayed put until cancel).
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "gateway/gemini-4:high, gateway/grok-4.7:high",
+			},
+		});
+		expect(getRetryFallbackChains(settings).default).toEqual(["gateway/grok-4.7:high"]);
+		settings.overrideModelRoles({ default: "gateway/gemini-4:high" });
+		expect(getRetryFallbackChains(settings).default).toBeUndefined();
+	});
+
 	it("merges comma modelRoles tail then explicit retry.fallbackChains (deduped)", () => {
 		const merged = Settings.isolated({
 			modelRoles: { slow: "gateway/gpt-6-astra:high, openai-codex/gpt-5.6-sol" },

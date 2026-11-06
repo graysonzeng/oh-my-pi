@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Text mode writes a once-per-minute stderr heartbeat while still waiting for the first model event, and logs `retry_fallback_applied` (`Falling back (role): from → to`) so prolonged first-token waits and model switches are visible instead of a silent `Working...` line
+
 ### Added
 
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))

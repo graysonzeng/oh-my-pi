@@ -56,6 +56,13 @@ export interface PrintModeOptions {
 export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 /** Error exits cannot hold automation for the full normal drain budget. */
 export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
+/**
+ * How often text print mode reminds that it is still waiting for model output.
+ * A single `Working...` line is easy to confuse with a hung process during
+ * multi-minute first-token waits (history-review B2/B3); the heartbeat keeps
+ * the wait distinguishable without inventing progress the provider has not sent.
+ */
+export const PRINT_MODE_WAITING_HEARTBEAT_MS = 60_000;
 /** Largest setTimeout delay before 32-bit overflow (Node/Bun fire in ~1 ms past this). */
 const MAX_TIMER_MS = 2_147_483_647;
 /** Exit status of a run the cost gate stopped (`--max-cost` / `session.maxCost` reached). */
@@ -325,24 +332,31 @@ async function runPrintModeCore(
 		if (parsed.name === "retry" && !(await prepareAgentTurn())) {
 			// The strict gate refused the turn the command would schedule:
 			// reported, consumed without executing, and the run exits 1.
+			clearWaitingHeartbeat();
 			return true;
 		}
 		const { executeAcpBuiltinSlashCommand } = await import("../slash-commands/acp-builtins");
 		const refusalBeforeCommand = session.costCapRefusal;
-		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
-		// The allow-list only matches registered commands, so `false` (not a
-		// command) and a `{ prompt }` residual cannot occur; stay defensive.
-		if (result === false || "prompt" in result) return false;
-		if (result.failed) builtinFailed = true;
-		// A builtin that scheduled a real agent turn (`/retry`) admitted that
-		// turn: its answer (and stop reason) belong to this run.
-		if (result.agentInvoked) {
-			admittedAgentTurn = true;
-			costCapRefusalBeforeTurn = refusalBeforeCommand;
+		try {
+			const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
+			// The allow-list only matches registered commands, so `false` (not a
+			// command) and a `{ prompt }` residual cannot occur; stay defensive.
+			if (result === false || "prompt" in result) return false;
+			if (result.failed) builtinFailed = true;
+			// A builtin that scheduled a real agent turn (`/retry`) admitted that
+			// turn: its answer (and stop reason) belong to this run.
+			if (result.agentInvoked) {
+				admittedAgentTurn = true;
+				costCapRefusalBeforeTurn = refusalBeforeCommand;
+			}
+			// A recovery command may have repaired a server the strict gate
+			// failed on, so the gate re-evaluates before the next model turn.
+			return true;
+		} finally {
+			// `/retry` arms the waiting heartbeat above but never enters `promptTurn`,
+			// whose `finally` would otherwise clear it.
+			if (parsed.name === "retry") clearWaitingHeartbeat();
 		}
-		// A recovery command may have repaired a server the strict gate
-		// failed on, so the gate re-evaluates before the next model turn.
-		return true;
 	};
 
 	// Discriminates a store failure from any other dispose rejection below.
@@ -375,6 +389,13 @@ async function runPrintModeCore(
 			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying
 			// (offline, an outage) must say why instead of looking like a slow answer.
 			writeStderrLine(`Retrying (${event.attempt}/${event.maxAttempts}): ${singleLine(event.errorMessage)}`);
+		} else if (event.type === "retry_fallback_applied") {
+			// A silent model swap would mask live-suite pin failures (acceptance A3) and
+			// hide the effective model on authorized hang fallbacks (acceptance B3).
+			const reason = event.reason ? ` (${singleLine(event.reason)})` : "";
+			writeStderrLine(
+				`Falling back (${singleLine(event.role)}): ${singleLine(event.from)} → ${singleLine(event.to)}${reason}`,
+			);
 		}
 	});
 
@@ -431,6 +452,20 @@ async function runPrintModeCore(
 	};
 
 	let wroteTextWorkingIndicator = false;
+	let waitingHeartbeat: ReturnType<typeof setInterval> | undefined;
+	const clearWaitingHeartbeat = (): void => {
+		if (waitingHeartbeat === undefined) return;
+		clearInterval(waitingHeartbeat);
+		waitingHeartbeat = undefined;
+	};
+	const armWaitingHeartbeat = (): void => {
+		if (mode !== "text") return;
+		clearWaitingHeartbeat();
+		waitingHeartbeat = setInterval(() => {
+			writeStderrLine("Still waiting for the first model event...");
+		}, PRINT_MODE_WAITING_HEARTBEAT_MS);
+		waitingHeartbeat.unref?.();
+	};
 	const writeTextWorkingIndicator = (): void => {
 		if (mode !== "text" || wroteTextWorkingIndicator) return;
 		process.stderr.write("Working...\n");
@@ -449,6 +484,7 @@ async function runPrintModeCore(
 			return false;
 		}
 		writeTextWorkingIndicator();
+		armWaitingHeartbeat();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		return true;
 	};
@@ -457,9 +493,13 @@ async function runPrintModeCore(
 		if (!(await prepareAgentTurn())) return;
 		admittedAgentTurn = true;
 		costCapRefusalBeforeTurn = session.costCapRefusal;
-		await logger.time("print:prompt", () =>
-			images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
-		);
+		try {
+			await logger.time("print:prompt", () =>
+				images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
+			);
+		} finally {
+			clearWaitingHeartbeat();
+		}
 	};
 
 	// Inputs run in order. The merged stdin/@file message is never dispatched
