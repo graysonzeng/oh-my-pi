@@ -116,7 +116,11 @@ function createModelRegistry(
 ): ModelRegistry {
 	const available = Array.isArray(models) ? models : [models];
 	return {
-		authStorage: {},
+		authStorage: {
+			credentials: {
+				onDisabled: () => () => {},
+			},
+		},
 		refresh: async () => {},
 		getAvailable: () => available,
 		getApiKey,

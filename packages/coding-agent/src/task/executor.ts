@@ -95,6 +95,7 @@ import {
 	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
+	modelSupportsEffortCeiling,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
@@ -4812,17 +4813,36 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				progress.contextWindow = model.contextWindow;
 			}
 			// Caller-requested coarse effort maps onto the resolved model's
-			// supported range, then respects the operator-configured ceiling.
-			// Undefined (no effort, or no controllable effort surface) falls
-			// through to the normal selectors below.
-			// The ceiling outlives initial resolution: it rides into the session so
+			// supported range, then respects the operator-configured ceiling and the
+			// agent frontmatter `maxEffort`. Undefined falls through to explicit
+			// `:level` suffixes and the agent default. A leftover `auto` agent
+			// default becomes high so omitted effort cannot inherit auto. The
+			// ceiling outlives initial resolution: it rides into the session so
 			// retry-fallback recovery can never clamp effort back up past it.
-			// A per-call `model` is caller-chosen too, so its `:level` is held to the same
-			// ceiling, and a model whose lowest effort is above it fails the spawn
-			// exactly as an `effort` hint does.
-			const spawnEffortCeiling =
+			// A per-call `model` is caller-chosen too, so its `:level` is held to the
+			// same ceiling, and a model whose lowest effort is above it fails the
+			// spawn exactly as an `effort` hint does. Mandatory single-effort models
+			// override the ceiling only when resolving their own effective level.
+			const globalEffortCeiling =
 				options.effort !== undefined || options.perCallModelGrants ? cfgTaskMaxEffort.get(settings) : undefined;
-			if (model && spawnEffortCeiling) assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
+			const spawnEffortCeiling =
+				agent.maxEffort !== undefined
+					? clampThinkingLevelToCeiling(undefined, globalEffortCeiling ?? agent.maxEffort, agent.maxEffort)
+					: globalEffortCeiling;
+			if (
+				options.effort === undefined &&
+				!options.perCallModelGrants &&
+				model !== undefined &&
+				spawnEffortCeiling !== undefined &&
+				!modelSupportsEffortCeiling(model, spawnEffortCeiling)
+			) {
+				throw new RangeError(
+					`${model.provider}/${model.id} has no supported thinking effort at or below agent ${agent.name} maxEffort=${spawnEffortCeiling}`,
+				);
+			}
+			if (model && spawnEffortCeiling && (options.effort !== undefined || options.perCallModelGrants)) {
+				assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
+			}
 			const effortLevel =
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
@@ -4831,20 +4851,27 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				explicitThinkingLevel && resolvedThinkingLevel !== AUTO_THINKING
 					? clampThinkingLevelToCeiling(model, resolvedThinkingLevel, spawnEffortCeiling)
 					: resolvedThinkingLevel;
+			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
+			// model pattern > agent-definition default > high. Agent ceilings clamp
+			// every concrete selector.
+			const agentThinkingLevel =
+				thinkingLevel === AUTO_THINKING || thinkingLevel === undefined
+					? resolveTaskEffortLevel(model)
+					: thinkingLevel;
+			const selectedThinkingLevel = effortLevel ?? (explicitThinkingLevel ? explicitLevel : agentThinkingLevel);
+			const effectiveThinkingLevel =
+				selectedThinkingLevel === AUTO_THINKING
+					? selectedThinkingLevel
+					: clampThinkingLevelToCeiling(model, selectedThinkingLevel, spawnEffortCeiling);
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? explicitLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
-					displayLevel !== undefined
+					displayLevel !== undefined && displayLevel !== AUTO_THINKING
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
-			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const fork = preparedSession?.fork;
