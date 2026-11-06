@@ -62,6 +62,7 @@ import type {
 	ResetsApi,
 	ResolvedApiKey,
 	RotateCredentialOptions,
+	SelectedCredentialRoute,
 	SessionRestrictionLease,
 	SessionsApi,
 	StoredAuthCredential,
@@ -320,6 +321,12 @@ class RemoteKeys implements KeysApi {
 	}
 	describe(provider: string, sessionId?: string): string | undefined {
 		return this.#remote.callSync("keys.describe", provider, sessionId);
+	}
+	get overrideEpoch(): number {
+		return this.#remote.callSync("keys.overrideEpoch");
+	}
+	selectedRoute(provider: string, options?: { sessionId?: string | null }): SelectedCredentialRoute | undefined {
+		return this.#remote.callSync("keys.selectedRoute", provider, options);
 	}
 	setRuntime(provider: string, apiKey: string): void {
 		this.invalidate();

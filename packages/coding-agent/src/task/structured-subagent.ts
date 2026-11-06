@@ -7,6 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
@@ -36,7 +37,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { AUTO_THINKING, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, type ConfiguredThinkingLevel, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -70,7 +71,18 @@ import type {
 	StructuredSubagentSchemaSource,
 } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "./workpool-yield";
+import {
+	resolveClassMaxRuntimeMs,
+	resolveSubagentPerformanceClass,
+	type SubagentPerformanceClass,
+} from "./review-performance";
 import { parseIsolationBackend } from "./worktree";
+import {
+	classifyChildResultForParentIntegrate,
+	type ChildDeliveryEvidenceV1,
+	type ParentIntegrateDecision,
+} from "./child-delivery-evidence";
+import type { WorkflowBudgetGuard } from "../workflow/budget-ledger";
 
 import {
 	cfgIsolationBackend,
@@ -84,6 +96,7 @@ import {
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
+	cfgTaskMaxRuntimeMs,
 	cfgTaskPerCallModel,
 	ovnfsCommand,
 	perCallModelEnabled,
@@ -161,8 +174,10 @@ export interface StructuredSubagentRequest {
 	 * `structured: true` keeps both, resolved as if this were `true`. Default `true`.
 	 */
 	structured?: boolean;
-	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
-	effort?: TaskEffort;
+	/** Explicit thinking selector for the child session; overrides the agent's default when set. */
+	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Per-spawn thinking effort mapped onto the resolved model's supported range; wins over {@link thinkingLevel}. */
+	effort?: TaskEffort | string;
 	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
 	solutionSpace?: string;
 	identity?: StructuredSubagentIdentity;
@@ -197,9 +212,22 @@ export interface StructuredSubagentRequest {
 	/** Workpool items accepted by the child yield tool during this turn. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
 	signal?: AbortSignal;
+	onResponse?: SimpleStreamOptions["onResponse"];
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Preserve the workflow's exact selected identity; no executor fallback or prewalk. */
+	strictModelIdentity?: boolean;
+	budgetGuard?: WorkflowBudgetGuard;
+	providerChargeKeys?: string[];
+	/** Devflow plan/code review requests `shadowReview: "code"`. */
+	shadowReview?: "code" | "off";
 	onProgress?: (progress: AgentProgress) => void;
 	/** See {@link ExecutorOptions.onToolResult}. */
 	onToolResult?: (result: SubagentToolResult) => void;
+	/**
+	 * When set, subagent tools are restricted to this allowlist (workflow scoped write/read policies).
+	 * Implies restrictToolNames for the executor session.
+	 */
+	allowedTools?: readonly string[];
 }
 
 /** A normalized preflight result, reusable by tests and adapters. */
@@ -236,6 +264,8 @@ export interface EffectiveSubagentPolicy {
 	enableIrc: boolean;
 	/** Caller `effort` hint to apply; dropped when the agent's level comes from the user's `^model:level` tag. */
 	effort?: TaskEffort;
+	performanceClass: SubagentPerformanceClass;
+	effectiveMaxRuntimeMs: number;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -246,6 +276,13 @@ export interface StructuredSubagentResult {
 	changesApplied: boolean | null;
 	artifactsDir: string;
 	temporaryArtifacts: boolean;
+	/** Machine-readable child→parent delivery packet when the child yielded one. */
+	deliveryEvidence?: ChildDeliveryEvidenceV1;
+	/**
+	 * Parent integrate classification over {@link deliveryEvidence}.
+	 * Always set after a settled run. Missing packets fail closed.
+	 */
+	parentIntegrateDecision: ParentIntegrateDecision;
 }
 
 /** Machine-readable failure category so adapters can retain their native errors. */
@@ -558,7 +595,16 @@ export async function resolveEffectiveSubagentPolicy(
 		}
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	let effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	// Workflow (and other adapters) may supply an explicit tool allowlist.
+	if (!planMode && request.allowedTools && request.allowedTools.length > 0) {
+		effectiveAgent = {
+			...effectiveAgent,
+			tools: [...request.allowedTools],
+			// Prevent recursive unrestricted fan-out under scoped write policies.
+			spawns: undefined,
+		};
+	}
 	// An agent declaring `structured: true` keeps its result contract when the caller opts out (`task.structured` off).
 	const structured = request.structured !== false || effectiveAgent.structured === true;
 	const schema = resolveSchema(request, effectiveAgent, structured);
@@ -633,6 +679,22 @@ export async function resolveEffectiveSubagentPolicy(
 			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
 		);
 	}
+	const performanceClass = resolveSubagentPerformanceClass({
+		agentName,
+		agentShadowReview: effectiveAgent.shadowReview,
+		spawnShadowReview: request.shadowReview,
+	});
+	const freshConfiguredMaxRuntimeMs = cfgTaskMaxRuntimeMs.get(request.session.settings);
+	let effectiveMaxRuntimeMs: number;
+	if (request.maxRuntimeMs !== undefined) {
+		effectiveMaxRuntimeMs = request.maxRuntimeMs;
+	} else if (request.invocationKind === "eval") {
+		effectiveMaxRuntimeMs = freshConfiguredMaxRuntimeMs;
+	} else if (freshConfiguredMaxRuntimeMs === 0) {
+		effectiveMaxRuntimeMs = 0;
+	} else {
+		effectiveMaxRuntimeMs = Math.min(freshConfiguredMaxRuntimeMs, resolveClassMaxRuntimeMs(performanceClass));
+	}
 	return {
 		discovery,
 		agentName,
@@ -664,7 +726,9 @@ export async function resolveEffectiveSubagentPolicy(
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
-		effort: userTaggedEffort ? undefined : request.effort,
+		effort: userTaggedEffort ? undefined : (request.effort as TaskEffort | undefined),
+		performanceClass,
+		effectiveMaxRuntimeMs,
 	};
 }
 
@@ -804,7 +868,7 @@ function buildExecutorOptions(
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		perCallModelGrants: policy.perCallModelGrants,
-		thinkingLevel: policy.effectiveAgent.thinkingLevel,
+		thinkingLevel: request.thinkingLevel ?? policy.effectiveAgent.thinkingLevel,
 		effort: policy.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
 		structured: policy.structured,
@@ -821,7 +885,7 @@ function buildExecutorOptions(
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
-		maxRuntimeMs: request.maxRuntimeMs,
+		maxRuntimeMs: policy.effectiveMaxRuntimeMs,
 		restrictToolNames,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
@@ -1147,6 +1211,22 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		}
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;
+		const deliveryEvidence = result.deliveryEvidence;
+		const packetDecision = classifyChildResultForParentIntegrate({
+			deliveryEvidence: deliveryEvidence ?? null,
+		});
+		// Packet-only at settle: never advertise integrate as decision-of-record
+		// without freshness/contract inputs (stale/codeVersion/requiredAcceptance).
+		const parentIntegrateDecision =
+			packetDecision.action === "integrate"
+				? {
+						classification: "stale_context" as const,
+						action: "reread_then_decide" as const,
+						reasons: ["packet_only_freshness_unchecked", ...packetDecision.reasons],
+						usedAuthorSelfAssessment: false as const,
+					}
+				: packetDecision;
+		result.parentIntegrateDecision = parentIntegrateDecision;
 		return {
 			result,
 			policy,
@@ -1154,6 +1234,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			changesApplied,
 			artifactsDir: lease.artifactsDir,
 			temporaryArtifacts: lease.temporary,
+			parentIntegrateDecision,
+			...(deliveryEvidence ? { deliveryEvidence } : {}),
 		};
 	} catch (error) {
 		if (error instanceof StructuredSubagentError) throw error;

@@ -56,6 +56,12 @@ export interface PrintModeOptions {
 export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 /** Error exits cannot hold automation for the full normal drain budget. */
 export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
+/**
+ * How often text print mode reminds that it is still waiting for the first
+ * model stream event. Cleared as soon as stream progress arrives (or the turn
+ * ends), so the line cannot outlive a real first event and mislabel later work.
+ */
+export const PRINT_MODE_WAITING_HEARTBEAT_MS = 60_000;
 /** Largest setTimeout delay before 32-bit overflow (Node/Bun fire in ~1 ms past this). */
 const MAX_TIMER_MS = 2_147_483_647;
 /** Exit status of a run the cost gate stopped (`--max-cost` / `session.maxCost` reached). */
@@ -231,6 +237,22 @@ async function runPrintModeCore(
 			// every later diagnostic and reject the awaited tail below.
 			.catch(() => {});
 	};
+	// Text-mode first-event wait heartbeat. Declared before dispatch/subscribe
+	// so abort, retry, and stream-progress paths can clear the same timer.
+	let waitingHeartbeat: ReturnType<typeof setInterval> | undefined;
+	const clearWaitingHeartbeat = (): void => {
+		if (waitingHeartbeat === undefined) return;
+		clearInterval(waitingHeartbeat);
+		waitingHeartbeat = undefined;
+	};
+	const armWaitingHeartbeat = (): void => {
+		if (mode !== "text") return;
+		clearWaitingHeartbeat();
+		waitingHeartbeat = setInterval(() => {
+			writeStderrLine("Still waiting for the first model event...");
+		}, PRINT_MODE_WAITING_HEARTBEAT_MS);
+		waitingHeartbeat.unref?.();
+	};
 	// Route slash input through the shared dispatcher so builtins run locally
 	// (e.g. `/mcp reauth <name>` opens the browser) instead of prompting the
 	// model with the literal text. Unknown or non-slash input falls through to
@@ -325,24 +347,31 @@ async function runPrintModeCore(
 		if (parsed.name === "retry" && !(await prepareAgentTurn())) {
 			// The strict gate refused the turn the command would schedule:
 			// reported, consumed without executing, and the run exits 1.
+			clearWaitingHeartbeat();
 			return true;
 		}
 		const { executeAcpBuiltinSlashCommand } = await import("../slash-commands/acp-builtins");
 		const refusalBeforeCommand = session.costCapRefusal;
-		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
-		// The allow-list only matches registered commands, so `false` (not a
-		// command) and a `{ prompt }` residual cannot occur; stay defensive.
-		if (result === false || "prompt" in result) return false;
-		if (result.failed) builtinFailed = true;
-		// A builtin that scheduled a real agent turn (`/retry`) admitted that
-		// turn: its answer (and stop reason) belong to this run.
-		if (result.agentInvoked) {
-			admittedAgentTurn = true;
-			costCapRefusalBeforeTurn = refusalBeforeCommand;
+		try {
+			const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
+			// The allow-list only matches registered commands, so `false` (not a
+			// command) and a `{ prompt }` residual cannot occur; stay defensive.
+			if (result === false || "prompt" in result) return false;
+			if (result.failed) builtinFailed = true;
+			// A builtin that scheduled a real agent turn (`/retry`) admitted that
+			// turn: its answer (and stop reason) belong to this run.
+			if (result.agentInvoked) {
+				admittedAgentTurn = true;
+				costCapRefusalBeforeTurn = refusalBeforeCommand;
+			}
+			// A recovery command may have repaired a server the strict gate
+			// failed on, so the gate re-evaluates before the next model turn.
+			return true;
+		} finally {
+			// `/retry` arms the waiting heartbeat above but never enters `promptTurn`,
+			// whose `finally` would otherwise clear it.
+			if (parsed.name === "retry") clearWaitingHeartbeat();
 		}
-		// A recovery command may have repaired a server the strict gate
-		// failed on, so the gate re-evaluates before the next model turn.
-		return true;
 	};
 
 	// Discriminates a store failure from any other dispose rejection below.
@@ -357,6 +386,17 @@ async function runPrintModeCore(
 
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
+		// First semantic stream progress ends the pre-first-event wait; keep the
+		// heartbeat wording accurate and stop it on abort/completion markers too.
+		if (
+			event.type === "message_start" ||
+			event.type === "message_update" ||
+			event.type === "tool_execution_start" ||
+			event.type === "turn_end" ||
+			event.type === "agent_end"
+		) {
+			clearWaitingHeartbeat();
+		}
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
@@ -374,7 +414,16 @@ async function runPrintModeCore(
 		} else if (event.type === "auto_retry_start") {
 			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying
 			// (offline, an outage) must say why instead of looking like a slow answer.
+			clearWaitingHeartbeat();
 			writeStderrLine(`Retrying (${event.attempt}/${event.maxAttempts}): ${singleLine(event.errorMessage)}`);
+		} else if (event.type === "retry_fallback_applied") {
+			// A silent model swap would mask live-suite pin failures (acceptance A3) and
+			// hide the effective model on authorized hang fallbacks (acceptance B3).
+			// JSON mode already emitted this event on stdout above; text mode logs the swap.
+			const reason = event.reason ? ` (${singleLine(event.reason)})` : "";
+			writeStderrLine(
+				`Falling back (${singleLine(event.role)}): ${singleLine(event.from)} → ${singleLine(event.to)}${reason}`,
+			);
 		}
 	});
 
@@ -449,6 +498,7 @@ async function runPrintModeCore(
 			return false;
 		}
 		writeTextWorkingIndicator();
+		armWaitingHeartbeat();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		return true;
 	};
@@ -457,9 +507,13 @@ async function runPrintModeCore(
 		if (!(await prepareAgentTurn())) return;
 		admittedAgentTurn = true;
 		costCapRefusalBeforeTurn = session.costCapRefusal;
-		await logger.time("print:prompt", () =>
-			images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
-		);
+		try {
+			await logger.time("print:prompt", () =>
+				images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
+			);
+		} finally {
+			clearWaitingHeartbeat();
+		}
 	};
 
 	// Inputs run in order. The merged stdin/@file message is never dispatched
@@ -612,6 +666,9 @@ async function runPrintModeCore(
 	// agent_end and late JSON advisor events) has drained; process.exit would
 	// otherwise discard the buffered tail and truncate the last record.
 	await stdoutTail;
+	// Safety net: prompt/retry finally and stream-progress clears cover the live
+	// turn; dispose still clears any stray interval after advisor drain.
+	clearWaitingHeartbeat();
 	// Dispose before returning the status instead of hard-exiting ahead of it:
 	// the awaited `dispose()` runs the browser reaper (releaseTabsForOwner), so
 	// an OMP-owned Chromium cannot survive the exit (issue #5643).

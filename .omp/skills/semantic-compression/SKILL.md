@@ -1,11 +1,11 @@
 ---
 name: semantic-compression
-description: Re-encode verbose prose into a dense telegraphic register — punctuation as connectives, label frames, verbless assertions — without losing normativity or precision. Use when compressing system prompts, tool/function descriptions, skill bodies, or agent instructions; reducing token count or context bloat; making documentation token-efficient for LLM input; or rewriting text in compressed notation.
+description: Re-encode existing prompt, skill, or tool prose into a dense telegraphic register. Not for writing new prompts from scratch.
 ---
 
 # Semantic Compression
 
-Compression is **re-encoding, not word deletion**. Filtering function words out of an English sentence leaves a damaged English sentence (`System design: efficient process incoming data, multiple sources`). Instead re-frame each claim in a register whose grammar is punctuation and layout — then the function words have no work left and drop out on their own.
+Compression is **re-encoding, not word deletion**. Target texts are load-bearing: a model executes them cold.
 
 Target texts are load-bearing: tool descriptions, system prompts, skills. A model executes them cold, with no author present to disambiguate. Compression that forces a guess is a bug, not a saving.
 

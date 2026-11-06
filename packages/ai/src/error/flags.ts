@@ -12,6 +12,7 @@ import {
 	isAccountScopedCapText,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
+	isPermanentBillingFailureText,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseRateLimitReason,
@@ -226,6 +227,8 @@ export function isCodexSteerRejection(message: { api?: Api; errorMessage?: strin
  * TLS), which must stay at least as retryable as the bare `Connection error.`
  * text they replaced.
  */
+const RATE_LIMIT_PROSE_PATTERN = /too many requests|rate.?limit/i;
+export const BAD_RESPONSE_STATUS_CODE_PATTERN = /bad[_ -]?response[_ -]?status[_ -]?code/i;
 export const TRANSIENT_TRANSPORT_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|temporar(?:y|ily)[ _-]?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|use of closed network connection|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|\bE(?:TIMEOUT|NOTFOUND|NETUNREACH|HOSTUNREACH)\b|\bFailedToOpenSocket\b|no internet connection|couldn.?t reach|couldn.?t connect to|tls certificate verification failed|malformed.?function.?call/i;
 const AUTH_FAILURE_PATTERN =
@@ -502,6 +505,12 @@ export function is(id: number | undefined, flag: Flag): boolean {
 export function retriable(id: number | undefined, opts?: { replayUnsafe?: boolean }): boolean {
 	if (is(id, Flag.ContentBlocked)) return false;
 	if (is(id, Flag.PayloadRejected)) return false;
+	// A 503 auth_unavailable sets Transient from the status token. That auth
+	// failure is not a same-model backoff. UsageLimit still rotates: "401
+	// Insufficient balance" is both AuthFailed and UsageLimit. Classification
+	// strips Transient from genuine auth failures, so an AuthFailed id that kept
+	// Transient is rate-limit prose quoting an auth code and stays retriable.
+	if (is(id, Flag.AuthFailed) && !is(id, Flag.UsageLimit) && !is(id, Flag.Transient)) return false;
 	if (opts?.replayUnsafe) return false;
 	if (is(id, Flag.MalformedFunctionCall)) return true;
 	return ((id ?? 0) & RETRIABLE_KINDS) !== 0;
@@ -695,9 +704,10 @@ function classifyText(
 		// as isProviderRetryableError. classify() carries the outer terminal status
 		// down the cause chain so a wrapped phrase (ProviderHttpError 400 → cause
 		// "unexpected EOF") is caught here too.
+		const permanentBillingFailure = isPermanentBillingFailureText(errorMessage);
 		if (!isTerminalClientErrorStatus(statusClean)) {
-			if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
-			else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+			if (!permanentBillingFailure && isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
+			else if (!permanentBillingFailure && isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
 			// A stream truncation, transport-level stream drop, or forwarded Codex
 			// HTTP body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag
 			// it explicitly so AIError.retriable and the turn-recovery layer treat it
@@ -832,7 +842,7 @@ export function classify(error: unknown, api?: Api): number {
 				if ((linkKinds & Flag.UsageLimit) === 0) {
 					linkKinds |= Flag.Transient;
 				}
-			} else if (codeStatus >= 500) {
+			} else if (codeStatus >= 500 && !isPermanentBillingFailureText(link.message)) {
 				linkKinds |= Flag.Transient;
 			}
 			kinds |= linkKinds;
@@ -859,6 +869,7 @@ export function classify(error: unknown, api?: Api): number {
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
+	if ((kinds & Flag.AuthFailed) !== 0) kinds &= ~(Flag.Transient | Flag.Timeout);
 	return kinds !== 0 ? create(kinds) : (status(error) ?? 0);
 }
 
@@ -1027,6 +1038,16 @@ export function classifyMessage(message: {
 		// because the same prompt reproduces the same malformed output, so the agent-level
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
+	}
+	// Auth / permanent-billing failures never same-model back off. Rate-limit
+	// prose that merely mentions an auth code ("Too many requests (401 from …)")
+	// stays a transient rate limit.
+	if (
+		classificationMessage &&
+		((isAuthFailureText(classificationMessage) && !RATE_LIMIT_PROSE_PATTERN.test(classificationMessage)) ||
+			isPermanentBillingFailureText(classificationMessage))
+	) {
+		kinds &= ~(Flag.Transient | Flag.Timeout);
 	}
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 

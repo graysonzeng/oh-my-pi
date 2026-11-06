@@ -27,6 +27,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { ArtifactManager } from "../../session/artifacts";
 import type { BlobPutOptions, BlobPutResult } from "../../session/blob-store";
 import type { SessionEntry, SessionHeader, SessionTreeNode, UsageStatistics } from "../../session/session-entries";
+import { EMPTY_LINEAGE_CONTEXT, type LineageContext } from "../../session/session-lineage";
 import type { ReadonlySessionManager } from "../../session/session-manager";
 import { isMainThread } from "../identity";
 import type { RpcCodec } from "../rpc";
@@ -99,6 +100,13 @@ export class ToolContextSessionView implements ReadonlySessionManager {
 
 	getSessionFile(): string | undefined {
 		return this.#wire.sessionFile;
+	}
+
+	async getLineageContext(): Promise<LineageContext> {
+		const file = this.getSessionFile();
+		if (!file) return EMPTY_LINEAGE_CONTEXT;
+		// Worker-side views only know the current session file; ancestor walk stays on main.
+		return { currentSessionFile: file, lineageRoots: [] };
 	}
 
 	getSessionName(): string | undefined {

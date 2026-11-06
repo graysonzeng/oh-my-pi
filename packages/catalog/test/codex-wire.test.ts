@@ -5,6 +5,7 @@ import {
 	getCodexResidency,
 	JWT_CLAIM_PATH,
 	OPENAI_HEADERS,
+	resolveCodexResponsesUrl,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 
 function codexToken(auth: Record<string, unknown>): string {
@@ -72,5 +73,21 @@ describe("getCodexResidency", () => {
 		const configured = { "X-OpenAI-Internal-Codex-Residency": "eu" };
 		applyCodexResidencyHeader(configured, token);
 		expect(configured).toEqual({ "X-OpenAI-Internal-Codex-Residency": "eu" });
+	});
+});
+
+describe("resolveCodexResponsesUrl", () => {
+	it("routes to /codex/responses by default and /responses when endpoint is standard", () => {
+		expect(resolveCodexResponsesUrl("https://c.688663.xyz/v1")).toBe("https://c.688663.xyz/v1/codex/responses");
+		expect(resolveCodexResponsesUrl("https://c.688663.xyz/v1", "standard")).toBe("https://c.688663.xyz/v1/responses");
+		expect(resolveCodexResponsesUrl("https://c.688663.xyz/v1/codex/responses", "standard")).toBe(
+			"https://c.688663.xyz/v1/responses",
+		);
+		expect(resolveCodexResponsesUrl("https://c.688663.xyz/v1/responses", "standard")).toBe(
+			"https://c.688663.xyz/v1/responses",
+		);
+		expect(resolveCodexResponsesUrl("https://chatgpt.com/backend-api/codex", "codex")).toBe(
+			"https://chatgpt.com/backend-api/codex/responses",
+		);
 	});
 });

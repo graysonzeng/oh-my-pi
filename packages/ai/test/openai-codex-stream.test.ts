@@ -446,6 +446,91 @@ describe("openai-codex streaming", () => {
 		]);
 	});
 
+	it("routes prewarm and SSE requests to /responses when codexResponsesEndpoint is standard", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const context = createCodexTestContext();
+		const requestedUrls: string[] = [];
+		const wsUrls: string[] = [];
+		const sse = createCompletedCodexSse("Hello");
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			requestedUrls.push(typeof input === "string" ? input : input.toString());
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+
+		class RecordingWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				wsUrls.push(url);
+				this.scheduleOpen();
+			}
+		}
+		global.WebSocket = RecordingWebSocket as unknown as typeof WebSocket;
+
+		const prewarmModel: Model<"openai-codex-responses"> = buildModel({
+			id: "gpt-6.1-sol",
+			name: "gpt-6.1-sol",
+			api: "openai-codex-responses",
+			provider: "gateway",
+			baseUrl: "https://gateway.example.com/v1",
+			compat: { codexResponsesEndpoint: "standard" },
+			reasoning: true,
+			preferWebsockets: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 128000,
+		});
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		try {
+			await prewarmOpenAICodexResponses(prewarmModel, {
+				apiKey: token,
+				sessionId: "ws-standard-endpoint",
+				providerSessionState,
+			});
+			expect(wsUrls).toEqual(["wss://gateway.example.com/v1/responses"]);
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
+
+		for (const baseUrl of [
+			"https://gateway.example.com/v1",
+			"https://gateway.example.com/v1/responses",
+			"https://gateway.example.com/v1/codex",
+			"https://gateway.example.com/v1/codex/responses",
+		]) {
+			const model: Model<"openai-codex-responses"> = {
+				...buildModel({
+					id: "gpt-6.1-sol",
+					name: "gpt-6.1-sol",
+					api: "openai-codex-responses",
+					provider: "gateway",
+					baseUrl,
+					compat: { codexResponsesEndpoint: "standard" },
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 128000,
+				}),
+				preferWebsockets: false,
+			};
+			const result = await streamOpenAICodexResponses(model, context, {
+				apiKey: token,
+				fetch: fetchMock as FetchImpl,
+			}).result();
+			expect(result.stopReason).toBe("stop");
+		}
+
+		expect(requestedUrls).toEqual([
+			"https://gateway.example.com/v1/responses",
+			"https://gateway.example.com/v1/responses",
+			"https://gateway.example.com/v1/responses",
+			"https://gateway.example.com/v1/responses",
+		]);
+	});
+
 	it("omits chatgpt account headers for opaque custom provider API keys", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

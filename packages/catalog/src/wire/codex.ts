@@ -21,6 +21,32 @@ export function isOfficialCodexApiUrl(baseUrl: string | undefined): boolean {
 	}
 }
 
+/** Responses path mode for `openai-codex-responses` transports; see `OpenAICompat.codexResponsesEndpoint`. */
+export type CodexResponsesEndpoint = "codex" | "standard";
+
+/**
+ * Resolve the Codex Responses URL shared by chat, prewarm, compaction, and search transports.
+ * - `"codex"` (default): `/codex/responses` on the official ChatGPT Codex backend.
+ * - `"standard"`: `/responses` for generic Responses gateways that 404 on `/codex/responses`.
+ */
+export function resolveCodexResponsesUrl(
+	baseUrl: string | undefined,
+	endpoint: CodexResponsesEndpoint = "codex",
+): string {
+	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : CODEX_BASE_URL;
+	const normalized = raw.replace(/\/+$/, "");
+	if (endpoint === "standard") {
+		if (normalized.endsWith("/codex/responses"))
+			return `${normalized.slice(0, -"/codex/responses".length)}/responses`;
+		if (normalized.endsWith("/responses")) return normalized;
+		if (normalized.endsWith("/codex")) return `${normalized.slice(0, -"/codex".length)}/responses`;
+		return `${normalized}/responses`;
+	}
+	if (normalized.endsWith("/codex/responses")) return normalized;
+	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
+	return `${normalized}/codex/responses`;
+}
+
 /**
  * Pinned OpenAI Codex client version (corresponds to @openai/codex package version).
  * Updated from npm by `bun run check-spoofed-versions --update`.
