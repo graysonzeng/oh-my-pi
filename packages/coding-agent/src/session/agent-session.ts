@@ -315,7 +315,7 @@ import {
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import { resolveConsultSelection } from "../tools/consult-model";
-import { type ConsultDetails, type ConsultUsage } from "../tools/consult-state";
+import { type ConsultDetails, type ConsultUsage, resetConsultSession, resetConsultTurn } from "../tools/consult-state";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -4871,6 +4871,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		if (event.type === "turn_start") {
+			resetConsultTurn(this);
 			this.#advisors.onPrimaryTurnStart();
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, this.#goalUsage());
 		}
@@ -8523,6 +8524,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Drop mutable tool decisions and directives owned by the previous logical session. */
 	#clearSessionScopedToolState(): void {
+		resetConsultSession(this);
 		this.agent.clearDeferredToolDirectives();
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
@@ -12579,6 +12581,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
+			resetConsultSession(this);
 			// The fork clones the transcript and keeps this recovery state running
 			// under a fresh id, so the work already produced is still this session's.
 			this.#recovery.reanchorServedAttribution(previousSessionId);

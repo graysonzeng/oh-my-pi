@@ -4683,8 +4683,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			checkAbort();
 			if (!registryFromParent) {
 				modelRegistry.refreshInBackground();
-			} else {
-				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
+			} else if (typeof modelRegistry.refreshIfStale === "function") {
+				await awaitAbortable(modelRegistry.refreshIfStale().catch(() => false));
 			}
 			checkAbort();
 
