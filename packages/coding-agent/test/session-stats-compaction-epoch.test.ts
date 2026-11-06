@@ -12,7 +12,8 @@ import { SessionStatsTracker } from "@oh-my-pi/pi-coding-agent/session/session-s
  * post-cutoff anchors after mid-run rebase — not a durable "times compacted"
  * field. B1 cross-100k fixtures can show `type=compaction` success with both
  * assistants stamped `compactionEpoch: 0` when turn2 runs in a new AgentSession
- * (CLI continue / process restart). Durable success is the JSONL compaction entry.
+ * (CLI continue / process restart). Same-process after successful rebase always
+ * advances (≥ 1). Durable success is the JSONL compaction entry.
  */
 describe("SessionStatsTracker compactionEpoch process-local contract", () => {
 	let authStorage: AuthStorage;

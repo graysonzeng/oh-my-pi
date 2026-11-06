@@ -411,8 +411,9 @@ export class SessionStatsTracker {
 	 *
 	 * Not a durable "times compacted" counter: JSONL `type=compaction` entries
 	 * are the authoritative success record across process boundaries. An
-	 * assistant stamped `compactionEpoch: 0` after a prior handoff does not
-	 * mean compaction failed or was skipped.
+	 * assistant stamped `compactionEpoch: 0` after a prior handoff (new process /
+	 * continue) does not mean compaction failed or was skipped. Same-process
+	 * stamps after a successful {@link rebaseAfterCompaction} are always ≥ 1.
 	 */
 	get compactionEpoch(): number {
 		return this.#compactionEpoch;
