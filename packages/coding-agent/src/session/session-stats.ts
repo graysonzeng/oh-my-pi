@@ -402,9 +402,17 @@ export class SessionStatsTracker {
 	}
 
 	/**
-	 * Monotonic compaction epoch, bumped whenever history is compacted. Stamped
-	 * onto each assistant snapshot at record time so {@link getContextBreakdown}
-	 * can reject a post-cutoff anchor whose usage predates the last compaction.
+	 * Process-local monotonic compaction epoch for this {@link SessionStatsTracker}
+	 * lifetime. Starts at 0 on every new tracker (including session continue /
+	 * reload) and is bumped only by {@link rebaseAfterCompaction} after a
+	 * successful in-process history rewrite. Stamped onto each assistant
+	 * snapshot at record time so {@link getContextBreakdown} can reject a
+	 * post-cutoff anchor whose usage predates the last in-process compaction.
+	 *
+	 * Not a durable "times compacted" counter: JSONL `type=compaction` entries
+	 * are the authoritative success record across process boundaries. An
+	 * assistant stamped `compactionEpoch: 0` after a prior handoff does not
+	 * mean compaction failed or was skipped.
 	 */
 	get compactionEpoch(): number {
 		return this.#compactionEpoch;
