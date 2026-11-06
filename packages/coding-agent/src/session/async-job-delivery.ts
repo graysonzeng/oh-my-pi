@@ -289,6 +289,7 @@ export function taskToolCallIdFromJob(
 		return item.taskToolCallId.trim();
 	}
 	return undefined;
+}
 
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
