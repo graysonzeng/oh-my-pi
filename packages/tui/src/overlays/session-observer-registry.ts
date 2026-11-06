@@ -20,6 +20,9 @@ export interface SubagentProgressPayload {
 	detached?: boolean;
 }
 
+/** Terminal completion provenance for a subagent run. Distinct from lifecycle `status`. */
+export type SubagentCompletionKind = "completed" | "budget_stop" | "timeout" | "hard_abort";
+
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
 export interface SubagentLifecyclePayload {
 	id: string;
@@ -27,6 +30,8 @@ export interface SubagentLifecyclePayload {
 	agentSource: AgentSource;
 	description?: string;
 	status: "started" | "completed" | "failed" | "aborted";
+	/** Required on terminal status (completed/failed/aborted); omit on `started`. */
+	completionKind?: SubagentCompletionKind;
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;
@@ -51,6 +56,8 @@ export interface ObservableSession {
 	agent?: string;
 	description?: string;
 	status: "active" | "completed" | "failed" | "aborted";
+	/** Terminal provenance; omit while `status` is `active`. */
+	completionKind?: SubagentCompletionKind;
 	sessionFile?: string;
 	parentToolCallId?: string;
 	/**
@@ -230,6 +237,8 @@ export class SessionObserverRegistry {
 							// A kept-alive or parked agent's next turn restarts its clock; the prior turn's
 							// snapshot must not be aged across the idle gap before the new turn's first frame.
 							if (payload.status === "started") existing.progressAt = undefined;
+							if (payload.completionKind) existing.completionKind = payload.completionKind;
+							else if (status === "active") existing.completionKind = undefined;
 						} else {
 							this.#sessions.set(payload.id, {
 								id: payload.id,
@@ -238,6 +247,7 @@ export class SessionObserverRegistry {
 								agent: payload.agent,
 								description: payload.description,
 								status,
+								completionKind: payload.completionKind,
 								sessionFile: payload.sessionFile,
 								parentToolCallId: payload.parentToolCallId,
 								detached: payload.detached,

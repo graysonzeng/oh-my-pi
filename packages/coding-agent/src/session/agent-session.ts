@@ -53,6 +53,7 @@ import {
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
 	generateBranchSummary,
+	resolveBudgetReserveTokens,
 	type ShakeConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
@@ -95,6 +96,7 @@ import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-m
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { type EditStore, type PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	$env,
 	escapeXmlText,
@@ -114,12 +116,13 @@ import {
 	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
-import { frameDataBytesBudget, readerIncludesThinking } from "@oh-my-pi/snapcompact";
+import { frameDataBytesBudget, providerImageBudget, readerIncludesThinking } from "@oh-my-pi/snapcompact";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobManagerApi } from "../async";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
+import { countRecentToolResultErrors } from "../auto-thinking/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
@@ -127,6 +130,7 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	disabledProviderIds,
+	formatModelString,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
@@ -135,12 +139,14 @@ import {
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
-import { combine, type SettingsScope } from "../config/registry";
+import { combine, lookup, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
+import { cfgConsultAllowSameModel, cfgConsultEnabled, cfgConsultModel, cfgTierXai } from "../config/workflow-settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
 import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
+import { NestedToolScheduler } from "../eval/js/nested-scheduler";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
@@ -179,6 +185,13 @@ import {
 } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
+import {
+	adjacentShadow,
+	DSH_GOAL_HASH_SHADOW_CUSTOM_TYPE,
+	type GoalHashResetReason,
+	type GoalHashShadowV1,
+	hashGoalFinalString,
+} from "../goals/hash";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -223,6 +236,39 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import {
+	backgroundArmIdFromArms,
+	DSH_ARM_IDS,
+	deriveLatencyCombination,
+	freezeLatencyArmSnapshot,
+	type LatencyArmId,
+	type LatencyArmSnapshotV1,
+	resolveLatencyArmsFromSettings,
+} from "../latency/arms";
+import { applyAssignedDshArms, type DshAssignmentV1, type DshExperimentId } from "../latency/assignment";
+import {
+	buildParentFinalVerificationDetails,
+	canRecordTrustedParentFinal,
+	type ParentFinalVerificationDetails,
+	type ParentFinalVerificationSource,
+	type ParentFinalVerificationStatus,
+	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
+	parseParentFinalVerificationDetails,
+} from "../latency/parent-final-verification";
+import {
+	type AcceptanceAuthority,
+	buildAcceptanceContractRef,
+	resolveAttemptId,
+	resolveEpisodeRootFromBranch,
+	type TaskAttemptIdentity,
+} from "../latency/task-episode";
+import {
+	RUNTIME_BUILD_IDENTITY_CUSTOM_TYPE,
+	type RuntimeBuildIdentityV1,
+	runtimeBuildIdentityRef,
+} from "../latency/runtime-build-identity";
+import { type LatencyRolloutCohortStore } from "../latency/rollout-cohort";
+import { sha256Hex } from "../workflow/optimization-receipt";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
@@ -237,7 +283,7 @@ import {
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
-import type { ImageAttachmentEntry, ToolSession } from "../tools";
+import type { ImageAttachmentEntry, NestedToolExecutionEvent, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
@@ -268,6 +314,8 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
+import { resolveConsultSelection } from "../tools/consult-model";
+import { type ConsultDetails, type ConsultUsage, resetConsultSession, resetConsultTurn } from "../tools/consult-state";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -419,6 +467,7 @@ import {
 	type HookMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
+	invalidateConvertToLlmArrayCache,
 	isEmptyErrorTurn,
 	titleContextWordCount,
 	isUserAuthoredMessage,
@@ -461,6 +510,13 @@ import {
 	SessionAdvisors,
 	type SessionAdvisorsHost,
 } from "./session-advisors";
+import {
+	applyContextBudgetCandidate,
+	type DescriptorPlacementDecision,
+	type OrdinaryTaskObligation,
+	type ResolvedModelOptimization,
+	type SessionContextStrategy,
+} from "../model-optimization";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import {
@@ -506,6 +562,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
+import { effectiveCompactionSettings } from "./context-strategy-experiment";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -992,6 +1049,14 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 	return true;
 }
 
+import {
+	READ_OMITTED_CONTENT_TOOL_NAME,
+	admitRecoveryToolResult,
+	parseRecoveryEnvelope,
+	type RecoveryPageDetails,
+} from "./omitted-content";
+export { READ_OMITTED_CONTENT_TOOL_NAME, admitRecoveryToolResult, parseRecoveryEnvelope, type RecoveryPageDetails };
+
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Cross-thread identity token (`${homeThreadId}:${snowflake}`), unique per
@@ -1123,6 +1188,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** A single model-only notebook reminder queued for the current prompt generation. */
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
 	#planModeState: PlanModeState | undefined;
+	/** Session-scoped `/consult <model>` override; undefined = follow `consult.model`. */
+	#consultModelOverride: string | undefined;
+	#reconcileModelOptimization: ((model: Model) => Promise<ResolvedModelOptimization>) | undefined;
+	#applyModelOptimizationRuntime: ((resolved: ResolvedModelOptimization) => void) | undefined;
+	#resolveInlineToolDescriptors: ((modelId: string | undefined) => boolean) | undefined;
+	#activeModelOptimization: ResolvedModelOptimization = {};
+	#modelOptimizationDirty = true;
+	#pruneToolDescriptions = false;
+	#ordinaryTaskObligations: OrdinaryTaskObligation[] = [];
+
+	consultUsage: ConsultUsage = { turn: 0, session: 0 };
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
@@ -1304,6 +1380,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	#latencyArmSnapshot: LatencyArmSnapshotV1 | undefined;
+	/** Arms that actually engaged during this run (treatment receipts for causal rollback). */
+	#firedLatencyArms = new Set<LatencyArmId>();
+	/**
+	 * Live workspace code fingerprint for ordinary acceptance invalidation.
+	 * When set and different from a receipt's codeState, that pass is treated failed.
+	 */
+	#workspaceCodeFingerprint: string | null = null;
+	#goalContextHash: string | undefined;
+	#goalHashResetReason: GoalHashResetReason = "none";
+	#lastGoalHashShadow: GoalHashShadowV1 | undefined;
+	#dshGoalInjected: boolean | null = null;
+	#dshAdjacentIdentical: boolean | null = null;
+	#dshGetBranchError = false;
+	#dshAssignment: DshAssignmentV1 | undefined;
+	#dshExecutionIds = new Map<DshExperimentId, string>();
+	#latencyRolloutStore: LatencyRolloutCohortStore | undefined;
+	#allowHeadlessGoalContinuation = false;
+
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
 	readonly #ttsr: TtsrCoordinator;
@@ -2116,6 +2211,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Live generation tok/s for the working row; fed by this session's own streamed deltas. */
+	#codeModeState: { namespacesInfo?: unknown } = {};
+	#nestedToolScheduler = new NestedToolScheduler();
 	readonly tokenRate: TokenRateMeter;
 
 	constructor(config: AgentSessionConfig) {
@@ -2132,6 +2229,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
+		this.consultUsage = config.consultUsage ?? this.consultUsage;
+		this.#latencyArmSnapshot = config.latencyArmSnapshot;
+		this.#dshAssignment = config.dshAssignment;
+		if (config.dshExecutionIds) this.#dshExecutionIds = config.dshExecutionIds;
+		this.#latencyRolloutStore = config.latencyRolloutStore;
+		this.#allowHeadlessGoalContinuation = config.allowHeadlessGoalContinuation === true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#disableModelFallback = config.disableModelFallback === true;
@@ -2276,7 +2379,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionId: () => this.sessionId,
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
-			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
+			syncAfterModelChange: previousEditMode => this.#syncAfterModelChange(previousEditMode),
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
 				await this.#setModelWithProviderSessionReset(model);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
@@ -2288,6 +2391,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			emit: event => this.#emit(event),
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
+			agentKind: () => this.#agentKind,
+			recentToolFailureCount: window => countRecentToolResultErrors(this.agent.state.messages, window),
+			contextUsagePercent: () => {
+				const percent = this.getContextUsage()?.percent;
+				return typeof percent === "number" && Number.isFinite(percent) ? percent : undefined;
+			},
+			isLatencyArmEnabled: arm => this.isLatencyArmEnabled(arm),
+			markLatencyArmFired: arm => this.markLatencyArmFired(arm),
 		};
 		this.#models = new ModelControls(modelControlsHost, {
 			scopedModels: config.scopedModels,
@@ -2346,8 +2457,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
-			syncAfterModelChange: (previousEditMode, options) =>
-				this.#tools.syncAfterModelChange(previousEditMode, options),
+			syncAfterModelChange: (previousEditMode, options) => this.#syncAfterModelChange(previousEditMode, options),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, options) =>
@@ -2502,7 +2612,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				let turnError: unknown;
 				const inFlightEpoch = this.#beginInFlight();
 				try {
-					await this.agent.prompt(messages.length === 1 ? first : messages);
+					await this.#promptAgent(messages.length === 1 ? first : messages);
 				} catch (error) {
 					turnError = error;
 					throw error;
@@ -2585,6 +2695,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return thunks;
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
+		this.#pruneToolDescriptions = config.pruneToolDescriptions === true;
+		this.#reconcileModelOptimization = config.reconcileModelOptimization;
+		this.#applyModelOptimizationRuntime = config.applyModelOptimization;
+		this.#resolveInlineToolDescriptors = config.resolveInlineToolDescriptors;
+		this.#refreshInlineToolDescriptors();
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -2614,12 +2729,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
 			waitForUser: dialog => this.waitForUser(dialog),
+			getConsultModelOverride: () => this.#consultModelOverride,
+			setConsultModelOverride: pattern => {
+				this.#consultModelOverride = pattern;
+			},
+			setCodeModeNamespacesInfo: info => {
+				if (info === undefined) delete this.#codeModeState.namespacesInfo;
+				else this.#codeModeState.namespacesInfo = info;
+			},
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,
+			createSessionSearchTool: config.createSessionSearchTool,
+			createConsultTool: config.createConsultTool,
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -2692,7 +2817,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			promptSequence: () => this.#promptSequence,
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
-			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
+			discardAssistantTurn: async message => {
+				await this.#recovery.discardAssistantTurn(message);
+			},
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
@@ -2795,6 +2922,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			getActiveModel: () => this.model,
 			yieldQueue: this.yieldQueue,
 			obfuscator: () => this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
@@ -2964,6 +3092,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			resetAdvisorRuntimes: (reason, options) => this.#advisors.resetAllRuntimes(reason, options),
 			rebaseAdvisorPrefix: reason => this.#advisors.rebaseDeliveredPrefixes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
+			refreshLiveGoalModeContext: liveMessages => this.refreshLiveGoalModeContext(liveMessages),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -3039,7 +3168,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
-		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
+		cfgModelRoles.listen(this, () => {
+			this.#advisors.reconcileModelRoles();
+			void this.#tools.reconcileConsultTool().catch(error => {
+				logger.warn("consult reconcile after model role change failed", { error: String(error) });
+			});
+		});
+		const reconcileConsult = () => {
+			void this.#tools.reconcileConsultTool().catch(error => {
+				logger.warn("consult reconcile after setting change failed", { error: String(error) });
+			});
+		};
+		cfgConsultEnabled.listen(this, reconcileConsult);
+		cfgConsultAllowSameModel.listen(this, reconcileConsult);
+		cfgConsultModel.listen(this, reconcileConsult);
 		// Re-derive the active model's effective context window when the
 		// extended-context setting flips at runtime, or a per-model compaction
 		// point moves past (or back inside) a standard window or is switched on/off: the registry
@@ -3215,6 +3357,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		cfgTierOpenai.listen(this, tier => this.setServiceTierFamily("openai", serviceTierSettingToTier(tier)));
 		cfgTierAnthropic.listen(this, tier => this.setServiceTierFamily("anthropic", serviceTierSettingToTier(tier)));
 		cfgTierGoogle.listen(this, tier => this.setServiceTierFamily("google", serviceTierSettingToTier(tier)));
+		cfgTierXai.listen(this, tier => this.setServiceTierFamily("xai", serviceTierSettingToTier(tier)));
 		cfgAdvisorRuntimeInputs.listen(this, (next, previous) => {
 			// A budget/tier edit rebuilds a running advisor (both are part of its
 			// runtime signature) without overriding a session-only `/advisor` toggle.
@@ -4732,6 +4875,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		if (event.type === "turn_start") {
+			resetConsultTurn(this);
 			this.#advisors.onPrimaryTurnStart();
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, this.#goalUsage());
 		}
@@ -7324,6 +7468,61 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.advertisedEvalToolNames;
 	}
 
+	/** Tools left directly model-visible by Code Mode / PTC; undefined when inactive. */
+	getCodeModeDirectToolNames(): readonly string[] | undefined {
+		return this.#tools.getCodeModeDirectToolNames();
+	}
+
+	getNestedToolScheduler(): NestedToolScheduler {
+		return this.#nestedToolScheduler;
+	}
+
+	emitNestedToolExecution(event: NestedToolExecutionEvent): Promise<void> {
+		return this.#emitSessionEvent(event);
+	}
+
+	/**
+	 * True only when `read_omitted_content` is currently authorized in the live
+	 * tool set the next provider call would see.
+	 */
+	isRecoveryToolAuthorized(): boolean {
+		return this.agent.state.tools.some(tool => tool.name === READ_OMITTED_CONTENT_TOOL_NAME);
+	}
+
+	/**
+	 * Current branch entries for `read_omitted_content`, or `undefined` when
+	 * the session cannot serve recall right now.
+	 */
+	currentRecoveryEntries(): readonly SessionEntry[] | undefined {
+		if (this.isDisposed) return undefined;
+		return this.sessionManager.getBranch();
+	}
+
+	/**
+	 * Conservative pre-emission fit check for a recovery page.
+	 */
+	fitsRecoveryResult(content: readonly (TextContent | ImageContent)[]): boolean {
+		const model = this.agent.state.model;
+		const contextWindow = model?.contextWindow ?? 0;
+		if (!model || contextWindow <= 0) return false;
+		const tokenizer = this.agent.tokenizer;
+		const compactionSettings = effectiveCompactionSettings(this.settings, contextWindow);
+		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
+		const candidateMessage: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "",
+			toolName: READ_OMITTED_CONTENT_TOOL_NAME,
+			content: content as ToolResultMessage["content"],
+			isError: false,
+			timestamp: 0,
+		};
+		const anchoredContextTokens = this.getContextUsage({ contextWindow })?.tokens ?? 0;
+		if (anchoredContextTokens + tokenizer.countMessage(candidateMessage) > fitBudget) return false;
+		const imageCount = content.reduce((n, part) => n + (part.type === "image" ? 1 : 0), 0);
+		if (imageCount > 0 && providerImageBudget(model) <= 0) return false;
+		return true;
+	}
+
 	/** Whether a registry entry came from a built-in factory. */
 	hasBuiltInTool(name: string): boolean {
 		return this.#tools.hasBuiltInTool(name);
@@ -7338,6 +7537,364 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	reconcileBuiltinTools(options?: { refreshPrompt?: boolean }): Promise<void> {
 		return this.#tools.reconcileBuiltinTools(options);
+	}
+
+	async #syncAfterModelChange(
+		previousEditMode: EditModeSetting,
+		options?: { retryFallback?: boolean },
+	): Promise<void> {
+		const previousInline = this.#pruneToolDescriptions;
+		this.#refreshInlineToolDescriptors();
+		await this.#ensureModelOptimizationReconciled();
+		await this.#tools.syncAfterModelChange(previousEditMode, options);
+		if (previousInline !== this.#pruneToolDescriptions) await this.refreshBaseSystemPrompt();
+	}
+
+	get activeModelOptimizationProfileId(): string | undefined {
+		return this.#activeModelOptimization.profile?.id;
+	}
+
+	get modelOptimizationContextStrategy(): SessionContextStrategy | undefined {
+		return this.#activeModelOptimization.contextStrategy;
+	}
+
+	get inlineToolDescriptors(): boolean {
+		return this.#pruneToolDescriptions;
+	}
+
+	get descriptorPlacement(): DescriptorPlacementDecision {
+		return this.#pruneToolDescriptions ? "system_inline" : "provider_schema";
+	}
+
+	setInlineToolDescriptors(enabled: boolean): void {
+		this.#pruneToolDescriptions = enabled;
+		this.agent.setPruneToolDescriptions(() => this.#pruneToolDescriptions);
+	}
+
+	#refreshInlineToolDescriptors(): void {
+		if (this.#resolveInlineToolDescriptors) {
+			this.setInlineToolDescriptors(this.#resolveInlineToolDescriptors(this.model?.id));
+		} else {
+			this.agent.setPruneToolDescriptions(() => this.#pruneToolDescriptions);
+		}
+	}
+
+	async ensureModelOptimization(): Promise<void> {
+		this.#modelOptimizationDirty = true;
+		await this.#ensureModelOptimizationReconciled();
+	}
+
+	async #ensureModelOptimizationReconciled(): Promise<void> {
+		if (!this.#reconcileModelOptimization) {
+			this.#modelOptimizationDirty = false;
+			return;
+		}
+		if (!this.#modelOptimizationDirty) return;
+		this.#modelOptimizationDirty = false;
+		try {
+			await this.#applyModelOptimization(this.model ? await this.#reconcileModelOptimization(this.model) : {});
+		} catch (error) {
+			logger.warn("Model optimization reconcile failed; clearing optimization", {
+				provider: this.model?.provider,
+				model: this.model?.id,
+				error: String(error),
+			});
+			await this.#applyModelOptimization({});
+		}
+	}
+
+	async #applyModelOptimization(resolved: ResolvedModelOptimization): Promise<void> {
+		const previousFingerprint = this.#activeModelOptimization.promptBlockFingerprint;
+		const contextBudgetArmEnabled =
+			this.isLatencyArmEnabled("context_optimization") && this.isLatencyArmEnabled("context_budget_tuning");
+		const applied = applyContextBudgetCandidate(resolved, contextBudgetArmEnabled);
+		if (contextBudgetArmEnabled) this.markLatencyArmFired("context_budget_tuning");
+		this.#activeModelOptimization = applied;
+		this.#applyModelOptimizationRuntime?.(applied);
+		this.agent.setToolScheduling(applied.toolScheduling);
+		if (previousFingerprint !== applied.promptBlockFingerprint) {
+			this.#clearInheritedProviderPromptCacheKey();
+			await this.refreshBaseSystemPrompt();
+		}
+	}
+
+	async #promptAgent(messages: AgentMessage | AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+		await this.ensureModelOptimization();
+		await this.agent.prompt(messages, options);
+	}
+
+	registerOrdinaryTaskObligation(obligation: OrdinaryTaskObligation): void {
+		this.#ordinaryTaskObligations = [
+			...this.#ordinaryTaskObligations.filter(item => item.id !== obligation.id),
+			{ ...obligation, source: "extension" },
+		];
+	}
+
+	clearOrdinaryTaskObligation(id: string): void {
+		this.#ordinaryTaskObligations = this.#ordinaryTaskObligations.filter(item => item.id !== id);
+	}
+
+	/**
+	 * Reapplies the PTC/Code Mode partition after a setting or model change.
+	 */
+	reconcileCodeMode(): Promise<void> {
+		return this.#tools.reconcileCodeMode();
+	}
+
+	/** Current Code Mode `tool_namespaces_info` snapshot, or `undefined` when inactive. */
+	get codeModeNamespacesInfo(): unknown {
+		return this.#codeModeState.namespacesInfo;
+	}
+
+	setSessionSearchToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#tools.setSessionSearchToolEnabled(enabled);
+	}
+
+	setConsultToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#tools.setConsultToolEnabled(enabled);
+	}
+
+	setConsultModelOverride(pattern: string | undefined): Promise<boolean> {
+		return this.#tools.setConsultModelOverride(pattern);
+	}
+
+	getConsultModelOverride(): string | undefined {
+		return this.#consultModelOverride;
+	}
+
+	applyConsultEnabledChange(): Promise<boolean> {
+		return this.#tools.reconcileConsultTool();
+	}
+
+	async consultState(): Promise<{
+		enabled: boolean;
+		active: boolean;
+		model?: string;
+		error?: string;
+		sameModel?: boolean;
+		credentials: boolean;
+		turn: number;
+		session: number;
+		last?: ConsultDetails;
+		override?: string;
+	}> {
+		const enabled = cfgConsultEnabled.get(this.settings) === true;
+		const active = this.getEnabledToolNames().includes("consult");
+		const usage = {
+			turn: this.consultUsage.turn,
+			session: this.consultUsage.session,
+			last: this.consultUsage.last,
+			override: this.#consultModelOverride,
+		};
+		try {
+			const resolved = await resolveConsultSelection({
+				settings: this.settings,
+				modelRegistry: this.#modelRegistry,
+				getConsultModelOverride: () => this.#consultModelOverride,
+				getActiveModel: () => this.model,
+				getSessionId: () => this.sessionId,
+			});
+			return {
+				enabled,
+				active,
+				model: resolved.model ? formatModelString(resolved.model) : undefined,
+				error: resolved.ok ? undefined : resolved.error,
+				sameModel: resolved.sameModel,
+				credentials: resolved.ok || resolved.error === "same_model",
+				...usage,
+			};
+		} catch (error) {
+			logger.warn("consult state resolution failed", { error: String(error) });
+			return {
+				enabled,
+				active,
+				error: "provider_error",
+				credentials: false,
+				...usage,
+			};
+		}
+	}
+
+	#ensureLatencyArmSnapshot(): LatencyArmSnapshotV1 {
+		if (this.#latencyArmSnapshot) return this.#latencyArmSnapshot;
+		const live = resolveLatencyArmsFromSettings(path => lookup(path)?.get(this.settings) ?? false);
+		const arms = this.#dshAssignment ? applyAssignedDshArms(live, this.#dshAssignment) : live;
+		for (const arm of DSH_ARM_IDS) {
+			if (live[arm] === false) arms[arm] = false;
+		}
+		const dimensions = (this.#dshAssignment?.dimensions ?? []).map(slice => {
+			const treatment = slice.childArms.every(arm => arms[arm] === true);
+			return {
+				...slice,
+				treatment,
+				stopApplied: slice.stopApplied || (slice.assignedTreatment && !treatment),
+			};
+		});
+		const combination = dimensions.length > 0 ? {} : deriveLatencyCombination(arms);
+		this.#latencyArmSnapshot = freezeLatencyArmSnapshot({
+			arms,
+			...combination,
+			dimensions: dimensions.length > 0 ? dimensions : null,
+			backgroundArmId: backgroundArmIdFromArms(arms),
+			codeRevision: (() => {
+				const cwd = this.sessionManager.getCwd();
+				if (typeof cwd !== "string" || cwd.length === 0) return undefined;
+				try {
+					return vcs.requireGit(cwd).headSync()?.commit ?? undefined;
+				} catch {
+					return undefined;
+				}
+			})(),
+			configHash: this.#dshAssignment?.fingerprint ?? sha256Hex(JSON.stringify(arms)),
+		});
+		return this.#latencyArmSnapshot;
+	}
+
+	/** Session-frozen latency arm lookup for tools/workflow owners. */
+	isLatencyArmEnabled(arm: keyof LatencyArmSnapshotV1["arms"]): boolean {
+		return this.#ensureLatencyArmSnapshot().arms[arm] === true;
+	}
+
+	getLatencyArmSnapshot(): LatencyArmSnapshotV1 {
+		return this.#ensureLatencyArmSnapshot();
+	}
+
+	/** Record that a latency arm actually engaged; only fired arms are causally rollbackable. */
+	markLatencyArmFired(arm: LatencyArmId): void {
+		this.#firedLatencyArms.add(arm);
+	}
+
+	recordDshGetBranchError(): void {
+		this.#dshGetBranchError = true;
+	}
+
+	/** Arms that actually engaged during this run (treatment receipts). */
+	getFiredLatencyArms(): LatencyArmId[] {
+		return [...this.#firedLatencyArms];
+	}
+
+	tryRecordTrustedParentFinalVerification(input: {
+		status: ParentFinalVerificationStatus;
+		authority: AcceptanceAuthority;
+		acceptanceItems: readonly string[];
+		source?: ParentFinalVerificationSource;
+		verifiedAtMs?: number;
+		attempt?: Partial<TaskAttemptIdentity> | null;
+		codeState?: ParentFinalVerificationDetails["codeState"];
+		evidenceRefs?: readonly string[];
+		eventId?: string;
+		buildIdentity?: RuntimeBuildIdentityV1 | null;
+		/** When true, also persist the full build identity custom entry once. */
+		persistBuildIdentity?: boolean;
+	}):
+		| { recorded: true; entryId: string; details: ParentFinalVerificationDetails }
+		| { recorded: false; reason: string } {
+		const gate = canRecordTrustedParentFinal({
+			acceptanceItems: input.acceptanceItems,
+			authority: input.authority,
+			status: input.status,
+		});
+		if (!gate.ok) return { recorded: false, reason: gate.reason };
+
+		const acceptanceContract = buildAcceptanceContractRef(input.acceptanceItems);
+		if (!acceptanceContract) return { recorded: false, reason: "missing_acceptance_criteria" };
+
+		const sessionId = this.sessionManager.getSessionId();
+		const branch = this.sessionManager.getBranch();
+		const rootUserEntryId = input.attempt?.episode?.rootUserEntryId ?? resolveEpisodeRootFromBranch(branch);
+		if (!rootUserEntryId) {
+			return { recorded: false, reason: "missing_root_user_entry" };
+		}
+
+		if (
+			input.status === "passed" &&
+			(input.authority === "user_explicit" || input.authority === "extension") &&
+			!input.codeState?.fingerprint?.trim()
+		) {
+			return { recorded: false, reason: "missing_code_state" };
+		}
+
+		const attemptId = resolveAttemptId(input.attempt?.attemptId, input.eventId);
+		const attempt: TaskAttemptIdentity = {
+			episode: {
+				sessionId: input.attempt?.episode?.sessionId ?? sessionId,
+				rootUserEntryId,
+			},
+			attemptId,
+			workflowId: input.attempt?.workflowId ?? null,
+			branchLeafId: input.attempt?.branchLeafId ?? this.sessionManager.getLeafId(),
+			taskToolCallId: input.attempt?.taskToolCallId ?? null,
+			jobId: input.attempt?.jobId ?? null,
+			agentId: input.attempt?.agentId ?? null,
+		};
+
+		const verifiedAtMs = input.verifiedAtMs ?? Date.now();
+		const source: ParentFinalVerificationSource =
+			input.source ??
+			(input.authority === "workflow"
+				? "workflow"
+				: input.authority === "fixture"
+					? "fixture"
+					: input.authority === "extension" || input.authority === "user_explicit"
+						? "extension"
+						: "extension");
+
+		let buildIdentityRef: string | undefined;
+		if (input.buildIdentity) {
+			buildIdentityRef = runtimeBuildIdentityRef(input.buildIdentity);
+			if (input.persistBuildIdentity === true) {
+				this.sessionManager.appendCustomEntry(RUNTIME_BUILD_IDENTITY_CUSTOM_TYPE, input.buildIdentity);
+			}
+		}
+
+		const details = buildParentFinalVerificationDetails(input.status, source, verifiedAtMs, {
+			eventId: input.eventId,
+			attempt,
+			acceptanceContract,
+			codeState: input.codeState,
+			authority: input.authority,
+			buildIdentityRef,
+			evidenceRefs: input.evidenceRefs,
+		});
+		const entryId = this.sessionManager.appendCustomEntry(PARENT_FINAL_VERIFICATION_MESSAGE_TYPE, details);
+		if (input.codeState?.fingerprint?.trim()) {
+			this.#workspaceCodeFingerprint = input.codeState.fingerprint.trim();
+		}
+		return { recorded: true, entryId, details };
+	}
+
+	#effectiveParentFinalStatus(parsed: ParentFinalVerificationDetails): ParentFinalVerificationStatus {
+		if (parsed.status !== "passed") return parsed.status;
+		const ordinary =
+			parsed.authority === "user_explicit" ||
+			parsed.authority === "extension" ||
+			(parsed.authority === undefined && parsed.source === "extension");
+		if (!ordinary) return parsed.status;
+		const fingerprint = parsed.codeState?.fingerprint?.trim() ?? "";
+		if (!fingerprint) return "failed";
+		if (this.#workspaceCodeFingerprint && this.#workspaceCodeFingerprint !== fingerprint) {
+			return "failed";
+		}
+		return parsed.status;
+	}
+
+	/**
+	 * Update the live workspace fingerprint used to invalidate ordinary accepts
+	 * when code/task state drifts after a receipt was recorded.
+	 */
+	setWorkspaceCodeFingerprint(fingerprint: string | null | undefined): void {
+		const trimmed = typeof fingerprint === "string" ? fingerprint.trim() : "";
+		this.#workspaceCodeFingerprint = trimmed || null;
+	}
+
+	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
+	invalidateLatencyArmSnapshot(): void {
+		this.#clearLatencyArmSnapshot();
+		void this.setSessionSearchToolEnabled(this.#ensureLatencyArmSnapshot().arms.dsh_session_search === true);
+	}
+
+	#clearLatencyArmSnapshot(): void {
+		this.#latencyArmSnapshot = undefined;
 	}
 
 	/** Updates source provenance when a live registry entry is replaced or restored. */
@@ -7611,9 +8168,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	get compactionSpeculation(): "idle" | "running" | "armed" {
 		return this.#maintenance.speculationState;
 	}
-	/** Strip image content from the current branch and persist the rewrite. */
+	/**
+	 * Strip image content from the current branch and persist the rewrite.
+	 * Queues on the session mutation owner so the first live mutation defers
+	 * behind any pending publish/repair; the maintenance implementation's own
+	 * owner acquisition is reentrant inside this wrapper.
+	 */
 	dropImages(): Promise<{ removed: number; tokensFreed: number }> {
-		return this.#maintenance.dropImages();
+		return this.sessionManager.runExclusive(() => this.#maintenance.dropImages());
 	}
 
 	/** Reduce stored context with the selected shake strategy. */
@@ -7971,6 +8533,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Drop mutable tool decisions and directives owned by the previous logical session. */
 	#clearSessionScopedToolState(): void {
+		resetConsultSession(this);
 		this.agent.clearDeferredToolDirectives();
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
@@ -8217,14 +8780,75 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
-	#buildGoalModeMessage(): CustomMessage | null {
-		const content = this.#goalRuntime.buildActivePrompt();
-		if (!content) return null;
+	/**
+	 * After mid-run compaction, the next provider request must carry the current
+	 * structured goal. A kept goal message from an earlier objective is dropped
+	 * so that permission is not sent again as current state.
+	 */
+	async refreshLiveGoalModeContext(liveMessages?: AgentMessage[]): Promise<void> {
+		const state = this.#goalModeState;
+		if (!(state?.enabled === true && state.goal.status === "active")) return;
+		const current = this.#renderGoalModeContent();
+		if (!current) return;
+		this.#dropSupersededGoalContext(this.agent.state.messages, current);
+		if (liveMessages && liveMessages !== this.agent.state.messages) {
+			this.#dropSupersededGoalContext(liveMessages, current);
+		}
+		const visible = liveMessages ?? this.agent.state.messages;
+		if (visible.some(message => message.role === "custom" && message.customType === "goal-mode-context")) return;
+		this.#goalContextHash = undefined;
+		this.#goalHashResetReason = "compaction";
+		await this.sendGoalModeContext({ deliverAs: "aside" });
+	}
+
+	/** Remove goal-context messages that are not the current structured objective. */
+	#dropSupersededGoalContext(messages: AgentMessage[], current: string): void {
+		let removed = false;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (!message || message.role !== "custom" || message.customType !== "goal-mode-context") continue;
+			if (message.content === current) continue;
+			messages.splice(index, 1);
+			removed = true;
+		}
+		if (removed) invalidateConvertToLlmArrayCache(messages);
+	}
+
+	#renderGoalModeContent(): string | null {
+		const inner = this.#goalRuntime.buildActivePrompt();
+		if (!inner) return null;
 		const todoContext = this.#buildGoalTodoContext();
+		return prompt.render(goalModeContextPrompt, { goalContext: inner, todoContext });
+	}
+
+	#buildGoalModeMessage(): CustomMessage | null {
+		const content = this.#renderGoalModeContent();
+		if (!content) return null;
+		const snapshot = this.#ensureLatencyArmSnapshot();
+		if (snapshot.arms.dsh_goal_hash_shadow === true) {
+			const finalHash = hashGoalFinalString(content);
+			const injected = this.#goalContextHash === undefined;
+			const shadow = adjacentShadow(this.#lastGoalHashShadow, {
+				v: 1,
+				sessionId: this.sessionManager.getSessionId(),
+				goalId: this.#goalModeState?.goal.id ?? "",
+				snapshotFingerprint: snapshot.fingerprint,
+				finalHash,
+				injected,
+				resetReason: injected ? this.#goalHashResetReason : "none",
+			});
+			this.sessionManager.appendCustomEntry(DSH_GOAL_HASH_SHADOW_CUSTOM_TYPE, shadow);
+			this.markLatencyArmFired("dsh_goal_hash_shadow");
+			this.#lastGoalHashShadow = shadow;
+			this.#dshGoalInjected = this.#dshGoalInjected === true || injected;
+			this.#dshAdjacentIdentical = shadow.adjacentIdentical;
+			if (injected) this.#goalContextHash = finalHash;
+			if (!injected) return null;
+		}
 		return {
 			role: "custom",
 			customType: "goal-mode-context",
-			content: prompt.render(goalModeContextPrompt, { goalContext: content, todoContext }),
+			content,
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
@@ -9377,6 +10001,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#planReferenceSent = true;
 			}
 			try {
+				await this.ensureModelOptimization();
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
@@ -10284,12 +10909,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
-			const run = this.agent.prompt(message);
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
 			// prompt must keep parking through it — waking on this claim
 			// would admit them into a run whose output the client drops.
-			await run;
+			await this.#promptAgent(message);
 			await this.#waitForPostPromptRecovery();
 			return true;
 		} finally {
@@ -11984,6 +12608,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
+			resetConsultSession(this);
 			// The fork clones the transcript and keeps this recovery state running
 			// under a fresh id, so the work already produced is still this session's.
 			this.#recovery.reanchorServedAttribution(previousSessionId);
@@ -12544,16 +13169,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		// The rewound turn's reply is the exploration branch's newest, so this records its prompt.
 		const explorationPromptDigest = this.#tools.recordedPromptDigest();
-		this.#bash.withBranchTransition(() => {
+		await this.#bash.withBranchTransition(async () => {
 			try {
-				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
+				await this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
 					startedAt: checkpointState.startedAt,
 				});
 			} catch (error) {
 				logger.warn("Rewind branch checkpoint missing, falling back to root", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
+				await this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
 			}
 		});
 
@@ -13743,6 +14368,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				cfgTierOpenai.get(this.settings),
 				cfgTierAnthropic.get(this.settings),
 				cfgTierGoogle.get(this.settings),
+				cfgTierXai.get(this.settings),
 			);
 			// Restore the thinking selector. Each change persists the configured
 			// selector (`auto` or a concrete level), so prefer it: an `auto` session
@@ -13816,7 +14442,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return true;
 		} catch (error) {
-			this.sessionManager.restoreState(previousSessionState);
+			await this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
@@ -14027,7 +14653,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					await this.sessionManager.newSession({ parentSession: previousSessionFile });
 					if (title) await this.sessionManager.setSessionName(title, titleSource);
 				} else {
-					this.sessionManager.createBranchedSession(leafId, { copyArtifacts: options?.copyArtifacts });
+					await this.sessionManager.createBranchedSession(leafId, { copyArtifacts: options?.copyArtifacts });
 				}
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
@@ -14149,7 +14775,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
-				this.sessionManager.createBranchedSession(leafId);
+				await this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
@@ -14474,7 +15100,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		try {
 			if (summaryText) {
 				// Create summary at target position (can be null for root)
-				const summaryId = this.sessionManager.branchWithSummary(
+				const summaryId = await this.sessionManager.branchWithSummary(
 					newLeafId,
 					summaryText,
 					summaryDetails,
@@ -14482,9 +15108,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
 			} else if (newLeafId === null) {
-				this.sessionManager.resetLeaf();
+				await this.sessionManager.resetLeaf();
 			} else {
-				this.sessionManager.branch(newLeafId);
+				await this.sessionManager.branch(newLeafId);
 			}
 			this.#bash.markSessionTransition(bashTransition);
 			branchTransitioned = true;

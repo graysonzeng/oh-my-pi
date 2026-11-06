@@ -147,6 +147,9 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionStateApi } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
+import type { LatencyArmId, LatencyArmSnapshotV1 } from "./latency/arms";
+import { executionIdTable, prepareLatencySnapshot } from "./latency/prepare-snapshot";
+import { LatencyRolloutCohortStore, mintProcessScopedRolloutContext } from "./latency/rollout-cohort";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -314,6 +317,12 @@ import {
 } from "./tools";
 import { resolveYieldReportText } from "./tools/yield";
 import {
+	applyWorkflowToolSessionFields,
+	type WorkflowCommandPolicy,
+	type WorkflowToolOptimization,
+	type WorkflowWritePolicy,
+} from "./tools/workflow-session-fields";
+import {
 	createModelJobCaptionWriter,
 	createModelJobWidgetAuthor,
 	type JobCaptionWriter,
@@ -388,6 +397,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 } from "./session/settings";
+import { cfgTierXai } from "./config/workflow-settings";
 import { cfgInterruptMode } from "./modes/settings";
 import { cfgFollowUpMode } from "./modes/settings";
 import { cfgSteeringMode } from "./modes/settings";
@@ -859,6 +869,13 @@ export interface CreateAgentSessionOptions {
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
 	restrictToolNames?: boolean;
 	/**
+	 * Isolated child session (Shadow Mind). Skips inline factories, extension
+	 * discovery, MCP, LSP, skills/commands discovery, and preload forwarding.
+	 * Keeps caller `customTools` and `toolNames`. Does not change
+	 * {@link restrictToolNames} semantics for other callers.
+	 */
+	isolatedChild?: boolean;
+	/**
 	 * Permit only caller-supplied SDK custom tools inside a restricted session.
 	 * They must still be named in {@link toolNames}; discovered extensions, MCP,
 	 * and ambient custom tools remain disabled. Default: false.
@@ -1005,6 +1022,16 @@ export interface CreateAgentSessionOptions {
 	telemetry?: AgentTelemetryConfig;
 
 	/**
+	 * Workflow-scoped tool session fields (from prepareWorkflowInvocation via
+	 * structured-subagent ExecutorOptions). Applied to the ToolSession before
+	 * createTools so wrapAgentToolWithWorkflowAliases sees argumentAliases and
+	 * bash/read/grep honor processResult / path policies.
+	 */
+	workflowToolOptimization?: WorkflowToolOptimization;
+	workflowWritePolicy?: WorkflowWritePolicy;
+	workflowCommandPolicy?: WorkflowCommandPolicy;
+
+	/**
 	 * Fired once, when the agent loop hands its first request to the provider
 	 * transport (i.e. the `streamFn` wrapper is first invoked). Used to measure
 	 * subagent launch latency — the boundary between "session built" and "model
@@ -1013,6 +1040,11 @@ export interface CreateAgentSessionOptions {
 	 * requests, follows it), which is the right granularity for launch timing.
 	 */
 	onFirstChatDispatch?: () => void;
+
+	/** Runner capability for DSH A4. TUI interactive main is false; extra/headless/task true. */
+	allowHeadlessGoalContinuation?: boolean;
+	/** Shared process-scoped rollout store. New stores without this context must not mint a bootNonce. */
+	latencyRolloutStore?: LatencyRolloutCohortStore;
 
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
@@ -1958,6 +1990,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const agentDir = options.agentDir ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
 	const subagentEventBus = options.subagentEventBus ?? new EventBus();
+	const isolatedChild = options.isolatedChild === true;
 
 	registerSshCleanup();
 	registerEvalCleanup();
@@ -2075,7 +2108,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		excludeAgentsMd ? withoutAgentsMd(files) : files;
 	const pinnedContextFiles = options.contextFiles
 		? contextFileFilter(options.contextFiles)
-		: options.noContextFiles
+		: options.noContextFiles || isolatedChild
 			? []
 			: undefined;
 	const contextFilesPromise = pinnedContextFiles
@@ -2098,11 +2131,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	advisorConfigsPromise.catch(() => {});
 	const promptTemplatesPromise = options.promptTemplates
 		? Promise.resolve(options.promptTemplates)
-		: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
+		: isolatedChild
+			? Promise.resolve([])
+			: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
 	promptTemplatesPromise.catch(() => {});
 	const slashCommandsPromise = options.slashCommands
 		? Promise.resolve(options.slashCommands)
-		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
+		: isolatedChild
+			? Promise.resolve([])
+			: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
 	slashCommandsPromise.catch(() => {});
 	const customCommandsPromise =
 		options.disableExtensionDiscovery || options.restrictToolNames === true
@@ -2112,7 +2149,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const skillsSettings = cfgSkills.get(settings);
 	const disabledExtensionIds = cfgDisabledExtensions.get(settings);
 	const discoveredSkillsPromise =
-		options.skills === undefined
+		options.skills === undefined && !isolatedChild
 			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
 					...skillsSettings,
 					disabledExtensions: disabledExtensionIds,
@@ -2390,6 +2427,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	if (options.skills !== undefined) {
 		skills = options.skills;
 		skillWarnings = [];
+	} else if (isolatedChild) {
+		skills = [];
+		skillWarnings = [];
 	} else {
 		const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
 		skills = discovered.skills;
@@ -2477,12 +2517,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
+	const toolsRestricted = restrictToolNames || isolatedChild;
 	// The session tree shares one cost gate: a subagent is given its parent's; a root
 	// session owns one that follows its session file. Read it per request, so a request
 	// lands on the gate of the session file it was sent for.
 	const currentCostGate = (): CostGateApi | undefined => session?.costGate ?? options.costGate;
-	const enableLsp = options.enableLsp ?? !restrictToolNames;
-	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
+	const enableLsp = !isolatedChild && (options.enableLsp ?? !restrictToolNames);
+	const lspReadOnly = options.lspReadOnly ?? toolsRestricted;
 	// Every root owns its jobs and delivery sinks, even when another root is live.
 	// Children use the exact manager passed by their parent; the singleton remains
 	// only a legacy pointer to whichever root first installed it, never a routing fallback.
@@ -2531,6 +2572,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName = options.agentDisplayName ?? agentKind;
+	const processRolloutContext = mintProcessScopedRolloutContext();
+	const latencyRolloutStore =
+		options.latencyRolloutStore ?? new LatencyRolloutCohortStore(undefined, processRolloutContext);
+	const allowHeadlessGoalContinuation =
+		options.allowHeadlessGoalContinuation ??
+		((options.hasUI !== true && !options.deferUsageReserveConfirmation) ||
+			(options.taskDepth ?? 0) > 0 ||
+			Boolean(options.parentTaskPrefix));
+	const preparedLatency = prepareLatencySnapshot({
+		sessionManager,
+		settings,
+		store: latencyRolloutStore,
+		eligibility: {
+			sessionId: sessionManager.getSessionId(),
+			agentKind,
+			taskSubagentOptIn: options.taskDepth !== undefined && options.taskDepth > 0,
+			allowHeadlessGoalContinuation,
+			acpDeferAgentInitiatedTurns: options.deferUsageReserveConfirmation === true,
+			now: new Date().toISOString(),
+		},
+		resume: hasExistingSession,
+	});
+	const frozenLatencySnapshot: LatencyArmSnapshotV1 = preparedLatency.snapshot;
 	let registeredAgentRef: AgentRef | undefined;
 	/**
 	 * Forget the agent ref on teardown — unless it is a retained terminal ref.
@@ -2640,7 +2704,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return prewalk !== undefined || deferredPrewalk !== undefined;
 			},
 			taskDepth: options.taskDepth ?? 0,
+			agentKind,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
+			getLineageContext: () => sessionManager.getLineageContext(),
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
 			getEvalSessionId: () => session?.getEvalSessionId() ?? defaultEvalSessionId(toolSession),
@@ -2661,6 +2727,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getAdvertisedEvalToolNames: () => session?.getAdvertisedEvalToolNames() ?? [],
+			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
+			getCodeModeDirectToolNames: () => session?.getCodeModeDirectToolNames(),
+			readOmittedContent: {
+				authorized: () => session?.isRecoveryToolAuthorized() ?? false,
+				entries: () => session?.currentRecoveryEntries(),
+				fits: content => session?.fitsRecoveryResult(content) ?? false,
+			},
+			getNestedToolScheduler: () => session?.getNestedToolScheduler(),
+			emitNestedToolExecution: event => session?.emitNestedToolExecution(event),
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an
@@ -2673,6 +2748,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
+			getConsultModelOverride: () => session?.getConsultModelOverride(),
+			snapshotConsultContext: () => ({
+				systemPrompt: [...(agent?.state.systemPrompt ?? [])],
+				messages: [...(agent?.state.messages ?? [])],
+			}),
+			getSecretObfuscator: () => session?.obfuscator,
+			consultUsage: { turn: 0, session: 0 },
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
@@ -2744,7 +2826,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			},
 			getArtifactManager: () => sessionManager.getArtifactManager(),
+			getArtifactContent: async id => sessionManager.getArtifactContent(id),
 			settings,
+			isLatencyArmEnabled: (arm: LatencyArmId) =>
+				(hasSession ? session.getLatencyArmSnapshot() : frozenLatencySnapshot).arms[arm] === true,
+			getLatencyArmSnapshot: () => (hasSession ? session.getLatencyArmSnapshot() : frozenLatencySnapshot),
+			markLatencyArmFired: (arm: LatencyArmId) => {
+				session?.markLatencyArmFired(arm);
+			},
+			recordDshGetBranchError: () => {
+				session?.recordDshGetBranchError();
+			},
+			invalidateLatencyArmSnapshot: () => {
+				session?.invalidateLatencyArmSnapshot();
+			},
 			authStorage,
 			modelRegistry,
 			getTelemetry: () => agent?.telemetry,
@@ -2816,6 +2911,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getArtifactsDir,
 			options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : undefined,
 		);
+
+		// Workflow prepare installs optimization + path/command policies on the parent
+		// session; subagent ExecutorOptions forwards them here so createTools /
+		// wrapAgentToolWithWorkflowAliases see argumentAliases and processResult.
+		applyWorkflowToolSessionFields(toolSession, {
+			workflowToolOptimization: options.workflowToolOptimization,
+			workflowWritePolicy: options.workflowWritePolicy,
+			workflowCommandPolicy: options.workflowCommandPolicy,
+		});
 
 		// Create built-in tools (already wrapped with meta notice formatting)
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
@@ -3004,7 +3108,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (!restrictToolNames && options.preloadedExtensions) {
+		if (isolatedChild) {
+			// Allocate a session runtime without evaluating caller-provided extension
+			// instances, paths, or factories. isolatedChild also ignores preloaded
+			// extension/custom-tool paths so parent forwarding cannot leak tools.
+			extensionPaths = [];
+			extensionsResult = await loadExtensions([], cwd, eventBus);
+		} else if (!restrictToolNames && options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,
 				extensions: [...options.preloadedExtensions.extensions],
@@ -3063,9 +3173,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Load inline extensions from factories. Caller-provided factories are safe
 		// to rebind, so preserve them with file-backed prepared extensions for
-		// `/tan` and other child sessions.
+		// `/tan` and other child sessions. isolatedChild ignores them entirely.
 		const rebindableInlineExtensionCount = options.extensions?.length ?? 0;
-		if (inlineExtensions.length > 0) {
+		if (!isolatedChild && inlineExtensions.length > 0) {
 			for (let i = 0; i < inlineExtensions.length; i++) {
 				const factory = inlineExtensions[i];
 				const sourceId = `<inline-${nextInlineExtensionIndex++}>`;
@@ -3091,7 +3201,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
 		// extensions are available for model selection on session resume / fallback.
-		if (!restrictToolNames) {
+		if (!restrictToolNames && !isolatedChild) {
 			const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
 			modelRegistry.syncExtensionSources(activeExtensionSources);
 			modelRegistry.clearSourceRegistrations(new Set(activeExtensionSources));
@@ -4526,11 +4636,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// unless the effective registry winner is hidden / defaultInactive. Restricted callers own the list.
 		const alwaysInclude: string[] = restrictToolNames
 			? []
-			: [
-					...sdkCustomTools.map(t => t.name),
-					...registeredTools.map(t => t.definition.name),
-					...settingsGatedCustomEntries.keys(),
-				].filter(name => !defaultInactiveToolNames.has(name));
+			: isolatedChild
+				? sdkCustomTools.map(t => t.name)
+				: [
+						...sdkCustomTools.map(t => t.name),
+						...registeredTools.map(t => t.definition.name),
+						...settingsGatedCustomEntries.keys(),
+					].filter(name => !defaultInactiveToolNames.has(name));
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
@@ -4744,6 +4856,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						cfgTierOpenai.get(settings),
 						cfgTierAnthropic.get(settings),
 						cfgTierGoogle.get(settings),
+						cfgTierXai.get(settings),
 					));
 		const persistInitialServiceTier =
 			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
@@ -5158,6 +5271,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
+			createSessionSearchTool: restrictToolNames
+				? undefined
+				: async () => (await BUILTIN_TOOLS.session_search(toolSession)) ?? null,
+			createConsultTool:
+				restrictToolNames && !explicitlyRequestedToolNames?.includes("consult")
+					? undefined
+					: async () => (await BUILTIN_TOOLS.consult(toolSession)) ?? null,
+			consultUsage: toolSession.consultUsage,
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)
@@ -5173,6 +5294,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorStreamFn: settingsAwareStreamFn,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			latencyArmSnapshot: frozenLatencySnapshot,
+			dshAssignment: preparedLatency.assignment,
+			dshExecutionIds: executionIdTable(preparedLatency.assignment),
+			latencyRolloutStore,
+			allowHeadlessGoalContinuation,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames,

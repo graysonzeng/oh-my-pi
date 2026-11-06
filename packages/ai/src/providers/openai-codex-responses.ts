@@ -10,6 +10,7 @@ import {
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
+	resolveCodexResponsesUrl,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	$env,
@@ -1261,7 +1262,7 @@ function createCodexRequestContext(
 	const accountId = getCodexAccountId(apiKey);
 	applyCodexAccessPrograms(transformedBody, model, accountId, options?.codexAccessPrograms);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
-	const url = resolveCodexResponsesUrl(baseUrl);
+	const url = resolveCodexResponsesUrl(baseUrl, model.compat?.codexResponsesEndpoint);
 
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
@@ -3296,7 +3297,7 @@ export async function prewarmOpenAICodexResponses(
 	if (!apiKey) return;
 	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
-	const url = resolveCodexResponsesUrl(baseUrl);
+	const url = resolveCodexResponsesUrl(baseUrl, model.compat?.codexResponsesEndpoint);
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const promptCacheKey = transportSessionId;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
@@ -4282,15 +4283,6 @@ function redactHeaders(headers: Headers): Record<string, string> {
 		redacted[key] = value;
 	}
 	return redacted;
-}
-
-/** Resolve a Codex Responses endpoint exactly as the chat and compaction transports do. */
-export function resolveCodexResponsesUrl(baseUrl: string | undefined): string {
-	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : CODEX_BASE_URL;
-	const normalized = raw.replace(/\/+$/, "");
-	if (normalized.endsWith("/codex/responses")) return normalized;
-	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
-	return `${normalized}/codex/responses`;
 }
 
 function convertMessages(model: Model<"openai-codex-responses">, context: Context): ResponseInput {
