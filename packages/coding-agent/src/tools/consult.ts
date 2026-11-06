@@ -168,7 +168,8 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 					);
 					if (
 						!key ||
-						(isConsultSameModel(this.session, candidate.model) && !this.session.settings.get("consult.allowSameModel"))
+						(isConsultSameModel(this.session, candidate.model) &&
+							!this.session.settings.get("consult.allowSameModel"))
 					) {
 						continue;
 					}
@@ -188,7 +189,11 @@ export class ConsultTool implements AgentTool<typeof consultSchema, ConsultToolD
 					obfuscator,
 				});
 				if ("error" in projection) {
-					recordConsultAttempt(this.session, { error: projection.error, maxTokens, model: formatModelString(model) });
+					recordConsultAttempt(this.session, {
+						error: projection.error,
+						maxTokens,
+						model: formatModelString(model),
+					});
 					return consultError(projection.error, { maxTokens, model: formatModelString(model) });
 				}
 				const reasoning = toReasoningEffort(
