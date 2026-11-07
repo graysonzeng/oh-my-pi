@@ -19,6 +19,7 @@ import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
 import { cfgToolsRestrictedFolders } from "../tools/settings";
+import { cfgConsultEnabled, cfgGoalHostGateEnabled } from "./workflow-settings";
 
 /** Condition over the global settings; hidden (false) until they are initialized. */
 function whenSettings(test: (settings: Settings) => boolean): () => boolean {
@@ -43,6 +44,8 @@ const CONDITIONS: Record<string, () => boolean> = {
 	contextFilesExtraNotProject: whenSettings(s => cfgContextFilesExtra.provenance(s) !== "project"),
 	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
 	perCallModelAllowNotProject: whenSettings(s => cfgTaskPerCallModelAllow.provenance(s) !== "project"),
+	consultEnabled: whenSettings(s => cfgConsultEnabled.get(s) === true),
+	goalHostGateEnabled: whenSettings(s => cfgGoalHostGateEnabled.get(s) === true),
 };
 
 /** Description suffix telling the panel user that an environment variable is in play. */

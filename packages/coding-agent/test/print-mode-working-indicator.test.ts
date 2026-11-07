@@ -4,6 +4,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
 	PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS,
+	PRINT_MODE_WAITING_HEARTBEAT_MS,
 	runPrintMode,
 } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
@@ -266,6 +267,93 @@ describe("print mode working indicator", () => {
 		await run;
 
 		expect(stderrOutput.join("")).toBe("Working...\n");
+	});
+
+	it("emits a waiting heartbeat while the prompt has not produced the first model event", async () => {
+		vi.useFakeTimers();
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"));
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "hello" });
+
+		await delayed.promptStarted;
+		try {
+			expect(stderrOutput.join("")).toBe("Working...\n");
+			vi.advanceTimersByTime(PRINT_MODE_WAITING_HEARTBEAT_MS);
+			expect(stderrOutput.join("")).toContain("Still waiting for the first model event...");
+			vi.advanceTimersByTime(PRINT_MODE_WAITING_HEARTBEAT_MS);
+			expect(stderrOutput.join("").split("Still waiting for the first model event...").length - 1).toBe(2);
+			// First stream progress must stop the heartbeat so wording stays accurate.
+			delayed.emit({ type: "message_start", message: makeAssistantMessage("") });
+			vi.advanceTimersByTime(PRINT_MODE_WAITING_HEARTBEAT_MS * 2);
+			expect(stderrOutput.join("").split("Still waiting for the first model event...").length - 1).toBe(2);
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+			vi.useRealTimers();
+		}
+
+		expect(stdoutOutput.join("")).toBe("final answer\n");
+	});
+
+	it("does not emit the waiting heartbeat on stderr in JSON mode", async () => {
+		vi.useFakeTimers();
+		const delayed = createDelayedSession(makeAssistantMessage("json answer"));
+		const run = runPrintMode(delayed.session, { mode: "json", initialMessage: "hello" });
+
+		await delayed.promptStarted;
+		try {
+			vi.advanceTimersByTime(PRINT_MODE_WAITING_HEARTBEAT_MS * 2);
+			expect(stderrOutput.join("")).not.toContain("Still waiting for the first model event...");
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+			vi.useRealTimers();
+		}
+	});
+
+	it("logs retry_fallback_applied with from→to so a hang fallback cannot stay silent", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"));
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "hello" });
+
+		await delayed.promptStarted;
+		try {
+			delayed.emit({
+				type: "retry_fallback_applied",
+				from: "gateway/gemini-4:high",
+				to: "gateway/gpt-6.1-sol:high",
+				role: "default",
+				reason: "stream timed out while waiting for the first event",
+			});
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+
+		expect(stderrOutput.join("")).toContain(
+			"Falling back (default): gateway/gemini-4:high → gateway/gpt-6.1-sol:high (stream timed out while waiting for the first event)",
+		);
+		expect(stdoutOutput.join("")).toBe("final answer\n");
+	});
+
+	it("emits retry_fallback_applied only via JSON event stream in JSON mode (stdout protocol)", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("json answer"));
+		const run = runPrintMode(delayed.session, { mode: "json", initialMessage: "hello" });
+
+		await delayed.promptStarted;
+		try {
+			delayed.emit({
+				type: "retry_fallback_applied",
+				from: "gateway/gemini-4:high",
+				to: "gateway/gpt-6.1-sol:high",
+				role: "default",
+			});
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+
+		expect(stderrOutput.join("")).not.toContain("Falling back");
+		expect(stdoutOutput.join("")).toContain('"type":"retry_fallback_applied"');
+		expect(stdoutOutput.join("")).toContain("gateway/gpt-6.1-sol:high");
 	});
 
 	it("writes an automatic sign-out notice to stderr in text mode and no other notice", async () => {

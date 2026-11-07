@@ -10,6 +10,7 @@ import { toError } from "@oh-my-pi/pi-utils";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
+import { appendEntryViaOrdinaryAcceptanceSink } from "../latency/ordinary-acceptance-sink";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
@@ -118,7 +119,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				});
 			},
 			appendEntry: (customType, data) => {
-				session.sessionManager.appendCustomEntry(customType, data);
+				appendEntryViaOrdinaryAcceptanceSink(session, customType, data);
 			},
 			setLabel: (targetId, label) => {
 				session.sessionManager.appendLabelChange(targetId, label);

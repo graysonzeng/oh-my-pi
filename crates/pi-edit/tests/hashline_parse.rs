@@ -350,6 +350,32 @@ fn rejects_contaminated_patch_syntax() {
 }
 
 #[test]
+fn skips_lone_at_at_separator_between_hunks() {
+	let parsed = parse_patch("PUT 2.=2:\n+B\n@@\nPUT >4:\n+E").unwrap();
+	let inserted: Vec<&str> = parsed
+		.edits
+		.iter()
+		.filter_map(|edit| match edit {
+			Edit::Insert { text, .. } => Some(text.as_str()),
+			_ => None,
+		})
+		.collect();
+	assert_eq!(inserted, vec!["B", "E"]);
+	assert!(
+		parsed
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("lone `@@` separator"))
+	);
+	assert!(
+		parse_patch("PUT 2.=2:\n+B\n@@ fn foo @@\nPUT >4:\n+E")
+			.unwrap_err()
+			.to_string()
+			.contains("`@@`-bracketed hunk header")
+	);
+}
+
+#[test]
 fn recovers_bare_range_header_as_implicit_put() {
 	let parsed = parse_patch("2.=3:\n+X").unwrap();
 	assert_eq!(
