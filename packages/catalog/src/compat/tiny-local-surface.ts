@@ -1,8 +1,8 @@
 /**
  * Tiny/local conservative tool surface: authored on the `tiny-local-surface`
- * catalog axis so contracted hosts (`tiny`, `local`, `ollama`, `lmstudio`,
- * canonical `lm-studio`) declare the fact instead of the model-policy
- * compiler guessing from provider/model/api strings.
+ * catalog axis so contracted hosts (`local`, `ollama`, `lm-studio`) declare
+ * the fact instead of the model-policy compiler guessing from provider/model/api
+ * strings.
  *
  * Resolved through the cascade when deriving ModelFacts (not baked onto
  * `Model`): bundled rows are frozen by the generator, and the flag is read
