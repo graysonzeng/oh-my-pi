@@ -305,6 +305,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.ttsrHelp,
 	},
 	{
+		name: "workflow-bench",
+		load: () => import("./commands/workflow-bench").then(m => m.default),
+		help: commandHelp.workflowBenchHelp,
+	},
+	{
 		name: "worktree",
 		load: () => import("./commands/worktree").then(m => m.default),
 		aliases: ["wt"],
