@@ -184,6 +184,8 @@ export function copySpawnJobLiveProgress(target: AgentProgress, source: AgentPro
 	target.resolvedModelIsFallback = source.resolvedModel ? source.resolvedModelIsFallback : undefined;
 	target.advisor = source.advisor ?? target.advisor;
 	target.completionPercent = source.completionPercent ?? target.completionPercent;
+	target.stage = source.stage ?? target.stage;
+	target.watch = source.watch ?? target.watch;
 	target.resolvedModelRoute = source.resolvedModelRoute ?? target.resolvedModelRoute;
 	target.tokens = source.tokens;
 	target.requests = source.requests;
