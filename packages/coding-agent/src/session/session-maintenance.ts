@@ -361,6 +361,14 @@ const READ_OMITTED_CONTENT_TOOL = "read_omitted_content";
 /** Absolute ceiling for one batch of structured assistant summaries. */
 const STRUCTURED_BATCH_OUTPUT_CAP_TOKENS = 4096;
 
+/**
+ * Smallest per-entry output budget worth requesting. The reply's JSON envelope
+ * alone costs ~20 tokens, so a source whose quarter-size budget falls below
+ * this cannot be summarized within it (every model stops on `length`) and
+ * would save almost nothing anyway; such entries stay verbatim.
+ */
+const STRUCTURED_MIN_ENTRY_OUTPUT_TOKENS = 64;
+
 /** Reasons a live maintenance pass may run the structured method. */
 type StructuredReason = "overflow" | "threshold" | "idle" | "incomplete" | "manual";
 /**
@@ -1440,9 +1448,14 @@ export class SessionMaintenance {
 			signal.throwIfAborted();
 			const entryTokens = tokenizer.countTokens(entry.text);
 			const singleCap = Math.min(STRUCTURED_BATCH_OUTPUT_CAP_TOKENS, outputLimit, Math.floor(entryTokens / 4));
-			// Individually oversized sources are skipped, never truncated and
-			// represented as if the model summarized their complete text.
-			if (singleCap <= 0 || !fits(this.#structuredSummaryContext([entry], singleCap), singleCap)) continue;
+			// Sources too short for a completable summary and individually
+			// oversized sources are skipped, never truncated and represented as
+			// if the model summarized their complete text.
+			if (
+				singleCap < STRUCTURED_MIN_ENTRY_OUTPUT_TOKENS ||
+				!fits(this.#structuredSummaryContext([entry], singleCap), singleCap)
+			)
+				continue;
 			if (batch.length > 0) {
 				const cap = Math.min(
 					STRUCTURED_BATCH_OUTPUT_CAP_TOKENS,

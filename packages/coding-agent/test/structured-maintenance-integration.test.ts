@@ -335,7 +335,8 @@ async function makeFixture(options: FixtureOptions = {}): Promise<Fixture> {
 			: undefined,
 		sideStreamFn,
 		providerSessionState: new Map(),
-		preferWebsockets: undefined,
+		preferWebsockets: () => undefined,
+		getPromptCacheKeyForModel: () => undefined,
 		model: () => currentModel,
 		thinkingLevel: () => undefined,
 		isDisposed: () => false,
@@ -591,6 +592,31 @@ describe("structured maintenance integration", () => {
 			expect.objectContaining({ type: "auto_compaction_start", action: "structured" }),
 			expect.objectContaining({ type: "auto_compaction_end", action: "structured", aborted: false }),
 		]);
+	});
+
+	it("keeps assistant text too short for a completable summary verbatim and out of the summary request", async () => {
+		const fixture = await makeFixture({
+			methodOrder: ["structured"],
+			thresholdPercent: SUMMARY_THRESHOLD_PERCENT,
+			providerTokens: 115_000,
+		});
+		const shortText = "Now SKILL.md guidance (boundaries 1 and 3, owner hint).";
+		fixture.sessionManager.appendMessage(userMessage("first question"));
+		const shortId = fixture.sessionManager.appendMessage(
+			assistantMessage([{ type: "text", text: shortText }, toolCall("short-call", "read")], fixture.model!),
+		);
+		fixture.sessionManager.appendMessage(toolResult("short-call", SMALL_RESULT));
+		appendSummaryBranch(fixture);
+
+		const result = await fixture.maintenance.runAutoCompaction("threshold", false, {
+			triggerContextTokens: 115_000,
+		});
+
+		expect(result.historyRewritten).toBe(true);
+		const requestedIds = fixture.sideCalls.flatMap(call => parseSummaryIds(call.prompt));
+		expect(requestedIds).toHaveLength(2);
+		expect(requestedIds).not.toContain(shortId);
+		expect(fixture.agent.state.messages.some(message => textOf(message) === shortText)).toBe(true);
 	});
 
 	it("uses compactionModel first and the current model first when no compactionModel is configured", async () => {
