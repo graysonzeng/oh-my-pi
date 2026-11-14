@@ -135,7 +135,6 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
 	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });
@@ -172,7 +171,6 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
 	"shadowReview?": '"code" | "off"',
 	"+": "delete",
 });

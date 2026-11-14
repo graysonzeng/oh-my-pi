@@ -422,6 +422,7 @@ describe("wait", () => {
 				isStreaming: true,
 				deliverIrcMessage: (msg: IrcMessage) => bridge.deliver(msg),
 				hasIrcInterrupts: () => bridge.hasInterrupts(),
+				hasIrcAsides: () => bridge.hasAsides(),
 			};
 			registry.register({
 				id: "Main",

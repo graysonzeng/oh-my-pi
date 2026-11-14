@@ -79,7 +79,12 @@ function handOffMail(messaging: WaitMessaging, woke?: IrcMessage): Promise<void>
 	const bus = IrcBus.global();
 	const mail = woke ? [woke] : [];
 	for (let msg = bus.take(messaging.senderId); msg; msg = bus.take(messaging.senderId)) mail.push(msg);
-	if (mail.length === 0) return inbox.hasIrcInterrupts() ? Promise.resolve() : undefined;
+	if (mail.length === 0) {
+		// interrupt:true mail is on the interrupt queue; ordinary directs (workflow)
+		// park as asides and must still end a wait immediately without riding in its result.
+		const queued = inbox.hasIrcInterrupts() || inbox.hasIrcAsides?.() === true;
+		return queued ? Promise.resolve() : undefined;
+	}
 	// Bus ids are snowflakes: they order messages sent within one millisecond.
 	mail.sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 	return (async () => {

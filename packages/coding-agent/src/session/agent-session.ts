@@ -14253,6 +14253,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#irc.hasInterrupts();
 	}
 
+	/** Whether an ordinary (non-interrupt) direct IRC message is parked as an aside. */
+	hasIrcAsides(): boolean {
+		return this.#irc.hasAsides();
+	}
+
 	/** Surfaces and consumes every pending IRC record before automatic injection (see {@link IrcBridge.drainInboxMessages}). */
 	drainPendingIrcInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
 		return this.#irc.drainInboxMessages(agentId, opts);
