@@ -80,20 +80,20 @@ describe("generic proxy metadata references", () => {
 
 	test("prefers complete cache pricing when limits match", () => {
 		const unpaid = referenceModel({
-			id: "kimi-k3",
+			id: "reference-fixture",
 			provider: "moonshot",
 			contextWindow: 128_000,
 			maxTokens: 32_000,
 			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
 		});
 		const pricedRelay = referenceModel({
-			id: "kimi-k3",
+			id: "reference-fixture",
 			provider: "openrouter",
 			contextWindow: 128_000,
 			maxTokens: 32_000,
 		});
 		const index = buildModelReferenceIndex([unpaid, pricedRelay]);
-		expect(resolveModelReference("kimi-k3", index)?.provider).toBe("openrouter");
+		expect(resolveModelReference("reference-fixture", index)?.provider).toBe("openrouter");
 	});
 
 	test("prefers openai over a relay when limits and cache pricing match", () => {
