@@ -727,27 +727,37 @@ fn format_block_resolution(resolution: &BlockResolution) -> String {
 	format!("{op} → resolved {span} ({lines} line{}){suffix}", if lines == 1 { "" } else { "s" })
 }
 
+fn snapshot_suffix_candidates(
+	path: &str,
+	tag: &str,
+	store: &EditStore,
+	files: &mut dyn FileSource,
+) -> Vec<std::path::PathBuf> {
+	let mut candidates = store
+		.paths_with_hash(tag)
+		.into_iter()
+		.filter(|candidate| candidate.ends_with(Path::new(path)) && files.exists(candidate))
+		.collect::<Vec<_>>();
+	candidates.sort();
+	candidates.dedup();
+	candidates
+}
+
 /// When the authored path does not exist, rebind the section to the one
-/// stored snapshot with the same content tag and file name. `None` keeps
-/// the authored section and target, which callers use by reference.
+/// stored snapshot with the same content tag and complete path suffix.
+/// `None` keeps the authored section and target, which callers use by
+/// reference.
 pub(crate) fn recover_target(
 	section: &PatchSection,
 	initial: &Resolved,
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Option<(PatchSection, Resolved)> {
-	if files.exists(&initial.absolute) {
+	if files.exists(&initial.absolute) || files.policy().is_internal_url(&section.path) {
 		return None;
 	}
 	let tag = section.file_hash.as_deref()?;
-	let authored_name = initial.absolute.file_name();
-	let mut candidates = store
-		.paths_with_hash(tag)
-		.into_iter()
-		.filter(|path| path.file_name() == authored_name && *path != initial.absolute)
-		.collect::<Vec<_>>();
-	candidates.sort();
-	candidates.dedup();
+	let mut candidates = snapshot_suffix_candidates(&section.path, tag, store, files);
 	if candidates.len() != 1
 		|| !files
 			.policy()
@@ -836,6 +846,35 @@ pub fn stage_patch(
 					&clipboard.fork(),
 				)?);
 				continue;
+			}
+			if let Some(tag) = tag {
+				let candidates = snapshot_suffix_candidates(&section.path, tag, store, files);
+				if candidates.len() > 1 {
+					return Err(EditError::rejected(
+						Rejection::FileNotFound,
+						format!(
+							"File not found: {}. Multiple files match its path suffix and snapshot tag \
+							 #{tag}:\n{}",
+							section.path,
+							candidates
+								.iter()
+								.map(|path| path.display().to_string())
+								.collect::<Vec<_>>()
+								.join("\n")
+						),
+					));
+				}
+				if let [candidate] = candidates.as_slice() {
+					return Err(EditError::rejected(
+						Rejection::FileNotFound,
+						format!(
+							"File not found: {}. This session read {} with the same tag; use that full \
+							 path in the section header.",
+							section.path,
+							candidate.display()
+						),
+					));
+				}
 			}
 			return Err(EditError::rejected(
 				Rejection::FileNotFound,

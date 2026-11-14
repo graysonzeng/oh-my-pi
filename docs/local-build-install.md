@@ -82,21 +82,21 @@ created by the current build; never delete pre-existing user files.
 
 ## Latest verified baseline
 
-Last updated: 2026-09-07 (Asia/Shanghai).
+Last updated: 2026-11-14 (Asia/Shanghai).
 
 | Item | Verified value |
 |---|---|
-| Source commit | `8095e3761f` / `8095e3761fbf2d0e412a589fc5bef822e8138b70` (`v15.5.9-13701-g8095e3761f-dirty`). Built from the current `workflow` checkout at this HEAD. The only remaining worktree change after install is this baseline record. An existing merge-conflict comment in `packages/coding-agent/test/task/parallel-spawn-local-bench.test.ts` was resolved to ours (`CALLS_PER_WORKER = 1`) and matched HEAD. A previously staged import split in `packages/coding-agent/test/task/review-metrics-contract.test.ts` was dropped after `bun check` passed on the HEAD import path. |
-| Package version | `omp/18.0.5` |
+| Source commit | `4160ee7cb4` (branch `fix/grok-edit-failures`, one commit on top of `workflow` `ea1bc3dd48`). Built from worktree `/Users/sheng/tencent/oh-my-pi-wt-grok-edit` because the main `workflow` checkout holds unrelated uncommitted changes. |
+| Package version | `omp/18.18.0` |
 | Artifact | `packages/coding-agent/dist/omp` |
 | Installed path | `/Users/sheng/.local/bin/omp` |
-| SHA-256 | `6e4a062887883f8c3f45526faec5da8e470e67e46b0dea1fa98e26b38c1b420a` |
-| Native SHA-256 | `7af814291cfe4d8b70ee25ac6720c9f06ea22f51e273e19f633659e9615796d5` (embedded `packages/natives/native/pi_natives.darwin-arm64.node`, sentinel `__piNativesV18_0_5`; matches `~/.omp/natives/18.0.5/pi_natives.darwin-arm64.node`) |
-| Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build` (`c97c8a3eab2a6e83f5dba9f5d4edf79daf223fe95b41ff40701e7840a247e2de`, previous `omp/18.0.5` from `0b46267a5a`) |
+| SHA-256 | `7dac0045afd6eb8629a5d6186366e37428dfb65f55b31a5205e6a5478c0c9e0b` |
+| Native SHA-256 | `1135eecf45c15bbf3d33c570b625d9b043a6b7b0d14cb7f2d6540c46c72222c3` (`packages/natives/native/pi_natives.darwin-arm64.node`, rebuilt with `bun --cwd=packages/natives run build`, `local` profile) |
+| Rollback backup | `/Users/sheng/.local/bin/omp.pre-local-build.20261114-grok-edit` (`13112fa27e6fe0e1fff7a8d72abbf5aea7110fbe08d138fcd7de53c8ad2f04b7`, previous `omp/18.18.0` installed 2026-11-13) |
 | Artifact type | adhoc-signed arm64 Mach-O executable |
-| Gates | `bun --cwd=packages/coding-agent run check` (biome 3085 files + tsgo) exit 0; production binary build; artifact version/`--help`/`stats --summary`/type/signature/checksum/`--smoke-test`; staged install signature; installed path/type/version/checksum/`--smoke-test`; `bun test test/task/review-metrics-contract.test.ts` 5 pass |
+| Gates | `bun --cwd=packages/coding-agent run check` exit 0; root `bun check` exit 0; `cargo nextest run -p pi-edit` 439 passed; 6 related TS test files 54 pass; production binary build; artifact version/`--help`/`stats --summary`/type/signature/checksum/`--smoke-test`; staged install signature; installed path/type/version/checksum/`--smoke-test`; installed `omp -p` read with `path=README.md:3, limit=2, offset=0` returned content instead of the stale-pagination error |
 
 The installed checksum matched the build artifact, both artifact and installed
 `--smoke-test` returned `smoke-test: ok`, and the installed command resolved to
-`/Users/sheng/.local/bin/omp` (`omp/18.0.5`). The previous installed command
+`/Users/sheng/.local/bin/omp` (`omp/18.18.0`). The previous installed command
 remains available at the rollback path above.

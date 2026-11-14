@@ -35,12 +35,7 @@ function createSession(cwd: string): ToolSession {
 	} as unknown as ToolSession;
 }
 
-// Regression: reading a file *outside* the session cwd (e.g. `~/.claude/settings.json`)
-// and then editing it anchored on the emitted hashline header. The header used to
-// collapse to the bare filename for every read; out-of-tree the edit tool's
-// snapshot-tag recovery refuses to rebind a bare name (allowTagPathRecovery), so the
-// path resolved against cwd, missed, and failed with "File not found". The header now
-// carries the full out-of-cwd path so the edit resolves directly.
+// Read headers preserve out-of-cwd paths so edits do not depend on suffix recovery.
 describe("read → edit round-trip for out-of-cwd files", () => {
 	let cwdDir: string;
 	let outDir: string;
@@ -76,6 +71,22 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 
 		expect(resultText).not.toContain("File not found");
 		expect(await Bun.file(outFile).text()).toBe("ALPHA\nbeta\n");
+	});
+
+	it("leaves an out-of-cwd snapshot candidate untouched and asks for its full path", async () => {
+		const outFile = path.join(outDir, "tool.py");
+		await Bun.write(outFile, "value = 1\n");
+		const session = createSession(cwdDir);
+		const read = textOutput(await new ReadTool(session).execute("read-outside-policy", { path: outFile }));
+		const tag = /#([0-9A-F]{4})\]/.exec(read)![1];
+		const result = await new EditTool(session, "hashline").execute("edit-outside-policy", {
+			input: `[tool.py#${tag}]\nPUT 1.=1:\n+value = 2`,
+		});
+		expect(result.isError).toBe(true);
+		expect(textOutput(result)).toContain("File not found: tool.py");
+		expect(textOutput(result)).toContain(await fs.realpath(outFile));
+		expect(textOutput(result)).toContain("use that full path in the section header");
+		expect(await Bun.file(outFile).text()).toBe("value = 1\n");
 	});
 
 	it("round-trips a home-relative path through read and edit", async () => {
