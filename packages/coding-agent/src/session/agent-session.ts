@@ -14253,6 +14253,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#irc.hasInterrupts();
 	}
 
+	/** Surfaces and consumes every pending IRC record before automatic injection (see {@link IrcBridge.drainInboxMessages}). */
+	drainPendingIrcInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
+		return this.#irc.drainInboxMessages(agentId, opts);
+	}
+
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
 		// The sender's context is active here; the delivery is the recipient's work.

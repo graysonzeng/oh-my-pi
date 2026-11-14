@@ -416,6 +416,8 @@ describe("per-call model advertisement", () => {
 			evalPreludes: () => [],
 			sessionAgents: () => [],
 			waitForUser: dialog => dialog(),
+			getConsultModelOverride: () => undefined,
+			setConsultModelOverride: () => {},
 		};
 		const surface = new SessionTools(host, {
 			baseSystemPrompt: [],

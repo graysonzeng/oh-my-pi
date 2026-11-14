@@ -998,7 +998,7 @@ describe("write resolves conflicts via conflict://N", () => {
 			}),
 		).rejects.toThrow(/Policy violation: workflow_path_forbidden/);
 		expect(await Bun.file(filePath).text()).toBe(TWO_WAY);
-		expect(session.conflictHistory?.get(1)).toBeDefined();
+		expect(session.state?.conflictHistory?.get(1)).toBeDefined();
 	});
 
 	it("rejects mixed bulk conflict://* before writing any file when one target is forbidden", async () => {
@@ -1014,7 +1014,7 @@ describe("write resolves conflicts via conflict://N", () => {
 
 		await read.execute("read-policy-bulk-allowed", { path: "allowed.ts" });
 		await read.execute("read-policy-bulk-forbidden", { path: "package.json" });
-		expect(session.conflictHistory?.entries()).toHaveLength(2);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(2);
 
 		await expect(
 			write.execute("write-policy-bulk-mixed", {
@@ -1024,6 +1024,6 @@ describe("write resolves conflicts via conflict://N", () => {
 		).rejects.toThrow(/Policy violation: workflow_path_forbidden/);
 		expect(await Bun.file(allowedPath).text()).toBe(TWO_WAY);
 		expect(await Bun.file(forbiddenPath).text()).toBe(TWO_WAY);
-		expect(session.conflictHistory?.entries()).toHaveLength(2);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(2);
 	});
 });
