@@ -460,7 +460,7 @@ export async function applyNestedPatches(
 			continue;
 		}
 		const combinedDiff = repoPatches.map(p => p.patch).join("\n");
-		const touchedFiles = [...new Set(repoPatches.flatMap(p => parsePatchTouchedFiles(p.patch)))];
+		const touchedFiles = [...new Set(repoPatches.flatMap(p => patchTouchedFiles(p.patch)))];
 
 		// Concurrent merge-backs would interleave stash/apply/commit on the
 		// same nested repo and drop each other's edits; serialize per repo.
@@ -809,8 +809,8 @@ async function patchTree(
 	}
 	try {
 		const withWip = await writeSyntheticTree(repoDir, parentSha, wipPatches);
-		const deltaFiles = new Set(parsePatchTouchedFiles(patchText));
-		const wipOnly = new Set(wipPatches.flatMap(parsePatchTouchedFiles).filter(file => !deltaFiles.has(file)));
+		const deltaFiles = new Set(patchTouchedFiles(patchText));
+		const wipOnly = new Set(wipPatches.flatMap(patchTouchedFiles).filter(file => !deltaFiles.has(file)));
 		// WIP-only files are untouched by the delta, so their post-delta state
 		// is the WIP state; diffing it back to the parent rewinds them.
 		const rewind =

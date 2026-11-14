@@ -5805,7 +5805,7 @@ export class SessionMaintenance {
 		if (contextWindow <= 0) return true;
 		const fitBudget = Math.max(
 			0,
-			contextWindow - resolveBudgetReserveTokens(contextWindow, this.#compactionSettings),
+			contextWindow - resolveBudgetReserveTokens(contextWindow, this.#compactionSettings(contextWindow)),
 		);
 		const messages = this.#host.messages();
 		const activeExcludedMessage = excludedMessage && messages.includes(excludedMessage) ? excludedMessage : undefined;

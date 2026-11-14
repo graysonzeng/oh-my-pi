@@ -131,7 +131,7 @@ export function inferPhaseHandoffPhase(entries: readonly SessionEntry[]): PhaseH
 	}
 	for (let i = 0; i < phases.length; i++) {
 		const phase = phases[i]!;
-		if (!phase.tasks.some(t => t.status === "pending" || t.status === "blocked")) continue;
+		if (!phase.tasks.some(t => t.status === "pending")) continue;
 		const mapped = phaseFromTodoName(phase.name);
 		if (mapped) return mapped;
 	}
@@ -309,9 +309,8 @@ function collectOpenConstraints(entries: readonly SessionEntry[]): string[] {
 	const out: string[] = [];
 	for (const phase of phases) {
 		for (const task of phase.tasks) {
-			if (task.status === "pending" || task.status === "in_progress" || task.status === "blocked") {
-				const blocker = task.blocker ? ` (blocked: ${task.blocker})` : "";
-				out.push(`[${phase.name}] ${task.content}${blocker}`);
+			if (task.status === "pending" || task.status === "in_progress") {
+				out.push(`[${phase.name}] ${task.content}`);
 			}
 		}
 	}

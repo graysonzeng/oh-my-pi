@@ -34,6 +34,8 @@ export type PuppeteerBrowserKind =
 			headless: boolean;
 			/** Process-local launch flag; shared browsers use the tab-scoped CDP override instead. */
 			insecure?: boolean;
+			/** Workflow/compiled-binary: allow file:// access for this launch. */
+			allowFileAccess?: boolean;
 	  }
 	| { kind: "spawned"; path: string; args?: string[] }
 	| { kind: "connected"; cdpUrl: string }

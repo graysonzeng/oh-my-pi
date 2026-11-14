@@ -5207,7 +5207,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const next: TodoPhase[] = this.todoPhases.map(phase => ({
 			name: phase.name,
 			tasks: phase.tasks.map(task => {
-				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
+				if (task.status !== "pending" && task.status !== "in_progress") {
 					return task;
 				}
 				if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;

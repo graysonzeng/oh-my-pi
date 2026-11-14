@@ -63,6 +63,7 @@ import {
 	cfgSystemPromptTemplates,
 } from "./session/settings";
 import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import { normalizeConcurrencyLimit } from "./task/parallel";
 import {
 	cfgAsyncEnabled,
 	cfgOutEnabled,

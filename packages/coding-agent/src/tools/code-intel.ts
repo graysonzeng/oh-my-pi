@@ -18,6 +18,7 @@ import codeIntelDescription from "../prompts/tools/code-intel.md" with { type: "
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { workflowToolWireName } from "../workflow/tool-optimization";
 import type { ToolSession } from ".";
+import { getEditStore } from "../edit/store";
 import { isEnglishOnlyEmbedModel, resolveCodeIntelEmbedModel } from "./code-intel-embed";
 import type { CodeIntelCandidate, CodeIntelConfidence, CodeIntelCoverage } from "./code-intel-envelope";
 import { renderCodeIntelEnvelope } from "./code-intel-envelope";
@@ -93,7 +94,7 @@ export interface CodeIntelToolDetails {
 }
 
 function seedPathsFromSession(session: ToolSession, knownRelativePaths: readonly string[]): string[] {
-	const store = session.editStore;
+	const store = getEditStore(session);
 	if (!store) return [];
 	const root = path.resolve(session.cwd);
 	const out: string[] = [];

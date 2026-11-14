@@ -934,8 +934,8 @@ fn stage_section(
 				return Err(EditError::rejected(
 					Rejection::FileNotFound,
 					format!(
-						"File not found: {}. This session read {} with the same tag; use that full \
-						 path in the section header.",
+						"File not found: {}. This session read {} with the same tag; use that full path \
+						 in the section header.",
 						section.path,
 						candidate.display()
 					),

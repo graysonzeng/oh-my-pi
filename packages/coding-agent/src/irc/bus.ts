@@ -40,7 +40,7 @@ export interface IrcWaitFilter {
 }
 
 /** Whether a bus wait under `filter` consumes `msg`. */
-function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
+export function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
 	if (filter.from !== undefined && msg.from !== filter.from) return false;
 	if (!filter.directOnly || (!msg.broadcast && !msg.progress)) return true;
 	return !msg.progress && (filter.repliesFrom?.includes(msg.from) ?? false);
