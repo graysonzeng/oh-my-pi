@@ -2479,7 +2479,7 @@ export class SessionMaintenance {
 						preserveData: hook.preserveData,
 					};
 					options?.onComplete?.(replacedResult);
-					return replacedResult;
+					return finish(replacedResult);
 				}
 				let patch: StructuredCompactionPatch | undefined;
 				let removed = 0;
@@ -2527,7 +2527,7 @@ export class SessionMaintenance {
 					details: { kind: "structured" },
 				};
 				options?.onComplete?.(compactionResult);
-				return compactionResult;
+				return finish(compactionResult);
 			}
 
 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);

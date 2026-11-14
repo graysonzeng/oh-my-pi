@@ -848,7 +848,10 @@ describe("structured maintenance integration", () => {
 		const manualResult = await manual.maintenance.compact();
 		expect(manualResult.details).toEqual({ kind: "structured" });
 		expect(largeResult(manual).omittedOriginal).toBeDefined();
-		expect(manual.events).toHaveLength(0);
+		expect(manual.events).toEqual([
+			expect.objectContaining({ type: "manual_compaction_start" }),
+			expect.objectContaining({ type: "manual_compaction_end", aborted: false, result: manualResult }),
+		]);
 		expect(manual.rebaseCalls).toBe(1);
 
 		const noop = await makeFixture({ methodOrder: ["structured"], providerTokens: 160_000 });
