@@ -882,9 +882,6 @@ export class PluginSettingsComponent extends Container {
 	}
 
 	async #showPluginList(): Promise<void> {
-		this.#currentView = "list";
-		this.#currentPlugin = null;
-		this.#currentMarketplacePlugin = null;
 		this.clear();
 
 		// Surface registry failures without taking the whole tab down — either
@@ -956,9 +953,6 @@ export class PluginSettingsComponent extends Container {
 	}
 
 	#showPluginDetail(plugin: InstalledPlugin): void {
-		this.#currentView = "npm-detail";
-		this.#currentPlugin = plugin;
-		this.#currentMarketplacePlugin = null;
 		this.clear();
 
 		this.#viewComponent = new PluginDetailComponent(plugin, this.#manager, {
@@ -988,9 +982,6 @@ export class PluginSettingsComponent extends Container {
 	}
 
 	#showMarketplaceDetail(plugin: InstalledPluginSummary): void {
-		this.#currentView = "marketplace-detail";
-		this.#currentPlugin = null;
-		this.#currentMarketplacePlugin = plugin;
 		this.clear();
 
 		this.#viewComponent = new MarketplacePluginDetailComponent(plugin, this.#manager, {

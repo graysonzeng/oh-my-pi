@@ -1,3 +1,4 @@
+import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
@@ -13,7 +14,7 @@ import {
 	resetSettingsForTest,
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { bindEffects, combine } from "@oh-my-pi/pi-coding-agent/config/registry";
 
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
@@ -41,6 +42,9 @@ import {
 	cfgPowerSleepPrevention,
 	cfgFeaturesUnexpectedStopDetection,
 	cfgRetryFallbackChains,
+	cfgProvidersOpenaiCodexCodeMode,
+	cfgProvidersOpenaiCodexCodeModeDirectTools,
+	cfgCodeModeInputs,
 	cfgProviderAppendOnlyContext,
 	cfgDefaultThinkingLevel,
 	cfgInlineToolDescriptors,
@@ -69,6 +73,11 @@ import {
 	cfgTaskEnableEffort,
 	cfgTaskAgentModelOverrides,
 } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	cfgConsultAllowSameModel,
+	cfgConsultEnabled,
+	cfgToolsPtcMode,
+} from "@oh-my-pi/pi-coding-agent/config/workflow-settings";
 import { cfgMnemopiDbPath, cfgMnemopiScoping } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { cfgHindsightBankId, cfgHindsightScoping } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
@@ -1280,6 +1289,124 @@ describe("Settings", () => {
 				expect(signalCount).toBe(1);
 				expect(settings.getModelRole("default")).toBe("openai/updated");
 				expect(settings.getModelRole("runtime")).toBe("openai/runtime");
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("notifies consultation availability changes without unmasking runtime overrides", async () => {
+			await writeSettings({ consult: { enabled: true, allowSameModel: false } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const observed: boolean[] = [];
+			const unsubscribe = combine({
+				enabled: cfgConsultEnabled,
+				allowSameModel: cfgConsultAllowSameModel,
+			}).listen(settings, () => {
+				observed.push(cfgConsultAllowSameModel.get(settings));
+			});
+			try {
+				await settings.reloadFromDisk();
+				await tick();
+				expect(observed).toEqual([]);
+				await writeSettings({ consult: { enabled: true, allowSameModel: true } });
+				await settings.reloadFromDisk();
+				await tick();
+				expect(observed).toEqual([true]);
+				cfgConsultAllowSameModel.override(settings, false);
+				await tick();
+				await settings.reloadFromDisk();
+				await tick();
+				expect(observed).toEqual([true, false]);
+				cfgConsultAllowSameModel.clearOverride(settings);
+				await tick();
+				expect(observed).toEqual([true, false, true]);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("signals Code Mode partition inputs picked up from disk", async () => {
+			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } }, eval: { js: true } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			let signalCount = 0;
+			const unsubscribe = combine({
+				base: cfgCodeModeInputs,
+				ptcMode: cfgToolsPtcMode,
+			}).listen(settings, () => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadFromDisk();
+				await tick();
+				expect(signalCount).toBe(0);
+
+				await writeSettings({ providers: { "openai-codex": { codeMode: "on" } }, eval: { js: true } });
+				await settings.reloadFromDisk();
+				await tick();
+
+				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
+				expect(signalCount).toBe(1);
+
+				// A single reload that changes several partition inputs signals once.
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+				});
+				await settings.reloadFromDisk();
+				await tick();
+
+				expect(cfgEvalJs.get(settings)).toBe(false);
+				expect(cfgProvidersOpenaiCodexCodeModeDirectTools.get(settings)).toEqual(["bash"]);
+				expect(signalCount).toBe(2);
+
+				// `edit.mode` renames the direct edit tool on the wire.
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+					edit: { mode: "apply_patch" },
+				});
+				await settings.reloadFromDisk();
+				await tick();
+
+				expect(cfgEditMode.get(settings)).toBe("apply_patch");
+				expect(signalCount).toBe(3);
+
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+					edit: { mode: "apply_patch" },
+					tools: { ptc: { mode: "on" } },
+				});
+				await settings.reloadFromDisk();
+				await tick();
+
+				expect(cfgToolsPtcMode.get(settings)).toBe("on");
+				expect(signalCount).toBe(4);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("signals Code Mode partition inputs supplied by the destination project", async () => {
+			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const otherProject = tempDir.join("code-mode-project");
+			await Bun.write(
+				path.join(getProjectAgentDir(otherProject), "config.yml"),
+				YAML.stringify({ providers: { "openai-codex": { codeMode: "on" } } }, null, 2),
+			);
+			let signalCount = 0;
+			const unsubscribe = cfgCodeModeInputs.listen(settings, () => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadForCwd(otherProject);
+				await tick();
+
+				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
+				expect(signalCount).toBe(1);
 			} finally {
 				unsubscribe();
 			}

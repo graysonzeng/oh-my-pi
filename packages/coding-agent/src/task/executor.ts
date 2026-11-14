@@ -1,3 +1,4 @@
+import { cfgTierXai } from "../config/workflow-settings";
 /**
  * Subagent execution.
  *
@@ -105,6 +106,7 @@ import {
 	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
+	modelSupportsEffortCeiling,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
@@ -138,6 +140,7 @@ import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import { recordStepsSent, type StepProgress } from "./steps";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
+	type AgentActivityPhase,
 	type AgentDefinition,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
@@ -1181,6 +1184,7 @@ function inheritedSubagentServiceTiers(
 			cfgTierOpenai.get(baseSettings),
 			cfgTierAnthropic.get(baseSettings),
 			cfgTierGoogle.get(baseSettings),
+			cfgTierXai.get(baseSettings),
 		);
 	}
 	const tiers: ServiceTierByFamily = {};
@@ -1932,6 +1936,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			});
 	};
 
+	const noteActivity = (phase: AgentActivityPhase, atMs: number): void => {
+		progress.activityPhase = phase;
+		progress.lastActivityAtMs = atMs;
+	};
+
 	const processEvent = (event: AgentEvent) => {
 		if (resolved) return;
 		const now = Date.now();
@@ -1940,8 +1949,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		switch (event.type) {
 			case "message_start":
 				if (event.message?.role === "assistant") {
+					noteActivity("model", now);
 					assistantStreaming = true;
 					resetRecentOutput();
+				} else {
+					noteActivity("working", now);
 				}
 				// An async-result follow-up injected after a recorded yield
 				// supersedes that yield: its payload predates the job outcome the
@@ -1957,6 +1969,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				break;
 
 			case "tool_execution_start": {
+				noteActivity("tool", now);
 				progress.toolCount++;
 				progress.currentTool = event.toolName;
 				let startArgs: Record<string, unknown> = {};
@@ -2004,6 +2017,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "tool_execution_end": {
+				noteActivity("working", now);
 				const finished = activeTools.get(event.toolCallId);
 				activeTools.delete(event.toolCallId);
 				if (finished) {
@@ -2152,6 +2166,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "tool_execution_update": {
+				if (progress.activityPhase === "tool") {
+					progress.lastActivityAtMs = now;
+				} else {
+					noteActivity("working", now);
+				}
 				// Surface nested-subagent progress mid-flight. The child task
 				// tool emits incremental `onUpdate` calls carrying its current
 				// `TaskToolDetails` (results + progress); we stash the latest
@@ -2169,12 +2188,28 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "message_update": {
-				if (event.message?.role !== "assistant") break;
+				if (event.message?.role !== "assistant") {
+					noteActivity("working", now);
+					break;
+				}
 				const assistantEvent = (
 					event as AgentEvent & {
 						assistantMessageEvent?: { type?: string; delta?: string };
 					}
 				).assistantMessageEvent;
+				if (assistantEvent?.type === "thinking_delta") {
+					noteActivity("thinking", now);
+				} else if (
+					assistantEvent?.type === "text_delta" ||
+					assistantEvent?.type === "toolcall_delta" ||
+					assistantEvent?.type === "toolcall_start" ||
+					assistantEvent?.type === "toolcall_end" ||
+					assistantEvent?.type === "image_delta"
+				) {
+					noteActivity("responding", now);
+				} else {
+					noteActivity("working", now);
+				}
 				if (assistantEvent?.type === "text_delta" && typeof assistantEvent.delta === "string") {
 					appendRecentOutputTail(assistantEvent.delta);
 					break;
@@ -2191,6 +2226,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "message_end": {
+				noteActivity("working", now);
 				// Extract text from assistant and toolResult messages (not user prompts)
 				const role = event.message?.role;
 				if (role === "assistant") {
@@ -2281,6 +2317,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "agent_end":
+				noteActivity("working", now);
 				// Extract final content from assistant messages only (not user prompts)
 				if (event.messages && Array.isArray(event.messages)) {
 					for (const msg of event.messages) {
@@ -2348,6 +2385,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			publishAdvisorState(session);
 			publishServingModel();
 			if (event.type === "auto_retry_start") {
+				noteActivity("working", Date.now());
 				progress.retryState = {
 					attempt: event.attempt,
 					maxAttempts: event.maxAttempts,
@@ -2360,6 +2398,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				return;
 			}
 			if (event.type === "auto_retry_end") {
+				noteActivity("working", Date.now());
 				const attempt = progress.retryState?.attempt ?? event.attempt;
 				progress.retryState = undefined;
 				if (!event.success) {
@@ -3166,6 +3205,9 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						: monitor.resolveAbortReasonText()
 		: undefined;
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
+	// Terminal snapshots are not live activity; clear the phase so wait/HUD
+	// readers do not keep a stale working/tool label after settle.
+	progress.activityPhase = undefined;
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected
@@ -4815,8 +4857,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			checkAbort();
 			if (!registryFromParent) {
 				modelRegistry.refreshInBackground();
-			} else {
-				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
+			} else if (typeof modelRegistry.refreshIfStale === "function") {
+				await awaitAbortable(modelRegistry.refreshIfStale().catch(() => false));
 			}
 			checkAbort();
 
@@ -4923,17 +4965,36 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				progress.contextWindow = model.contextWindow;
 			}
 			// Caller-requested coarse effort maps onto the resolved model's
-			// supported range, then respects the operator-configured ceiling.
-			// Undefined (no effort, or no controllable effort surface) falls
-			// through to the normal selectors below.
-			// The ceiling outlives initial resolution: it rides into the session so
+			// supported range, then respects the operator-configured ceiling and the
+			// agent frontmatter `maxEffort`. Undefined falls through to explicit
+			// `:level` suffixes and the agent default. A leftover `auto` agent
+			// default becomes high so omitted effort cannot inherit auto. The
+			// ceiling outlives initial resolution: it rides into the session so
 			// retry-fallback recovery can never clamp effort back up past it.
-			// A per-call `model` is caller-chosen too, so its `:level` is held to the same
-			// ceiling, and a model whose lowest effort is above it fails the spawn
-			// exactly as an `effort` hint does.
-			const spawnEffortCeiling =
+			// A per-call `model` is caller-chosen too, so its `:level` is held to the
+			// same ceiling, and a model whose lowest effort is above it fails the
+			// spawn exactly as an `effort` hint does. Mandatory single-effort models
+			// override the ceiling only when resolving their own effective level.
+			const globalEffortCeiling =
 				options.effort !== undefined || options.perCallModelGrants ? cfgTaskMaxEffort.get(settings) : undefined;
-			if (model && spawnEffortCeiling) assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
+			const spawnEffortCeiling =
+				agent.maxEffort !== undefined
+					? clampThinkingLevelToCeiling(undefined, globalEffortCeiling ?? agent.maxEffort, agent.maxEffort)
+					: globalEffortCeiling;
+			if (
+				options.effort === undefined &&
+				!options.perCallModelGrants &&
+				model !== undefined &&
+				spawnEffortCeiling !== undefined &&
+				!modelSupportsEffortCeiling(model, spawnEffortCeiling)
+			) {
+				throw new RangeError(
+					`${model.provider}/${model.id} has no supported thinking effort at or below agent ${agent.name} maxEffort=${spawnEffortCeiling}`,
+				);
+			}
+			if (model && spawnEffortCeiling && (options.effort !== undefined || options.perCallModelGrants)) {
+				assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
+			}
 			const effortLevel =
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
@@ -4942,20 +5003,27 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				explicitThinkingLevel && resolvedThinkingLevel !== AUTO_THINKING
 					? clampThinkingLevelToCeiling(model, resolvedThinkingLevel, spawnEffortCeiling)
 					: resolvedThinkingLevel;
+			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
+			// model pattern > agent-definition default > high. Agent ceilings clamp
+			// every concrete selector.
+			const agentThinkingLevel =
+				thinkingLevel === AUTO_THINKING || thinkingLevel === undefined
+					? resolveTaskEffortLevel(model)
+					: thinkingLevel;
+			const selectedThinkingLevel = effortLevel ?? (explicitThinkingLevel ? explicitLevel : agentThinkingLevel);
+			const effectiveThinkingLevel =
+				selectedThinkingLevel === AUTO_THINKING
+					? selectedThinkingLevel
+					: clampThinkingLevelToCeiling(model, selectedThinkingLevel, spawnEffortCeiling);
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? explicitLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
-					displayLevel !== undefined
+					displayLevel !== undefined && displayLevel !== AUTO_THINKING
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
-			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const fork = preparedSession?.fork;

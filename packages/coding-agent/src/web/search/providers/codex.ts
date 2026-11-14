@@ -5,7 +5,6 @@
  * the official ChatGPT backend for OAuth logins.
  */
 import { type Api, type AuthStorage, type FetchImpl, type Model, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
-import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -13,6 +12,7 @@ import {
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
+	resolveCodexResponsesUrl,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../types";
@@ -275,7 +275,11 @@ function extractTextSources(text: string): SearchSource[] {
 
 async function resolveCodexSearchTransport(params: SearchParams): Promise<CodexSearchTransport> {
 	const baseUrl = params.model.baseUrl;
-	const url = resolveCodexResponsesUrl(baseUrl);
+	const endpointMode =
+		params.model.compat && "codexResponsesEndpoint" in params.model.compat
+			? params.model.compat.codexResponsesEndpoint
+			: undefined;
+	const url = resolveCodexResponsesUrl(baseUrl, endpointMode);
 	const headers = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 	return {
 		baseUrl,

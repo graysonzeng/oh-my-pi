@@ -109,7 +109,8 @@ async function probeEndpoint(wsEndpoint: string): Promise<boolean> {
  * reachable); callers fall back to a process-local launch.
  *
  * Per-open process flags are intentionally absent: a running shared Chromium
- * cannot be relaunched for one tab, so invalid-certificate handling stays
+ * cannot be relaunched for one tab, so `allow_file_access` opens take a
+ * process-local launch instead; invalid-certificate handling stays
  * page-scoped through CDP.
  */
 export async function ensureSharedBrowser(opts: {

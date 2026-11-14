@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import type { AgentHubDeps, AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import type { HubActionQueueHints } from "@oh-my-pi/pi-tui/overlays/agent-hub-action-queue";
 import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { type AgentCostSnapshot, aggregateCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import type { AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
@@ -11,7 +12,9 @@ import { IrcBus, type IrcBusApi } from "../irc/bus";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
+import type { AgentSession } from "../session/agent-session";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
+import { collectHubActionHints } from "./hub-action-hints";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
@@ -27,17 +30,23 @@ export const agentTranscriptSource: AgentTranscriptSource = {
 	},
 };
 
+export interface AgentHubRuntimeOptions {
+	registry?: AgentRegistryApi;
+	lifecycle?: AgentLifecycleApi;
+	irc?: IrcBusApi;
+	activity?: AgentActivityIndex;
+	remote?: AgentHubRemote;
+	settings?: Settings;
+	sessionFile?: string | null;
+	/** Optional live ask-dialog / approval overlays from the TUI host. */
+	askDialogOpenForAgentIds?: () => ReadonlySet<string> | readonly string[] | undefined;
+	pendingApprovalAgentIds?: () => ReadonlySet<string> | readonly string[] | undefined;
+	pendingIntegrateAgentIds?: () => ReadonlySet<string> | readonly string[] | undefined;
+}
+
 /** Host services used by the roster, without exposing runtime implementation to tui. */
 export function createAgentHubRuntime(
-	options: {
-		registry?: AgentRegistryApi;
-		lifecycle?: AgentLifecycleApi;
-		irc?: IrcBusApi;
-		activity?: AgentActivityIndex;
-		remote?: AgentHubRemote;
-		settings?: Settings;
-		sessionFile?: string | null;
-	} = {},
+	options: AgentHubRuntimeOptions = {},
 ): Pick<
 	AgentHubDeps<AgentRef>,
 	| "registry"
@@ -49,10 +58,25 @@ export function createAgentHubRuntime(
 	| "transcript"
 	| "loadPersisted"
 	| "getRoleInfo"
+	| "actionHints"
 > {
 	const registry = options.registry ?? AgentRegistry.global();
 	const rootSessionFile = options.sessionFile?.endsWith(".jsonl") ? options.sessionFile : undefined;
 	const copied = new Set<AgentRecordLike>();
+	const actionHints = (): HubActionQueueHints =>
+		collectHubActionHints({
+			agents: registry.list(),
+			resolveSession: id => {
+				const ref = registry.get(id);
+				const session = ref?.session;
+				return session && typeof (session as AgentSession).getGoalModeState === "function"
+					? (session as AgentSession)
+					: null;
+			},
+			askDialogOpenForAgentIds: options.askDialogOpenForAgentIds?.(),
+			pendingApprovalAgentIds: options.pendingApprovalAgentIds?.(),
+			pendingIntegrateAgentIds: options.pendingIntegrateAgentIds?.(),
+		});
 	return {
 		registry,
 		// Local roster only: a collab guest mirrors the host's registry, whose
@@ -72,6 +96,7 @@ export function createAgentHubRuntime(
 				onCopiedRef: ref => copied.add(ref),
 			}),
 		getRoleInfo: options.settings ? role => getRoleInfo(role, options.settings!) : undefined,
+		actionHints,
 	};
 }
 

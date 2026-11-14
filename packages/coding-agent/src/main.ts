@@ -2005,6 +2005,9 @@ export async function runRootCommand(
 		if (parsedArgs.noJudge) cfgNoJudge.override(settingsInstance, true);
 		if (parsedArgs.noSpotlight) cfgNoSpotlight.override(settingsInstance, true);
 		if (parsedArgs.offline) cfgOffline.override(settingsInstance, true);
+		if (parsedArgs.ptc) {
+			settingsInstance.override("tools.ptc.mode", parsedArgs.ptc);
+		}
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyProtocolDefaults("rpc", settingsInstance);
 		} else if (parsedArgs.mode === "acp") {
@@ -2079,6 +2082,13 @@ export async function runRootCommand(
 		// Apply --wait-async CLI flag (ephemeral, not persisted); only print mode reads it
 		if (parsedArgs.waitAsync) {
 			cfgAsyncPrintWake.override(settingsInstance, true);
+		}
+		if (parsedArgs.consult) {
+			settingsInstance.override("consult.enabled", true);
+		}
+		if (parsedArgs.consultModel) {
+			settingsInstance.override("consult.enabled", true);
+			settingsInstance.override("consult.model", parsedArgs.consultModel);
 		}
 		// Apply --external-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.externalThinking) {
@@ -2412,6 +2422,7 @@ export async function runRootCommand(
 			options.tuiTranscript = isInteractive;
 			options.autoTitle = isInteractive;
 			options.deferSkillDescriptionCompression = isInteractive;
+			if (isInteractive) options.allowHeadlessGoalContinuation = false;
 			options.settings = settingsInstance;
 			options.telemetry = startupTelemetry;
 			options.topLevelExtensions = startupTopLevelExtensions;

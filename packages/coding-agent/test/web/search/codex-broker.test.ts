@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
+import { CODEX_BASE_URL, resolveCodexResponsesUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";

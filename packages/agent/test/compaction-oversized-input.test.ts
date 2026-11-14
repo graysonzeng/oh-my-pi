@@ -11,6 +11,7 @@ import {
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { checkpointSummary } from "./helpers";
 
 function createAssistantMessage(text: string): AssistantMessage {
 	return {
@@ -38,6 +39,15 @@ function getModel(contextWindow: number): Model {
 	return { ...model, contextWindow };
 }
 
+/**
+ * A structurally valid local summary whose `## Goal` body carries the fold's
+ * call number, so a test can tell which window's answer it received without
+ * loosening the harness's required-heading contract.
+ */
+function localSummary(call: number): string {
+	return checkpointSummary({ "## Goal": `summary ${call}` });
+}
+
 /** ~4 chars per cl100k token, so each turn is roughly `tokens` tokens of input. */
 function turn(index: number, tokens: number): AgentMessage[] {
 	return [
@@ -53,11 +63,11 @@ function promptTextOf(call: unknown[]): string {
 
 describe("summarization input budget", () => {
 	test("summarizes a fitting conversation in one call", async () => {
-		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage(localSummary(0)));
 		try {
 			const summary = await generateSummary(turn(1, 200), getModel(200_000), 16_384, "test-key");
 			expect(spy.mock.calls.length).toBe(1);
-			expect(summary).toBe("summary");
+			expect(summary).toBe(localSummary(0));
 		} finally {
 			spy.mockRestore();
 		}
@@ -67,7 +77,7 @@ describe("summarization input budget", () => {
 		let call = 0;
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockImplementation(async () => createAssistantMessage(`summary ${++call}`));
+			.mockImplementation(async () => createAssistantMessage(localSummary(++call)));
 		try {
 			// 40k-token window leaves ~4k of conversation budget after the summary
 			// reserve, so ~48k tokens of conversation cannot be one prompt.
@@ -75,7 +85,7 @@ describe("summarization input budget", () => {
 			const summary = await generateSummary(messages, getModel(40_000), 16_384, "test-key");
 
 			expect(spy.mock.calls.length).toBeGreaterThan(1);
-			expect(summary).toBe(`summary ${spy.mock.calls.length}`);
+			expect(summary).toBe(localSummary(spy.mock.calls.length));
 
 			// Every window is inside the budget, and every window after the first
 			// carries the summary of the ones before it.
@@ -84,7 +94,7 @@ describe("summarization input budget", () => {
 				expect(prompt.length).toBeLessThan(40_000 * 4);
 			}
 			expect(prompts[0]).not.toContain("<previous-summary>");
-			expect(prompts[1]).toContain("<previous-summary>\nsummary 1\n</previous-summary>");
+			expect(prompts[1]).toContain(`<previous-summary>\n${localSummary(1)}\n</previous-summary>`);
 
 			// The fold covers the whole span: first and last turns both reach a call.
 			expect(prompts[0]).toContain("turn 0");
@@ -107,7 +117,7 @@ describe("summarization input budget", () => {
 				rejected.push(prompt.length);
 				throw new Error(`400 prompt is too long: ${prompt.length} tokens > ${providerCapChars} maximum`);
 			}
-			return createAssistantMessage(`summary ${++call}`);
+			return createAssistantMessage(localSummary(++call));
 		});
 		try {
 			const messages = Array.from({ length: 60 }, (_, i) => turn(i, 4_000)).flat();
@@ -117,7 +127,7 @@ describe("summarization input budget", () => {
 			// the window instead of failing the compaction.
 			expect(rejected.length).toBeGreaterThan(0);
 			expect(rejected.length).toBeLessThan(4);
-			expect(summary).toBe(`summary ${call}`);
+			expect(summary).toBe(localSummary(call));
 			const accepted = spy.mock.calls.map(promptTextOf).filter(p => p.length <= providerCapChars);
 			expect(accepted[0]).toContain("turn 0");
 			expect(accepted[accepted.length - 1]).toContain("turn 59");
@@ -137,12 +147,12 @@ describe("summarization input budget", () => {
 			if (prompt.length > providerCapChars) {
 				throw new Error(`400 prompt is too long: ${prompt.length} tokens > ${providerCapChars} maximum`);
 			}
-			return createAssistantMessage("summary");
+			return createAssistantMessage(localSummary(0));
 		});
 		try {
 			const messages = Array.from({ length: 12 }, (_, i) => turn(i, 4_000)).flat();
 			const summary = await generateSummary(messages, getModel(40_000), 16_384, "test-key");
-			expect(summary).toBe("summary");
+			expect(summary).toBe(localSummary(0));
 			for (const prompt of spy.mock.calls.map(promptTextOf)) {
 				expect(prompt.length).toBeLessThanOrEqual(providerCapChars);
 			}
@@ -169,7 +179,7 @@ describe("summarization input budget", () => {
 	});
 
 	test("carries a caller-supplied previous summary into the first window", async () => {
-		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("merged"));
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage(checkpointSummary()));
 		try {
 			await generateSummary(turn(1, 200), getModel(200_000), 16_384, "test-key", undefined, undefined, "earlier");
 			expect(promptTextOf(spy.mock.calls[0])).toContain("<previous-summary>\nearlier\n</previous-summary>");

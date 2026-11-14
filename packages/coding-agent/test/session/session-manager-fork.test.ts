@@ -117,7 +117,7 @@ describe("SessionManager.forkFrom", () => {
 			const cloneHeader = cloneEntries.find((entry): entry is SessionHeader => entry.type === "session");
 			const cloneMessage = cloneEntries.find((entry): entry is SessionMessageEntry => entry.type === "message");
 			expect(cloneHeader?.id).not.toBe(sourceHeader.id);
-			expect(cloneHeader?.parentSession).toBe(sourceHeader.id);
+			expect(cloneHeader?.parentSession).toBe(path.resolve(sourceFile));
 			expect(cloneHeader?.cwd).toBe(cwd);
 			if (cloneMessage?.message.role !== "user") throw new Error("expected forked user message");
 			expect(cloneMessage.message.content).toBe("hello");
@@ -634,7 +634,7 @@ describe("SessionManager.forkFrom", () => {
 			});
 			const migrated = forked.getEntries().find(entry => entry.id === "hook");
 			expect(migrated).toMatchObject({ type: "message", message: { role: "custom", customType: "legacy" } });
-			forked.branch("user");
+			await forked.branch("user");
 			forked.appendMessage({ role: "user", content: "fork-only continuation", timestamp: 3 });
 			expect(forked.buildSessionContext().messages).toMatchObject([
 				{ role: "user", content: "source" },

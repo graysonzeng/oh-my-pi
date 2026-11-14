@@ -120,6 +120,8 @@ import type { GoalModeState } from "../goals/state";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
 import { hasNativeJudge } from "../judgment";
+import { recordExplicitUserAcceptance } from "../latency/ordinary-acceptance-sink";
+import { resolveParentFinalCodeStateRef } from "../task/workspace-code-version";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
 import {
@@ -367,7 +369,11 @@ import {
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
 } from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
-import { type ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import {
+	type ObservableSession,
+	type SessionObserverChangeKind,
+	SessionObserverRegistry,
+} from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
@@ -480,6 +486,7 @@ import { combine, type SettingValueOf } from "../config/registry";
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
 import { cfgExtensionAssistantTextRenderers, cfgExtensionTranscriptPresenters } from "../extensibility/settings";
 import { cfgTierAdvisor } from "../session/settings";
+import { formatCompactLiveActivityLine, liveActivityFromProgress } from "../tools/wait";
 import {
 	cfgCompactionEnabled,
 	cfgCompactionIdleEnabled,
@@ -643,9 +650,9 @@ function formatHudNoteMarker(count: number): string {
 	return theme.fg("dim", chalk.italic(` \u207a${sub}`));
 }
 
-type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
+type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget" | "complete";
 
-const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
+const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget", "complete"]);
 const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
@@ -1250,6 +1257,16 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 }
 
 /**
+ * Bounded low-frequency repaint for the detached subagent HUD. Progress
+ * snapshots coalesce at ~100ms, but while a subagent is silent — no tool
+ * events, no stream chunks — nothing repaints and the row freezes on the last
+ * tool name. The ticker only invalidates the HUD block so elapsed/silence
+ * counters grow; it never emits or fabricates worker activity. Cleared as
+ * soon as no detached active rows remain, and always in `stop()`.
+ */
+export const SUBAGENT_HUD_REFRESH_MS = 2000;
+
+/**
  * Build the anchored subagent HUD block: a bold accent "Subagents · N running"
  * header (with the agent-hub key right-aligned when `hubKey` is given) plus
  * a bounded set of running-agent rows in the same `Id ⟨role⟩: description`
@@ -1269,6 +1286,7 @@ export function renderSubagentHudLines(
 	expanded = false,
 	livePreview = false,
 	hubKey?: string,
+	hitMap?: { order: string[]; toggleRow?: number },
 ): string[] {
 	const running = sessions.filter(isHudSubagent);
 	if (running.length === 0) return [];
@@ -1335,13 +1353,30 @@ export function renderSubagentHudLines(
 					}
 				}
 				const head = truncateToWidth(line, rowWidth, "");
-				const preview = livePreview ? renderSubagentToolPreview(session, rowWidth) : undefined;
+				let preview: string | undefined;
+				if (livePreview) {
+					preview = renderSubagentToolPreview(session, rowWidth);
+				} else {
+					const activity = liveActivityFromProgress(session.progress, Date.now());
+					preview = activity ? formatCompactLiveActivityLine(activity, Math.max(1, rowWidth), theme) : undefined;
+				}
 				itemLineCounts.set(session, preview ? 2 : 1);
 				return preview ? [head, preview] : head;
 			},
 		},
 		theme,
 	);
+	const toggleRowIndex = layout.toggle === undefined ? undefined : 2 + rows.length;
+	if (hitMap) {
+		const order: string[] = [];
+		for (let i = 0; i < items.length; i++) {
+			const id = items[i]!.id;
+			const count = itemLineCounts.get(items[i]!) ?? 1;
+			for (let n = 0; n < count; n++) order.push(id);
+		}
+		hitMap.order = order;
+		hitMap.toggleRow = toggleRowIndex;
+	}
 	const toggleRow =
 		layout.toggle === undefined
 			? []
@@ -2044,7 +2079,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#dictationStarting = false;
 	#micCursor: MicCursor | undefined;
 	#resizeHandler?: () => void;
-	#observerRegistry: SessionObserverRegistry;
+	#observerRegistry = new SessionObserverRegistry();
 	/** Click override for the pinned jump-list density; undefined follows `display.pinnedAgents`. */
 	#pinnedHudOverride: boolean | undefined;
 	#eventBus?: EventBus;
@@ -2083,6 +2118,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** A scrollback replay is rendering. */
 	#replaying = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
+	#observerUiSyncNeedsTodoReconcile = false;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
@@ -2090,6 +2126,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#runningSubagentCount = 0;
 	/** Agents the hub can show, running or not: keeps the HUD agents segment up after the last one finishes. */
 	#inspectableSubagentCount = 0;
+	/** Low-frequency repaint ticker for the detached subagent HUD; `undefined` when idle. */
+	#subagentHudTicker?: NodeJS.Timeout;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
 	#subagentHudKey = "";
@@ -2679,8 +2717,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
 		this.syncRunningSubagentBadge();
-		this.#observerRegistry.onChange(() => {
-			this.#scheduleObserverUiSync();
+		this.#observerRegistry.onChange(kind => {
+			this.#scheduleObserverUiSync(kind);
 		});
 		// `/pause` stops the live-preview tick (the fullscreen pause screen covers
 		// the HUD); resuming repaints so elapsed markers catch up immediately.
@@ -4863,7 +4901,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#agentRegistryUnsubscribe = registry.onChange(() => {
 				// Restoring a roster emits one event per agent. Rebuild the badge and
 				// lists once per burst through the observer scheduler.
-				this.#scheduleObserverUiSync();
+				this.#scheduleObserverUiSync("progress");
 			});
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
@@ -5139,6 +5177,60 @@ export class InteractiveMode implements InteractiveModeContext {
 		return out;
 	}
 
+	/**
+	 * Auto-complete any open todo (pending/in_progress/blocked) whose content
+	 * matches a subagent that has finished successfully. Fires on every observer
+	 * `onChange` so the visual state stays in sync with subagent lifecycle
+	 * without requiring the agent to issue a follow-up `todo`. A todo `block`ed
+	 * while waiting on a detached subagent is included: that subagent completing
+	 * is exactly the unblock signal, and blocked todos are excluded from the stop
+	 * reminder, so leaving it blocked would strand it silently. Failed, aborted,
+	 * and non-ordinary completions (`budget_stop` / `timeout` / `hard_abort`)
+	 * are intentionally NOT auto-completed — those stay open so the user
+	 * (or the next agent turn) can decide what to do.
+	 *
+	 * Idempotent: only flips open tasks, never re-touches completed ones.
+	 */
+	#reconcileTodosWithSubagents(): void {
+		const completedDescs: string[] = [];
+		for (const session of this.#observerRegistry.getSessions()) {
+			if (session.kind !== "subagent") continue;
+			if (session.status !== "completed") continue;
+			if (session.completionKind && session.completionKind !== "completed") continue;
+			const candidate =
+				session.description?.trim() || session.progress?.description?.trim() || session.label?.trim();
+			if (candidate) completedDescs.push(candidate);
+		}
+		if (completedDescs.length === 0) return;
+
+		let mutated = false;
+		const next: TodoPhase[] = this.todoPhases.map(phase => ({
+			name: phase.name,
+			tasks: phase.tasks.map(task => {
+				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
+					return task;
+				}
+				if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
+				mutated = true;
+				// Drop any blocker note along with the blocked status — the wait the
+				// note described is over.
+				return { content: task.content, status: "completed" as const };
+			}),
+		}));
+		if (!mutated) return;
+		// Persist into the session that owns the snapshot we derived `next` from,
+		// not `viewSession`: the two diverge mid focus-attach, and writing to the
+		// destination there would clobber its canonical plan. Leaving the owner
+		// bound (rather than routing through `setTodos`, which rebinds it to
+		// `viewSession`) keeps a follow-up reconcile in the same window correct.
+		const owner = this.#todoPhasesOwner ?? this.session;
+		owner.commitTodoPhases(next);
+		this.todoPhases = next;
+		this.#syncTodoHudState(owner);
+		this.#renderTodoList();
+		this.ui.requestRender();
+	}
+
 	#cancelTodoAutoClearTimer(): void {
 		this.#todoAutoClearGeneration++;
 		if (this.#todoAutoClearTimer) {
@@ -5236,7 +5328,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return active ?? nonEmpty[nonEmpty.length - 1];
 	}
 
-	#scheduleObserverUiSync(): void {
+	#scheduleObserverUiSync(kind: SessionObserverChangeKind): void {
+		if (kind !== "progress") {
+			this.#observerUiSyncNeedsTodoReconcile = true;
+		}
 		if (this.#observerUiSyncTimer) return;
 		this.#observerUiSyncTimer = setTimeout(() => {
 			this.#observerUiSyncTimer = undefined;
@@ -5247,15 +5342,27 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#flushObserverUiSync(): void {
 		const badgeChanged = this.syncRunningSubagentBadge({ requestRender: false });
-		// Observer changes never touch the todo phases or their persisted
-		// visibility: a finished subagent's description is not a `todo done`, so
-		// only the pending-todo highlight reads them. Repaint the HUD and
-		// transcript todo cards when the active descriptions change, even if the
-		// HUD is hidden; re-syncing HUD state here would re-arm the auto-clear timer.
-		const descriptionsChanged = this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey;
-		if (descriptionsChanged) this.#renderTodoList();
+		let todoChanged = false;
+		if (
+			this.#observerUiSyncNeedsTodoReconcile ||
+			this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey
+		) {
+			if (this.#observerUiSyncNeedsTodoReconcile) {
+				this.#observerUiSyncNeedsTodoReconcile = false;
+				this.#reconcileTodosWithSubagents();
+				this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
+			}
+			// Progress-only ticks (10 Hz while subagents run) cannot change the
+			// todo phases or their persisted visibility — re-syncing would also
+			// re-arm the auto-clear timer so it could never fire. The HUD and
+			// transcript todo cards still need repainting when the active
+			// descriptions change, even if the HUD itself is hidden.
+			this.#renderTodoList();
+			todoChanged = true;
+		}
 		const hudChanged = this.#renderSubagentList();
-		if (badgeChanged || descriptionsChanged || hudChanged) this.ui.requestRender();
+		this.#ensureSubagentHudTicker();
+		if (badgeChanged || todoChanged || hudChanged) this.ui.requestRender();
 	}
 
 	#cancelObserverUiSyncTimer(): void {
@@ -5263,7 +5370,45 @@ export class InteractiveMode implements InteractiveModeContext {
 			clearTimeout(this.#observerUiSyncTimer);
 			this.#observerUiSyncTimer = undefined;
 		}
+		this.#observerUiSyncNeedsTodoReconcile = false;
 		this.#cancelSubagentPreviewTick();
+	}
+	/** Whether the anchored subagent HUD currently has detached active rows to keep alive. */
+	#hasDetachedActiveHudSessions(): boolean {
+		return this.#observerRegistry
+			.getSessions()
+			.some(session => session.kind === "subagent" && session.status === "active" && session.detached === true);
+	}
+
+	/**
+	 * Keep the detached HUD repainting at a bounded low frequency so elapsed /
+	 * silence counters advance without new progress events. Redraw only: never
+	 * emits progress or fabricates worker activity. Self-clears the moment the
+	 * HUD has nothing left to show.
+	 */
+	#ensureSubagentHudTicker(): void {
+		if (this.#subagentHudTicker) return;
+		if (!this.#hasDetachedActiveHudSessions()) {
+			this.#cancelSubagentHudTicker();
+			return;
+		}
+		const ticker = setInterval(() => {
+			if (!this.#hasDetachedActiveHudSessions()) {
+				this.#cancelSubagentHudTicker();
+				return;
+			}
+			this.#renderSubagentList();
+			this.ui.requestRender();
+		}, SUBAGENT_HUD_REFRESH_MS);
+		ticker.unref?.();
+		this.#subagentHudTicker = ticker;
+	}
+
+	#cancelSubagentHudTicker(): void {
+		if (this.#subagentHudTicker) {
+			clearInterval(this.#subagentHudTicker);
+			this.#subagentHudTicker = undefined;
+		}
 	}
 
 	#renderTodoList(): void {
@@ -5651,14 +5796,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		const expanded = this.#pinnedHudOverride ?? mode === "full";
 		const livePreview = cfgDisplaySubagentLivePreview.get(settings);
 		const hubKey = appKey(this.keybindings, "app.agents.hub") || undefined;
-		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, livePreview, hubKey);
+		const hitMap: { order: string[]; toggleRow?: number } = { order: [] };
+		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, livePreview, hubKey, hitMap);
 		if (lines.length === 0) return undefined;
 		const layout = layoutPinnedHud(running.length, expanded);
 		const tickMs =
 			livePreview && !agentPauseGate.paused
 				? nextSubagentPreviewTickMs(running.slice(0, layout.itemRows), Date.now())
 				: undefined;
-		return { lines, order: running.map(session => session.id), toggleRow: layout.toggleRow, tickMs };
+		return {
+			lines,
+			order: hitMap.order.length > 0 ? hitMap.order : running.map(session => session.id),
+			toggleRow: hitMap.toggleRow ?? layout.toggleRow,
+			tickMs,
+		};
 	}
 
 	#armSubagentPreviewTick(tickMs: number | undefined): void {
@@ -5987,13 +6138,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				mode: "active",
 				goal,
 			});
+			await this.session.goalRuntime.recoverPendingVerification();
 			const restored = await this.session.goalRuntime.onThreadResumed({
 				preserveActiveGoal: options?.preserveActiveGoal,
 			});
 			this.goalModeEnabled = restored?.enabled === true;
 			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
-			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
-			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
 				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 				this.#goalModePreviousTools = previousTools;
@@ -7494,6 +7644,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			case "drop":
 				await this.#confirmAndDropGoal();
 				return false;
+			case "complete":
+				await this.#confirmAndCompleteGoal();
+				return false;
 			case "budget":
 				if (!this.goalModeEnabled) {
 					this.showWarning(
@@ -7517,7 +7670,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
 		const items =
 			state === "active"
-				? ["Show details", "Adjust budget…", "Pause", "Drop"]
+				? ["Show details", "Adjust budget…", "Pause", "Complete", "Drop"]
 				: ["Resume", "Show details", "Adjust budget…", "Drop"];
 		const choice = await this.showHookSelector(title, items);
 		if (!choice) return;
@@ -7533,6 +7686,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			case "Resume":
 				await this.#resumeGoalAction();
+				return;
+			case "Complete":
+				await this.#confirmAndCompleteGoal();
 				return;
 			case "Drop":
 				await this.#confirmAndDropGoal();
@@ -7618,6 +7774,48 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** End the `working` hold of `init({ startupRun })` once the command-line prompts are dispatched. */
 	settleStartupRun(): void {
 		settleStartupRun();
+	}
+
+	async #confirmAndCompleteGoal(): Promise<void> {
+		const state = this.session.getGoalModeState();
+		if (!state?.goal || state.goal.status === "dropped" || state.goal.status === "complete") {
+			this.showWarning("No goal to complete.");
+			return;
+		}
+		const confirmed = await this.showHookConfirm(
+			"Complete goal?",
+			"This marks the goal complete from the host. Use only when the current repo evidence satisfies the objective.",
+		);
+		if (!confirmed) return;
+		// Ordinary trusted acceptance sink (Batch 1 W1): explicit host-confirmed
+		// user accept only — never auto on stop / LLM done / todo-complete.
+		const objective = state.goal.objective.trim();
+		if (objective) {
+			try {
+				const codeState = await resolveParentFinalCodeStateRef(this.session.sessionManager.getCwd());
+				const acceptance = recordExplicitUserAcceptance(this.session, {
+					acceptanceItems: [objective],
+					status: "passed",
+					eventId: `user-accept:goal:${this.session.sessionManager.getSessionId()}:${state.goal.id}`,
+					...(codeState ? { codeState } : {}),
+				});
+				if (!acceptance.recorded) {
+					logger.warn("ordinary acceptance: goal complete gated out", { reason: acceptance.reason });
+					this.showWarning(`Acceptance receipt not recorded (${acceptance.reason}). Goal still completed.`);
+				} else if (codeState?.fingerprint) {
+					this.session.setWorkspaceCodeFingerprint(codeState.fingerprint);
+				}
+			} catch (error) {
+				logger.warn("ordinary acceptance: goal complete write failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				this.showWarning("Acceptance receipt write failed; goal still completed (not minted green).");
+			}
+		}
+		this.session.goalRuntime.cancelInFlightNominations("user_confirmed");
+		await this.session.goalRuntime.completeGoalFromTool();
+		await this.#exitGoalMode({ reason: "completed" });
+		this.showStatus("Goal completed.");
 	}
 
 	async #startGoalFromObjective(
@@ -8197,6 +8395,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#downloadActivityHud.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
+		this.#cancelSubagentHudTicker();
 		this.#cancelGoalContinuation();
 		clearInterval(this.#jobsSheetTimer);
 		this.#jobsSheetTimer = undefined;

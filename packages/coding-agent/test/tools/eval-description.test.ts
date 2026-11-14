@@ -185,6 +185,31 @@ describe("eval tool description", () => {
 		}
 	});
 
+	it("pages xd topic docs instead of looking up a topic named after the selector", async () => {
+		const session = makeSession({});
+		const archive = Array.from({ length: 120 }, (_, i) => `archive-line-${i + 1}`).join("\n");
+		session.getToolByName = name =>
+			name === "eval" ? ({ docTopics: () => ({ archive }) } as unknown as AgentTool) : undefined;
+		const readTool = new ReadTool(session);
+		for (const [locator, kwargs, expected] of [
+			["xd://eval/archive", { offset: 0, limit: 80 }, archive.split("\n").slice(0, 80).join("\n")],
+			["xd://eval/archive:raw:2+3", {}, archive.split("\n").slice(1, 4).join("\n")],
+			["xd://eval/archive:-2:raw", {}, archive.split("\n").slice(-2).join("\n")],
+		] as const) {
+			const result = await readTool.execute("topic-page", { path: locator, ...kwargs });
+			const text = result.content
+				.filter(part => part.type === "text")
+				.map(part => part.text)
+				.join("\n");
+			if (locator === "xd://eval/archive") {
+				expect(text).toContain(expected.split("\n")[0]!);
+				expect(text).not.toContain("archive-line-101");
+			} else {
+				expect(text).toBe(expected);
+			}
+		}
+	});
+
 	it("links only current enabled prelude documentation", () => {
 		let enabled = true;
 		const prelude: EvalPreludeDefinition = {

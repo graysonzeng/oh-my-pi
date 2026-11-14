@@ -82,7 +82,13 @@ describe("advisor classifier-refusal fallback", () => {
 		let providerFailed = false;
 		const controls = { primaryRefuses: true };
 		const agent = new Agent({
-			initialState: { model: advisorPrimary, systemPrompt: ["Test"], tools: [], messages: [] },
+			// Workflow pauses an advisor on the primary model (same_model); run the session on a distinct model.
+			initialState: {
+				model: getBundledModel("anthropic", "claude-opus-4-5"),
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: primary.stream,
 		});
 		const settings = Settings.isolated({

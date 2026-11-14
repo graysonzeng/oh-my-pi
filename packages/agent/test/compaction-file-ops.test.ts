@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { extractFileOpsFromMessage, stripReadSelector } from "../src/compaction/utils";
+import { validateCompactionEvidenceFidelity } from "../src/compaction/compaction";
+import { extractFileOpsFromMessage, formatFileOperations, stripReadSelector } from "../src/compaction/utils";
 import { createAssistantMessage } from "./helpers";
 
 function readCall(id: string, path: string) {
@@ -81,5 +82,93 @@ describe("extractFileOpsFromMessage", () => {
 		const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
 		expect(readFiles).toEqual(["src/keep.ts"]);
 		expect(modifiedFiles).toEqual([]);
+	});
+});
+
+describe("computeFileLists", () => {
+	it("drops scheme:// URLs rehydrated from legacy compaction details", () => {
+		const fileOps = snapcompact.createFileOps();
+		// Simulate a pre-fix summary's details.readFiles/modifiedFiles fed straight
+		// into fileOps without going through extractFileOpsFromMessage.
+		fileOps.read.add("src/read-only.ts");
+		fileOps.read.add("artifact://7");
+		fileOps.edited.add("src/edited.ts");
+		fileOps.edited.add("conflict://1");
+		fileOps.written.add("local://ctx.md");
+		const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
+		expect(readFiles).toEqual(["src/read-only.ts"]);
+		expect(modifiedFiles).toEqual(["src/edited.ts"]);
+	});
+});
+
+describe("formatFileOperations", () => {
+	it("renders one grouped <files> tree with Read/Write/RW markers", () => {
+		const rendered = formatFileOperations(
+			["src/a.ts", "src/b.ts"],
+			["src/c.ts", "src/d.ts"],
+			new Set(["src/a.ts", "src/b.ts", "src/c.ts"]),
+		);
+		expect(rendered).toBe(
+			["<files>", "# src/", "a.ts (Read)", "b.ts (Read)", "c.ts (RW)", "d.ts (Write)", "</files>"].join("\n"),
+		);
+	});
+
+	it("marks modified files Write when no read set is provided", () => {
+		const rendered = formatFileOperations([], ["c.ts"]);
+		expect(rendered).toBe(["<files>", "c.ts (Write)", "</files>"].join("\n"));
+	});
+});
+
+describe("isUrlSchemePath", () => {
+	it("flags internal URIs and web URLs", () => {
+		expect(snapcompact.isUrlSchemePath("conflict://1")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("conflict://*")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("artifact://7")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("local://ctx.md")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("history://AuthLoader")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("https://example.com/page")).toBe(true);
+		// Prefixed conflict typo form — scheme appears after a colon, not at start.
+		expect(snapcompact.isUrlSchemePath("src/login.ts:conflict://3")).toBe(true);
+	});
+
+	it("leaves real filesystem paths untouched", () => {
+		expect(snapcompact.isUrlSchemePath("src/foo.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("C:/Users/me/file.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("db.sqlite:users")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("archive.zip:dir/file.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("docs/compaction.md:100-170:raw")).toBe(false);
+	});
+});
+
+describe("compaction evidence fidelity", () => {
+	it("reports omitted file, artifact, and unresolved-failure anchors", () => {
+		const receipt = validateCompactionEvidenceFidelity({
+			summary: "Implementation continued after compaction.",
+			filePaths: ["src/session.ts"],
+			artifactReferences: ["artifact://failure-log"],
+			unresolvedFailureAnchors: ["TS2322"],
+		});
+
+		expect(receipt.status).toBe("fail");
+		expect(receipt.missing).toEqual({
+			file_paths: ["src/session.ts"],
+			artifact_references: ["artifact://failure-log"],
+			unresolved_failures: ["TS2322"],
+		});
+		expect(receipt.checked).toEqual({ file_paths: 1, artifact_references: 1, unresolved_failures: 1 });
+		expect(receipt.summarySha256).toMatch(/^[a-f0-9]{64}$/);
+	});
+
+	it("fails open as unavailable when unresolved task state cannot be proven", () => {
+		const receipt = validateCompactionEvidenceFidelity({
+			summary: "Read src/session.ts; recover artifact://failure-log.",
+			filePaths: ["src/session.ts"],
+			artifactReferences: ["artifact://failure-log"],
+		});
+
+		expect(receipt.status).toBe("unavailable");
+		expect(receipt.missing.file_paths).toEqual([]);
+		expect(receipt.missing.artifact_references).toEqual([]);
+		expect(receipt.unavailableKinds).toEqual(["unresolved_failures"]);
 	});
 });

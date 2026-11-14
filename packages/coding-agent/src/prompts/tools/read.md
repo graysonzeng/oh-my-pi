@@ -11,6 +11,10 @@ Path suffixes:
 - Non-raw reads (comma lists too) may add the open/close line of a cut block; only :raw stays exact.
 - :raw verbatim without anchors/prefixes; combine :2-4:raw or :raw:2-4 for exactly those lines.
 - Beside :raw a bare number is that one line (:17:raw), :17-:raw runs on.
+- :conflicts lists one line per unresolved merge block.
+- SVG/SVGZ default text; :img rasterizes an SVG/SVGZ into an image, :raw original. Raster images (PNG, JPEG) need no selector; :img rejects them.
+- Video requires ffmpeg/ffprobe: bare preview grid+metadata, :412 frame, :1h5m42s/:90s/:01:23 time.
+Independent reads whose paths are already known MUST share one turn; NEVER serialize them to inspect results first. Unknown local path? Use `glob` first; read only returned paths.
 
 Sources:
 - Bare code: declarations only; re-read ONLY footer-named omissions, NEVER guess `..`/`…`.

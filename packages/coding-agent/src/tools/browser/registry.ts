@@ -18,6 +18,7 @@ import {
 	type UserAgentOverride,
 } from "./launch";
 import { reapOrphanSharedTargets, type SharedTargetScope } from "./orphan-registry";
+import { leaseOwnedApp, ownedProfileDir } from "./owned-app";
 import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { UPDATE_RELAY_EXTENSION, waitForRelayExtension } from "./relay/probe";
@@ -253,8 +254,10 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		// worker host) MUST go through the project-shared broker-owned Chromium:
 		// per-process launches are what produced launch storms and orphaned
 		// process trees. The process-local launch survives only for hosts that
-		// cannot spawn the broker (bun test, SDK embedding without a CLI entry).
-		if (isCompiledBinary() || workerHostEntry() !== null) {
+		// cannot spawn the broker (bun test, SDK embedding without a CLI entry),
+		// and for `allow_file_access`, a launch flag a running shared Chromium
+		// cannot take; that launch closes with its last tab.
+		if ((isCompiledBinary() || workerHostEntry() !== null) && !kind.allowFileAccess) {
 			return await openSharedHeadlessHandle(kind, opts);
 		}
 		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({
@@ -363,6 +366,8 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		);
 	}
 	const appArgs = kind.args ?? [];
+	const ownedProfile = ownedProfileDir(appArgs);
+	if (ownedProfile) await leaseOwnedApp(exe, ownedProfile);
 	const reused = await findReusableCdp(exe, { signal: opts.signal, appArgs });
 	let cdpUrl: string;
 	let pid: number;

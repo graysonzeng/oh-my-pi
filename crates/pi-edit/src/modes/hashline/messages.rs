@@ -254,6 +254,11 @@ pub fn literal_op_row_warning(line: u32, text: &str) -> String {
 pub const BARE_RANGE_AUTO_PUT_WARNING: &str =
 	"Recovered a bare `N.=M:` header as `PUT N.=M:`. Prefix replacement ranges with `PUT`.";
 
+/// A lone `@@` row between hunks carries no anchor, so it was skipped.
+pub const LONE_HUNK_SEPARATOR_IGNORED_WARNING: &str = "Ignored lone `@@` separator row(s). \
+                                                       Hashline hunks need no separator; start \
+                                                       each with its `PUT`/`CUT` header.";
+
 /// Copied read-output elision rows were ignored rather than written as source.
 pub const READ_METADATA_IGNORED_WARNING: &str =
 	"Ignored copied read-output elision row(s). Re-read elided ranges before editing them.";

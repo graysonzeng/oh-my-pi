@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
+import { cfgTaskAgentIdleTtlMs } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface SessionStub {
@@ -136,6 +138,29 @@ describe("AgentLifecycleManager", () => {
 		expect(ref?.session).toBeNull();
 		expect(ref?.sessionFile).toBe("/tmp/1-Sub.jsonl");
 		expect(lifecycle.has("1-Sub")).toBe(true);
+	});
+
+	it("parks keep-alive agents after task.agentIdleTtlMs (default 420s post-yield session_exit gap)", async () => {
+		// History-review B4: yield→session_exit ≈420s matches task.agentIdleTtlMs
+		// default. That interval is lifecycle park/GC of a keep-alive child, not a
+		// proven parent waiter — executor adopts with this TTL after yield returns.
+		const idleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(Settings.isolated())) || 0);
+		expect(idleTtlMs).toBe(420_000);
+
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		registerIdleSub("ttl-Sub", stub.session, "/tmp/ttl-Sub.jsonl");
+		lifecycle.adopt("ttl-Sub", { idleTtlMs });
+
+		vi.advanceTimersByTime(idleTtlMs - 1);
+		await flushAsync();
+		expect(registry.get("ttl-Sub")?.status).toBe("idle");
+		expect(stub.disposeCalls()).toBe(0);
+
+		vi.advanceTimersByTime(1);
+		await flushAsync();
+		expect(registry.get("ttl-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
 	});
 
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {

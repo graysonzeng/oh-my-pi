@@ -31,6 +31,7 @@ pub mod clipboard;
 pub mod crash_handler;
 pub mod desktop;
 pub mod devicecheck;
+
 pub mod diff;
 /// Directory change watching via `ReadDirectoryChangesW` (Windows).
 pub mod dir_watch;

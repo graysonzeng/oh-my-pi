@@ -15,14 +15,11 @@ export function applyToolProxy<TTool extends object>(tool: TTool, wrapper: objec
 			visited.add(key);
 			Object.defineProperty(wrapper, key, {
 				get() {
-					const value = (tool as Record<PropertyKey, unknown>)[key];
+					// Use the real tool as Reflect receiver so private-field getters on class
+					// tools keep a valid brand (Proxy-as-receiver throws TypeError).
+					const value = Reflect.get(tool, key, tool);
 					if (typeof value !== "function") return value;
-					// Callable schema values (ArkType `Type`, e.g. the `parameters` schema)
-					// must pass through untouched: `bind()` returns a bare bound function
-					// that drops the schema surface (`toJsonSchema`/`assert`/own keys), so a
-					// bound schema later stringifies to `undefined` and poisons wire-schema
-					// and token accounting. Only genuine methods are bound so `this` is
-					// preserved through the wrapper.
+					// Callable schemas must retain their schema surface; bind only genuine methods.
 					if (isArkSchema(value) || typeof value.bind !== "function") return value;
 					return value.bind(tool);
 				},

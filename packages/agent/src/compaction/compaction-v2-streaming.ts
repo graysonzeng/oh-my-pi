@@ -26,11 +26,11 @@ import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
-	CODEX_BASE_URL,
 	codexRoutingHint,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
+	resolveCodexResponsesUrl,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson, toError } from "@oh-my-pi/pi-utils";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
@@ -109,7 +109,9 @@ export function getCompactionV2Endpoint(model: Model): string | undefined {
 		return appendAzureApiVersion(`${resolveAzureOpenAiBaseUrl(model)}/responses`);
 	}
 	if (api === "openai-codex-responses" || model.provider === "openai-codex") {
-		return resolveOpenAiCodexResponsesEndpoint(model.baseUrl);
+		const endpointMode =
+			model.compat && "codexResponsesEndpoint" in model.compat ? model.compat.codexResponsesEndpoint : undefined;
+		return resolveCodexResponsesUrl(model.baseUrl, endpointMode);
 	}
 	return resolveOpenAiResponsesEndpoint(model.baseUrl);
 }
@@ -154,14 +156,6 @@ function resolveOpenAiResponsesEndpoint(baseUrl: string | undefined): string {
 	if (normalizedBase.endsWith("/responses")) return normalizedBase;
 	if (normalizedBase.endsWith("/v1")) return `${normalizedBase}/responses`;
 	return `${normalizedBase}/v1/responses`;
-}
-
-function resolveOpenAiCodexResponsesEndpoint(baseUrl: string | undefined): string {
-	const rawBase = baseUrl && baseUrl.trim().length > 0 ? baseUrl : CODEX_BASE_URL;
-	const normalizedBase = rawBase.replace(/\/+$/, "");
-	if (normalizedBase.endsWith("/codex/responses")) return normalizedBase;
-	if (normalizedBase.endsWith("/codex")) return `${normalizedBase}/responses`;
-	return `${normalizedBase}/codex/responses`;
 }
 
 function resolveCompactionV2Model(model: Model): string {

@@ -109,7 +109,6 @@ describe("createAgentSession auto-learn tool activation", () => {
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			...noDiscoveryOptions(),
 			toolNames: ["rewind"],
-			requireYieldTool: true,
 		});
 		sessions.push(session);
 		const names = session.getActiveToolNames();
@@ -127,7 +126,6 @@ describe("createAgentSession auto-learn tool activation", () => {
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			...noDiscoveryOptions(),
 			toolNames: ["checkpoint"],
-			requireYieldTool: true,
 			restrictToolNames: true,
 		});
 		sessions.push(session);

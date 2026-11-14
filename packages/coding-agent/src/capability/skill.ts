@@ -6,6 +6,15 @@
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
+/** Prompt-listing budget for skill `description`. Over-length descriptions stay loaded; discovery warns instead of truncating. */
+export const MAX_SKILL_DESCRIPTION_CHARS = 160;
+
+/** Warning text when a description exceeds `MAX_SKILL_DESCRIPTION_CHARS`. */
+export function skillDescriptionOverBudgetMessage(name: string, description: string): string | undefined {
+	if (description.length <= MAX_SKILL_DESCRIPTION_CHARS) return undefined;
+	return `"${name}" description is ${description.length} characters; keep it to ${MAX_SKILL_DESCRIPTION_CHARS} so the model can still tell when to use the skill`;
+}
+
 /**
  * Parsed frontmatter from a skill file.
  */

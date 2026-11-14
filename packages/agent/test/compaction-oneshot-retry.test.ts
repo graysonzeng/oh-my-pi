@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { generateSummary } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai/types";
+import { checkpointSummary } from "./helpers";
 
 /**
  * Defends `SummaryOptions.oneshotRetry`, the split that lets manual `/compact`
@@ -67,6 +68,9 @@ function summary(text: string): AssistantMessage {
 	} as unknown as AssistantMessage;
 }
 
+/** A valid local summary carrying the sentinel this test asserts on. */
+const recoveredSummary = checkpointSummary({ "## Progress": "recovered summary" });
+
 describe("SummaryOptions.oneshotRetry", () => {
 	it("retries a transient failure by default, so manual /compact survives a blip", async () => {
 		let calls = 0;
@@ -76,7 +80,7 @@ describe("SummaryOptions.oneshotRetry", () => {
 			// a value this test picked for itself.
 			completeImpl: () => {
 				calls += 1;
-				return Promise.resolve(calls === 1 ? overloaded() : summary("recovered summary"));
+				return Promise.resolve(calls === 1 ? overloaded() : summary(recoveredSummary));
 			},
 		});
 

@@ -25,6 +25,7 @@ describe("resolveModelTokenizer", () => {
 		expect(resolveModelTokenizer("Qwen/Qwen3.8-27B")).toBe("qwen3");
 		expect(resolveModelTokenizer("qwen3-32b")).toBeUndefined();
 		expect(resolveModelTokenizer("deepseek-chat")).toBe("deepseek-v3");
+		expect(resolveModelTokenizer("deepseek-flash")).toBe("deepseek-v3");
 		expect(resolveModelTokenizer("deepseek-r1-0528")).toBe("deepseek-v3");
 		expect(resolveModelTokenizer("deepseek-r1-distill-qwen-32b")).toBeUndefined();
 		expect(resolveModelTokenizer("moonshotai/Kimi-K3")).toBe("kimi-k2");

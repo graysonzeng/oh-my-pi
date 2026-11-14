@@ -16,7 +16,7 @@ import { resolveToCwd } from "../../../../tools/path-utils";
 import { listDirectChildRepos } from "../../../../utils/active-repo-context";
 import { github } from "../../../../utils/github";
 import { gitlab } from "../../../../utils/gitlab";
-import { buildReviewPrompt } from "./prompt";
+import { buildReviewPrompt, LARGE_DIFF_CHARACTER_LIMIT, LARGE_DIFF_FILE_LIMIT } from "./prompt";
 import {
 	createResolvedReviewTarget,
 	getReviewTargetIssue,
@@ -587,17 +587,30 @@ export async function selectReviewChoice(
 		: undefined;
 }
 
-function reviewTargetPrompt(
+async function reviewTargetPrompt(
 	ctx: HookCommandContext,
 	target: ResolvedReviewTarget,
 	instructions?: string,
-): string | undefined {
+): Promise<string | undefined> {
 	const issue = getReviewTargetIssue(target);
 	if (issue) {
 		if (ctx.hasUI) ctx.ui.notify(issue, "warning");
 		return undefined;
 	}
-	return buildReviewPrompt(target, instructions);
+	const artifactId = await ctx.sessionManager?.saveArtifact?.(target.rawDiff, "review-diff");
+	const snapshotRef =
+		artifactId === undefined
+			? undefined
+			: artifactId.startsWith("artifact://")
+				? artifactId
+				: `artifact://${artifactId}`;
+	const requiresArtifact =
+		target.rawDiff.length > LARGE_DIFF_CHARACTER_LIMIT || target.snapshot.files.length > LARGE_DIFF_FILE_LIMIT;
+	if (requiresArtifact && snapshotRef === undefined) {
+		if (ctx.hasUI) ctx.ui.notify("Unable to persist the full review diff as a stable artifact", "error");
+		return undefined;
+	}
+	return buildReviewPrompt(target, instructions, { snapshotRef });
 }
 
 function buildHeadlessReviewPrompt(focus: string | undefined, repository: string | undefined): string {

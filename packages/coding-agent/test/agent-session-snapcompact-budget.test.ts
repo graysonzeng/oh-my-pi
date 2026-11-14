@@ -405,6 +405,9 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		cfgSnapcompactShape.set(session.settings, "5x8-bw");
 		const shape = snapcompact.resolveShape(model, "5x8-bw");
 		expect(shape.frameTokenEstimate).toBe(Math.ceil(81 ** 2 * 1.2));
+		// Workflow defaults the trigger to 60% of the window; this case is about
+		// per-frame pricing, so size against the upstream usable-window trigger.
+		session.settings.override("compaction.thresholdPercent", -1);
 
 		// ~45k tokens of kept-recent traffic leaves room under the trigger for several
 		// frames, so the token budget, not the byte or provider caps, decides the count.

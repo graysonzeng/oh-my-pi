@@ -8,7 +8,7 @@ import type { WatchedFilesForwarder } from "./watched-files";
 
 export const lspSchema = type({
 	action:
-		"'diagnostics' | 'definition' | 'references' | 'hover' | 'symbols' | 'rename' | 'rename_file' | 'code_actions' | 'type_definition' | 'implementation' | 'status' | 'reload' | 'capabilities' | 'request'",
+		"'diagnostics' | 'definition' | 'references' | 'hover' | 'symbols' | 'rename' | 'rename_file' | 'code_actions' | 'type_definition' | 'implementation' | 'call_hierarchy' | 'status' | 'reload' | 'capabilities' | 'request'",
 	file: "string?",
 	line: "number?",
 	symbol: "string?",
@@ -46,6 +46,27 @@ export interface LocationLink {
 	targetUri: string;
 	targetRange: Range;
 	targetSelectionRange: Range;
+}
+
+export interface CallHierarchyItem {
+	name: string;
+	kind: number;
+	tags?: number[];
+	detail?: string;
+	uri: string;
+	range: Range;
+	selectionRange: Range;
+	data?: unknown;
+}
+
+export interface CallHierarchyIncomingCall {
+	from: CallHierarchyItem;
+	fromRanges: Range[];
+}
+
+export interface CallHierarchyOutgoingCall {
+	to: CallHierarchyItem;
+	fromRanges: Range[];
 }
 
 // =============================================================================

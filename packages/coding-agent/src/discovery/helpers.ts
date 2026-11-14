@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Effort } from "@oh-my-pi/pi-ai";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
 import {
 	CONFIG_DIR_NAME,
@@ -31,7 +32,7 @@ import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel, parseEffort } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
@@ -303,13 +304,18 @@ export interface ParsedAgentFields {
 	model?: string[];
 	output?: unknown;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	maxEffort?: Effort;
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
+	/** When `false`, the spawned session skips model-family tool-output clamps. */
+	outputTruncation?: boolean;
 	blocking?: boolean;
 	/** `true` = keep `yield` and the output schema when `task.structured` is off. */
 	structured?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
+	/** Opt-in code-review shadow cohort. Only `"code"` is recognized. */
+	shadowReview?: "code";
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
 	advisor?: boolean | string;
 }
@@ -377,10 +383,12 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 				: undefined;
 
 	const thinkingLevel = parseConfiguredThinkingLevel(rawThinkingLevel);
+	const maxEffort = typeof frontmatter.maxEffort === "string" ? parseEffort(frontmatter.maxEffort) : undefined;
 	const model = parseModelList(frontmatter.model);
 	const blocking = parseBoolean(frontmatter.blocking);
 	const structured = parseBoolean(frontmatter.structured);
 	const readSummarize = parseBoolean(frontmatter.readSummarize);
+	const outputTruncation = parseBoolean(frontmatter.outputTruncation);
 	// prewalk: true → hand off to the default prewalk target; "<pattern>" → custom target.
 	let prewalk: boolean | string | undefined = parseBoolean(frontmatter.prewalk);
 	if (prewalk === undefined && typeof frontmatter.prewalk === "string") {
@@ -396,6 +404,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
+	const shadowReview = frontmatter.shadowReview === "code" ? "code" : undefined;
 	return {
 		name,
 		description,
@@ -404,11 +413,14 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		model,
 		output,
 		thinkingLevel,
+		maxEffort,
 		blocking,
 		structured,
 		autoloadSkills,
 		readSummarize,
+		outputTruncation,
 		prewalk,
+		shadowReview,
 		advisor,
 	};
 }

@@ -31,6 +31,7 @@ import { loadSkills, type Skill } from "./extensibility/skills";
 import { InternalUrlRouter } from "./internal-urls/router";
 import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
+import consultInstructionsPrompt from "./prompts/system/consult-instructions.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -569,12 +570,22 @@ export interface BuildSystemPromptOptions {
 	eagerTasksAlways?: boolean;
 	/** Whether `task.batch` is enabled; selects the centralized delegation guidance's call shape. */
 	taskBatch?: boolean;
+	/** Whether to render proactive guidance for batching independent runnable slices. */
+	taskProactiveAutoParallel?: boolean;
+	/** Whether to render proactive guidance for escalating gated delivery to workflow. */
+	taskProactivePipelineGuidance?: boolean;
+	/** Whether to render proactive guidance for routing slices through existing agents. */
+	taskProactiveStageRouting?: boolean;
+	/** Effective task concurrency limit displayed in centralized delegation guidance. Zero means unlimited. */
+	taskMaxConcurrency?: number;
 	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
 	taskIrcEnabled?: boolean;
 	/** Whether the read-only `scout` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
 	scoutAvailable?: boolean;
 	/** Active model's delegation appetite (catalog `delegation-bias` axis); selects the Delegation section's wording. Default: `balanced`. */
 	delegationBias?: DelegationBias;
+	/** Whether the mechanical `sonic` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
+	sonicAvailable?: boolean;
 
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
@@ -633,6 +644,12 @@ export interface BuildSystemPromptOptions {
 	 * the main agent verifies once after all subagents land, so parallel children don't storm the CPU.
 	 */
 	subagent?: boolean;
+	/**
+	 * When true, the default template uses the worker execution context instead of
+	 * main-agent delegation, global workflow, and global completion management.
+	 * Custom / append / RULES text is not filtered or rewritten. Default: false.
+	 */
+	workerClass?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -733,12 +750,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks = false,
 		eagerTasksAlways = false,
 		taskBatch = true,
+		taskProactiveAutoParallel = false,
+		taskProactivePipelineGuidance = false,
+		taskProactiveStageRouting = false,
+		taskMaxConcurrency = 0,
 		taskIrcEnabled = false,
 		secretsEnabled = false,
 		resultShaping = "",
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
-		delegationBias = "balanced",
+		delegationBias = "eager",
+		sonicAvailable = true,
 		memoryBackend,
 		securityEnabled = false,
 		settingsApproval = false,
@@ -760,6 +782,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		writeTransportOnly = false,
 		subagent = false,
 		activeRepoContext: providedActiveRepoContext,
+		workerClass = false,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -1116,6 +1139,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		model: includeModelInPrompt ? (model ?? "") : "",
 		// An explicit eager-tasks mode lifts balanced/restrained wording to eager; gated has its own eager-tasks text.
 		delegationTier: eagerTasks && delegationBias !== "gated" ? "eager" : delegationBias,
+		delegationBias,
+		workerClass,
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
@@ -1123,7 +1148,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks,
 		eagerTasksAlways,
 		taskBatch,
+		taskProactiveAutoParallel,
+		taskProactivePipelineGuidance,
+		taskProactiveStageRouting,
+		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
+		sonicAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
 		resultShaping,
@@ -1162,6 +1192,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	for (const prelude of evalPreludes) {
 		const guidance = prelude.guidance?.trim();
 		if (guidance) systemPrompt.push(guidance);
+	}
+	if (toolNames.includes("consult")) {
+		systemPrompt.push(consultInstructionsPrompt.trim());
 	}
 	// Working-directory content (context files with their paths, workspace
 	// tree/roots, active repo) and session append text form one trailing

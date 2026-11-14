@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
@@ -142,6 +143,18 @@ describe("estimate cache option split", () => {
 });
 
 describe("estimate cache invalidation seams", () => {
+	test("cache invalidation does not make a complete history snapshot stale, but content changes do", () => {
+		const result = toolResult("original content");
+		const entry = messageEntry(result);
+		invalidateMessageCache(result);
+		const snapshot = structuredClone(entry);
+		invalidateMessageCache(result);
+		expect(isDeepStrictEqual(entry, snapshot)).toBe(true);
+		result.content = [{ type: "text", text: "changed content" }];
+		invalidateMessageCache(result);
+		expect(isDeepStrictEqual(entry, snapshot)).toBe(false);
+	});
+
 	test("pruneToolOutputs drops the cached estimate of a pruned result", () => {
 		const big = toolResult("x".repeat(20_000));
 		const entries = [messageEntry(big as AgentMessage)];

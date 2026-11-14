@@ -15,6 +15,63 @@ scripts/session-stats/
   audit-prompt.md  # system prompt for the audit classifier
 ```
 
+## Subagent baseline (`subagent-report.ts`)
+
+```sh
+bun run stats:subagents --since 3d --folder oh-my-pi
+bun run stats:subagents --session /path/to/parent.jsonl --format json
+bun run stats:subagents --since 1w --json /tmp/subagent-baseline.json
+```
+
+Offline JSONL analysis: no model calls, database sync, or uploads. `--since`
+selects whole parent/child groups by their latest file modification time; it
+is not an event-time filter. `--session` includes nested child transcripts
+without applying that window. Freeze/copy the input if comparing runs.
+
+The report separates assistant active wall time (gaps over ten minutes excluded),
+message-span wall time, provider TTFT/generation, and task call-to-result latency.
+The latter may be just a spawn acknowledgement, not time waiting for completion.
+Missing completion, queue, and final-verification evidence remains unknown;
+normal exit and successful tools never imply task acceptance. Concurrent child
+durations are not summed into end-to-end latency. When an explicit
+`parent_final_verification` custom entry/message is present (workflow
+`final_verify`, `AgentSession.recordParentFinalVerification`, or fixture),
+the report fills `parentFinalVerification` and parent start→verify `e2eMs` /
+`criticalPathMs`; failures and timeouts stay in `completionKinds`.
+
+`deliveryCost` (ordinary vs workflow cohorts kept separate; mixed receipts
+stay in `unknownCohort`) answers the delivery-first cost baseline:
+first-delivery accept, investigate/fix/verify cycles after that boundary,
+parent wait vs integrate vs child union time, input/output/cache-read tokens
+and priced cost, and attempt cost sliced by completion kind
+(timeout/cancelled/budget_stop). Core metric:
+`costPerAcceptedTask = totalAttemptCost ÷ acceptedTaskCount` — only when
+**every** task in the cohort has priced attempt cost; partial pricing leaves
+the ratio `null` (never understate by treating missing costs as $0). Missing
+signals stay `null` / `"unknown"` — never zero-filled. Optional
+`delivery_quality_outcome` receipts surface false-accept / missed-defect
+counts; absent receipts leave those fields `"unknown"`.
+
+**History supplement S1:** until sessions emit explicit
+`parent_final_verification` receipts, `costPerAcceptedTask` and first-pass
+rate remain **future / uncomputable** for that corpus — do not treat tool
+success or process exit as acceptance. When receipts exist (with
+`verifiedAtMs`), the Package 1 pipeline fills accepted-task cost. Evidence
+handoff observe (generate → consume → reject-stale) is metrics/logging only;
+the handoff schema is not expanded in this round.
+
+Repeated reads are grouped by selector-stripped resource within one parent
+session and emitted as SHA-256 keys, not raw paths/URLs. Different ranges or
+changed file contents can be legitimate reads: these counts are investigation
+signals, not proven redundant work. A local “501 identical-view” style tally,
+when present, is likewise a **candidate** only. **Track E prompt rules remain
+no-go** until humans attribute thrash and decide go (see
+`docs/tools/eval.md` and
+`docs/superpowers/specs/2026-09-13-sol-pi-efficiency-absorption.md`).
+Timing/model usage summaries currently
+pool parent and child requests, so they are not per-model controlled experiments.
+No conversation bodies or raw tool arguments appear in report output.
+
 ## One-time prep
 
 ```sh

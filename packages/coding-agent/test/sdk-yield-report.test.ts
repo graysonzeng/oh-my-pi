@@ -71,7 +71,6 @@ async function harness(
 		enableMCP: false,
 		enableLsp: false,
 		skipPythonPreflight: true,
-		requireYieldTool: true,
 		toolNames: ["yield"],
 		parentTaskPrefix: "report-child",
 		agentId: "report-child",

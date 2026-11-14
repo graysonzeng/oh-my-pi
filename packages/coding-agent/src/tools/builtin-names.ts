@@ -15,6 +15,8 @@ export const BUILTIN_TOOL_NAMES = [
 	"grep",
 	"find",
 	"lsp",
+	"code_intel",
+	"consult",
 	"checkpoint",
 	"rewind",
 	"context_notes",
@@ -31,6 +33,9 @@ export const BUILTIN_TOOL_NAMES = [
 	"reflect",
 	"learn",
 	"manage_skill",
+	"workflow",
+	"session_search",
+	"read_omitted_content",
 ] as const;
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];
@@ -86,6 +91,20 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	learn: { summary: "Capture reusable lessons in long-term memory", defaultState: "off" },
 	manage_skill: { summary: "Create, update, or delete managed skills", defaultState: "off" },
 	security_scan: { summary: "Run security scans", defaultState: "off" },
+	code_intel: {
+		summary: "Locate symbols, call edges, and ownership with a verified evidence envelope",
+		defaultState: "on",
+	},
+	consult: { summary: "Ask a stronger model for mid-turn strategic guidance", defaultState: "off" },
+	workflow: {
+		summary: "Multi-model coding workflow: plan, implement, review, and verify",
+		defaultState: "off",
+	},
+	session_search: { summary: "Search this session's raw journal on the current branch", defaultState: "off" },
+	read_omitted_content: {
+		summary: "Read a bounded page of tool output retained by structured compaction",
+		defaultState: "off",
+	},
 };
 
 export const HIDDEN_TOOL_NAMES = ["yield", "goal", "think"] as const;

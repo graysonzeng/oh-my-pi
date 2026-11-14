@@ -1,0 +1,1105 @@
+import type { BudgetInvocationSettlement, WorkflowBudgetGuard, WorkflowBudgetPort } from "./budget-ledger";
+import type { Usage } from "@oh-my-pi/pi-ai";
+import type { StablePrefixFinalRequestObserveV1 } from "../latency/stable-prefix-assembly-bridge";
+import type { ModelFactsSource } from "../model-policy/adapters";
+import type {
+	ModelFactsV1,
+	ModelPolicyFeatureGates,
+	SemanticToolContract,
+	SessionPolicyStateV1,
+} from "../model-policy/types";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ToolSession } from "../tools";
+import type { ContextEntry, ContextLedgerV1 } from "./context-ledger";
+import type { OverlaySidecar } from "./overlay";
+import type { PolicyExperimentReceiptV1 } from "./policy-experiment";
+import type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
+
+/** Re-export for consumers that import receipt types from workflow/types. */
+export type { ContextLedgerV1 } from "./context-ledger";
+export type { PromptAssemblyReceiptV1 } from "./prompt-assembly";
+
+/** Same four-value provenance as task `SubagentCompletionKind`; kept local so workflow/types does not import task. */
+export type WorkflowCompletionKind = "completed" | "budget_stop" | "timeout" | "hard_abort";
+/** Isolation controls for write stages (mirrors task isolation without importing task). */
+export interface WorkflowIsolationControls {
+	requested?: boolean;
+	merge?: "patch" | "branch";
+	apply?: boolean;
+}
+
+export type WorkflowStatus =
+	| "created"
+	| "planning"
+	| "plan_review"
+	| "implementing"
+	| "implementation_verify"
+	| "code_review"
+	| "repairing"
+	| "final_verify"
+	| "completed"
+	| "blocked"
+	| "cancelled"
+	| "failed";
+
+export interface ArtifactHeader {
+	schemaVersion: 1 | 2;
+	workflowId: string;
+	attemptId: string;
+	stage: WorkflowStatus;
+	createdAt: string;
+	modelProfileId?: string;
+	provider?: string;
+	model?: string;
+	promptVersion?: string;
+}
+
+export interface WorkPackageV1 {
+	id: string;
+	assignment: string;
+	paths: string[];
+	dependsOn: string[];
+}
+
+export type WorkPackageRunStatusV1 = "pending" | "succeeded" | "failed";
+
+export interface WorkPackageExecutionV1 extends WorkPackageV1 {
+	status: WorkPackageRunStatusV1;
+	invocationAttemptId?: string;
+	implementation?: ImplementationArtifactV1;
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	modelFamily?: string;
+	errorKind?: WorkflowErrorKind;
+	errorSummary?: string;
+}
+
+/** P1-4 explainable merge/recovery outcome; isolation is never a transaction. */
+export interface WorkPackageMergeRecoveryV1 {
+	kind: "merge_conflict" | "merge_applied" | "recovered_applied" | "needs_reconciliation";
+	explainable: true;
+	detail: string;
+	verifyRerunGuaranteed: false;
+	isolationIsTransaction: false;
+	unitIds?: string[];
+}
+
+export interface WorkPackageMergeV1 {
+	status: "pending" | "prepared" | "applied" | "failed";
+	order: string[];
+	patchPath?: string;
+	changesApplied?: boolean;
+	/** SHA-256 of the durable aggregate patch written before merge starts. */
+	patchSha256?: string;
+	summary?: string;
+	/** Explainable merge/recovery outcome (P1-4); does not rewrite `summary`. */
+	recovery?: WorkPackageMergeRecoveryV1;
+}
+
+export interface WorkPackageStateArtifactV1 extends ArtifactHeader {
+	kind: "work-package-state";
+	revision: number;
+	mode: "capture_then_apply";
+	packages: WorkPackageExecutionV1[];
+	merge: WorkPackageMergeV1;
+	/** Scope decision captured at the write-commit boundary. */
+	scopeStatus?: "adhered" | "warning" | "violation" | "indeterminate";
+}
+
+export interface CapturedChangesMergeRequest {
+	workflowId: string;
+	attemptId: string;
+	cwd: string;
+	patches: readonly { packageId: string; patchPath: string }[];
+	outputPatchPath: string;
+	signal?: AbortSignal;
+}
+
+export interface CapturedChangesMergeResult {
+	patchPath: string;
+	changesApplied: boolean;
+	summary: string;
+}
+
+export type CapturedChangesMerger = (request: CapturedChangesMergeRequest) => Promise<CapturedChangesMergeResult>;
+
+export interface PlanArtifactV1 extends ArtifactHeader {
+	kind: "plan";
+	summary: string;
+	assumptions: string[];
+	nonGoals: string[];
+	affectedFiles: Array<{
+		path: string;
+		action: "create" | "modify" | "delete";
+		reason: string;
+	}>;
+	implementationSteps: Array<{
+		id: string;
+		description: string;
+		dependsOn: string[];
+	}>;
+	workPackages?: WorkPackageV1[];
+	acceptanceCriteria: string[];
+	verificationCommands: string[];
+	risks: string[];
+	rollback: string[];
+	/**
+	 * Replan-only: planner disposition for each prior plan-review finding.
+	 * Required by the engine when replan follows open P0/P1 findings; omitted on first plan.
+	 */
+	authorResponses?: AuthorResponseV1[];
+}
+
+export interface ReviewFindingV1 {
+	id: string;
+	priority: "P0" | "P1" | "P2" | "P3";
+	category:
+		| "correctness"
+		| "architecture"
+		| "security"
+		| "concurrency"
+		| "compatibility"
+		| "testing"
+		| "maintainability";
+	status: "open" | "in_progress" | "resolved" | "rejected";
+	confidence: number;
+	summary: string;
+	explanation: string;
+	file?: string;
+	line?: number;
+	suggestedOwner: "implementer" | "reasoning_repair" | "human";
+	/** Engine-owned disposition captured from the accepted review decision. */
+	blocking?: boolean;
+	/** Engine-owned evidence for resolved/rejected transitions. */
+	resolutionEvidence?: string[];
+}
+
+export interface ReviewArtifactV1 extends ArtifactHeader {
+	schemaVersion: 1;
+	kind: "review";
+	subject: "plan" | "implementation";
+	decision: "approved" | "changes_requested" | "blocked";
+	findings: ReviewFindingV1[];
+	explanation: string;
+	confidence: number;
+}
+
+export type FindingBasisV1 =
+	| "spec_requirement"
+	| "user_requirement"
+	| "repo_evidence"
+	| "safety_invariant"
+	| "missing_authority";
+
+export type PlanReviewKindV1 = "initial" | "rereview" | "arbitration" | "human";
+export type PlanReviewTriggerReasonV1 = "contradiction" | "suspicious_pass" | "max_cycles_author_reject" | null;
+
+export interface RequirementCoverageV1 {
+	requirementId: string;
+	source: "spec_requirement" | "user_requirement";
+	mandatory: boolean;
+	status: "satisfied" | "violated" | "not_applicable" | "missing_authority";
+	evidenceRefs: string[];
+	rationale: string;
+}
+
+export interface RequirementsSnapshotRequirementV1 {
+	requirementId: string;
+	source: "spec_requirement" | "user_requirement";
+	mandatory: boolean;
+	text: string;
+}
+
+export interface RequirementsSnapshotV1 {
+	schemaVersion: 1;
+	kind: "requirements_snapshot";
+	workflowId: string;
+	createdAt: string;
+	/** Frozen request text used to extract requirements. */
+	source: {
+		request: string;
+		constraints: string | null;
+	};
+	requirements: RequirementsSnapshotRequirementV1[];
+	/** sha256 of the canonical fingerprint payload (excludes createdAt). */
+	sha256: string;
+}
+
+export interface PlanReviewFindingV2 extends ReviewFindingV1 {
+	basis: FindingBasisV1;
+	requirementId: string | null;
+	sourceRefs: string[];
+	missingAuthority: string | null;
+}
+
+export interface AuthorResponseV1 {
+	findingId: string;
+	disposition: "accepted" | "rejected" | "clarified";
+	explanation: string;
+	evidenceRefs: string[];
+}
+
+export interface PlanReviewArtifactV2 {
+	schemaVersion: 2;
+	workflowId: string;
+	attemptId: string;
+	stage: "plan_review";
+	createdAt: string;
+	modelProfileId: string | null;
+	provider: string | null;
+	model: string | null;
+	promptVersion: string;
+	kind: "review";
+	subject: "plan";
+	reviewKind: PlanReviewKindV1;
+	decision: "approved" | "changes_requested" | "blocked";
+	findings: PlanReviewFindingV2[];
+	explanation: string;
+	confidence: number;
+	requirementsSnapshotRef: string;
+	requirementsSnapshotSha256: string;
+	coverage: RequirementCoverageV1[];
+	uncoveredDimensions: string[];
+	antiAnchoringRationale: string;
+	reviewRound: 1 | 2;
+	authorResponses: AuthorResponseV1[];
+	triggerReason: PlanReviewTriggerReasonV1;
+	routeSelectionReceiptRef: string | null;
+	cleanContextReceiptRef: string | null;
+	specEvidenceReceiptRef: string | null;
+	authorityReceiptRef: string | null;
+}
+
+export type PlanReviewArtifact = ReviewArtifactV1 | PlanReviewArtifactV2;
+
+export type PlanReviewSubstateV1 = "initial_review" | "awaiting_replan" | "rereview" | "arbitration" | "awaiting_human";
+
+export type PlanReviewSchemaCohortV1 = "v1" | "v2";
+
+export type PlanReviewArbitrationAttemptPhaseV1 = "reserved" | "completed" | "failed_closed";
+
+export interface PlanReviewControlStateV1 {
+	schemaVersion: 1;
+	kind: "plan_review_control_state";
+	substate: PlanReviewSubstateV1;
+	reviewRound: 1 | 2;
+	planRejectionCount: number;
+	/** 0 = never reserved; 1 = sole cycle reserved or completed (maxArbitrationCycles default 1). */
+	arbitrationCycles: 0 | 1;
+	arbitrationTrigger: Exclude<PlanReviewTriggerReasonV1, null> | null;
+	/** Stable id for the sole reserved arbitration attempt; null until reserved. */
+	arbitrationAttemptId: string | null;
+	/** Pre-call reservation / completion phase for non-replayable resume. */
+	arbitrationAttemptPhase: PlanReviewArbitrationAttemptPhaseV1 | null;
+	/**
+	 * Immutable plan-review schema cohort for this workflow.
+	 * Persisted before the first review call so resume cannot flip V1↔V2 mid-flight.
+	 */
+	reviewSchemaCohort: PlanReviewSchemaCohortV1;
+	latestPlanArtifactRef: string | null;
+	latestReviewArtifactRef: string | null;
+	authorResponsesArtifactRef: string | null;
+	routeSelectionReceiptRef: string | null;
+	humanRequestReason: string | null;
+	updatedAt: string;
+}
+
+export interface PlanReviewRouteSelectionV1 {
+	schemaVersion: 1;
+	kind: "plan_review_route_selection";
+	profileId: string;
+	provider: string;
+	model: string;
+	modelFamily: string | null;
+	attestedProvider: string;
+	attestedModel: string;
+	exactMatch: boolean | null;
+	snapshotFingerprint: string | null;
+	createdAt: string;
+}
+
+export interface ImplementationArtifactV1 extends ArtifactHeader {
+	kind: "implementation";
+	summary: string;
+	changedFiles: string[];
+	addressedStepIds: string[];
+	commandsRun: Array<{
+		command: string;
+		exitCode: number;
+		summary: string;
+	}>;
+	patchPath?: string;
+	/** Strict repair may explicitly report that no new changes are required. */
+	noChangesRequired?: boolean;
+	branchName?: string;
+	unresolved: string[];
+}
+
+/**
+ * Ownership + validity metadata for a verification result (P1-2).
+ * Defined here so artifact consumers need not import the validity module.
+ */
+export type VerificationExecutor = "workflow_verifier" | "worker" | "parent";
+export type VerificationOwnerRole = "workflow_verifier" | "worker" | "parent";
+export type VerificationInvalidationTrigger =
+	| "implementation_changed"
+	| "commands_changed"
+	| "scope_changed"
+	| "repair_applied"
+	| "owner_transfer"
+	| "explicit";
+export type VerificationScopeKind = "commands" | "paths" | "repo";
+
+export interface VerificationScope {
+	kind: VerificationScopeKind;
+	paths?: string[];
+}
+
+export interface VerificationWorkspaceBinding {
+	/** realpath of the directory verification commands execute in. */
+	cwd: string;
+	/** VCS backend that proved the snapshot (`git` or `jj`). */
+	vcs: string;
+	/** realpath of the checkout or workspace root. */
+	root: string;
+	/** Working-copy commit id. Absent proof is not stored as an empty id. */
+	headId: string;
+	/** sha256 of proven HEAD plus dirty and untracked content. Not a guess. */
+	contentSha256: string;
+	/** Paths observed in the same VCS capture, for host-owned delivery scope evidence. */
+	changedFiles?: string[];
+}
+
+export interface VerificationCodeState {
+	patchSha256: string;
+	changedFiles: string[];
+	implementationAttemptId?: string;
+	fingerprint: string;
+	/**
+	 * Proven execution workspace. Absent on legacy seals and when the tree
+	 * could not be proven — those seals are not reusable.
+	 */
+	workspace?: VerificationWorkspaceBinding;
+}
+
+export interface VerificationValidityV1 {
+	schemaVersion: 1;
+	kind: "verification_validity";
+	executor: VerificationExecutor;
+	owner: VerificationOwnerRole;
+	commands: string[];
+	scope: VerificationScope;
+	codeState: VerificationCodeState;
+	invalidatedBy: VerificationInvalidationTrigger[];
+	invalid?: boolean;
+	invalidReason?: string;
+	invalidatedAt?: string;
+}
+
+export interface VerificationArtifactV1 extends ArtifactHeader {
+	kind: "verification";
+	passed: boolean;
+	checks: Array<{
+		id: string;
+		command?: string;
+		status: "passed" | "failed" | "skipped";
+		exitCode?: number;
+		summary: string;
+		logPath?: string;
+	}>;
+	/**
+	 * Optional validity seal: command+scope, code state, executor/owner identity,
+	 * and invalidation triggers. Absent on legacy artifacts → treat as unknown
+	 * (not reusable delivery evidence).
+	 */
+	validity?: VerificationValidityV1;
+}
+
+/** Kind of a preserved stage-handoff item (deterministic extract, not model summary). */
+export type StageHandoffItemKind = "plan" | "finding" | "patch" | "verification";
+
+/** One retained fragment at a stage boundary. */
+export interface StageHandoffPreservedItem {
+	kind: StageHandoffItemKind;
+	artifactId: string;
+	/**
+	 * Deterministic extract. Non-blocking items may be clamped to 500 characters.
+	 * Blocking acceptance, verification, and findings are complete or explicitly
+	 * sharded — a 500-character clamp is not their only copy.
+	 */
+	summary: string;
+	/** UTF-8 byte length of `summary`. */
+	bytes: number;
+	/**
+	 * When true, item must not be dropped under budget pressure
+	 * (blocking findings, patch refs, failed verification, etc.).
+	 */
+	blocking: boolean;
+	/** 1-based shard index when one logical item was split to stay recoverable. */
+	shardIndex?: number;
+	shardCount?: number;
+}
+
+/**
+ * Deterministic stage-boundary role-aware handoff (P1).
+ * Built only on successful stage completion; sources are never deleted.
+ */
+export interface StageHandoffV1 {
+	schemaVersion: 1;
+	kind: "stage_handoff";
+	fromStage: WorkflowStatus;
+	toStage: WorkflowStatus;
+	preservedItems: StageHandoffPreservedItem[];
+	/** Source artifact ids whose full bodies were not inlined (still recoverable). */
+	omittedArtifactIds: string[];
+	/** Recovery URIs for full source content (typically artifact://relativePath). */
+	recoveryUris: string[];
+	/** Total UTF-8 bytes of candidate source artifacts before extract. */
+	bytesBeforeHandoff: number;
+	/** Total UTF-8 bytes of preserved item summaries after extract (not wire/request tokens). */
+	bytesAfterHandoff: number;
+	/** sha256 of canonical payload (stable key order; excludes timestamps). */
+	contentFingerprint: string;
+}
+
+/** Durable source ref used when sizing handoff bytes / recovery. */
+export interface StageHandoffArtifactRef {
+	artifactId: string;
+	/** UTF-8 byte length of full stored content. */
+	bytes: number;
+	/**
+	 * Loadable recovery URI. Production workflow refs are absolute `file://` URLs
+	 * of the stored artifact file — the read tool already resolves those.
+	 * Session spill ids stay `artifact://<digits>`.
+	 */
+	recoveryUri: string;
+	/** SHA-256 of the stored body. Loaders must reject a mismatch. */
+	contentSha256?: string;
+}
+
+export type WorkflowRole = "planner" | "plan_reviewer" | "plan_arbitrator" | "implementer" | "code_reviewer" | "repair";
+export type WorkflowQualityTier = "balanced" | "critical";
+
+export type ModelIdentityProvenance =
+	| "configured"
+	| "local_resolution"
+	| "provider_echo"
+	| "gateway_attestation"
+	| "unknown";
+
+export interface ModelIdentityCoordinatesV1 {
+	provider: string | null;
+	model: string | null;
+	checkpoint: string | null;
+	provenance: ModelIdentityProvenance;
+}
+
+export interface ConfiguredModelIdentityV1 extends ModelIdentityCoordinatesV1 {
+	profileId: string;
+	modelPattern: string;
+	requestedEffort: ConfiguredThinkingLevel | null;
+	modelFamily: string | null;
+}
+
+export interface WorkflowRuntimeIdentityReceiptV1 {
+	schemaVersion: 1;
+	configured: ConfiguredModelIdentityV1;
+	localResolution: ModelIdentityCoordinatesV1;
+	attested: ModelIdentityCoordinatesV1;
+	exactMatch: boolean | null;
+	effortSupported: boolean | null;
+	modelFamily: string | null;
+}
+
+export interface QualityRouteProfileSnapshotV1 {
+	profile: ModelProfile;
+	configuredIdentity: ConfiguredModelIdentityV1;
+}
+
+export interface QualityRouteSnapshotV1 {
+	schemaVersion: 1;
+	qualityTier: WorkflowQualityTier;
+	degradedMode: false;
+	routes: Readonly<Record<WorkflowRole, readonly string[]>>;
+	profiles: readonly QualityRouteProfileSnapshotV1[];
+	fingerprint: string;
+}
+
+export type WorkflowModelBackedStage = "planning" | "plan_review" | "implementing" | "code_review" | "repairing";
+
+export type WorkflowEvidenceStatus = "verified" | "legacy" | "unknown" | "invalid";
+
+/** Secret-safe identity projection used by persisted workflow status reports. */
+export interface WorkflowIdentityCoordinatesEvidenceV1 {
+	provider: string | null;
+	model: string | null;
+	checkpoint: string | null;
+	provenance: ModelIdentityProvenance;
+}
+
+export interface WorkflowConfiguredIdentityEvidenceV1 extends WorkflowIdentityCoordinatesEvidenceV1 {
+	profileId: string | null;
+	modelPattern: string | null;
+	requestedEffort: string | null;
+	modelFamily: string | null;
+}
+
+export interface WorkflowConfiguredStageRouteEvidenceV1 {
+	stage: WorkflowModelBackedStage;
+	role: WorkflowRole;
+	orderedProfileIds: string[] | null;
+}
+
+export interface WorkflowRoutingSkipEvidenceV1 {
+	profileId: string | null;
+	reason: string;
+}
+
+export interface WorkflowRoutingDecisionEvidenceV1 {
+	selectedProfileId: string | null;
+	configuredProfileIds: string[] | null;
+	reason: string | null;
+	fallbackFrom: string | null;
+	skipped: WorkflowRoutingSkipEvidenceV1[];
+}
+
+export interface WorkflowModelExecutionEvidenceV1 {
+	profileId: string | null;
+	configuredIdentity: WorkflowConfiguredIdentityEvidenceV1 | null;
+	localResolution: WorkflowIdentityCoordinatesEvidenceV1 | null;
+	attestedIdentity: WorkflowIdentityCoordinatesEvidenceV1 | null;
+	exactIdentityMatch: boolean | null;
+	effortSupported: boolean | null;
+	modelFamily: string | null;
+	/** Tool policy id actually applied for this execution (named override or role default). */
+	toolPolicyId?: string | null;
+	completionKind?: WorkflowCompletionKind | null;
+}
+
+export interface WorkflowModelAttemptEvidenceV1 {
+	attemptId: string;
+	stage: WorkflowModelBackedStage;
+	role: WorkflowRole;
+	ordinal: number;
+	status: string;
+	configuredProfileId: string | null;
+	evidenceStatus: WorkflowEvidenceStatus;
+	routing: WorkflowRoutingDecisionEvidenceV1[];
+	executions: WorkflowModelExecutionEvidenceV1[];
+}
+
+export interface WorkflowQualityRouteStatusEvidenceV1 {
+	status: WorkflowEvidenceStatus;
+	qualityTier: WorkflowQualityTier | null;
+	snapshotFingerprint: string | null;
+	configuredStages: WorkflowConfiguredStageRouteEvidenceV1[];
+}
+
+/** Safe, persisted-only status projection. Request/policy/artifact bodies are intentionally excluded. */
+export interface WorkflowStatusReportV1 {
+	schemaVersion: 1;
+	workflowId: string;
+	status: WorkflowStatus;
+	currentStage: WorkflowStatus;
+	version: number;
+	attemptCount: number;
+	artifactCount: number;
+	transitionCount: number;
+	budgetTotals: Record<string, unknown> | null;
+	qualityRoute: WorkflowQualityRouteStatusEvidenceV1;
+	modelAttempts: WorkflowModelAttemptEvidenceV1[];
+}
+
+export type WorkflowQualityRoutes = Partial<
+	Record<WorkflowQualityTier, Readonly<Record<WorkflowRole, readonly string[]>>>
+>;
+
+/** Per-model system prompt style and instruction shaping. */
+export interface PromptStrategy {
+	kind: "verbose" | "concise" | "structured" | "custom";
+	/** Template id: default | concise-claude | structured-gpt | explicit-grok */
+	systemPromptTemplate?: string;
+	/** Reserved: static example bank not shipped; applyPromptStrategy ignores for now. */
+	fewShotPolicy?: {
+		enabled: boolean;
+		maxExamples: number;
+		dynamicSelection: boolean;
+	};
+	thinkingPrompt?: {
+		enabled: boolean;
+		style: "step-by-step" | "scratchpad" | "none";
+	};
+	roleEmphasis?: "light" | "medium" | "heavy";
+	instructionFormat?: "natural" | "numbered" | "xml-tagged";
+}
+
+export type TruncationStrategy = "head" | "tail" | "smart" | "none";
+
+export interface ToolOutputTruncationRule {
+	toolName: string | string[];
+	strategy: TruncationStrategy;
+	maxBytes?: number;
+	maxLines?: number;
+	preservePatterns?: string[];
+}
+
+export interface ToolStrategy {
+	toolAliases?: Record<string, string>;
+	argumentAliases?: Record<string, Record<string, string>>;
+	outputTruncation?: {
+		enabled: boolean;
+		rules: ToolOutputTruncationRule[];
+	};
+	resultSummarization?: {
+		enabled: boolean;
+		/** Built-in summarizer keys: bash, read, grep, test, ls — or "*" default. */
+		summarizerKeys?: string[];
+	};
+	/**
+	 * Cap concurrent shared tools in a single agent-loop batch.
+	 * Wired via Agent.toolScheduling.maxConcurrentTools when session installs the policy.
+	 */
+	maxConcurrentTools?: number;
+	/**
+	 * Hard remaining tool-call budget for this stage (mutable across batches).
+	 * null/undefined = unlimited. Not derived from toolHistory.maxToolCalls.
+	 */
+	remainingToolCalls?: number | null;
+	/** Remaining stage wall time in ms; ≤0 skips remaining tools. null = unknown. */
+	remainingStageTimeMs?: number | null;
+	/**
+	 * Resource conflict mode for concurrent tools:
+	 * - serialize/conservative: same-path writes and mutating bash serialize
+	 * - fail: later conflicting tool is skipped with error
+	 * - permissive: only explicit exclusive / same-path write pairs conflict
+	 */
+	resourceConflictMode?: "serialize" | "fail" | "conservative" | "permissive";
+}
+
+export interface ContextStrategy {
+	targetUtilization: number;
+	repoMap?: {
+		enabled: boolean;
+		maxFiles: number;
+		strategy: "full-content" | "symbols-only" | "hybrid";
+	};
+	eviction?: {
+		enabled: boolean;
+		preserveUserTurns: boolean;
+		evictPersisted: boolean;
+		keepRecentN: number;
+	};
+	/**
+	 * Preferred artifact budget surface. When set, each defined field overrides
+	 * the matching `contextPolicy` field via `resolveArtifactInclusion`
+	 * (see `artifact-inclusion.ts` dual-field docs; no threshold change).
+	 */
+	artifactInclusion?: {
+		includePlan: boolean;
+		includeReviewFindings: boolean;
+		includeVerification: boolean;
+		maxArtifactBytes: number;
+	};
+	toolHistory?: {
+		maxToolCalls: number;
+		summarizeOld: boolean;
+	};
+}
+
+export interface OutputStrategy {
+	schemaEnhancement?: {
+		addDescriptions: boolean;
+		addExamples: boolean;
+		strictMode: boolean;
+	};
+	outputPrefixPrompt?: string;
+	retryOnSchemaViolation?: {
+		enabled: boolean;
+		maxRetries: number;
+		includeErrorInRetry: boolean;
+	};
+}
+
+/**
+ * Workflow model profile: role/budget/schema binding plus optional model optimization.
+ * Shared model-level strategies may also be referenced via optimizationProfileId.
+ */
+export interface WorkflowModelProfile {
+	id: string;
+	vendor: "anthropic" | "openai" | "xai" | string;
+	modelPattern: string | string[];
+	roles: WorkflowRole[];
+	/**
+	 * Optional reference to a shared ModelOptimizationProfile id.
+	 * When set with inline strategy fields, inline fields override the referenced profile
+	 * for workflow-local use (normalizer materializes the merge).
+	 */
+	optimizationProfileId?: string;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Provider/gateway execution identity must exactly attest this profile before output is trusted. */
+	strictIdentity?: boolean;
+	promptTemplate: string;
+	promptVersion: string;
+	toolPolicyId: string;
+	toolAliases?: Record<string, string>;
+	argumentAliases?: Record<string, Record<string, string>>;
+	/** Per-model prompt shaping (style template, few-shot, role emphasis). */
+	promptStrategy?: PromptStrategy;
+	/** Per-model tool output truncation, summarization, and concurrency. */
+	toolStrategy?: ToolStrategy;
+	/** Per-model context window utilization, eviction, and repo-map. */
+	contextStrategy?: ContextStrategy;
+	/** Per-model structured-output schema enhancement and retry. */
+	outputStrategy?: OutputStrategy;
+	/**
+	 * Gated tool/skill presentation. Default (missing) is direct mode with feature off.
+	 * When enabled + catalog, non-essential tools get xd://tools/{name} locators without full schema.
+	 * Also gated by settings `workflow.presentationOptimization.enabled` (default false).
+	 */
+	presentationPolicy?: {
+		enabled?: boolean;
+		mode?: "direct" | "catalog";
+		essentialTools?: string[];
+		skillCatalogOnly?: boolean;
+		/** Skill names whose full body is injected immediately when catalog mode is on. */
+		autoloadSkills?: string[];
+	};
+	disabledTools?: string[];
+	maxRequests: number;
+	maxRuntimeMs: number;
+	maxInputTokens?: number;
+	maxOutputTokens?: number;
+	maxCostUsd?: number;
+	retryPolicy: {
+		maxAttempts: number;
+		retryableErrorKinds: string[];
+		fallbackProfileIds: string[];
+	};
+	/**
+	 * Compat / legacy budget surface. Effective inclusion flags and
+	 * `maxArtifactBytes` prefer `contextStrategy.artifactInclusion` when set
+	 * (see `resolveArtifactInclusion`). `includeFullTranscript` is policy-only.
+	 */
+	contextPolicy: {
+		includePlan: boolean;
+		includeReviewFindings: boolean;
+		includeVerification: boolean;
+		includeFullTranscript: boolean;
+		maxArtifactBytes: number;
+	};
+}
+
+/**
+ * @deprecated Use {@link WorkflowModelProfile}. Alias retained for one release cycle.
+ */
+export type ModelProfile = WorkflowModelProfile;
+
+export interface WorkflowAgentRequest {
+	workflowId: string;
+	/** Stage attempt id (WorkflowStore.beginAttempt) — parent of invocation identity. */
+	attemptId: string;
+	role: WorkflowRole;
+	/**
+	 * Optional pre-minted invocation id for redelivery/settlement of the same call.
+	 * Omit for new model executions — RuntimeAdapter mints a unique id per launch.
+	 */
+	invocationId?: string;
+	/** Optional pipeline review agent override (`subagent-sol` / `subagent-grok`). Not a new WorkflowRole. */
+	agent?: string;
+	pipelineKind?: "devflow";
+	authorModelFamily?: string | null;
+	profile: ModelProfile;
+	assignment: string;
+	context?: string;
+	/** Explicit typed context eligible for deterministic dedupe or recoverable replacement. */
+	contextEntries?: ContextEntry[];
+	outputSchema?: unknown;
+	isolation?: WorkflowIsolationControls;
+	session: ToolSession;
+	signal?: AbortSignal;
+	/**
+	 * Optional exact model facts for capability compilation.
+	 * When omitted, prepareWorkflowInvocation derives facts from `model` or
+	 * conservative shadow identity from the profile.
+	 */
+	modelFacts?: ModelFactsV1;
+	/** Catalog model used to derive facts when modelFacts is absent. */
+	model?: ModelFactsSource;
+	/** Optional session seed for policy compilation. */
+	sessionPolicyState?: Partial<SessionPolicyStateV1>;
+	/** Shadow candidate gates; raw active fields never authorize production rollout. */
+	modelPolicyFeatureGates?: ModelPolicyFeatureGates;
+	/** Validated evidence receipt that exclusively authorizes one live compiler lever. */
+	policyExperimentReceipt?: PolicyExperimentReceiptV1;
+	/** Optional semantic tools for descriptor compilation (never expands role allowlist). */
+	semanticTools?: SemanticToolContract[];
+}
+
+export interface WorkflowAgentResult<TArtifact = unknown> {
+	artifact: TArtifact;
+
+	rawResultId: string;
+	attemptId: string;
+	patchPath?: string;
+	branchName?: string;
+	usage?: Usage;
+	/** Isolation merge result: true applied, false failed/not applied, null N/A. */
+	changesApplied?: boolean | null;
+	resolvedProvider?: string;
+	resolvedModel?: string;
+	toolCalls?: number;
+	/**
+	 * Prompt assembly receipt from prepareWorkflowInvocation (attempt evidence).
+	 * After a successful run, provider cache counters are merged when usage reports them.
+	 */
+	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
+	/**
+	 * W5 safe observe at the final provider-serialized request boundary (onPayload).
+	 * Fingerprints only; claimedLiveWin always false. Usage/cache/TTFT associated when known.
+	 */
+	stablePrefixFinalObserve?: StablePrefixFinalRequestObserveV1;
+	contextLedger?: ContextLedgerV1;
+	/** Tool optimization receipts accumulated on the live tool path during the attempt. */
+	optimizationReceipts?: unknown[];
+	/** Deterministic schema repair attempt receipt when raw repair ran. */
+	schemaRepairReceipt?: unknown;
+	/** Configured/local/provider-attested identity layers for this execution. */
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	/** Catalog-derived lineage from the attested execution identity. */
+	modelFamily?: string;
+	/** Tool policy id actually applied (named override or role default). */
+	resolvedToolPolicyId?: string;
+	completionKind?: WorkflowCompletionKind;
+}
+
+export interface WorkflowRuntimeEvidence {
+	usage?: Usage;
+	resolvedProvider?: string;
+	resolvedModel?: string;
+	toolCalls?: number;
+	promptAssemblyReceipt?: PromptAssemblyReceiptV1;
+	contextLedger?: ContextLedgerV1;
+	optimizationReceipts?: unknown[];
+	identityReceipt?: WorkflowRuntimeIdentityReceiptV1;
+	modelFamily?: string;
+	/** Tool policy id actually applied (named override or role default). */
+	resolvedToolPolicyId?: string;
+	/** Relative artifact kind ref when scope-metrics was persisted. */
+	scopeMetricsKind?: string;
+	completionKind?: WorkflowCompletionKind;
+}
+
+export interface WorkflowRequest {
+	workflowId?: string;
+	request: string;
+	constraints?: string;
+	qualityTier?: WorkflowQualityTier;
+}
+
+export type WorkflowErrorKind =
+	| "configuration"
+	| "authentication"
+	| "quota"
+	| "rate_limit"
+	| "timeout"
+	| "cancelled"
+	| "provider_transient"
+	| "provider_permanent"
+	| "identity_mismatch"
+	| "schema_violation"
+	| "tool_failure"
+	| "verification_failure"
+	| "policy_violation"
+	| "merge_conflict"
+	| "budget_exhausted"
+	| "internal";
+
+export interface WorkflowState {
+	id: string;
+	status: WorkflowStatus;
+	currentStage: WorkflowStatus;
+	currentAttemptId?: string;
+	degradedMode: boolean;
+	createdAt: string;
+	updatedAt: string;
+	version: number;
+	requestJson: string;
+	policyJson: string;
+	/** Exclusive runner owner id when a process holds the lock; undefined when free. */
+	runnerOwner?: string;
+	/** Persistent interactive session that owns automatic `/delivery` discovery. */
+	ownerSessionId?: string;
+	/** NULL/absent = legacy workflow. Never inferred from request prose. */
+	pipelineKind?: "devflow";
+	overlaySidecar?: OverlaySidecar;
+}
+
+export interface Artifact {
+	id: string;
+	workflowId: string;
+	attemptId: string;
+	kind: string;
+	schemaVersion: number;
+	relativePath: string;
+	sha256: string;
+	createdAt: string;
+	content?: string;
+}
+
+export interface Transition {
+	id: number;
+	workflowId: string;
+	fromStatus: WorkflowStatus;
+	toStatus: WorkflowStatus;
+	reason: string;
+	attemptId?: string;
+	createdAt: string;
+}
+
+export interface Attempt {
+	id: string;
+	workflowId: string;
+	stage: string;
+	ordinal: number;
+	modelProfileId?: string;
+	status: string;
+	errorKind?: string;
+	errorSummary?: string;
+	usageJson?: string;
+	startedAt: string;
+	finishedAt?: string;
+}
+
+/** Port used by stages — only adapter implements real provider I/O. */
+export interface RuntimePort {
+	buildRequest(request: WorkflowAgentRequest): WorkflowAgentRequest;
+	run<TArtifact = unknown>(request: WorkflowAgentRequest): Promise<WorkflowAgentResult<TArtifact>>;
+	mergeCapturedChanges?: CapturedChangesMerger;
+	/**
+	 * Optional shared-budget hook. Engine sets it once; stages do not each thread a ledger.
+	 * Absent on fakes that do not bill.
+	 */
+	setBudgetPort?(port: WorkflowBudgetPort | undefined): void;
+	/**
+	 * Non-consuming settlement metadata for one attempt. Charge keys stay in the ledger snapshot.
+	 * Multiple gate, arbitration, and fallback invocations remain listed; nothing is deleted.
+	 */
+	takeBudgetSettlement?(attemptId: string): readonly BudgetInvocationSettlement[];
+}
+
+/** Port used by verify stages — deterministic commands only. */
+export interface VerifierPort {
+	verify(
+		artifact: Pick<ArtifactHeader, "workflowId" | "attemptId" | "stage"> &
+			Partial<Pick<ArtifactHeader, "modelProfileId" | "provider" | "model" | "promptVersion">> & {
+				changedFiles?: string[];
+				patchContent?: string;
+			},
+		commands: string[],
+		forbiddenPaths?: string[],
+		options?: { signal?: AbortSignal; timeoutMs?: number; expectDirtyTree?: boolean },
+	): Promise<VerificationArtifactV1>;
+	/**
+	 * Directory `verify` actually runs commands in. Stages fingerprint this
+	 * tree, not a caller cwd that may have drifted.
+	 */
+	workspaceCwd?: () => string;
+}
+
+// ---------------------------------------------------------------------------
+// Availability preflight (dedicated probe seam — not RuntimePort.run)
+// ---------------------------------------------------------------------------
+
+export type AvailabilityProbeStatus = "available" | "unavailable" | "indeterminate";
+export type AvailabilityRequirement = "required" | "conditional";
+export type AvailabilityScopeStatus = "ready" | "degraded" | "blocked" | "not_required";
+
+/** Single physical probe request for one profile/runtime target. */
+export interface WorkflowAvailabilityProbeRequest {
+	profile: ModelProfile;
+	role: WorkflowRole;
+	session: ToolSession;
+	signal?: AbortSignal;
+	timeoutMs?: number;
+	/** Shared budget guard for this physical probe. Absent probes stay unbilled by the adapter. */
+	budgetGuard?: WorkflowBudgetGuard;
+}
+
+/** Outcome of one physical probe before per-profile expansion. */
+export interface WorkflowAvailabilityProbeResult {
+	status: AvailabilityProbeStatus;
+	/** Local registry/session resolution; never provider attestation. */
+	localProvider?: string;
+	localModel?: string;
+	/** Provider/gateway-attested identity only. */
+	attestedProvider?: string;
+	attestedModel?: string;
+	attestedCheckpoint?: string;
+	identityProvenance?: ModelIdentityProvenance;
+	exactIdentityMatch?: boolean | null;
+	effortSupported?: boolean | null;
+	/** Compatibility projection: attested identity for strict profiles, local identity otherwise. */
+	actualProvider?: string;
+	actualModel?: string;
+	/** Omitted when the target never started before the overall deadline. */
+	latencyMs?: number;
+	/** Observable response usage for this diagnostic request only. */
+	usage?: Usage;
+	/** Provider/runtime-reported cost. null means explicitly unknown; never infer zero. */
+	reportedCostUsd?: number | null;
+	errorKind?: string;
+	errorSummary?: string;
+}
+
+/**
+ * Dedicated availability probe port.
+ * Must not be implemented by forging schema artifacts through RuntimePort.run().
+ */
+export interface WorkflowAvailabilityPort {
+	probe(request: WorkflowAvailabilityProbeRequest): Promise<WorkflowAvailabilityProbeResult>;
+}
+
+/** Per-profile row in a preflight report (after single-flight expansion). */
+export interface WorkflowAvailabilityProfileResult {
+	profileId: string;
+	role: WorkflowRole;
+	requirement: AvailabilityRequirement;
+	status: AvailabilityProbeStatus;
+	runtime: "embedded";
+	actualProvider?: string;
+	actualModel?: string;
+	localProvider?: string;
+	localModel?: string;
+	attestedProvider?: string;
+	attestedModel?: string;
+	attestedCheckpoint?: string;
+	identityProvenance?: ModelIdentityProvenance;
+	exactIdentityMatch?: boolean | null;
+	effortSupported?: boolean | null;
+	latencyMs?: number;
+	source?: "live" | "shared_live";
+	/** Marks this usage as preflight diagnostics, not stage/workflow model usage. */
+	usageKind: "diagnostic";
+	usage?: Usage;
+	reportedCostUsd?: number | null;
+	errorKind?: string;
+	errorSummary?: string;
+}
+
+/** Full preflight report returned from start/resume. */
+export interface WorkflowAvailabilityReport {
+	workflowId: string;
+	invocationId: string;
+	operation: "start" | "resume";
+	scope: "full" | "single_step";
+	checkedAt: string;
+	wallLatencyMs: number;
+	status: AvailabilityScopeStatus;
+	profiles: WorkflowAvailabilityProfileResult[];
+	/** Aggregate of physical live probes only; shared_live rows are not double-counted. */
+	usageKind: "diagnostic";
+	usage?: Usage;
+	/** Aggregate reported cost, or null when any physical probe cost is unknown. */
+	reportedCostUsd?: number | null;
+	/** Required roles with zero available routes (present when status is blocked). */
+	blockedRoles?: WorkflowRole[];
+}

@@ -31,13 +31,13 @@ describe("SessionManager session ids", () => {
 		expect(secondId).not.toBe(firstId);
 	});
 
-	it("generates a UUIDv7 when branching a session", () => {
+	it("generates a UUIDv7 when branching a session", async () => {
 		const session = SessionManager.inMemory();
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		const branchPointId = session.appendMessage({ role: "user", content: "follow up", timestamp: 2 });
 		const firstId = expectUuidV7SessionId(session);
 
-		session.createBranchedSession(branchPointId);
+		await session.createBranchedSession(branchPointId);
 
 		const branchedId = expectUuidV7SessionId(session);
 		expect(branchedId).not.toBe(firstId);
@@ -55,7 +55,10 @@ describe("SessionManager session ids", () => {
 
 		const forkedId = expectUuidV7SessionId(session);
 		expect(forkedId).not.toBe(firstId);
-		expect(session.getHeader()?.parentSession).toBe(firstId);
+		// New fork writes persist the canonical absolute source session-file path
+		// (not the legacy ID) so fresh-process lineage resolution stays
+		// registry-free.
+		expect(session.getHeader()?.parentSession).toBe(forkResult.oldSessionFile);
 	});
 
 	it("preserves existing session ids when reopening a saved session", async () => {

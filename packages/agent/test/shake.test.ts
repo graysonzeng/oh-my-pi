@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { convertMessageToLlm } from "../src/compaction/messages";
+import { DEFAULT_SHAKE_CONFIG } from "../src/compaction/shake";
 
 const tokenizer = new Tokenizer();
 
@@ -108,6 +109,19 @@ describe("collectShakeRegions — tool results", () => {
 		const entry = messageEntry(toolResultMessage("skill", "y".repeat(800)));
 		const regions = collectShakeRegions([entry], tokenizer, cfg({ protectedTools: ["skill"] }));
 		expect(regions).toHaveLength(0);
+	});
+
+	test("keeps recalled original pages while shaking other eligible output in every preset", () => {
+		const recalled = messageEntry(toolResultMessage("read_omitted_content", "original page ".repeat(2_000)));
+		const ordinary = messageEntry(toolResultMessage("bash", "disposable output ".repeat(2_000)));
+		for (const preset of [DEFAULT_SHAKE_CONFIG, AGGRESSIVE_SHAKE_CONFIG, RESCUE_SHAKE_CONFIG]) {
+			const regions = collectShakeRegions([recalled, ordinary], tokenizer, {
+				...preset,
+				protectTokens: 0,
+				minSavings: 0,
+			});
+			expect(regions.map(region => region.entry.id)).toEqual([ordinary.id]);
+		}
 	});
 
 	test("never collects already-pruned tool results", () => {

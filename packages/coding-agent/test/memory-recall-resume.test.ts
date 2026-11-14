@@ -427,7 +427,7 @@ describe("Mnemopi recall across a resume", () => {
 		const sessionManager = live.session.sessionManager;
 		const firstPrompt = sessionManager.getEntries().find(entry => entry.type === "message");
 		if (!firstPrompt?.parentId) throw new Error("first prompt has no parent");
-		sessionManager.createBranchedSession(firstPrompt.parentId);
+		await sessionManager.createBranchedSession(firstPrompt.parentId);
 		const { block, notice } = await firstTurn(startProcess(dir, sessionManager));
 		expect(block).toContain("beta-9");
 		expect(block).not.toContain("alpha-7");
