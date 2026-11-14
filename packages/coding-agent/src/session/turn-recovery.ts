@@ -2753,6 +2753,7 @@ export class TurnRecovery {
 		return this.#host.contextFitsModel(model, message);
 	}
 
+	/**
 	 * Record a config-unavailable failure for the active model route (process-local)
 	 * so sibling fallback candidates sharing the dead credential are skipped.
 	 * Cooldown/transport/unknown do not write the registry. Model-policy denials
