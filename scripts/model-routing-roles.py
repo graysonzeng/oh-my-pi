@@ -89,9 +89,17 @@ for f in glob.glob(os.path.join(sd, "*", "*.jsonl")):
                         fs = final_from_row(p)
                         if fs:
                             note_outcome(jid or f"{source}:{len(outcome_by_id)}", p.get("agent") or role.get(jid or "", "?"), fs, source)
-        if m.get("role") == "custom" and m.get("customType") == "async-result":
-            d = m.get("details") or {}
+        # Persisted as a top-level `custom_message` entry; in-memory messages use role=custom.
+        async_entry = (
+            j if j.get("type") == "custom_message" and j.get("customType") == "async-result"
+            else m if m.get("role") == "custom" and m.get("customType") == "async-result"
+            else None
+        )
+        if async_entry is not None:
+            d = async_entry.get("details") or {}
             for job in d.get("jobs") or []:
+                if job.get("type") not in (None, "task"):
+                    continue
                 agent = job.get("agent") or "?"
                 jid = row_id(job)
                 if jid:
