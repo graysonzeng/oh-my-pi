@@ -98,12 +98,12 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	consult: { summary: "Ask a stronger model for mid-turn strategic guidance", defaultState: "off" },
 	workflow: {
 		summary: "Multi-model coding workflow: plan, implement, review, and verify",
-		defaultState: "off",
+		defaultState: "on",
 	},
 	session_search: { summary: "Search this session's raw journal on the current branch", defaultState: "off" },
 	read_omitted_content: {
 		summary: "Read a bounded page of tool output retained by structured compaction",
-		defaultState: "off",
+		defaultState: "on",
 	},
 };
 
