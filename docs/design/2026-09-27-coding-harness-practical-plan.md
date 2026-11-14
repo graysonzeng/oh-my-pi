@@ -315,8 +315,45 @@ Clamp fix：fixed `thresholdTokens` 现夹到 `window − resolveBudgetReserveTo
 | 256_000 window | 200_000 | **153_600** |
 | 1_000_000 window | 200_000 | **600_000** |
 
-Clamp（#40）：固定 `thresholdTokens>0` 仍夹到 `window − reserve`，不回归 `window−1`。Percent 路径按现有实现取 `floor(window × pct/100)`；在默认 15% reserve 下 60% 始终 ≤ usable。
+Clamp（#40）：固定 `thresholdTokens>0` 仍夹到 `window − reserve`，不回归 `window−1`。#41 的 percent 路径仅取 `floor(window × pct/100)`；绝对预留下限在小窗口可能高于15%，因此当时“60% 始终 ≤ usable”的判断不成立。后续修复将百分比路径也限制到 usable，见下方评审修复记录。
 
 ### 回退
 
 将 `thresholdPercent` 默认改回 `-1`、`thresholdTokens` 改回 `200_000`（或再退到双 `-1` usable-only）；UI Default 映射同步回退。
+
+## 评审修复记录（2026-09-28）
+
+基线：`add88b12895e7376e6703ab7508f07e6e996d75c`。本次仅本地修复；未提交、发布、安装二进制、修改全局配置或调用付费模型。生产默认仍为60%，实验默认不变。
+
+### 已修复的缺口
+
+- `packages/agent/src/compaction/compaction.ts`：百分比阈值也取 `min(floor(window × percent/100), usable)`。修复前实际函数输出：24K窗口阈值14,400、usable 7,616；32K窗口阈值19,200、usable 15,616，超过usable 1 token仍不触发维护。修复后分别在7,616 / 15,616边界触发既有维护判断；用户显式大reserve同样受到保护。固定token优先级和既有reserve回退不变。
+- `packages/coding-agent/src/session/{agent-session,session-maintenance}.ts`：原逻辑只要压缩尾部还存在任意 `goal-mode-context` 就跳过刷新，即使当前结构化目标已经撤销旧许可。现在两处mid-run维护收尾核对当前渲染内容，移除过时的工作上下文目标消息并补入新状态，同时失效转换缓存。原始session记录不被删除；不新增目标状态或自然语言推断机制。
+- 回归测试改为检查“允许改名→禁止改名”后下一次provider请求仅携带新目标，并检查工具调用/结果配对。移除刷新方法spy断言、默认字段复述及重复阈值用例；增加小窗口绝对预留、显式大预留，以及高百分比受安全预留限制的边界验证。
+- 文档stash冲突：核对index两侧后保留200K及后续60%修订记录，移除冲突标记和孤立的 `=======`；更正“60%始终小于usable”的错误说明。仅该文档暂存以清除unmerged状态，不提交。
+
+### 实际验证
+
+```text
+bun test packages/agent/test/compaction-soft-cap-threshold.test.ts packages/agent/test/compaction-reserve-provenance.test.ts packages/coding-agent/test/session/soft-cap-default.test.ts packages/coding-agent/test/compaction.test.ts packages/coding-agent/test/task/result-summary.test.ts packages/coding-agent/test/agent-session-goal-midrun-compaction.test.ts
+```
+
+结果：**94 pass / 1 skip / 1 fail**，306次断言。失败仍为评审前已观察到的 `delivers parent steering after interrupting a tool despite a stalled result listener`（等待result listener超时）；本次不把它归因于新增修复，也没有用基线对照证明它是随机flake。修正新增fixture的prefer-const问题后，单独重跑 `bun test packages/coding-agent/test/agent-session-goal-midrun-compaction.test.ts -t 'latest structured rename constraint'`：**1 pass / 0 fail**，11次断言。
+
+- `packages/agent` 内 `bun check`：通过（lint、格式、类型检查）。
+- `packages/coding-agent` 内 `bun check`：通过（lint、格式、类型检查）；仍有其他文件的40条warning，未顺手清理。
+- 实际SDK入口：在 `packages/coding-agent` 执行临时 `bun scripts/tmp-goal-constraint-midrun-smoke.ts`，使用真实 `AgentSession.prompt()`、Agent工具循环、SessionMaintenance、隔离Settings及临时会话/鉴权存储；provider流与摘要生成使用离线替身，无网络调用。阈值保持生产配置；仅methodOrder覆盖为soft以使用离线摘要替身。脚本运行后已删除。
+
+SDK smoke实际输出摘要：
+
+```json
+{"SMOKE_OK":true,"contextWindow":32000,"thresholdTokens":15616,"thresholdPercent":60,"configuredThresholdTokens":-1,"compactCalls":1,"providerRequests":2,"nextObjectiveHasForbidRename":true,"oldPermissionOnNextRequest":false,"toolCalls":["tc-0"],"toolResults":["tc-0"],"parentAccepted":false,"taskStatus":"completed"}
+```
+
+该smoke真实经过维护入口，证明下一次请求的结构化禁令、工具配对和exit0不等于接受；不是用 `--version` 或worker启动代替行为验证。永久回归入口为上述goal-midrun测试。
+
+### 未验证项与回退
+
+- 仅验证调用 `setGoalModeState` 更新后的宿主状态保持；未证明纯自然语言改口会自动结构化，也未证明真实模型遵守禁令。未运行付费评测、真实摘要模型、TUI菜单或RPC入口。本次不改菜单配置映射。
+- 相关测试组仍有上述1项失败，不能声明整组全绿；不声明性能或成本收益。历史“supersede pass”不能替代本次明确定位的回归证据。
+- 回退范围：本次百分比clamp、goal刷新及配套测试差异；不回退用户60%默认决策，不删除原始会话或其他工作树内容。无配置、数据库迁移或新持久状态。
