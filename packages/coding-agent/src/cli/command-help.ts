@@ -197,6 +197,10 @@ export const usageHelp = {
 	description: "Show provider usage limits for every authenticated account",
 } satisfies CommandMetadata;
 
+export const workflowBenchHelp = {
+	description: "Run the fixed-task workflow optimization benchmark suite (baseline vs optimized, fake runtime smoke)",
+} satisfies CommandMetadata;
+
 export const worktreeHelp = {
 	description: "Add, list, or clear git worktrees (clone-first when enabled)",
 } satisfies CommandMetadata;

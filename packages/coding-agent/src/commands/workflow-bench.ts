@@ -1,10 +1,10 @@
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { workflowBenchHelp as commandHelp } from "../cli/command-help";
 import { runWorkflowBenchCommand } from "../cli/workflow-bench-cli";
 import { createLiveWorkflowBenchmarkRuntime } from "../workflow/benchmark/live-runtime";
 
 export default class WorkflowBench extends Command {
-	static description =
-		"Run the fixed-task workflow optimization benchmark suite (baseline vs optimized, fake runtime smoke)";
+	static description = commandHelp.description;
 
 	static flags = {
 		mode: Flags.string({ description: "fake (default) | live (credentialed workflow run)" }),
