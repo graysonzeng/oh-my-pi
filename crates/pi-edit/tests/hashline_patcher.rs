@@ -478,7 +478,7 @@ async fn recovered_rem_reports_authored_and_deleted_paths() {
 	let workspace = common::Workspace::new(EditMode::Hashline);
 	let target = workspace.write("correct/target.ts", "const value = 1;\n");
 	let tag = workspace.snapshot("correct/target.ts", "const value = 1;\n", None);
-	let input = format!("[wrong/target.ts#{tag}]\nREM\n");
+	let input = format!("[target.ts#{tag}]\nREM\n");
 	let outcome = workspace
 		.apply_json(&json!({ "input": input }), &common::DiskWriter::default())
 		.await
@@ -495,13 +495,90 @@ async fn recovered_rem_reports_authored_and_deleted_paths() {
 	);
 	assert!(
 		outcome.text.contains(&format!(
-			"Warnings:\nPath \"wrong/target.ts\" does not exist; matched its filename and snapshot \
-			 tag #{tag} to {}",
+			"Warnings:\nPath \"target.ts\" does not exist; matched its filename and snapshot tag \
+			 #{tag} to {}",
 			deleted.display()
 		)),
 		"{}",
 		outcome.text
 	);
+}
+
+#[tokio::test]
+async fn outside_snapshot_suffix_suggests_the_full_path_without_writing() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	let outside = common::Workspace::new(EditMode::Hashline);
+	let target = outside.write("src/tool.py", "value = 1\n");
+	let canonical = pi_edit::path_policy::canonical_key(&target);
+	let tag = workspace.store.record(&canonical, "value = 1\n", None);
+	for authored in ["src/tool.py", "tool.py"] {
+		let writer = common::DiskWriter::default();
+		let error = workspace
+			.apply_json(
+				&json!({ "input": format!("[{authored}#{tag}]\nPUT 1.=1:\n+value = 2") }),
+				&writer,
+			)
+			.await
+			.expect_err("outside candidates require an explicit full path");
+		assert_eq!(error.kind(), "file_not_found");
+		assert_eq!(
+			error.to_string(),
+			format!(
+				"File not found: {authored}. This session read {} with the same tag; use that full \
+				 path in the section header.",
+				canonical.display()
+			)
+		);
+		assert_eq!(outside.read("src/tool.py").as_deref(), Some("value = 1\n"));
+		assert!(writer.requests.lock().is_empty());
+	}
+}
+
+#[tokio::test]
+async fn deleted_snapshot_paths_do_not_make_a_live_suffix_ambiguous() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	for path in ["tool.py", "deleted/tool.py", "sub/tool.py"] {
+		workspace.write(path, "value = 1\n");
+		workspace.snapshot(path, "value = 1\n", None);
+	}
+	std::fs::remove_file(workspace.cwd().join("tool.py")).expect("remove old target");
+	std::fs::remove_file(workspace.cwd().join("deleted/tool.py")).expect("remove old candidate");
+	let tag = workspace.snapshot("sub/tool.py", "value = 1\n", None);
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[tool.py#{tag}]\nPUT 1.=1:\n+value = 2") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("only the live candidate resolves");
+	assert_eq!(workspace.read("sub/tool.py").as_deref(), Some("value = 2\n"));
+	assert!(workspace.read("tool.py").is_none());
+	assert!(workspace.read("deleted/tool.py").is_none());
+}
+
+#[tokio::test]
+async fn ambiguous_snapshot_suffix_reports_all_candidates_without_writing() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("one/tool.py", "value = 1\n");
+	workspace.write("two/tool.py", "value = 1\n");
+	let tag = workspace.snapshot("one/tool.py", "value = 1\n", None);
+	workspace.snapshot("two/tool.py", "value = 1\n", None);
+	let outside = common::Workspace::new(EditMode::Hashline);
+	let target = outside.write("external/tool.py", "value = 1\n");
+	let canonical = pi_edit::path_policy::canonical_key(&target);
+	workspace.store.record(&canonical, "value = 1\n", None);
+	let writer = common::DiskWriter::default();
+	let error = workspace
+		.apply_json(&json!({ "input": format!("[tool.py#{tag}]\nPUT 1.=1:\n+value = 2") }), &writer)
+		.await
+		.expect_err("ambiguous suffix must not choose a file");
+	assert_eq!(error.kind(), "file_not_found");
+	let message = error.to_string();
+	assert!(message.contains("File not found: tool.py"), "{message}");
+	assert!(message.contains("one/tool.py"), "{message}");
+	assert!(message.contains("two/tool.py"), "{message}");
+	assert!(message.contains(&canonical.display().to_string()), "{message}");
+	assert!(writer.requests.lock().is_empty());
 }
 
 #[test]

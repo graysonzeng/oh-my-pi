@@ -161,13 +161,13 @@ export function selToOffsetLimit(parsed: ResolvedSelector): { offset?: number; l
 /**
  * Compose optional Claude-style `offset`/`limit` kwargs onto the path-inline
  * selector contract (history supplement S3). Prefer embedding `:N` / `:raw:N-`
- * in `path`. When a range selector is already present, kwargs are rejected
- * with an explicit message instead of silently re-reading page 1.
+ * in `path`. An existing line selector wins when offset is omitted or repeats
+ * its first range's start; limit only bounds a single open-ended selector.
+ * A different offset is rejected instead of silently re-reading page 1.
  *
  * `0` is treated as omitted so providers that must send every JSON field
  * (strict required+nullable) can pass `offset: 0` / `limit: 0` without a
- * validation round-trip. Non-zero kwargs with an existing range selector
- * still fail closed.
+ * validation round-trip.
  *
  * Artifact URLs without an existing `:raw` get `:raw` injected so continue-read
  * pages the verbatim body (history E2/E3). Plain filesystem paths compose as
@@ -186,6 +186,21 @@ export function composeReadPaginationArgs(input: { path: string; offset?: number
 	}
 
 	const parsed = parseReadPathSelector(input.path);
+	if (parsed.kind === "lines" && (offset === undefined || offset === parsed.ranges[0].startLine)) {
+		if (limit !== undefined && parsed.ranges.length === 1 && parsed.ranges[0].endLine === undefined) {
+			const split = /^[a-z][a-z0-9+.-]*:\/\//i.test(input.path)
+				? splitInternalUrlSel(input.path)
+				: splitPathAndSel(input.path);
+			if (!split.sel!.includes(",")) {
+				const selector = split
+					.sel!.split(":")
+					.map(chunk => (chunk.toLowerCase() === "raw" ? chunk : `${parsed.ranges[0].startLine}+${limit}`))
+					.join(":");
+				return { path: `${split.path}:${selector}` };
+			}
+		}
+		return { path: input.path };
+	}
 	if (parsed.kind === "lines" || parsed.kind === "tail") {
 		const next = offset !== undefined ? (limit !== undefined ? `:${offset}+${limit}` : `:${offset}-`) : `:1+${limit}`;
 		const example = input.path.includes("artifact://") ? "artifact://…:raw:301-" : "path:301";

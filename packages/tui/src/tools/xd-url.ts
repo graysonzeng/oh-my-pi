@@ -1,3 +1,5 @@
+import { splitInternalUrlSel } from "./read";
+
 /** Canonical prefix for virtual tool-device URLs. */
 export const XD_URL_PREFIX = "xd://";
 
@@ -24,7 +26,8 @@ export function parseXdUrl(input: string): { name: string | null } | null {
  * Returns `null` for anything else, including bare device URLs.
  */
 export function parseXdTopicUrl(input: string): { name: string; topic: string } | null {
-	const match = /^xd:\/\/([^/?#]+)\/([^/?#]+)$/i.exec(input.trim());
+	const { path } = splitInternalUrlSel(input.trim(), () => ({ selectors: "lines" }));
+	const match = /^xd:\/\/([^/?#]+)\/([^/?#]+)$/i.exec(path);
 	return match ? { name: match[1]!, topic: match[2]! } : null;
 }
 

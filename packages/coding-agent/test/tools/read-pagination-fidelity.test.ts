@@ -158,6 +158,61 @@ describe("read tool pagination fidelity (S3)", () => {
 		expect(zeros).toBe(selected);
 	});
 
+	it("keeps bounded selectors authoritative when pagination kwargs repeat their start", async () => {
+		const result = await tool.execute("redundant", {
+			path: "artifact://0:raw:43-55",
+			offset: 43,
+			limit: 20,
+		});
+		expect(getTextOutput(result)).toBe(
+			Array.from({ length: 13 }, (_, i) => `line-${String(i + 43).padStart(3, "0")}`).join("\n"),
+		);
+	});
+
+	it("bounds open-ended selectors with limit even when offset is omitted or zero", async () => {
+		for (const offset of [undefined, 0, 84]) {
+			const result = await tool.execute(`open-${offset}`, {
+				path: "artifact://0:raw:84-",
+				offset,
+				limit: 2,
+			});
+			expect(getTextOutput(result)).toBe("line-084\nline-085");
+		}
+	});
+
+	it("does not widen comma ranges or raw suffix selectors with redundant kwargs", () => {
+		expect(composeReadPaginationArgs({ path: "file.txt:43-55,80-90", limit: 20 })).toEqual({
+			path: "file.txt:43-55,80-90",
+		});
+		expect(composeReadPaginationArgs({ path: "file.txt:84", limit: 2 })).toEqual({ path: "file.txt:84+2" });
+		expect(composeReadPaginationArgs({ path: "file.txt:84-:raw", offset: 84, limit: 2 })).toEqual({
+			path: "file.txt:84+2:raw",
+		});
+	});
+
+	it("bounds alternate open selectors without rewriting raw single lines or comma lists", () => {
+		for (const selector of ["84..", "L84", "L84-"]) {
+			expect(composeReadPaginationArgs({ path: `file.txt:${selector}`, limit: 2 })).toEqual({
+				path: "file.txt:84+2",
+			});
+		}
+		expect(composeReadPaginationArgs({ path: "README.md:36", limit: 2 })).toEqual({ path: "README.md:36+2" });
+		expect(composeReadPaginationArgs({ path: "file.txt:raw:L84-", limit: 2 })).toEqual({
+			path: "file.txt:raw:84+2",
+		});
+		expect(composeReadPaginationArgs({ path: "file.txt:L84-:RAW", limit: 2 })).toEqual({
+			path: "file.txt:84+2:RAW",
+		});
+		expect(composeReadPaginationArgs({ path: "file.txt:84-,100-110", limit: 2 })).toEqual({
+			path: "file.txt:84-,100-110",
+		});
+		for (const selector of ["raw:84", "84:raw"]) {
+			expect(composeReadPaginationArgs({ path: `file.txt:${selector}`, limit: 2 })).toEqual({
+				path: `file.txt:${selector}`,
+			});
+		}
+	});
+
 	it("accepts offset/limit 0 at the tool schema so grok-style required zeros do not fail closed", () => {
 		expect(
 			validateToolArguments(tool, {
