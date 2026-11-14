@@ -960,6 +960,7 @@ describe("write resolves conflicts via conflict://N", () => {
 
 		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFa-ours\nmiddle\nb-ours\ntail\n");
 		expect(session.state?.conflictHistory?.entries()).toHaveLength(0);
+	});
 
 	it("still resolves an allowed-file conflict when workflow write policy is installed", async () => {
 		const filePath = path.join(tempDir, "src.ts");
