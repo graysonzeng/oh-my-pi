@@ -516,6 +516,10 @@ export class RemoteAgentSession implements AgentViewSession {
 		throw new Error(`hasIrcInterrupts must run on the session's home thread (${this.home}), not on a mirror`);
 	}
 
+	hasIrcAsides(): boolean {
+		throw new Error(`hasIrcAsides must run on the session's home thread (${this.home}), not on a mirror`);
+	}
+
 	emitIrcRelayObservation(record: CustomMessage): void {
 		this.#notify("emitIrcRelayObservation", record);
 	}

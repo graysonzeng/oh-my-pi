@@ -169,6 +169,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 		throw new Error(`hasIrcInterrupts must run on the session's home thread (${this.home}), not on a peer handle`);
 	}
 
+	hasIrcAsides(): boolean {
+		throw new Error(`hasIrcAsides must run on the session's home thread (${this.home}), not on a peer handle`);
+	}
+
 	emitIrcRelayObservation(record: CustomMessage): void {
 		mainBridge().remote.notify("emitIrcRelayObservation", this, record);
 	}
