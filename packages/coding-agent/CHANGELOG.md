@@ -498,6 +498,7 @@
 - Read accepts redundant pagination kwargs alongside line selectors, while still rejecting conflicting offsets.
 - Read applies line selectors to `xd://` topic documentation instead of treating selectors as part of the topic name.
 - Edit resolves missing short paths within the workspace by full path suffix and snapshot tag, lists ambiguous matches, and suggests full paths for files outside the workspace.
+- A successful manual structured compaction reports the committed summary on `manual_compaction_end` instead of a false "Compaction failed".
 - Structured auto-compaction no longer fails repeatedly on very short old assistant messages; they are kept verbatim instead of requested as summaries whose tiny output budget no model can meet.
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `retain` call that fails midway no longer delivers part of itself to the Hindsight server while telling the model nothing was queued ([#18440](https://github.com/can1357/oh-my-pi/pull/18440) by [@eggpeat](https://github.com/eggpeat))
