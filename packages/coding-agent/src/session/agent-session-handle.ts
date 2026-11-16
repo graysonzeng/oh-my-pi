@@ -134,6 +134,8 @@ export interface AgentSessionHandle {
 	hasQueuedIrcFrom(from: string): boolean;
 	/** Whether a queued IRC message, injected as a user turn at the next step boundary, ends a `wait`. */
 	hasIrcInterrupts(): boolean;
+	/** Whether an ordinary (non-interrupt) direct IRC message is parked as an aside. */
+	hasIrcAsides(): boolean;
 	/** Emit a display-only IRC relay observation on this session's UI. */
 	emitIrcRelayObservation(record: CustomMessage): void;
 	/** Deliver an IRC message into this recipient session. */
