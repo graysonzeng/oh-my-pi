@@ -23,6 +23,7 @@ import type {
 	Model,
 	ModelSpec,
 	ProviderSessionState,
+	ProviderResponseMetadata,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -370,6 +371,171 @@ class MockWebSocket {
 }
 
 describe("openai-codex streaming", () => {
+	describe("provider response metadata", () => {
+		it.each([
+			["created model", "gpt-6.1-sol", undefined, "gpt-6.1-sol"],
+			["different server model", "grok-4.7-build", undefined, "grok-4.7-build"],
+			["conflicting server models", "gpt-6.1-sol", "grok-4.7-build", undefined],
+			["later server model", undefined, "grok-4.7-build", "grok-4.7-build"],
+			["empty created model", "", "gpt-6.1-sol", "gpt-6.1-sol"],
+			["no server model", undefined, undefined, undefined],
+			["non-string server model", 42, undefined, undefined],
+			["blank server model", "   ", undefined, undefined],
+		] as const)("reports one SSE response with %s", async (_name, createdModel, laterModel, expectedModel) => {
+			const model = { ...createCodexTestModel(), id: "gpt-6.1-sol", preferWebsockets: false };
+			const onResponse = vi.fn(async (_response: ProviderResponseMetadata, _model?: Model) => {});
+			const events = [
+				{ type: "response.created", response: { id: "resp_identity", model: createdModel } },
+				{ type: "response.in_progress", response: { id: "resp_identity", model: laterModel } },
+			];
+			const sse =
+				events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("") + createCompletedCodexSse("Hello");
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: async () =>
+					new Response(sse, {
+						status: 200,
+						headers: { "Content-Type": "text/event-stream", "X-Request-Id": "req_identity" },
+					}),
+				onResponse,
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(onResponse).toHaveBeenCalledTimes(1);
+			expect(onResponse).toHaveBeenCalledWith(
+				{
+					status: 200,
+					headers: { "content-type": "text/event-stream", "x-request-id": "req_identity" },
+					requestId: "req_identity",
+					...(expectedModel === undefined ? {} : { metadata: { model: expectedModel } }),
+				},
+				model,
+			);
+			expect(onResponse.mock.calls[0]?.[1]).toBe(model);
+		});
+
+		it("uses a completed response model when earlier SSE events omit it and awaits the observer", async () => {
+			const model = { ...createCodexTestModel(), preferWebsockets: false };
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const onResponse = vi.fn(async (_response: ProviderResponseMetadata, _model?: Model) => {
+				entered.resolve();
+				await release.promise;
+			});
+			const events = [
+				{ type: "response.created", response: { id: "resp_completed_model" } },
+				{ type: "response.completed", response: { status: "completed", model: "gpt-6.1-sol" } },
+			];
+			let settled = false;
+			const result = streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: async () => new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")),
+				onResponse,
+			})
+				.result()
+				.then(value => {
+					settled = true;
+					return value;
+				});
+			await entered.promise;
+			expect(settled).toBe(false);
+			release.resolve();
+			expect((await result).stopReason).toBe("stop");
+			expect(onResponse).toHaveBeenCalledTimes(1);
+			expect(onResponse).toHaveBeenCalledWith(
+				expect.objectContaining({ metadata: { model: "gpt-6.1-sol" } }),
+				model,
+			);
+		});
+
+		it("reports only the streamed response across status retries, with the server-echoed model", async () => {
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const model = { ...createCodexTestModel(), preferWebsockets: false };
+			const onResponse = vi.fn(async (_response: ProviderResponseMetadata, _model?: Model) => {});
+			const fetchMock = vi.fn(async () =>
+				fetchMock.mock.calls.length === 1
+					? new Response("temporarily unavailable", {
+							status: 503,
+							headers: { "content-type": "text/plain", "x-request-id": "req_retry" },
+						})
+					: new Response(
+							`data: ${JSON.stringify({ type: "response.created", response: { model: "grok-4.7-build" } })}\n\n` +
+								createCompletedCodexSse("Recovered"),
+						),
+			);
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				onResponse,
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(onResponse).toHaveBeenCalledTimes(1);
+			expect(onResponse).toHaveBeenCalledWith(
+				expect.objectContaining({ metadata: { model: "grok-4.7-build" } }),
+				model,
+			);
+		});
+
+		it.each([true, false])(
+			"reports each WebSocket response with handshake headers available: %s",
+			async withHeaders => {
+				const model = createCodexTestModel();
+				const onResponse = vi.fn(async (_response: ProviderResponseMetadata, _model?: Model) => {});
+				const providerSessionState = new Map<string, ProviderSessionState>();
+				let responses = 0;
+				class IdentityWebSocket extends MockWebSocket {
+					handshakeHeaders = withHeaders ? { "x-request-id": "req_ws_identity" } : undefined;
+					constructor(url: string, options?: WsOptions) {
+						super(url, options);
+						this.scheduleOpen();
+					}
+					override send(): void {
+						responses += 1;
+						this.sendJson({
+							type: "response.created",
+							response: { id: `resp_${responses}`, model: "gpt-6.1-sol" },
+						});
+						this.emitCodexResponse({
+							messageId: `msg_${responses}`,
+							responseId: `resp_${responses}`,
+							text: "Hello",
+						});
+					}
+				}
+				global.WebSocket = IdentityWebSocket as unknown as typeof WebSocket;
+				try {
+					for (let turn = 0; turn < 2; turn++) {
+						const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+							apiKey: createCodexTestToken(),
+							sessionId: "ws-response-identity",
+							providerSessionState,
+							onResponse,
+							fetch: async () => {
+								throw new Error("WebSocket identity test must not fall back to HTTP");
+							},
+						}).result();
+						expect(result.stopReason).toBe("stop");
+					}
+					expect(onResponse).toHaveBeenCalledTimes(2);
+					for (const call of onResponse.mock.calls) {
+						expect(call).toEqual([
+							{
+								status: 101,
+								headers: withHeaders ? { "x-request-id": "req_ws_identity" } : {},
+								metadata: { model: "gpt-6.1-sol" },
+							},
+							model,
+						]);
+						expect(call[1]).toBe(model);
+					}
+				} finally {
+					for (const state of providerSessionState.values()) state.close();
+				}
+			},
+		);
+	});
+
 	it.each(["arguments.done", "output_item.done", "terminal"])(
 		"refuses truncated final JSON via %s",
 		async finalizer => {

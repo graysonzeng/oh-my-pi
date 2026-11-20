@@ -31,6 +31,7 @@ const CHECKPOINT_HEADERS = ["x-omp-model-checkpoint", "x-model-checkpoint", "x-l
 interface CapturedAttestation {
 	provider: string;
 	model: string;
+	echoedModel: string;
 	checkpoint: string | null;
 	provenance: Extract<ModelIdentityProvenance, "provider_echo" | "gateway_attestation">;
 }
@@ -68,12 +69,22 @@ function normalizedAttestedIdentity(
 	]);
 	if (explicitProviders.size > 1) return undefined;
 	const gatewayModel = gatewayModels[0];
-	const attestedModel = attestedModels.values().next().value;
+	let attestedModel = attestedModels.values().next().value;
 	const attestedProvider = explicitProviders.values().next().value ?? localModel?.provider;
 	if (!attestedProvider || !attestedModel) return undefined;
+	const echoedModel = attestedModel;
+	if (
+		localModel &&
+		attestedProvider === localModel.provider &&
+		attestedModel === localModel.requestModelId &&
+		localModel.requestModelId !== localModel.id
+	) {
+		attestedModel = localModel.id;
+	}
 	return {
 		provider: attestedProvider,
 		model: attestedModel,
+		echoedModel,
 		checkpoint: checkpointValues[0] ?? null,
 		provenance: gatewayModel ? "gateway_attestation" : "provider_echo",
 	};
@@ -83,6 +94,7 @@ function sameAttestation(left: CapturedAttestation, right: CapturedAttestation):
 	return (
 		left.provider === right.provider &&
 		left.model === right.model &&
+		left.echoedModel === right.echoedModel &&
 		left.checkpoint === right.checkpoint &&
 		left.provenance === right.provenance
 	);
@@ -135,7 +147,8 @@ export class ProviderIdentityCollector {
 		) {
 			return { provider: null, model: null, checkpoint: null, provenance: "unknown" };
 		}
-		return { ...this.#attestation };
+		const { provider, model, checkpoint, provenance } = this.#attestation;
+		return { provider, model, checkpoint, provenance };
 	}
 
 	effortSupported(effort: ModelProfile["thinkingLevel"]): boolean | null {

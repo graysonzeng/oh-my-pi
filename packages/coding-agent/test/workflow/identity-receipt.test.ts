@@ -339,6 +339,87 @@ describe("strict availability identity receipt", () => {
 	});
 });
 
+describe("strict gateway response identity", () => {
+	it.each([
+		["claude-opus-5.5", "claude-opus-5-5", "claude-opus-5-5", "anthropic"],
+		["claude-opus-5.5", "claude-opus-5-5", "gateway/claude-opus-5-5", "anthropic"],
+		["gpt-6.1-sol", undefined, "gpt-6.1-sol", "openai"],
+	] as const)("accepts %s with request alias %s and exact echo %s (%s)", (id, requestModelId, echo, vendor) => {
+		const target = model({ provider: "gateway", id, requestModelId });
+		const collector = new ProviderIdentityCollector();
+		collector.onResponse(providerBodyMetadata(echo), target);
+
+		const receipt = buildRuntimeIdentityReceipt(profile({ vendor, modelPattern: `gateway/${id}` }), collector);
+
+		expect(receipt.attested).toEqual({
+			provider: "gateway",
+			model: id,
+			checkpoint: null,
+			provenance: "provider_echo",
+		});
+		expect(receipt.exactMatch).toBe(true);
+		expect(receipt.effortSupported).toBe(true);
+		expect(() => assertStrictRuntimeIdentity(receipt)).not.toThrow();
+	});
+
+	it("rejects a response without a provider echo even when a request alias is configured", () => {
+		const target = model({ provider: "gateway", id: "claude-opus-5.5", requestModelId: "claude-opus-5-5" });
+		const collector = new ProviderIdentityCollector();
+		collector.onResponse(metadata({}), target);
+		const receipt = buildRuntimeIdentityReceipt(
+			profile({ vendor: "anthropic", modelPattern: "gateway/claude-opus-5.5" }),
+			collector,
+		);
+
+		expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_attestation_missing/);
+	});
+
+	it.each([
+		["grok-4.7", undefined, "grok-4.7-build", "xai"],
+		["grok-4.7", "unrelated-model", "grok-4.7-build", "xai"],
+		["claude-opus-5.5", "claude-opus-5-5", "claude-opus-5", "anthropic"],
+		["claude-opus-5.5", undefined, "claude-opus-5-5", "anthropic"],
+		["claude-opus-5.5", "claude-opus-5-5", "other/claude-opus-5-5", "anthropic"],
+	] as const)("rejects %s with request alias %s and unauthorized echo %s (%s)", (id, requestModelId, echo, vendor) => {
+		const target = model({ provider: "gateway", id, requestModelId });
+		const collector = new ProviderIdentityCollector();
+		collector.onResponse(providerBodyMetadata(echo), target);
+		const receipt = buildRuntimeIdentityReceipt(profile({ vendor, modelPattern: `gateway/${id}` }), collector);
+
+		expect(receipt.attested.model).toBe(echo.replace("other/", ""));
+		expect(receipt.exactMatch).toBe(false);
+		expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_identity_mismatch/);
+	});
+
+	it("does not hide conflicting raw header and body echoes behind a request alias", () => {
+		const target = model({ provider: "gateway", id: "claude-opus-5.5", requestModelId: "claude-opus-5-5" });
+		const collector = new ProviderIdentityCollector();
+		collector.onResponse(
+			{ ...metadata({ "x-provider-model": target.id }), metadata: { model: target.requestModelId } },
+			target,
+		);
+		const receipt = buildRuntimeIdentityReceipt(
+			profile({ vendor: "anthropic", modelPattern: "gateway/claude-opus-5.5" }),
+			collector,
+		);
+
+		expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_attestation_missing/);
+	});
+
+	it("rejects conflicting raw callback echoes even when their mapped identities match", () => {
+		const target = model({ provider: "gateway", id: "claude-opus-5.5", requestModelId: "claude-opus-5-5" });
+		const collector = new ProviderIdentityCollector();
+		collector.onResponse(providerBodyMetadata("claude-opus-5-5"), target);
+		collector.onResponse(providerBodyMetadata("claude-opus-5.5"), target);
+		const receipt = buildRuntimeIdentityReceipt(
+			profile({ vendor: "anthropic", modelPattern: "gateway/claude-opus-5.5" }),
+			collector,
+		);
+
+		expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_attestation_missing/);
+	});
+});
+
 describe("legacy non-strict availability", () => {
 	it("keeps legacy availability when identity attestation is absent", async () => {
 		const result = await probe(

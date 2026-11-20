@@ -37,6 +37,7 @@ import type {
 	FetchImpl,
 	Model,
 	ProviderSessionState,
+	ProviderResponseMetadata,
 	RawSseEvent,
 	ServiceTier,
 	StreamFunction,
@@ -73,6 +74,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
+import { normalizeProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
@@ -1747,6 +1749,8 @@ async function openCodexWebSocketTransport(
 				requestContext.rawRequestDump.body = chainedBody;
 				return {
 					eventStream: websocketConnection.streamRequest(
+						model,
+						options,
 						{ attachSteerIds: liveSteers.map(steer => steer.id) },
 						timeouts,
 						requestSetup.requestSignal,
@@ -1841,6 +1845,8 @@ async function openCodexWebSocketTransport(
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 			});
 		const eventStream = websocketConnection.streamRequest(
+			model,
+			options,
 			{ send: websocketRequest },
 			timeouts,
 			requestSetup.requestSignal,
@@ -1899,25 +1905,24 @@ async function openCodexSseTransport(
 	const open = async (wireBody: RequestBody) => {
 		// Keep the 400 dump honest: record the body actually sent on the wire.
 		requestContext.rawRequestDump.body = wireBody;
-		return requestSetup.wrapCodexSseStream(
-			await openCodexSseEventStream(
-				requestContext.url,
-				requestContext.requestHeaders,
-				requestContext.accountId,
-				requestContext.apiKey,
-				requestContext.transportSessionId,
-				wireBody,
-				state,
-				requestContext.turnState,
-				requestContext.responsesLite,
-				requestContext.codexClientVersion,
-				requestContext.requestMetadata,
-				requestSetup.requestSignal,
-				requestSetup.firstEventTimeoutMs,
-				options?.codexSseMaxAttempts,
-				event => options?.onSseEvent?.(event, model),
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
-			),
+		return openCodexSseEventStream(
+			model,
+			options,
+			requestSetup,
+			requestContext.url,
+			requestContext.requestHeaders,
+			requestContext.accountId,
+			requestContext.apiKey,
+			requestContext.transportSessionId,
+			wireBody,
+			state,
+			requestContext.turnState,
+			requestContext.responsesLite,
+			requestContext.codexClientVersion,
+			requestContext.requestMetadata,
+			options?.codexSseMaxAttempts,
+			event => options?.onSseEvent?.(event, model),
+			wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 		);
 	};
 	const canAppendBeforeRequest = state?.canAppend === true;
@@ -3879,6 +3884,8 @@ class CodexWebSocketConnection {
 	}
 
 	async *streamRequest(
+		model: Model<"openai-codex-responses">,
+		options: OpenAICodexResponsesOptions | undefined,
 		exchange: CodexWebSocketExchange,
 		timeouts: CodexWebSocketRequestTimeouts,
 		signal?: AbortSignal,
@@ -3889,7 +3896,7 @@ class CodexWebSocketConnection {
 		releaseReservation?.();
 		let owned = false;
 		try {
-			yield* this.#channel.streamRequest(
+			const events = this.#channel.streamRequest(
 				"send" in exchange ? exchange : { receive: true },
 				timeouts,
 				signal,
@@ -3905,6 +3912,17 @@ class CodexWebSocketConnection {
 					}
 				},
 			);
+			yield* options?.onResponse
+				? observeCodexResponse(
+						events,
+						{
+							status: 101,
+							headers: this.#channel.handshakeHeaders ? headersToRecord(this.#channel.handshakeHeaders) : {},
+						},
+						model,
+						options.onResponse,
+					)
+				: events;
 		} catch (error) {
 			CODEX_DEBUG &&
 				logger.debug("[codex] codex websocket transport failure", {
@@ -4052,7 +4070,63 @@ async function getOrCreateCodexWebSocketConnection(
 	return state.connection;
 }
 
+const CODEX_TERMINAL_RESPONSE_EVENTS: Record<string, true> = {
+	"response.completed": true,
+	"response.done": true,
+	"response.failed": true,
+	"response.incomplete": true,
+};
+
+/** Server-echoed model only. Blank and non-string values are not an echo. */
+function echoedCodexResponseModel(event: Record<string, unknown>): string | undefined {
+	const value = asRecord(event.response)?.model;
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * One callback per physical response. A later event that echoes a different model
+ * is a conflict: report the response with no model so strict identity fails closed.
+ * Never fills the model from the request.
+ */
+async function* observeCodexResponse(
+	events: AsyncGenerator<Record<string, unknown>>,
+	response: ProviderResponseMetadata,
+	model: Model<"openai-codex-responses">,
+	onResponse: NonNullable<OpenAICodexResponsesOptions["onResponse"]>,
+): AsyncGenerator<Record<string, unknown>> {
+	let echoedModel: string | undefined;
+	let conflict = false;
+	let notified = false;
+	const notify = async (): Promise<void> => {
+		if (notified) return;
+		notified = true;
+		await onResponse(
+			conflict || echoedModel === undefined ? response : { ...response, metadata: { model: echoedModel } },
+			model,
+		);
+	};
+	try {
+		for await (const event of events) {
+			const next = echoedCodexResponseModel(event);
+			if (next !== undefined) {
+				if (echoedModel === undefined) echoedModel = next;
+				else if (echoedModel !== next) conflict = true;
+			}
+			const eventType = typeof event.type === "string" ? event.type : "";
+			if (!notified && (conflict || CODEX_TERMINAL_RESPONSE_EVENTS[eventType] === true)) await notify();
+			yield event;
+		}
+	} finally {
+		if (!notified) await notify();
+	}
+}
+
 async function openCodexSseEventStream(
+	model: Model<"openai-codex-responses">,
+	options: OpenAICodexResponsesOptions | undefined,
+	requestSetup: CodexRequestSetup,
 	url: string,
 	requestHeaders: Record<string, string> | undefined,
 	accountId: string | undefined,
@@ -4064,12 +4138,11 @@ async function openCodexSseEventStream(
 	responsesLite: boolean,
 	codexClientVersion: string,
 	requestMetadata: CodexRequestMetadata | undefined,
-	signal: AbortSignal | undefined,
-	firstEventTimeoutMs: number | undefined,
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
+	const { requestSignal: signal, firstEventTimeoutMs } = requestSetup;
 	const headers = createCodexHeaders(
 		requestHeaders,
 		accountId,
@@ -4168,13 +4241,23 @@ async function openCodexSseEventStream(
 	}
 	// Attach the observer only when a diagnostic listener exists: any observer
 	// turns on per-line raw capture in `readSseJson`.
-	return readSseJson<Record<string, unknown>>(
-		response.body,
-		signal,
-		onSseEvent
-			? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, undefined)
-			: undefined,
+	const events = requestSetup.wrapCodexSseStream(
+		readSseJson<Record<string, unknown>>(
+			response.body,
+			signal,
+			onSseEvent
+				? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, undefined)
+				: undefined,
+		),
 	);
+	return options?.onResponse
+		? observeCodexResponse(
+				events,
+				normalizeProviderResponse(response, response.headers.get("x-request-id") ?? undefined),
+				model,
+				options.onResponse,
+			)
+		: events;
 }
 
 function createCodexHeaders(
