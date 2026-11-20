@@ -174,6 +174,17 @@ async function probeSessionModel(
 		try {
 			assertStrictRuntimeIdentity(identityReceipt);
 		} catch (error) {
+			if (identityCollector.hasStreamIdentityConflict()) {
+				return {
+					status: "unavailable",
+					...identityFields,
+					latencyMs,
+					usage: response.usage,
+					reportedCostUsd: reportedCost(response.usage),
+					errorKind: "identity_mismatch",
+					errorSummary: "Identity verification failed: stream_identity_conflict",
+				};
+			}
 			const missing = identityReceipt.attested.provenance === "unknown";
 			return {
 				status: missing ? "indeterminate" : "unavailable",

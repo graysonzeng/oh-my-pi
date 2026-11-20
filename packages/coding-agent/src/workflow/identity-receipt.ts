@@ -36,10 +36,17 @@ interface CapturedAttestation {
 	provenance: Extract<ModelIdentityProvenance, "provider_echo" | "gateway_attestation">;
 }
 
+function parseAttestedModelString(value: string): { provider: string; id: string } | undefined {
+	const parsed = parseModelString(value);
+	if (!parsed || parsed.thinkingLevel !== undefined) return undefined;
+	return { provider: parsed.provider, id: parsed.id };
+}
+
 function normalizedAttestedIdentity(
 	response: ProviderResponseMetadata,
 	localModel: Model<Api> | undefined,
 ): CapturedAttestation | undefined {
+	if (response.metadata?.identityConflict === true) return undefined;
 	const headerValues = (names: readonly string[]): string[] =>
 		names.map(name => response.headers[name]?.trim()).filter((value): value is string => Boolean(value));
 	const metadataValues = (names: readonly string[]): string[] =>
@@ -52,7 +59,7 @@ function normalizedAttestedIdentity(
 	const metadataModels = metadataValues(["resolvedModel", "model", "modelId"]);
 	const modelValues = [...gatewayModels, ...providerModels, ...metadataModels];
 	if (modelValues.length === 0) return undefined;
-	const attestedModels = new Set(modelValues.map(value => parseModelString(value)?.id ?? value));
+	const attestedModels = new Set(modelValues.map(value => parseAttestedModelString(value)?.id ?? value));
 	if (attestedModels.size !== 1) return undefined;
 
 	const checkpointValues = [
@@ -63,7 +70,9 @@ function normalizedAttestedIdentity(
 	if (checkpoints.size > 1) return undefined;
 
 	const explicitProviders = new Set([
-		...modelValues.map(value => parseModelString(value)?.provider).filter((value): value is string => Boolean(value)),
+		...modelValues
+			.map(value => parseAttestedModelString(value)?.provider)
+			.filter((value): value is string => Boolean(value)),
 		...headerValues(PROVIDER_HEADERS),
 		...metadataValues(["resolvedProvider", "provider", "providerId"]),
 	]);
@@ -73,6 +82,8 @@ function normalizedAttestedIdentity(
 	const attestedProvider = explicitProviders.values().next().value ?? localModel?.provider;
 	if (!attestedProvider || !attestedModel) return undefined;
 	const echoedModel = attestedModel;
+	// Exact wire-id match only: trusts local requestModelId config, fails closed on slashed
+	// requestModelId values, and a relay echo proves gateway echo rather than backend execution.
 	if (
 		localModel &&
 		attestedProvider === localModel.provider &&
@@ -104,6 +115,7 @@ export class ProviderIdentityCollector {
 	#responses = 0;
 	#missingAttestations = 0;
 	#conflictingAttestations = false;
+	#streamIdentityConflict = false;
 	#attestation: CapturedAttestation | undefined;
 	#localProvider: string | null = null;
 	#localModel: string | null = null;
@@ -116,6 +128,11 @@ export class ProviderIdentityCollector {
 			this.#localModel = model.id;
 			this.#efforts = getSupportedEfforts(model);
 		}
+		if (response.metadata?.identityConflict === true) {
+			this.#conflictingAttestations = true;
+			this.#streamIdentityConflict = true;
+			return;
+		}
 		const attestation = normalizedAttestedIdentity(response, model);
 		if (!attestation) {
 			this.#missingAttestations += 1;
@@ -127,6 +144,10 @@ export class ProviderIdentityCollector {
 		}
 		this.#attestation = attestation;
 	};
+
+	hasStreamIdentityConflict(): boolean {
+		return this.#streamIdentityConflict;
+	}
 
 	localResolution(fallback?: string): ModelIdentityCoordinatesV1 {
 		const parsed = fallback ? parseModelString(fallback) : undefined;

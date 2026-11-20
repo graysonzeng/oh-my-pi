@@ -418,6 +418,138 @@ describe("strict gateway response identity", () => {
 
 		expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_attestation_missing/);
 	});
+
+	it("fails closed on stream identityConflict even when matching HTTP identity headers are present", async () => {
+		const target = model();
+		const conflictWithHeaders: ProviderResponseMetadata = {
+			...metadata({
+				"x-omp-resolved-model": "openai/gpt-5.6-sol",
+				"x-provider-model": "gpt-5.6-sol",
+				"x-provider-id": "openai",
+				"x-omp-model-checkpoint": "gateway-checkpoint-1",
+			}),
+			metadata: { identityConflict: true },
+		};
+		const collector = new ProviderIdentityCollector();
+		collector.onResponse(conflictWithHeaders, target);
+		const receipt = buildRuntimeIdentityReceipt(profile(), collector, "openai/gpt-5.6-sol");
+
+		expect(collector.hasStreamIdentityConflict()).toBe(true);
+		expect(receipt.attested).toEqual({
+			provider: null,
+			model: null,
+			checkpoint: null,
+			provenance: "unknown",
+		});
+		expect(receipt.exactMatch).toBeNull();
+		expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_attestation_missing/);
+
+		const result = await probe(profile(), target, [conflictWithHeaders]);
+		expect(result).toMatchObject({
+			status: "unavailable",
+			localProvider: "openai",
+			localModel: "gpt-5.6-sol",
+			identityProvenance: "unknown",
+			exactIdentityMatch: null,
+			effortSupported: true,
+			errorKind: "identity_mismatch",
+		});
+		expect(result.errorSummary).toMatch(/stream_identity_conflict/);
+		expect(result.attestedProvider).toBeUndefined();
+		expect(result.attestedModel).toBeUndefined();
+		expect(result.attestedCheckpoint).toBeUndefined();
+		expect(result.actualProvider).toBeUndefined();
+		expect(result.actualModel).toBeUndefined();
+	});
+
+	it("fails closed on stream identityConflict without headers", async () => {
+		const target = model();
+		const conflictWithoutHeaders: ProviderResponseMetadata = {
+			...metadata({}),
+			metadata: { identityConflict: true },
+		};
+		const collector = new ProviderIdentityCollector();
+		collector.onResponse(conflictWithoutHeaders, target);
+		const receipt = buildRuntimeIdentityReceipt(profile(), collector, "openai/gpt-5.6-sol");
+
+		expect(collector.hasStreamIdentityConflict()).toBe(true);
+		expect(receipt.attested.provenance).toBe("unknown");
+		expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_attestation_missing/);
+
+		const result = await probe(profile(), target, [conflictWithoutHeaders]);
+		expect(result).toMatchObject({
+			status: "unavailable",
+			localProvider: "openai",
+			localModel: "gpt-5.6-sol",
+			identityProvenance: "unknown",
+			exactIdentityMatch: null,
+			effortSupported: true,
+			errorKind: "identity_mismatch",
+		});
+		expect(result.errorSummary).toMatch(/stream_identity_conflict/);
+		expect(result.attestedProvider).toBeUndefined();
+		expect(result.attestedModel).toBeUndefined();
+		expect(result.actualProvider).toBeUndefined();
+		expect(result.actualModel).toBeUndefined();
+	});
+
+	it.each(["valid-then-conflict", "conflict-then-valid"] as const)(
+		"fails closed with identity_mismatch when a stream conflict mixes with a valid response (%s)",
+		async order => {
+			const target = model();
+			const valid = gatewayAttestationMetadata();
+			const conflict: ProviderResponseMetadata = {
+				...gatewayAttestationMetadata(),
+				metadata: { identityConflict: true },
+			};
+			const responses = order === "valid-then-conflict" ? [valid, conflict] : [conflict, valid];
+
+			const collector = new ProviderIdentityCollector();
+			for (const response of responses) {
+				collector.onResponse(response, target);
+			}
+			const receipt = buildRuntimeIdentityReceipt(profile(), collector, "openai/gpt-5.6-sol");
+			expect(collector.hasStreamIdentityConflict()).toBe(true);
+			expect(receipt.attested.provenance).toBe("unknown");
+			expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_attestation_missing/);
+
+			const result = await probe(profile(), target, responses);
+			expect(result).toMatchObject({
+				status: "unavailable",
+				identityProvenance: "unknown",
+				exactIdentityMatch: null,
+				effortSupported: true,
+				errorKind: "identity_mismatch",
+			});
+			expect(result.errorSummary).toMatch(/stream_identity_conflict/);
+			expect(result.attestedProvider).toBeUndefined();
+			expect(result.attestedModel).toBeUndefined();
+			expect(result.attestedCheckpoint).toBeUndefined();
+			expect(result.actualProvider).toBeUndefined();
+			expect(result.actualModel).toBeUndefined();
+		},
+	);
+
+	it.each(["body", "header"] as const)(
+		"rejects an attested model string carrying a thinking-level suffix (%s)",
+		source => {
+			const target = model({ provider: "gateway", id: "claude-opus-5.5", requestModelId: "claude-opus-5-5" });
+			const collector = new ProviderIdentityCollector();
+			const response =
+				source === "body"
+					? providerBodyMetadata("gateway/claude-opus-5-5:low")
+					: metadata({ "x-omp-resolved-model": "gateway/claude-opus-5-5:low" });
+			collector.onResponse(response, target);
+			const receipt = buildRuntimeIdentityReceipt(
+				profile({ vendor: "anthropic", modelPattern: "gateway/claude-opus-5.5" }),
+				collector,
+			);
+
+			expect(receipt.attested.model).toBe("gateway/claude-opus-5-5:low");
+			expect(receipt.exactMatch).toBe(false);
+			expect(() => assertStrictRuntimeIdentity(receipt)).toThrow(/provider_identity_mismatch/);
+		},
+	);
 });
 
 describe("legacy non-strict availability", () => {
