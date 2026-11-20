@@ -669,15 +669,16 @@ export async function resolveEffectiveSubagentPolicy(
 						? parentModelGrantPattern(parentActiveModel)
 						: request.session.getActiveModelString?.(),
 				);
+	const strictModel = request.strictModelIdentity === true;
 	const parentActiveModelPattern =
-		hasPreparedSeance || perCallModelGrants ? undefined : request.session.getActiveModelString?.();
+		hasPreparedSeance || perCallModelGrants || strictModel ? undefined : request.session.getActiveModelString?.();
 	const modelResolution = {
 		requestModel: preparedSeance?.modelPatterns ?? request.model,
-		settingsOverride: hasPreparedSeance ? undefined : agentModelOverrides[agentName],
-		agentModel: hasPreparedSeance ? undefined : effectiveAgent.model,
+		settingsOverride: hasPreparedSeance || strictModel ? undefined : agentModelOverrides[agentName],
+		agentModel: hasPreparedSeance || strictModel ? undefined : effectiveAgent.model,
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
-		fallbackModelPattern: hasPreparedSeance ? undefined : request.session.getModelString?.(),
+		fallbackModelPattern: hasPreparedSeance || strictModel ? undefined : request.session.getModelString?.(),
 	};
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the
@@ -685,7 +686,15 @@ export async function resolveEffectiveSubagentPolicy(
 	// model is already one exact selector and stays literal, never a role alias.
 	const { patterns: modelOverride, role: modelRole } = perCallModelGrants
 		? { patterns: [(perCallSelector as string).trim()], role: undefined }
-		: resolveAgentModelSelection(modelResolution);
+		: strictModel
+			? {
+					patterns: resolveConfiguredModelPatterns(
+						preparedSeance?.modelPatterns ?? request.model,
+						request.session.settings,
+					),
+					role: undefined,
+				}
+			: resolveAgentModelSelection(modelResolution);
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
@@ -778,7 +787,7 @@ async function applySpawnHook(
 	if (spawnResult?.block) {
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
 	}
-	if (spawnResult?.model === undefined) return policy;
+	if (spawnResult?.model === undefined || request.strictModelIdentity) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
 	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
@@ -912,6 +921,11 @@ function buildExecutorOptions(
 		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
 		onToolResult: request.onToolResult,
+		onResponse: request.onResponse,
+		onPayload: request.onPayload,
+		strictModelIdentity: request.strictModelIdentity,
+		budgetGuard: request.budgetGuard,
+		providerChargeKeys: request.providerChargeKeys,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,

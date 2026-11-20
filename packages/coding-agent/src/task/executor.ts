@@ -11,7 +11,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ServiceTierByFamily, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -31,7 +31,7 @@ import {
 } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { ModelRegistry } from "../config/model-registry";
+import { isAuthenticated, kNoAuth, ModelRegistry } from "../config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	previewLine,
@@ -191,6 +191,7 @@ import {
 	cfgCompactionThresholdPercent,
 	cfgCompactionThresholdTokens,
 } from "../session/context-settings";
+import type { WorkflowBudgetGuard } from "../workflow/budget-ledger";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -550,6 +551,12 @@ export interface ExecutorOptions {
 	onProgress?: (progress: AgentProgress) => void;
 	/** Receives each tool call the subagent finishes, with its result text; feeds the task job's widget. */
 	onToolResult?: (result: SubagentToolResult) => void;
+	onResponse?: SimpleStreamOptions["onResponse"];
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Preserve the workflow's exact selected identity; no executor fallback, prewalk, or advisor. */
+	strictModelIdentity?: boolean;
+	budgetGuard?: WorkflowBudgetGuard;
+	providerChargeKeys?: string[];
 	/**
 	 * Epochs (ms, `Date.now()`) bracketing the concurrency-semaphore wait:
 	 * `invokedAt` is stamped at the spawn boundary before `acquire()`,
@@ -1346,6 +1353,9 @@ interface RunMonitorArgs {
 	completionProbe: boolean;
 	/** Fires each time a terminal `yield` is recorded for this run. */
 	onYieldAccepted?: () => void;
+	strictModelIdentity?: boolean;
+	budgetGuard?: WorkflowBudgetGuard;
+	providerChargeKeys?: string[];
 }
 
 /**
@@ -1372,6 +1382,8 @@ interface SubagentRunMonitor {
 	runtimeLimitExceeded(): boolean;
 	/** True once the soft-budget stop fired: the free-running turn was aborted and the run is being driven to a forced final yield. */
 	budgetStopRequested(): boolean;
+	/** Records a stop triggered by an external shared workflow budget guard. */
+	noteSharedBudgetStop(): void;
 	/** Resolves when the budget-stop session abort has settled (immediately when no stop fired). */
 	waitForBudgetStop(): Promise<void>;
 	/**
@@ -1616,6 +1628,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				})
 			: Promise.resolve();
 	};
+	const noteSharedBudgetStop = () => {
+		if (budgetStopRequested || abortSent || resolved) return;
+		budgetStopRequested = true;
+	};
 
 	const failWithError = (message: string) => {
 		terminalError ??= message;
@@ -1774,7 +1790,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// a late label still lands via the finalize-time reads of `progress.description`;
 	// failures just leave the label unset.
 	const labelSource = assignment?.trim();
-	if (!args.description && args.modelRegistry && args.settings && labelSource) {
+	if (
+		!args.description &&
+		!args.strictModelIdentity &&
+		!args.budgetGuard &&
+		args.modelRegistry &&
+		args.settings &&
+		labelSource
+	) {
 		generateTaskLabel(
 			labelSource,
 			args.modelRegistry,
@@ -2277,6 +2300,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// Extract and accumulate usage (prefer message.usage, fallback to event.usage)
 				const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
 				const messageUsage = getMessageUsage(event.message) || eventUsage;
+				const chargeKey = role === "assistant" ? args.providerChargeKeys?.shift() : undefined;
 				if (isRecord(messageUsage)) {
 					// Only count assistant messages (not tool results, etc.)
 					if (role === "assistant") {
@@ -2296,6 +2320,30 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							accumulatedUsage.cost.cacheWrite += getNumberField(costRecord, "cacheWrite") ?? 0;
 							accumulatedUsage.cost.total += getNumberField(costRecord, "total") ?? 0;
 							progress.cost = accumulatedUsage.cost.total;
+						}
+						if (args.budgetGuard && chargeKey) {
+							const turnTotal = costRecord ? getNumberField(costRecord, "total") : undefined;
+							args.budgetGuard.settleProviderUsage({
+								idempotencyKey: chargeKey,
+								launched: true,
+								usage:
+									turnTotal === undefined || costRecord === undefined
+										? null
+										: {
+												input: getNumberField(messageUsage, "input") ?? 0,
+												output: getNumberField(messageUsage, "output") ?? 0,
+												cacheRead: getNumberField(messageUsage, "cacheRead") ?? 0,
+												cacheWrite: getNumberField(messageUsage, "cacheWrite") ?? 0,
+												totalTokens: getNumberField(messageUsage, "totalTokens") ?? 0,
+												cost: {
+													input: getNumberField(costRecord, "input") ?? 0,
+													output: getNumberField(costRecord, "output") ?? 0,
+													cacheRead: getNumberField(costRecord, "cacheRead") ?? 0,
+													cacheWrite: getNumberField(costRecord, "cacheWrite") ?? 0,
+													total: turnTotal,
+												},
+											},
+							});
 						}
 					}
 					// Accumulate tokens for progress display
@@ -2467,6 +2515,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			budgetLimitExceeded ||
 			budgetStopRequested,
 		budgetStopRequested: () => budgetStopRequested,
+		noteSharedBudgetStop,
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
@@ -2623,9 +2672,10 @@ async function driveSessionToResult(
 		 * them); each later one is sent once the previous one was delivered.
 		 */
 		steps?: StepProgress;
+		budgetGuard?: WorkflowBudgetGuard;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy, restore, steps } = options;
+	const { solutionSpace, onPromptBusy, restore, steps, budgetGuard } = options;
 	const structured = options.structured !== false;
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2748,11 +2798,16 @@ async function driveSessionToResult(
 
 		// The forced final turn must answer through `yield`, or with no tools at all.
 		const reminderToolChoice = structured ? buildNamedToolChoice("yield", session.model) : "none";
+		const sharedFollowUpBlocked = () => Boolean(budgetGuard && !budgetGuard.allowsModelCall());
 
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
 			let retriesForced = false;
 			while (!monitor.yieldCalled() && retryCount < MAX_YIELD_RETRIES && !abortSignal.aborted) {
+				if (sharedFollowUpBlocked()) {
+					monitor.noteSharedBudgetStop();
+					break;
+				}
 				// A budget stop collapses the reminder ladder to a single forced
 				// final yield: wait for the stop's session abort to settle, then
 				// prompt once with the wrap-up reminder + named tool choice.
@@ -2849,14 +2904,19 @@ async function driveSessionToResult(
 			let asyncPendingNoticeSent = false;
 			while (!abortSignal.aborted) {
 				if (!monitor.yieldCalled()) {
-					await runYieldLadder();
-					if (
-						!monitor.yieldCalled() &&
-						(monitor.budgetStopRequested() ||
-							session.getLastAssistantMessage()?.stopReason === "error" ||
-							!session.hasPendingAsyncWork())
-					)
-						break;
+					if (sharedFollowUpBlocked()) {
+						monitor.noteSharedBudgetStop();
+						if (!session.hasPendingAsyncWork()) break;
+					} else {
+						await runYieldLadder();
+						if (
+							!monitor.yieldCalled() &&
+							(monitor.budgetStopRequested() ||
+								session.getLastAssistantMessage()?.stopReason === "error" ||
+								!session.hasPendingAsyncWork())
+						)
+							break;
+					}
 				}
 				// Let the parked yield's turn-stop session abort settle before
 				// prompting again (mirrors waitForBudgetStop).
@@ -2869,7 +2929,7 @@ async function driveSessionToResult(
 					await awaitAbortable(session.settleAsyncWork());
 					continue;
 				}
-				if (!asyncPendingNoticeSent) {
+				if (!asyncPendingNoticeSent && !sharedFollowUpBlocked()) {
 					asyncPendingNoticeSent = true;
 					const running = session.getAsyncJobSnapshot()?.running ?? [];
 					if (running.length > 0) {
@@ -2910,6 +2970,10 @@ async function driveSessionToResult(
 				? monitor.yieldCalled()
 				: session.getLastAssistantMessage()?.stopReason === "stop";
 			if (!delivered || abortSignal.aborted || monitor.budgetStopRequested()) break;
+			if (sharedFollowUpBlocked()) {
+				monitor.noteSharedBudgetStop();
+				break;
+			}
 			monitor.holdForSteps(next + 1 < steps.prompts.length);
 			monitor.beginStep();
 			resetYieldTurnState(session.getToolByName("yield"));
@@ -3241,6 +3305,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		durationMs: Date.now() - args.startTime,
 		tokens: progress.tokens,
 		requests: progress.requests,
+		providerRequests: progress.requests,
 		contextTokens: progress.contextTokens,
 		contextWindow: progress.contextWindow,
 		modelOverride,
@@ -4226,6 +4291,8 @@ interface SubagentSessionSpec {
 		| "systemPrompt"
 		| "resolveServiceTierByFamily"
 		| "onFirstChatDispatch"
+		| "onResponse"
+		| "onPayload"
 	>;
 	preparedSession?: Pick<PreparedSeanceSession, "promptSuffix">;
 	prompt: SubagentPromptInputs;
@@ -4236,6 +4303,8 @@ interface SubagentLaunchInputs {
 	workPoolYieldItems: readonly WorkPoolYieldItem[];
 	resolveServiceTierByFamily?: CreateAgentSessionOptions["resolveServiceTierByFamily"];
 	onFirstChatDispatch?: () => void;
+	onResponse?: SimpleStreamOptions["onResponse"];
+	onPayload?: SimpleStreamOptions["onPayload"];
 }
 
 /** Names of the child's explicitly supplied tools; they win over same-named MCP proxies on every rebind. */
@@ -4266,6 +4335,8 @@ function buildSubagentSessionOptions(
 		expectedAgentRef,
 		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
+		onResponse: launch?.onResponse,
+		onPayload: launch?.onPayload,
 		// A launch prompts its assignment only after setup; a revive's turns are its IRC wakes.
 		awaitingAssignment: launch !== undefined,
 		systemPrompt: defaultPrompt => {
@@ -4555,7 +4626,16 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  * read from `options.settings`; a call without settings runs here.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
-	const pool = isMainThread() && options.settings ? subagentWorkerPool(options.settings) : undefined;
+	// Keep runs carrying live host callbacks or shared budget state on the calling
+	// thread so ProviderIdentityCollector, budgetGuard, and providerChargeKeys stay
+	// in-process without cross-thread cloning or async-RPC mismatch.
+	const hasInProcessHooks =
+		options.onResponse !== undefined ||
+		options.onPayload !== undefined ||
+		options.budgetGuard !== undefined ||
+		options.providerChargeKeys !== undefined;
+	const pool =
+		isMainThread() && options.settings && !hasInProcessHooks ? subagentWorkerPool(options.settings) : undefined;
 	return pool ? runSubprocessPlaced(pool, options, runSubprocessOnThisThread) : runSubprocessOnThisThread(options);
 }
 
@@ -4649,12 +4729,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	// spawn's owner is its parent subagent) and lands on the child's
 	// `modelRoles.advisor`. The expanded pattern is also what the session
 	// contract persists, so cold revival under root settings reuses it.
-	const advisorSelection = preparedSession
-		? undefined
-		: resolveAgentAdvisorSelection({
-				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-				agentAdvisor: agent.advisor,
-			});
+	const advisorSelection =
+		preparedSession || options.strictModelIdentity
+			? undefined
+			: resolveAgentAdvisorSelection({
+					settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
+					agentAdvisor: agent.advisor,
+				});
 	const advisorRolePattern = advisorSelection?.model
 		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
 		: undefined;
@@ -4665,6 +4746,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
+			...(options.strictModelIdentity ? { "retry.modelFallback": false } : undefined),
 			...(advisorSelection ? { "advisor.enabled": true } : undefined),
 			...(advisorRolePattern
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
@@ -4736,7 +4818,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	const lspEnabled = enableLsp ?? true;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
 
-	const completionProbe = isCompletionProbeEnabled(settings, parentDepth);
+	const completionProbe =
+		!options.strictModelIdentity && !options.budgetGuard && isCompletionProbeEnabled(settings, parentDepth);
 	const monitor = createSubagentRunMonitor({
 		index,
 		id,
@@ -4763,6 +4846,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		completionProbe,
+		strictModelIdentity: options.strictModelIdentity,
+		budgetGuard: options.budgetGuard,
+		providerChargeKeys: options.providerChargeKeys,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -4874,29 +4960,71 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				: undefined;
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			const inheritedRetryFallbackChain =
-				configuredModelPatterns.length === 1
+				!options.strictModelIdentity && configuredModelPatterns.length === 1
 					? resolveSubagentInheritedRetryFallbackChain(
 							subagentSettings,
 							modelRegistry,
 							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
 						)
 					: undefined;
+			const resolution = options.strictModelIdentity
+				? await awaitAbortable(
+						(async () => {
+							let resolved = resolveModelOverride(modelPatterns, modelRegistry, settings, {
+								exactOnly: !!options.perCallModelGrants,
+							});
+							if (!resolved.model && typeof modelRegistry.awaitBackgroundRefresh === "function") {
+								await modelRegistry.awaitBackgroundRefresh();
+								resolved = resolveModelOverride(modelPatterns, modelRegistry, settings, {
+									exactOnly: !!options.perCallModelGrants,
+								});
+							}
+							const resolvedModel = resolved.model;
+							if (!resolvedModel) {
+								throw new Error(
+									`Strict model identity could not resolve requested model: ${modelPatterns.join(", ")}`,
+								);
+							}
+							if (allowedProvider !== undefined && resolvedModel.provider !== allowedProvider) {
+								throw new Error("Offline mode: no subagent model is available on the active parent provider.");
+							}
+							const getApiKey = options.getApiKey;
+							const hasAuth = getApiKey
+								? await (async () => {
+										const resolvedKey = await getApiKey(resolvedModel);
+										return typeof resolvedKey === "string"
+											? resolvedKey === kNoAuth || isAuthenticated(resolvedKey)
+											: resolvedKey !== undefined;
+									})()
+								: await (async () => {
+										const apiKey = await modelRegistry.getApiKey(resolvedModel, id);
+										return apiKey === kNoAuth || isAuthenticated(apiKey);
+									})();
+							if (!hasAuth) {
+								throw new Error(
+									`Strict model identity has no working credentials for ${formatModelStringWithRouting(resolvedModel)}`,
+								);
+							}
+							return { ...resolved, authFallbackUsed: false };
+						})(),
+					)
+				: await awaitAbortable(
+						resolveModelOverrideWithAuthFallback(
+							modelPatterns,
+							options.parentActiveModelPattern,
+							modelRegistry,
+							settings,
+							id,
+							{ exactOnly: !!options.perCallModelGrants, allowedProvider },
+						),
+					);
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
 				warning: modelResolutionWarning,
-			} = await awaitAbortable(
-				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
-					options.parentActiveModelPattern,
-					modelRegistry,
-					settings,
-					id,
-					{ exactOnly: !!options.perCallModelGrants, allowedProvider },
-				),
-			);
+			} = resolution;
 			if (cfgOffline.get(settings) && !model) {
 				throw new Error("Offline mode: no subagent model is available on the active parent provider.");
 			}
@@ -4939,22 +5067,26 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 								resolvedModel,
 								inheritedSubagentServiceTiers(settings, options.parentServiceTier),
 							);
-			const retryFallbackRole = installSubagentRetryFallbackChain({
-				settings: subagentSettings,
-				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings).filter(
-					candidate => allowedProvider === undefined || candidate.model.provider === allowedProvider,
-				),
-				inheritedFallbackChain:
-					allowedProvider === undefined
-						? inheritedRetryFallbackChain
-						: inheritedRetryFallbackChain?.filter(entry => {
-								const candidate = resolveModelOverride([entry], modelRegistry, subagentSettings).model;
-								return candidate?.provider === allowedProvider;
-							}),
-				model,
-				authFallbackUsed,
-			});
+			const retryFallbackRole = options.strictModelIdentity
+				? undefined
+				: installSubagentRetryFallbackChain({
+						settings: subagentSettings,
+						id,
+						candidates: resolveSubagentRetryFallbackCandidates(
+							modelPatterns,
+							modelRegistry,
+							subagentSettings,
+						).filter(candidate => allowedProvider === undefined || candidate.model.provider === allowedProvider),
+						inheritedFallbackChain:
+							allowedProvider === undefined
+								? inheritedRetryFallbackChain
+								: inheritedRetryFallbackChain?.filter(entry => {
+										const candidate = resolveModelOverride([entry], modelRegistry, subagentSettings).model;
+										return candidate?.provider === allowedProvider;
+									}),
+						model,
+						authFallbackUsed,
+					});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {
 					role: retryFallbackRole,
@@ -5059,7 +5191,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const perCallModelGrants = options.perCallModelGrants;
 			let prewalk: Prewalk | undefined;
 			const prewalkPattern =
-				preparedSession || perCallModelGrants
+				preparedSession || perCallModelGrants || options.strictModelIdentity
 					? undefined
 					: resolveAgentPrewalkPattern({
 							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
@@ -5143,17 +5275,30 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+						model || modelOverride === undefined || options.strictModelIdentity
+							? undefined
+							: options.parentActiveModelPattern,
 					modelPatternFallbackRole:
-						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
+						model || modelOverride === undefined || options.strictModelIdentity
+							? undefined
+							: subagentRetryFallbackRole(id),
 					modelPatternDefaultFallbackChain:
-						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+						model || modelOverride === undefined || options.strictModelIdentity
+							? undefined
+							: inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
-					...(perCallModelGrants || allowedProvider !== undefined
+					...(perCallModelGrants || allowedProvider !== undefined || options.strictModelIdentity
 						? {
 								assertDispatchModel: (dispatchModel: Model) => {
 									if (allowedProvider !== undefined && dispatchModel.provider !== allowedProvider) {
 										throw new Error("Offline mode: subagent dispatch must use the active parent provider.");
+									}
+									if (options.strictModelIdentity && model) {
+										if (dispatchModel.provider !== model.provider || dispatchModel.id !== model.id) {
+											throw new Error(
+												`Strict model identity refused dispatch model ${formatModelStringWithRouting(dispatchModel)}; expected ${formatModelStringWithRouting(model)}.`,
+											);
+										}
 									}
 									if (perCallModelGrants) {
 										assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
@@ -5161,7 +5306,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 											assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
 									}
 								},
-								...(perCallModelGrants ? { disableModelFallback: true } : {}),
+								...(perCallModelGrants || options.strictModelIdentity ? { disableModelFallback: true } : {}),
 								disableServerSideFallback: true,
 							}
 						: {}),
@@ -5265,6 +5410,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						onFirstChatDispatch: () => {
 							firstChatDispatchAt ??= performance.now();
 						},
+						onResponse: options.onResponse,
+						onPayload: options.onPayload,
 					}),
 				);
 				({ session } = await awaitAbortable(sessionPromise));
@@ -5340,7 +5487,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				const reviveCapture: WarmReviveCapture = {
 					sessionFile,
 					spec: sessionSpec,
-					perCallModel: perCallModelGrants !== undefined,
+					perCallModel: perCallModelGrants !== undefined || options.strictModelIdentity === true,
 					settings: captureSubagentSettings(settings, subagentSettings),
 					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
@@ -5481,6 +5628,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				solutionSpace: options.solutionSpace,
 				structured,
 				steps: options.steps?.length ? { prompts: options.steps, sent: 1 } : undefined,
+				budgetGuard: options.budgetGuard,
 			});
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
@@ -5711,7 +5859,17 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	};
 
 	try {
-		const done = await runSubagent();
+		let done: Awaited<ReturnType<typeof runSubagent>>;
+		try {
+			done = await runSubagent();
+		} catch (error) {
+			if (error && typeof error === "object") {
+				const observed = error as { providerRequests?: number; usage?: unknown };
+				if (observed.providerRequests === undefined) observed.providerRequests = progress.requests;
+				if (observed.usage === undefined && monitor.hasUsage()) observed.usage = monitor.accumulatedUsage;
+			}
+			throw error;
+		}
 		monitor.finish();
 
 		const result = await finalizeRunResult({
