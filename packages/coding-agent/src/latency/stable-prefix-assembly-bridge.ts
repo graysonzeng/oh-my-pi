@@ -1,8 +1,10 @@
 /**
  * W5 bridge: map real workflow prompt-assembly sections onto Experiment B
  * observe / controlled reorder at the assembly boundary (before provider send),
- * and safe fingerprint observe at the final provider-serialized request boundary.
+ * safe fingerprint observe at the final provider-serialized request boundary,
+ * and a deterministic diff of consecutive observe receipts.
  *
+ * Diffs keep segment kinds, fingerprints, and byte lengths only.
  * Does not claim server cache hits from client string equality.
  * claimedLiveWin stays false on mechanism receipts.
  */
@@ -409,5 +411,191 @@ export function usageMetricsFromProviderUsage(
 		cacheRead,
 		ttftMs: typeof ttftMs === "number" && Number.isFinite(ttftMs) && ttftMs >= 0 ? ttftMs : null,
 		costTotal: cost,
+	};
+}
+
+export type StablePrefixMissReason =
+	| "none"
+	| "tool_schema_changed"
+	| "static_rules_changed"
+	| "dynamic_context_changed"
+	| "assignment_changed"
+	| "other_segment_changed"
+	| "provider_identity_changed"
+	| "segment_order_changed";
+
+export type StablePrefixKindDiffStatus = "unchanged" | "changed" | "added" | "removed";
+
+export interface StablePrefixKindDiffV1 {
+	kind: ProviderRequestSegmentKind;
+	status: StablePrefixKindDiffStatus;
+	previousFingerprint: string | null;
+	currentFingerprint: string | null;
+	previousByteLength: number;
+	currentByteLength: number;
+	byteDelta: number;
+}
+
+/** Segment list plus provider identity. Both observe receipts satisfy this. */
+export interface StablePrefixDiffableObserve {
+	segments: readonly ProviderRequestSegment[];
+	providerIdentity: StablePrefixProviderIdentity;
+}
+
+export interface StablePrefixObservationDiffV1 {
+	v: 1;
+	kinds: readonly StablePrefixKindDiffV1[];
+	changedKinds: readonly ProviderRequestSegmentKind[];
+	firstChangedKind: ProviderRequestSegmentKind | null;
+	missReason: StablePrefixMissReason;
+	unchanged: boolean;
+	/** True when the leading static_rules/tools run is identical, ignoring the dynamic tail. */
+	prefixPreserved: boolean;
+	identityChanged: boolean;
+	claimedLiveWin: false;
+}
+
+const MISS_REASON_BY_KIND: Record<ProviderRequestSegmentKind, StablePrefixMissReason> = {
+	tools: "tool_schema_changed",
+	static_rules: "static_rules_changed",
+	dynamic_context: "dynamic_context_changed",
+	assignment: "assignment_changed",
+	other: "other_segment_changed",
+};
+
+const IDENTITY_FIELDS = ["provider", "api", "model", "toolSchemaFingerprint", "effortFingerprint"] as const;
+
+function providerIdentityChanged(
+	previous: StablePrefixProviderIdentity,
+	current: StablePrefixProviderIdentity,
+): boolean {
+	for (const field of IDENTITY_FIELDS) {
+		if ((previous[field] ?? null) !== (current[field] ?? null)) return true;
+	}
+	return false;
+}
+
+function groupSegments(
+	segments: readonly ProviderRequestSegment[],
+): Map<ProviderRequestSegmentKind, ProviderRequestSegment[]> {
+	const grouped = new Map<ProviderRequestSegmentKind, ProviderRequestSegment[]>();
+	for (const segment of segments) {
+		const list = grouped.get(segment.kind);
+		if (list) list.push(segment);
+		else grouped.set(segment.kind, [segment]);
+	}
+	return grouped;
+}
+
+function kindAppearanceOrder(
+	previous: readonly ProviderRequestSegment[],
+	current: readonly ProviderRequestSegment[],
+): ProviderRequestSegmentKind[] {
+	const order: ProviderRequestSegmentKind[] = [];
+	const seen = new Set<ProviderRequestSegmentKind>();
+	for (const segment of [...previous, ...current]) {
+		if (seen.has(segment.kind)) continue;
+		seen.add(segment.kind);
+		order.push(segment.kind);
+	}
+	return order;
+}
+
+/** One segment keeps its fingerprint. Several of one kind hash in list order. */
+function aggregateFingerprint(segments: readonly ProviderRequestSegment[]): string | null {
+	if (segments.length === 0) return null;
+	if (segments.length === 1) return segments[0]!.fingerprint;
+	return sha256Hex(JSON.stringify(segments.map(segment => segment.fingerprint)));
+}
+
+function aggregateBytes(segments: readonly ProviderRequestSegment[]): number {
+	let total = 0;
+	for (const segment of segments) total += segment.byteLength;
+	return total;
+}
+
+function leadingStaticPrefix(segments: readonly ProviderRequestSegment[]): readonly ProviderRequestSegment[] {
+	const prefix: ProviderRequestSegment[] = [];
+	for (const segment of segments) {
+		if (segment.kind !== "static_rules" && segment.kind !== "tools") break;
+		prefix.push(segment);
+	}
+	return prefix;
+}
+
+function sameSegmentSequence(
+	previous: readonly ProviderRequestSegment[],
+	current: readonly ProviderRequestSegment[],
+): boolean {
+	if (previous.length !== current.length) return false;
+	for (let index = 0; index < previous.length; index++) {
+		const left = previous[index]!;
+		const right = current[index]!;
+		if (left.kind !== right.kind || left.fingerprint !== right.fingerprint || left.byteLength !== right.byteLength) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Diff consecutive segment-bearing observe receipts.
+ * Kind status walks previous order, then kinds that exist only on current.
+ * A segment-body change wins over provider identity and over pure reordering.
+ * Output never copies prompt or tool bodies.
+ */
+export function diffStablePrefixObservations(
+	previous: StablePrefixDiffableObserve,
+	current: StablePrefixDiffableObserve,
+): StablePrefixObservationDiffV1 {
+	const previousGroups = groupSegments(previous.segments);
+	const currentGroups = groupSegments(current.segments);
+	const kinds: StablePrefixKindDiffV1[] = [];
+	for (const kind of kindAppearanceOrder(previous.segments, current.segments)) {
+		const before = previousGroups.get(kind) ?? [];
+		const after = currentGroups.get(kind) ?? [];
+		const previousFingerprint = aggregateFingerprint(before);
+		const currentFingerprint = aggregateFingerprint(after);
+		const previousByteLength = aggregateBytes(before);
+		const currentByteLength = aggregateBytes(after);
+		let status: StablePrefixKindDiffStatus;
+		if (before.length === 0) status = "added";
+		else if (after.length === 0) status = "removed";
+		else if (previousFingerprint === currentFingerprint && previousByteLength === currentByteLength)
+			status = "unchanged";
+		else status = "changed";
+		kinds.push({
+			kind,
+			status,
+			previousFingerprint,
+			currentFingerprint,
+			previousByteLength,
+			currentByteLength,
+			byteDelta: currentByteLength - previousByteLength,
+		});
+	}
+
+	const changedKinds = kinds.filter(row => row.status !== "unchanged").map(row => row.kind);
+	const firstChanged = kinds.find(row => row.status !== "unchanged");
+	const identityDiffers = providerIdentityChanged(previous.providerIdentity, current.providerIdentity);
+	const orderChanged = changedKinds.length === 0 && !sameSegmentSequence(previous.segments, current.segments);
+	let missReason: StablePrefixMissReason = "none";
+	if (firstChanged) missReason = MISS_REASON_BY_KIND[firstChanged.kind];
+	else if (orderChanged) missReason = "segment_order_changed";
+	else if (identityDiffers) missReason = "provider_identity_changed";
+
+	return {
+		v: 1,
+		kinds,
+		changedKinds,
+		firstChangedKind: firstChanged?.kind ?? null,
+		missReason,
+		unchanged: missReason === "none",
+		prefixPreserved: sameSegmentSequence(
+			leadingStaticPrefix(previous.segments),
+			leadingStaticPrefix(current.segments),
+		),
+		identityChanged: identityDiffers,
+		claimedLiveWin: false,
 	};
 }
