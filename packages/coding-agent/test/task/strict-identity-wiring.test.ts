@@ -6,14 +6,17 @@ import type { Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import {
@@ -498,4 +501,245 @@ describe("strict-identity callback and executor wiring", () => {
 		expect(forwardedCreateOptions[1]?.disableModelFallback).toBe(true);
 		expect(forwardedCreateOptions[1]?.disableServerSideFallback).toBe(true);
 	}, 30_000);
+
+	it("settles the latest charge key without drifting subsequent turns after transport retries", async () => {
+		const notePath = path.join(tempRoot, "retry-note.txt");
+		await fs.writeFile(notePath, "retry-content", "utf8");
+
+		let turn = 0;
+		const retryModel = createMockModel({
+			id: "strict-retry",
+			handler: async (context, options) => {
+				turn += 1;
+				if (turn === 1) {
+					await options?.onPayload?.({ messages: context.messages, attempt: 1 }, retryModel, options.signal);
+					await options?.onPayload?.({ messages: context.messages, attempt: 2 }, retryModel, options.signal);
+					return {
+						toolCalls: [{ id: "read-1", name: "read", arguments: { path: notePath } }],
+						usage: { input: 100, output: 20, cost: { input: 0.01, output: 0.02, total: 0.03 } },
+					};
+				}
+				await options?.onPayload?.({ messages: context.messages, attempt: 1 }, retryModel, options.signal);
+				return {
+					content: ["Recovered after retry."],
+					usage: { input: 120, output: 30, cost: { input: 0.02, output: 0.02, total: 0.04 } },
+				};
+			},
+		});
+		const { agentId, session } = await createHarness({ models: [retryModel] });
+
+		const ledger = new BudgetLedger({ limitUsd: 1, maxRequests: 10 });
+		const budgetGuard = createWorkflowBudgetPort(ledger).bind({
+			workflowId: "wf-retry-charge",
+			attemptId: "att-1",
+			invocationId: "inv-1",
+			profileId: "strict-profile",
+			maxRequests: 10,
+			maxCostUsd: 1,
+		});
+		const providerChargeKeys: string[] = [];
+		let ordinal = 0;
+
+		const execution = await runStructuredSubagent({
+			session,
+			invocationKind: "task",
+			assignment: `Read ${notePath} and finish.`,
+			agent: "worker",
+			model: "mock/strict-retry",
+			structured: false,
+			strictModelIdentity: true,
+			budgetGuard,
+			providerChargeKeys,
+			onPayload: () => {
+				ordinal += 1;
+				const key = budgetGuard.beforeProviderRequest({ ordinal });
+				if (key) providerChargeKeys.push(key);
+				return undefined;
+			},
+			identity: { id: agentId },
+			keepAlive: false,
+		});
+
+		expect(execution.result.exitCode).toBe(0);
+		expect(execution.result.output).toBe("Recovered after retry.");
+		expect(ordinal).toBe(3);
+		expect(providerChargeKeys).toEqual([]);
+		const snap = ledger.snapshot();
+		expect(snap.providerRequests).toBe(3);
+		expect(snap.knownCostLowerBoundUsd).toBeCloseTo(0.07, 6);
+		const providerCharges = (snap.charges ?? []).filter(c => c.unit === "provider");
+		expect(providerCharges[0]?.unknown).toBe(true);
+		expect(providerCharges[1]?.costUsd).toBeCloseTo(0.03, 6);
+		expect(providerCharges[2]?.costUsd).toBeCloseTo(0.04, 6);
+	});
+
+	it("fires host onPayload and onResponse only for primary agent turns, not side-channel calls", async () => {
+		const primary = createMockModel({
+			id: "strict-isolation",
+			handler: async (context, options) => {
+				await options?.onPayload?.({ messages: context.messages }, primary, options.signal);
+				return {
+					content: ["Ok."],
+					responseHeaders: { "x-omp-resolved-model": "mock/strict-isolation" },
+				};
+			},
+		});
+		const cwd = path.join(tempRoot, "side-channel-work");
+		await fs.mkdir(cwd, { recursive: true });
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("mock", "test-key");
+		const sourceId = `side-channel-isolation-${++runCounter}`;
+		registerMockApi(sourceId);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+		vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+			provider === primary.provider && id === primary.id ? primary : undefined,
+		);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primary]);
+		vi.spyOn(modelRegistry, "getAll").mockReturnValue([primary]);
+		vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockResolvedValue(undefined);
+
+		let hostPayloadCalls = 0;
+		let hostResponseCalls = 0;
+		const { session } = await realCreateAgentSession({
+			cwd,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.reminders": false }),
+			model: primary,
+			sessionManager: SessionManager.inMemory(cwd),
+			enableMCP: false,
+			enableLsp: false,
+			hasUI: false,
+			onPayload: () => {
+				hostPayloadCalls += 1;
+				return undefined;
+			},
+			onResponse: () => {
+				hostResponseCalls += 1;
+			},
+		});
+		try {
+			await session.runEphemeralTurn({ promptText: "Side question." });
+			expect(hostPayloadCalls).toBe(0);
+			expect(hostResponseCalls).toBe(0);
+
+			await session.prompt("Primary prompt.");
+			expect(hostPayloadCalls).toBe(1);
+			expect(hostResponseCalls).toBe(1);
+		} finally {
+			await session.dispose();
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+		}
+	});
+
+	it("rejects @upstream routing mismatch and enforces exactOnly without perCallModelGrants under strictModelIdentity", async () => {
+		const bundled = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!bundled) throw new Error("Expected bundled openrouter/z-ai/glm-4.7");
+		const capturedRequests: Array<Record<string, unknown>> = [];
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				const body = (await req.json()) as Record<string, unknown>;
+				capturedRequests.push(body);
+				const sse = [
+					'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_route_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Routed."}]}}',
+					'data: {"type":"response.completed","response":{"id":"resp_route_1","status":"completed","model":"z-ai/glm-4.7","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4,"input_tokens_details":{"cached_tokens":0}}}}',
+					"",
+				].join("\n\n");
+				return new Response(sse, {
+					status: 200,
+					headers: {
+						"content-type": "text/event-stream",
+						"x-omp-resolved-model": "openrouter/z-ai/glm-4.7",
+					},
+				});
+			},
+		});
+		cleanups.push(async () => {
+			await server.stop(true);
+		});
+		const baseOpenRouter: Model = {
+			...bundled,
+			baseUrl: server.url.toString().replace(/\/$/, ""),
+		};
+		const cerebras = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [baseOpenRouter]).model;
+		const together = parseModelPattern("openrouter/z-ai/glm-4.7@together", [baseOpenRouter]).model;
+		if (!cerebras || !together) throw new Error("Expected routed models");
+
+		const routingHarness = await createHarness({
+			models: [baseOpenRouter],
+			authenticatedProviders: ["openrouter"],
+		});
+		const routedExec = await runStructuredSubagent({
+			session: routingHarness.session,
+			invocationKind: "task",
+			assignment: "Check @upstream validation.",
+			agent: "worker",
+			model: "openrouter/z-ai/glm-4.7@cerebras",
+			structured: false,
+			strictModelIdentity: true,
+			identity: { id: routingHarness.agentId },
+			keepAlive: false,
+		});
+		expect(routedExec.result.error).toBeUndefined();
+		expect(routedExec.result.exitCode).toBe(0);
+		const assertDispatchModel = routingHarness.forwardedCreateOptions[0]?.assertDispatchModel;
+		expect(() => assertDispatchModel?.(cerebras)).not.toThrow();
+		expect(() => assertDispatchModel?.(together)).toThrow(/Strict model identity refused dispatch model/);
+		expect(() => assertDispatchModel?.(baseOpenRouter)).toThrow(/Strict model identity refused dispatch model/);
+
+		// Without perCallModelGrants, bare/fuzzy model selectors must still fail closed under exactOnly.
+		const bareIdTarget = createMockModel({
+			id: "strict-role-target",
+			handler: () => ({ content: ["Should not run"] }),
+		});
+		const bareHarness = await createHarness({
+			models: [bareIdTarget],
+		});
+		const bareExec = await runStructuredSubagent({
+			session: bareHarness.session,
+			invocationKind: "task",
+			assignment: "Must reject bare id without exactOnly escape.",
+			agent: "worker",
+			model: "strict-role-target",
+			structured: false,
+			strictModelIdentity: true,
+			identity: { id: bareHarness.agentId },
+			keepAlive: false,
+		});
+		expect(bareExec.result.exitCode).not.toBe(0);
+		expect(bareExec.result.error).toMatch(
+			/Strict model identity could not resolve requested model: strict-role-target/,
+		);
+		expect(bareIdTarget.calls).toHaveLength(0);
+	});
+
+	it("preserves frozen errors thrown out of runSubagent instead of masking with TypeError", async () => {
+		const primary = createMockModel({
+			id: "strict-frozen",
+			handler: () => ({ content: ["unused"] }),
+		});
+		const { agentId, session } = await createHarness({ models: [primary] });
+		(session as { asyncJobManager?: unknown }).asyncJobManager = {
+			cancelAndReapOwnerJobs: async () => {
+				throw Object.freeze(new Error("frozen failure sentinel"));
+			},
+		};
+
+		await expect(
+			runStructuredSubagent({
+				session,
+				invocationKind: "task",
+				assignment: "Trigger frozen failure.",
+				agent: "worker",
+				model: "mock/strict-frozen",
+				structured: false,
+				strictModelIdentity: true,
+				identity: { id: agentId },
+				keepAlive: false,
+			}),
+		).rejects.toThrow(/frozen failure sentinel/);
+	});
 });

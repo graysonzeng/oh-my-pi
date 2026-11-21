@@ -4944,14 +4944,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const transformProviderContext = createTransformProviderContext(
 			createSessionDateCwdReminderJournal(sessionManager),
 		);
+		const sessionOnPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) =>
+			extensionRunner.emitBeforeProviderRequest(payload, model, signal);
+		const sessionOnResponse: SimpleStreamOptions["onResponse"] = async (response, model, signal) => {
+			await extensionRunner.emitAfterProviderResponse(response, model, signal);
+		};
 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
-			const transformed = await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
+			const transformed = await sessionOnPayload(payload, model, signal);
 			if (!options.onPayload) return transformed;
 			return (await options.onPayload(transformed ?? payload, model, signal)) ?? transformed;
 		};
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model, signal) => {
 			await options.onResponse?.(response, model, signal);
-			await extensionRunner.emitAfterProviderResponse(response, model, signal);
+			await sessionOnResponse(response, model, signal);
 		};
 
 		const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
@@ -5501,8 +5506,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformContext,
 			transformProviderContext,
 			createAdvisorTransformProviderContext: () => createTransformProviderContext(),
-			onPayload,
-			onResponse,
+			onPayload: sessionOnPayload,
+			onResponse: sessionOnResponse,
+			primaryOnResponse: options.onResponse ? onResponse : undefined,
 			sideStreamFn: settingsAwareStreamFn,
 			advisorStreamFn: settingsAwareStreamFn,
 			convertToLlm: convertToLlmFinal,
@@ -6060,8 +6066,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				(["manage_skill", "learn"] as const)
 					.map(name => session.getToolByName(name))
 					.filter((tool): tool is AgentTool => tool !== undefined),
-			onPayload,
-			onResponse,
+			onPayload: sessionOnPayload,
+			onResponse: sessionOnResponse,
 			createAgent: captureOptions => {
 				const captureModel = captureOptions.initialState?.model;
 				const captureSessionId = captureOptions.sessionId;

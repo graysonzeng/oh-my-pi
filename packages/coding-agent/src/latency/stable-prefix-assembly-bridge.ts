@@ -505,7 +505,7 @@ function kindAppearanceOrder(
 function aggregateFingerprint(segments: readonly ProviderRequestSegment[]): string | null {
 	if (segments.length === 0) return null;
 	if (segments.length === 1) return segments[0]!.fingerprint;
-	return sha256Hex(JSON.stringify(segments.map(segment => segment.fingerprint)));
+	return sha256Hex(JSON.stringify(segments.map(segment => [segment.fingerprint, segment.byteLength])));
 }
 
 function aggregateBytes(segments: readonly ProviderRequestSegment[]): number {
@@ -541,7 +541,9 @@ function sameSegmentSequence(
 /**
  * Diff consecutive segment-bearing observe receipts.
  * Kind status walks previous order, then kinds that exist only on current.
- * A segment-body change wins over provider identity and over pure reordering.
+ * Static prefix breaks (changed tools/static_rules, then static prefix reorder,
+ * then provider identity) take priority over downstream dynamic shifts so
+ * routine per-turn context changes do not mask upstream cache invalidation.
  * Output never copies prompt or tool bodies.
  */
 export function diffStablePrefixObservations(
@@ -577,12 +579,20 @@ export function diffStablePrefixObservations(
 
 	const changedKinds = kinds.filter(row => row.status !== "unchanged").map(row => row.kind);
 	const firstChanged = kinds.find(row => row.status !== "unchanged");
+	const firstChangedStatic = kinds.find(
+		row => row.status !== "unchanged" && (row.kind === "tools" || row.kind === "static_rules"),
+	);
+	const prefixPreserved = sameSegmentSequence(
+		leadingStaticPrefix(previous.segments),
+		leadingStaticPrefix(current.segments),
+	);
 	const identityDiffers = providerIdentityChanged(previous.providerIdentity, current.providerIdentity);
-	const orderChanged = changedKinds.length === 0 && !sameSegmentSequence(previous.segments, current.segments);
 	let missReason: StablePrefixMissReason = "none";
-	if (firstChanged) missReason = MISS_REASON_BY_KIND[firstChanged.kind];
-	else if (orderChanged) missReason = "segment_order_changed";
+	if (firstChangedStatic) missReason = MISS_REASON_BY_KIND[firstChangedStatic.kind];
+	else if (!prefixPreserved) missReason = "segment_order_changed";
 	else if (identityDiffers) missReason = "provider_identity_changed";
+	else if (firstChanged) missReason = MISS_REASON_BY_KIND[firstChanged.kind];
+	else if (!sameSegmentSequence(previous.segments, current.segments)) missReason = "segment_order_changed";
 
 	return {
 		v: 1,
@@ -591,10 +601,7 @@ export function diffStablePrefixObservations(
 		firstChangedKind: firstChanged?.kind ?? null,
 		missReason,
 		unchanged: missReason === "none",
-		prefixPreserved: sameSegmentSequence(
-			leadingStaticPrefix(previous.segments),
-			leadingStaticPrefix(current.segments),
-		),
+		prefixPreserved,
 		identityChanged: identityDiffers,
 		claimedLiveWin: false,
 	};

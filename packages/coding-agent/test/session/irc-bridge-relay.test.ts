@@ -222,4 +222,28 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		await bridge.deliver({ id: "p2", from: "Peer", to: "Child", body: "question?", ts: 9 });
 		expect(bridge.hasQueuedFrom("Peer")).toBe(true);
 	});
+
+	it("drains inbox messages in arrival order even when a quiet broadcast arrives after a peer aside", async () => {
+		const { bridge } = makeStreamingChild();
+		await bridge.deliver({ id: "p1", from: "Peer", to: "Child", body: "first", ts: 3 });
+		await bridge.deliver({ id: "b3", from: "Main", to: "Child", body: "everyone: second", ts: 4, broadcast: true });
+		await bridge.deliver({ id: "p2", from: "Peer", to: "Child", body: "third", ts: 5 });
+
+		expect(bridge.drainInboxMessages("Child").map(msg => msg.id)).toEqual(["p1", "b3", "p2"]);
+	});
+
+	it("keeps a streaming parent progress note visible and queued without steering", async () => {
+		const { bridge, steered, observed } = makeStreamingChild();
+		await bridge.deliver({ id: "prog-1", from: "Main", to: "Child", body: "halfway done", ts: 10, progress: true });
+
+		expect(steered).toHaveLength(0);
+		expect(bridge.hasInterrupts()).toBe(false);
+		expect(observed[0]).toMatchObject({
+			type: "irc_message",
+			message: { display: true, details: { id: "prog-1", progress: true } },
+		});
+		expect(bridge.drainPending().map(r => (r as CustomMessage).details)).toMatchObject([
+			{ id: "prog-1", progress: true },
+		]);
+	});
 });

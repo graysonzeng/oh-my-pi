@@ -291,6 +291,7 @@ import {
 	replayObservations,
 	resolveOrdinaryLatencyObservationFields,
 	summarizeDshDimensionMetrics,
+	summarizeLatencyCohort,
 } from "../latency/rollout-cohort";
 import { sha256Hex } from "../workflow/optimization-receipt";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
@@ -1194,6 +1195,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#cancelExitRecorder?: () => void;
 	#cancelFatalRecoveryHint?: () => void;
 	#exitRecorded = false;
+	#recordedExitKind: SessionExitData["kind"] | null = null;
+	#rolloutEvaluated = false;
+	#retryFallbackAppliedCount = 0;
 	/** Last observed `workspace.additionalDirectories`, diffed on change to add/remove only settings-seeded roots. */
 	#settingsWorkspaceDirectories: readonly string[] = [];
 	/** Last observed auto-QA gate; the system prompt advertises `xd://report_issue` only while it holds. */
@@ -2651,21 +2655,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// outer await on `#onResponse` (provider-response.ts) tolerates a sync void return,
 		// and skipping the wrapper drops a per-event `newPromiseCapability` allocation that
 		// shows up as ~3.5% self time in streaming profiles.
-		const configuredOnResponse = config.onResponse;
-		this.#onResponse = configuredOnResponse
-			? async (response, model, signal) => {
-					this.rawSseDebugBuffer.recordResponse(response, model);
-					this.#stats.ingestProviderUsageHeaders(response, model);
-					await this.#maybeRefreshLazyLocalContext(response, model);
-					await configuredOnResponse(response, model, signal);
-				}
-			: (response, model) => {
-					this.rawSseDebugBuffer.recordResponse(response, model);
-					this.#stats.ingestProviderUsageHeaders(response, model);
-					// Returns void (no allocation) unless a one-time lazy-model
-					// refresh is actually due, preserving the sync fast path.
-					return this.#maybeRefreshLazyLocalContext(response, model);
-				};
+		const wrapOnResponse = (
+			handler: SimpleStreamOptions["onResponse"] | undefined,
+		): NonNullable<SimpleStreamOptions["onResponse"]> =>
+			handler
+				? async (response, model, signal) => {
+						this.rawSseDebugBuffer.recordResponse(response, model);
+						this.#stats.ingestProviderUsageHeaders(response, model);
+						await this.#maybeRefreshLazyLocalContext(response, model);
+						await handler(response, model, signal);
+					}
+				: (response, model) => {
+						this.rawSseDebugBuffer.recordResponse(response, model);
+						this.#stats.ingestProviderUsageHeaders(response, model);
+						// Returns void (no allocation) unless a one-time lazy-model
+						// refresh is actually due, preserving the sync fast path.
+						return this.#maybeRefreshLazyLocalContext(response, model);
+					};
+		this.#onResponse = wrapOnResponse(config.onResponse);
 		const configuredOnSseEvent = config.onSseEvent;
 		this.#onSseEvent = configuredOnSseEvent
 			? (event, model) => {
@@ -2675,7 +2682,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			: (event, model) => {
 					this.rawSseDebugBuffer.recordEvent(event, model);
 				};
-		this.agent.setProviderResponseInterceptor(this.#onResponse);
+		const primaryResponseInterceptor = config.primaryOnResponse
+			? wrapOnResponse(config.primaryOnResponse)
+			: this.#onResponse;
+		this.agent.setProviderResponseInterceptor(primaryResponseInterceptor);
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
 			if (signal?.aborted) return;
@@ -3014,7 +3024,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 		});
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
-			this.#recordSessionExit(reason);
+			const exitKind = this.#recordSessionExit(reason);
+			this.#evaluateLatencyRolloutAtSessionEnd(exitKind);
 		});
 		this.#cancelFatalRecoveryHint = postmortem.registerFatalRecoveryHint(() => {
 			const sessionId = this.sessionManager.getSessionId();
@@ -4148,7 +4159,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#recordSessionExit(reason: postmortem.Reason | "dispose"): SessionExitData["kind"] | null {
-		if (this.#exitRecorded) return null;
+		if (this.#exitRecorded) return this.#recordedExitKind;
 		this.#exitRecorded = true;
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
@@ -4197,6 +4208,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		this.#recordedExitKind = kind;
 		return kind;
 	}
 
@@ -4229,6 +4241,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
+		if (event.type === "retry_fallback_applied") {
+			this.#retryFallbackAppliedCount += 1;
+		}
 		if (event.type === "tool_execution_update") {
 			// Returned background calls have no later tool result to persist their
 			// terminal frame. Keep the latest update for future focus rebuilds;
@@ -8190,7 +8205,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			endedAt,
 			toolCallCount: this.getSessionStats().toolCalls,
 			toolCalls,
-			fallbackCount: null,
+			fallbackCount: this.#retryFallbackAppliedCount,
 			verifierSource: verifier.source,
 			verifierStatus: verifier.status,
 		});
@@ -8206,7 +8221,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		try {
 			const snapshot = this.#latencyArmSnapshot;
 			if (!snapshot) return;
-			const store = this.#latencyRolloutStore ?? new LatencyRolloutCohortStore();
+			const store = this.#latencyRolloutStore;
+			if (!store) return;
+			if (this.sessionManager.isOwnedElsewhere()) return;
+			if (this.#rolloutEvaluated) return;
+			this.#rolloutEvaluated = true;
 			const sessionId = this.sessionManager.getSessionId();
 			const completed = exitKind === "normal";
 			const endedAt = new Date().toISOString();
@@ -8302,7 +8321,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					for (const arm of decision.disabledArms) {
 						this.settings.override(LATENCY_ARM_SETTINGS[arm], false);
 					}
-					this.invalidateLatencyArmSnapshot();
+					this.#clearLatencyArmSnapshot();
 				}
 			};
 			if (slices.length > 0) {
@@ -8332,9 +8351,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				return;
 			}
 			const key = deriveLatencyCohortKey(snapshot);
-			const treatment = store.summaryForKey(key);
+			const allObservations = store.readAll();
+			const treatment = summarizeLatencyCohort(allObservations.filter(o => o.key === key));
 			const baseline =
-				key === LATENCY_BASELINE_COHORT_KEY ? undefined : store.summaryForKey(LATENCY_BASELINE_COHORT_KEY);
+				key === LATENCY_BASELINE_COHORT_KEY
+					? undefined
+					: summarizeLatencyCohort(allObservations.filter(o => o.key === LATENCY_BASELINE_COHORT_KEY));
 			const cohort = treatment && baseline ? computeLatencyCohortMetrics(treatment, baseline) : undefined;
 			persistStop(
 				buildLatencyRolloutDecision({
@@ -8779,8 +8801,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							entry.content === tail.content,
 					)
 			: undefined;
-		if (persisted) this.sessionManager.branch(persisted.id);
-		else this.#appendEvalStateContextEntry(tail);
+		if (persisted) {
+			void this.sessionManager.branch(persisted.id).catch(error => {
+				logger.warn("Failed to branch to persisted eval state context", {
+					entryId: persisted.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		} else {
+			this.#appendEvalStateContextEntry(tail);
+		}
 	}
 
 	#appendEvalStateContextEntry(message: CustomMessage): void {
@@ -9079,6 +9109,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Drop mutable tool decisions and directives owned by the previous logical session. */
 	#clearSessionScopedToolState(): void {
+		this.#retryFallbackAppliedCount = 0;
 		resetConsultSession(this);
 		this.agent.clearDeferredToolDirectives();
 		this.#toolChoiceQueue.clear();

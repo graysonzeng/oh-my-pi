@@ -2300,7 +2300,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// Extract and accumulate usage (prefer message.usage, fallback to event.usage)
 				const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
 				const messageUsage = getMessageUsage(event.message) || eventUsage;
-				const chargeKey = role === "assistant" ? args.providerChargeKeys?.shift() : undefined;
+				let chargeKey: string | undefined;
+				if (role === "assistant" && args.providerChargeKeys && args.providerChargeKeys.length > 0) {
+					// Use the latest launched attempt key for this turn and discard superseded
+					// retry keys from the queue (they stay recorded as unknown-cost launches in
+					// the ledger, fail-closed) so subsequent turns never shift onto stale keys.
+					chargeKey = args.providerChargeKeys.pop();
+					args.providerChargeKeys.length = 0;
+				}
 				if (isRecord(messageUsage)) {
 					// Only count assistant messages (not tool results, etc.)
 					if (role === "assistant") {
@@ -4883,13 +4890,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		artifactsDir: options.artifactsDir,
 	};
 
-	const runSubagent = async (): Promise<{
+	interface SubagentRunOutcome {
 		exitCode: number;
 		error?: string;
 		aborted?: boolean;
 		abortReason?: string;
 		durationMs: number;
-	}> => {
+	}
+
+	const runSubagent = async (): Promise<SubagentRunOutcome> => {
 		const sessionAbortController = new AbortController();
 		const abortSignal = monitor.abortSignal;
 		let exitCode = 0;
@@ -4970,13 +4979,14 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const resolution = options.strictModelIdentity
 				? await awaitAbortable(
 						(async () => {
+							const exactOnly = Boolean(options.perCallModelGrants || options.strictModelIdentity);
 							let resolved = resolveModelOverride(modelPatterns, modelRegistry, settings, {
-								exactOnly: !!options.perCallModelGrants,
+								exactOnly,
 							});
 							if (!resolved.model && typeof modelRegistry.awaitBackgroundRefresh === "function") {
 								await modelRegistry.awaitBackgroundRefresh();
 								resolved = resolveModelOverride(modelPatterns, modelRegistry, settings, {
-									exactOnly: !!options.perCallModelGrants,
+									exactOnly,
 								});
 							}
 							const resolvedModel = resolved.model;
@@ -5294,7 +5304,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 										throw new Error("Offline mode: subagent dispatch must use the active parent provider.");
 									}
 									if (options.strictModelIdentity && model) {
-										if (dispatchModel.provider !== model.provider || dispatchModel.id !== model.id) {
+										if (formatModelStringWithRouting(dispatchModel) !== formatModelStringWithRouting(model)) {
 											throw new Error(
 												`Strict model identity refused dispatch model ${formatModelStringWithRouting(dispatchModel)}; expected ${formatModelStringWithRouting(model)}.`,
 											);
@@ -5859,11 +5869,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	};
 
 	try {
-		let done: Awaited<ReturnType<typeof runSubagent>>;
+		let done: SubagentRunOutcome;
 		try {
 			done = await runSubagent();
 		} catch (error) {
-			if (error && typeof error === "object") {
+			if (error && typeof error === "object" && Object.isExtensible(error)) {
 				const observed = error as { providerRequests?: number; usage?: unknown };
 				if (observed.providerRequests === undefined) observed.providerRequests = progress.requests;
 				if (observed.usage === undefined && monitor.hasUsage()) observed.usage = monitor.accumulatedUsage;

@@ -340,4 +340,66 @@ describe("stable prefix observation diff", () => {
 		expect(sameFingerprint.kinds[0]?.byteDelta).toBe(2);
 		expect(sameFingerprint.prefixPreserved).toBe(true);
 	});
+
+	it("prioritizes leading static reorder and provider identity ahead of per-turn dynamic changes", () => {
+		const tools = fingerprintProviderSegment("tools", "tool-schema");
+		const rules = fingerprintProviderSegment("static_rules", "rules-body");
+		const dynamic1 = fingerprintProviderSegment("dynamic_context", "turn-1");
+		const dynamic2 = fingerprintProviderSegment("dynamic_context", "turn-2");
+
+		const reorderedWithDynamic = diffStablePrefixObservations(
+			{
+				segments: [tools, rules, dynamic1],
+				providerIdentity: { provider: "anthropic", model: "claude-sonnet-4-5" },
+			},
+			{
+				segments: [rules, tools, dynamic2],
+				providerIdentity: { provider: "anthropic", model: "claude-sonnet-4-5" },
+			},
+		);
+		expect(reorderedWithDynamic.missReason).toBe("segment_order_changed");
+		expect(reorderedWithDynamic.prefixPreserved).toBe(false);
+		expect(reorderedWithDynamic.changedKinds).toContain("dynamic_context");
+
+		const identityWithDynamic = diffStablePrefixObservations(
+			{
+				segments: [tools, rules, dynamic1],
+				providerIdentity: { provider: "anthropic", model: "claude-sonnet-4-5" },
+			},
+			{
+				segments: [tools, rules, dynamic2],
+				providerIdentity: { provider: "anthropic", model: "claude-opus-5-5", effortFingerprint: "effort-max" },
+			},
+		);
+		expect(identityWithDynamic.missReason).toBe("provider_identity_changed");
+		expect(identityWithDynamic.prefixPreserved).toBe(true);
+		expect(identityWithDynamic.identityChanged).toBe(true);
+		expect(identityWithDynamic.changedKinds).toContain("dynamic_context");
+	});
+
+	it("detects swapped segment byte lengths across matching fingerprints when total bytes match", () => {
+		const dynamic = fingerprintProviderSegment("dynamic_context", "turn");
+		const diff = diffStablePrefixObservations(
+			{
+				segments: [
+					{ kind: "static_rules", fingerprint: "fp-a", byteLength: 10 },
+					{ kind: "static_rules", fingerprint: "fp-b", byteLength: 20 },
+					dynamic,
+				],
+				providerIdentity: {},
+			},
+			{
+				segments: [
+					{ kind: "static_rules", fingerprint: "fp-a", byteLength: 20 },
+					{ kind: "static_rules", fingerprint: "fp-b", byteLength: 10 },
+					dynamic,
+				],
+				providerIdentity: {},
+			},
+		);
+		const rules = diff.kinds.find(row => row.kind === "static_rules");
+		expect(rules?.status).toBe("changed");
+		expect(rules?.byteDelta).toBe(0);
+		expect(diff.missReason).toBe("static_rules_changed");
+	});
 });

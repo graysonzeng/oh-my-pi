@@ -358,6 +358,8 @@ export interface AgentSessionConfig {
 	onPayload?: SimpleStreamOptions["onPayload"];
 	/** Provider response hook used by the active session request path. */
 	onResponse?: SimpleStreamOptions["onResponse"];
+	/** Provider response hook used only by the primary agent loop (excludes side-channel/advisor/auto-learn calls). */
+	primaryOnResponse?: SimpleStreamOptions["onResponse"];
 	/** Raw SSE hook used by the active session request path. */
 	onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	/** Per-session raw SSE diagnostic buffer. */

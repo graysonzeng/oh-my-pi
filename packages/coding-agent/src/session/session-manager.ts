@@ -4460,6 +4460,11 @@ export class SessionManager {
 			this.#branchCore(branchFromId);
 			return;
 		}
+		if (this.#currentChainHoldsLease()) {
+			if (this.#diskFailure instanceof SessionPersistenceIndeterminateError) throw this.#diskFailure;
+			this.#branchCore(branchFromId);
+			return;
+		}
 		return this.runExclusive(() => this.#branchCore(branchFromId));
 	}
 
@@ -4471,6 +4476,11 @@ export class SessionManager {
 	/** Reset the leaf to null so the next append creates a new root entry. */
 	async resetLeaf(): Promise<void> {
 		if (this.#exclusiveMutationIsIdle()) {
+			this.#setLeaf(null);
+			return;
+		}
+		if (this.#currentChainHoldsLease()) {
+			if (this.#diskFailure instanceof SessionPersistenceIndeterminateError) throw this.#diskFailure;
 			this.#setLeaf(null);
 			return;
 		}

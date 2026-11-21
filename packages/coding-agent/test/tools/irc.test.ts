@@ -827,7 +827,7 @@ describe("IRC", () => {
 			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
 		});
 
-		it("queues ordinary parent IRC as an aside while a subagent turn is streaming", async () => {
+		it("steers direct parent IRC while a subagent turn is streaming", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
@@ -841,11 +841,16 @@ describe("IRC", () => {
 				body: "change approach",
 				ts: Date.now(),
 			});
+			const queued = session.agent.peekSteeringQueue();
 			expect(outcome).toBe("injected");
 			expect(promptSpy).not.toHaveBeenCalled();
 			expect(session.agent.hasIrcInterrupts?.()).toBe(false);
-			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
-			expect(session.drainPendingIrcInboxMessages("0-Child").map(msg => msg.body)).toEqual(["change approach"]);
+			expect(queued).toHaveLength(1);
+			const parentSteer = queued[0];
+			expect(parentSteer?.role).toBe("user");
+			if (parentSteer?.role !== "user") throw new Error("expected queued parent IRC steer");
+			expect(parentSteer.content).toContain("change approach");
+			expect(session.drainPendingIrcInboxMessages("0-Child")).toEqual([]);
 		});
 
 		it("queues interrupt:true parent IRC as steering while a subagent turn is streaming", async () => {

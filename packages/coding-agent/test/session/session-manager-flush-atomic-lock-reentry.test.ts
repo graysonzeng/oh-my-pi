@@ -210,4 +210,69 @@ describe("SessionManager.flush() and the atomic persistence lock", () => {
 
 		expect(await settlesWithinMicrotaskBudget(appendPromise, 500)).toBe(true);
 	});
+
+	it("clears pending count after an aborted exclusive waiter so branch() resumes synchronous execution", async () => {
+		const storage = new BackgroundFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions/proj", storage);
+		const anchorId = manager.appendCustomEntry("anchor", { n: 1 });
+		const secondId = manager.appendCustomEntry("second", { n: 2 });
+
+		const holderEntered = Promise.withResolvers<void>();
+		const releaseHolder = Promise.withResolvers<void>();
+		const holderPromise = manager.runExclusive(async () => {
+			holderEntered.resolve();
+			await releaseHolder.promise;
+		});
+		await holderEntered.promise;
+
+		const abortController = new AbortController();
+		const canceledWaiter = manager.runExclusive(() => "never", { signal: abortController.signal });
+		abortController.abort(new Error("waiter cancelled"));
+		await expect(canceledWaiter).rejects.toThrow("waiter cancelled");
+
+		releaseHolder.resolve();
+		await holderPromise;
+
+		const branchPromise = manager.branch(anchorId);
+		expect(manager.getLeafId()).toBe(anchorId);
+		await branchPromise;
+		expect(manager.getLeafId()).toBe(anchorId);
+		expect(secondId).not.toBe(anchorId);
+	});
+
+	it("runs branch() synchronously on reentrant exclusive leases and queues concurrent external callers in FIFO order", async () => {
+		const storage = new BackgroundFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions/proj", storage);
+		const firstId = manager.appendCustomEntry("first", { n: 1 });
+		const secondId = manager.appendCustomEntry("second", { n: 2 });
+		const thirdId = manager.appendCustomEntry("third", { n: 3 });
+
+		const order: string[] = [];
+		const holderEntered = Promise.withResolvers<void>();
+		const releaseHolder = Promise.withResolvers<void>();
+
+		const holderPromise = manager.runExclusive(async () => {
+			order.push("holder:start");
+			holderEntered.resolve();
+			await releaseHolder.promise;
+			// Reentrant branch inside the held lease updates leaf immediately without deadlocking on the FIFO.
+			const reentrantPromise = manager.branch(firstId);
+			expect(manager.getLeafId()).toBe(firstId);
+			order.push("holder:reentrant-branched");
+			await reentrantPromise;
+			order.push("holder:end");
+		});
+		await holderEntered.promise;
+
+		const concurrentBranchPromise = manager.branch(secondId).then(() => {
+			order.push("external:branched");
+		});
+		// External caller must wait behind the active exclusive holder.
+		expect(manager.getLeafId()).toBe(thirdId);
+
+		releaseHolder.resolve();
+		await Promise.all([holderPromise, concurrentBranchPromise]);
+		expect(manager.getLeafId()).toBe(secondId);
+		expect(order).toEqual(["holder:start", "holder:reentrant-branched", "holder:end", "external:branched"]);
+	});
 });

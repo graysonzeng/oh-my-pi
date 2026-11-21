@@ -39,6 +39,11 @@ export class IrcBridge {
 	 *  (no observer would reply to the sender); they resume into a monitored wake once
 	 *  the contract clears or the hold is released. */
 	#deferredWakes: AgentMessage[] = [];
+	/** Enqueue order for {@link drainPending} and {@link drainInboxMessages}. Quiet broadcasts
+	 *  and progress notes share the interrupt queue so they do not end a wait, but they must
+	 *  still drain alongside asides in arrival order. */
+	#arrivalSeq = 0;
+	readonly #arrival = new WeakMap<AgentMessage, number>();
 	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
 
@@ -110,20 +115,32 @@ export class IrcBridge {
 		void pending.finally(() => this.#pendingReplies.delete(pending));
 	}
 
-	/** Takes queued IRC records in interrupt-before-aside order; `keepPeerMessages` leaves a
+	/** Takes queued IRC records in arrival order; `keepPeerMessages` leaves a
 	 *  subagent's non-parent messages queued for their own wake turn. */
 	drainPending(options?: { keepPeerMessages?: boolean }): AgentMessage[] {
-		if (options?.keepPeerMessages) {
-			const isPeer = (record: AgentMessage) => this.isPeerMessage(record);
-			const records = [...this.#interrupts, ...this.#asides].filter(record => !isPeer(record));
-			this.#interrupts = this.#interrupts.filter(isPeer);
-			this.#asides = this.#asides.filter(isPeer);
-			return records;
+		const queuedAsInterrupt = new Set(this.#interrupts);
+		const ordered = [...this.#interrupts, ...this.#asides].sort(
+			(a, b) => (this.#arrival.get(a) ?? 0) - (this.#arrival.get(b) ?? 0),
+		);
+		if (!options?.keepPeerMessages) {
+			this.#interrupts = [];
+			this.#asides = [];
+			return ordered;
 		}
-		const records = [...this.#interrupts, ...this.#asides];
-		this.#interrupts = [];
-		this.#asides = [];
-		return records;
+		const taken: AgentMessage[] = [];
+		const interrupts: AgentMessage[] = [];
+		const asides: AgentMessage[] = [];
+		for (const record of ordered) {
+			if (!this.isPeerMessage(record)) {
+				taken.push(record);
+				continue;
+			}
+			if (queuedAsInterrupt.has(record)) interrupts.push(record);
+			else asides.push(record);
+		}
+		this.#interrupts = interrupts;
+		this.#asides = asides;
+		return taken;
 	}
 
 	/** Snapshots and discards every queued IRC record — used when a session-boundary transition
@@ -159,6 +176,7 @@ export class IrcBridge {
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
 	 *  session transition, and extension `deliverAs: "aside"` sends. */
 	queueAside(records: AgentMessage[]): void {
+		for (const record of records) this.#rememberArrival(record);
 		this.#asides.push(...records);
 	}
 
@@ -176,52 +194,57 @@ export class IrcBridge {
 		return records;
 	}
 
+	#rememberArrival(record: AgentMessage): void {
+		if (!this.#arrival.has(record)) {
+			this.#arrival.set(record, this.#arrivalSeq++);
+		}
+	}
+
 	/** Surfaces and consumes every queued incoming record before automatic injection; with
 	 *  `ifAny`, takes nothing unless at least one of them satisfies it. */
 	drainInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: AgentMessage[] = [];
 		const remainingAsides: AgentMessage[] = [];
-		const queues = [
-			{ records: this.#interrupts, remaining: remainingInterrupts },
-			{ records: this.#asides, remaining: remainingAsides },
-		];
-		for (const queue of queues) {
-			for (const record of queue.records) {
-				if (record.role !== "custom") {
-					queue.remaining.push(record);
-					continue;
-				}
-				if (record.customType !== "irc:incoming") {
-					queue.remaining.push(record);
-					continue;
-				}
-				const details = record.details;
-				if (!details || typeof details !== "object") {
-					queue.remaining.push(record);
-					continue;
-				}
-				const id = Reflect.get(details, "id");
-				const from = Reflect.get(details, "from");
-				const body = Reflect.get(details, "message");
-				const replyTo = Reflect.get(details, "replyTo");
-				const broadcast = Reflect.get(details, "broadcast") === true;
-				const progress = Reflect.get(details, "progress") === true;
-				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
-					queue.remaining.push(record);
-					continue;
-				}
-				messages.push({
-					id,
-					from,
-					to: agentId,
-					body,
-					ts: record.timestamp,
-					...(typeof replyTo === "string" ? { replyTo } : {}),
-					...(broadcast ? { broadcast: true } : {}),
-					...(progress ? { progress: true } : {}),
-				});
+		const entries = [
+			...this.#interrupts.map(record => ({ record, isInterrupt: true })),
+			...this.#asides.map(record => ({ record, isInterrupt: false })),
+		].sort((a, b) => (this.#arrival.get(a.record) ?? 0) - (this.#arrival.get(b.record) ?? 0));
+		for (const { record, isInterrupt } of entries) {
+			const remaining = isInterrupt ? remainingInterrupts : remainingAsides;
+			if (record.role !== "custom") {
+				remaining.push(record);
+				continue;
 			}
+			if (record.customType !== "irc:incoming") {
+				remaining.push(record);
+				continue;
+			}
+			const details = record.details;
+			if (!details || typeof details !== "object") {
+				remaining.push(record);
+				continue;
+			}
+			const id = Reflect.get(details, "id");
+			const from = Reflect.get(details, "from");
+			const body = Reflect.get(details, "message");
+			const replyTo = Reflect.get(details, "replyTo");
+			const broadcast = Reflect.get(details, "broadcast") === true;
+			const progress = Reflect.get(details, "progress") === true;
+			if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
+				remaining.push(record);
+				continue;
+			}
+			messages.push({
+				id,
+				from,
+				to: agentId,
+				body,
+				ts: record.timestamp,
+				...(typeof replyTo === "string" ? { replyTo } : {}),
+				...(broadcast ? { broadcast: true } : {}),
+				...(progress ? { progress: true } : {}),
+			});
 		}
 		if (opts?.ifAny && !messages.some(opts.ifAny)) return [];
 		this.#interrupts = remainingInterrupts;
@@ -268,6 +291,7 @@ export class IrcBridge {
 		// A broadcast leg or progress note asks nothing of the recipient, so a
 		// busy one reads it at its next step boundary without being interrupted.
 		const quiet = msg.broadcast === true || msg.progress === true;
+		const steerParent = streaming && fromParent && !peerMessage && msg.progress !== true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -286,7 +310,7 @@ export class IrcBridge {
 			}),
 			// The parent steer becomes the transcript card when consumed; keep this
 			// observation available to listeners without also painting a live card.
-			display: !(streaming && fromParent && !peerMessage),
+			display: !steerParent,
 			details: {
 				id: msg.id,
 				from: msg.from,
@@ -303,8 +327,9 @@ export class IrcBridge {
 		if (peerMessage) this.#peerMessages.add(record);
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			// Only interrupt:true parent IRC steers; ordinary parent IRC waits as an aside.
-			if (fromParent && msg.interrupt === true) {
+			// A direct parent message (not a broadcast leg or progress note) is the parent's
+			// request: steer it now. The live card stays hidden (`display` above) and this steer is the card.
+			if (steerParent) {
 				const steer: AgentMessage = {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
@@ -316,13 +341,16 @@ export class IrcBridge {
 				this.#parentSteers.add(steer);
 				this.#host.agent.steer(steer);
 			} else if (msg.interrupt === true) {
+				this.#rememberArrival(record);
 				this.#interrupts.push(record);
 			} else if (quiet) {
 				// Broadcast/progress asks nothing: park on the interrupt queue marked
 				// quiet so waits are not aborted, while the next boundary still sees them.
+				this.#rememberArrival(record);
 				this.#quietRecords.add(record);
 				this.#interrupts.push(record);
 			} else {
+				this.#rememberArrival(record);
 				this.#asides.push(record);
 			}
 			return "injected";
