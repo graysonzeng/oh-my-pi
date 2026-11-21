@@ -164,7 +164,7 @@ export class ModelMentionRegistry {
 						effort: mention.thinkingLevel,
 					}),
 					model: [mention.selector],
-					thinkingLevel: mention.thinkingLevel ?? task.thinkingLevel,
+					thinkingLevel: mention.thinkingLevel ?? AUTO_THINKING,
 					filePath: undefined,
 				})),
 		];
