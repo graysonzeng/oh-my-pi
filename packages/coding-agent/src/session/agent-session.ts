@@ -239,18 +239,31 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	backgroundArmIdFromArms,
+	buildLatencyRolloutDecision,
 	DSH_ARM_IDS,
 	deriveLatencyCombination,
 	freezeLatencyArmSnapshot,
+	LATENCY_ARM_IDS,
+	LATENCY_ARM_SETTINGS,
 	type LatencyArmId,
 	type LatencyArmSnapshotV1,
+	type LatencyRolloutDecisionV1,
 	resolveLatencyArmsFromSettings,
 } from "../latency/arms";
-import { applyAssignedDshArms, type DshAssignmentV1, type DshExperimentId } from "../latency/assignment";
+import {
+	applyAssignedDshArms,
+	DSH_DIMENSION_EXPERIMENT,
+	type DshAssignmentV1,
+	type DshExperimentId,
+	intentEventId,
+	metricsEventId,
+} from "../latency/assignment";
 import {
 	buildParentFinalVerificationDetails,
 	canRecordTrustedParentFinal,
+	ordinaryVerifierFromParentFinal,
 	type ParentFinalVerificationDetails,
+	type ParentFinalVerificationObservation,
 	type ParentFinalVerificationSource,
 	type ParentFinalVerificationStatus,
 	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
@@ -268,7 +281,17 @@ import {
 	type RuntimeBuildIdentityV1,
 	runtimeBuildIdentityRef,
 } from "../latency/runtime-build-identity";
-import { type LatencyRolloutCohortStore } from "../latency/rollout-cohort";
+import {
+	buildOrdinarySessionObservationJoin,
+	computeLatencyCohortMetrics,
+	deriveLatencyCohortKey,
+	LATENCY_BASELINE_COHORT_KEY,
+	LatencyRolloutCohortStore,
+	type OrdinarySessionObservationJoinV1,
+	replayObservations,
+	resolveOrdinaryLatencyObservationFields,
+	summarizeDshDimensionMetrics,
+} from "../latency/rollout-cohort";
 import { sha256Hex } from "../workflow/optimization-receipt";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
@@ -4124,21 +4147,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, data);
 	}
 
-	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
-		if (this.#exitRecorded) return;
+	#recordSessionExit(reason: postmortem.Reason | "dispose"): SessionExitData["kind"] | null {
+		if (this.#exitRecorded) return null;
 		this.#exitRecorded = true;
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
 			pendingToolCalls.length === 0 &&
 			!this.sessionManager.getEntries().some(entry => entry.type === "message" && entry.message.role === "assistant")
 		) {
-			return;
+			return null;
 		}
 		// Another live process owns the session, so this process wrote nothing to
 		// it (its first write would have moved it to a sibling it owns). Writing
 		// the marker would fork the conversation into an "open-elsewhere" copy
 		// just to say a reader exited, and any pending tool calls are the owner's.
-		if (this.sessionManager.isOwnedElsewhere()) return;
+		if (this.sessionManager.isOwnedElsewhere()) return null;
 		const kind: SessionExitData["kind"] =
 			reason === "dispose" || reason === postmortem.Reason.MANUAL
 				? "normal"
@@ -4174,6 +4197,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		return kind;
 	}
 
 	#queuedExtensionEvents: AgentSessionEvent[] = [];
@@ -7002,7 +7026,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#cacheWarmer.onRefreshEnd = undefined;
 			this.#cacheWarmer.cancel();
 		}
-		this.#recordSessionExit(options.reason ?? "dispose");
+		const exitKind = this.#recordSessionExit(options.reason ?? "dispose");
+		this.#evaluateLatencyRolloutAtSessionEnd(exitKind);
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
@@ -8117,6 +8142,215 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	setWorkspaceCodeFingerprint(fingerprint: string | null | undefined): void {
 		const trimmed = typeof fingerprint === "string" ? fingerprint.trim() : "";
 		this.#workspaceCodeFingerprint = trimmed || null;
+	}
+
+	/**
+	 * Latest parent-final receipt on the active branch.
+	 * Abandoned-branch receipts remain in getEntries() and must not set the
+	 * ordinary cohort verifier.
+	 */
+	#latestParentFinalVerificationFromEntries(): ParentFinalVerificationObservation | null {
+		let latest: ParentFinalVerificationObservation | null = null;
+		for (const entry of this.sessionManager.getBranch()) {
+			const details =
+				entry.type === "custom" && entry.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE
+					? entry.data
+					: entry.type === "custom_message" && entry.customType === PARENT_FINAL_VERIFICATION_MESSAGE_TYPE
+						? entry.details
+						: undefined;
+			if (details === undefined) continue;
+			const parsed = parseParentFinalVerificationDetails(details);
+			if (!parsed) continue;
+			const ts = parsed.verifiedAtMs ?? Date.parse(entry.timestamp);
+			latest = {
+				status: this.#effectiveParentFinalStatus(parsed),
+				source: parsed.source,
+				ts: Number.isFinite(ts) ? ts : null,
+			};
+		}
+		return latest;
+	}
+
+	#ordinarySessionObservationJoin(endedAt: string): OrdinarySessionObservationJoinV1 {
+		const toolCalls: Array<{ name: string; arguments?: Record<string, unknown> }> = [];
+		for (const message of this.agent.state.messages) {
+			if (message.role !== "assistant") continue;
+			for (const content of message.content) {
+				if (content.type !== "toolCall") continue;
+				toolCalls.push({ name: content.name, arguments: content.arguments });
+			}
+		}
+		const verifier = ordinaryVerifierFromParentFinal(this.#latestParentFinalVerificationFromEntries());
+		return buildOrdinarySessionObservationJoin({
+			provider: this.model?.provider,
+			model: this.model?.id,
+			profileId: this.#activeModelOptimization.profile?.id,
+			armFingerprint: this.#latencyArmSnapshot?.fingerprint ?? null,
+			startedAt: this.sessionManager.getHeader()?.timestamp,
+			endedAt,
+			toolCallCount: this.getSessionStats().toolCalls,
+			toolCalls,
+			fallbackCount: null,
+			verifierSource: verifier.source,
+			verifierStatus: verifier.status,
+		});
+	}
+
+	/**
+	 * One session-end evaluation for the ordinary parent-final cohort.
+	 * The receipt is the latest parent-final verification on the active branch
+	 * only. A missing snapshot is a no-op, not an invented status.
+	 * Bookkeeping must not fail session teardown.
+	 */
+	#evaluateLatencyRolloutAtSessionEnd(exitKind: SessionExitData["kind"] | null): void {
+		try {
+			const snapshot = this.#latencyArmSnapshot;
+			if (!snapshot) return;
+			const store = this.#latencyRolloutStore ?? new LatencyRolloutCohortStore();
+			const sessionId = this.sessionManager.getSessionId();
+			const completed = exitKind === "normal";
+			const endedAt = new Date().toISOString();
+			const firedArms = this.getFiredLatencyArms();
+			const ordinaryJoin = this.#ordinarySessionObservationJoin(endedAt);
+			const ordinaryCore = resolveOrdinaryLatencyObservationFields({
+				workMetrics: ordinaryJoin.workMetrics,
+				costUsd: this.sessionManager.getUsageStatistics().cost,
+			});
+			const slices = snapshot.dimensions?.filter(slice => slice.role !== "excluded") ?? [];
+			if (slices.length > 0) {
+				for (const slice of slices) {
+					const experimentId = DSH_DIMENSION_EXPERIMENT[slice.id];
+					const executionId = this.#dshExecutionIds.get(experimentId);
+					if (!executionId) continue;
+					const eventId = metricsEventId(sessionId, experimentId);
+					const observationOk = store.appendObservation({
+						schemaVersion: 1,
+						kind: "latency_rollout_observation",
+						key: slice.cohortKey ?? deriveLatencyCohortKey(snapshot),
+						status: exitKind ?? "unknown",
+						completed,
+						...ordinaryCore,
+						firedArms,
+						endedAt,
+						event_id: eventId,
+						phase: "metrics",
+						snapshotFingerprint: snapshot.fingerprint,
+						sessionId,
+						experimentId,
+						dimensionId: slice.id,
+						assignmentRestored: this.#dshAssignment !== undefined,
+						bgFingerprint: snapshot.backgroundArmId?.replace(/^bg:/, "") ?? null,
+						sampleUnit: "session",
+						stopApplied: slice.stopApplied,
+						dshGetBranchError: this.#dshGetBranchError,
+						dshGoalInjected: this.#dshGoalInjected,
+						dshAdjacentIdentical: this.#dshAdjacentIdentical,
+						dshHeadlessCount: this.#goalModeState?.goal.headlessContinuationCount ?? null,
+						...ordinaryJoin,
+					});
+					if (!observationOk) {
+						store.markControlPlaneDegraded();
+						continue;
+					}
+					const commitOk = store.appendRunIntent({
+						kind: "dsh-run-intent",
+						event_id: intentEventId(sessionId, experimentId, executionId),
+						sessionId,
+						experimentId,
+						executionId,
+						state: "committed",
+						startedAt: endedAt,
+						committedAt: endedAt,
+						metricsEventId: eventId,
+						expiresAt: new Date(Date.parse(endedAt) + 30 * 24 * 60 * 60 * 1000).toISOString(),
+					});
+					if (!commitOk) store.markControlPlaneDegraded();
+				}
+				if (store.controlPlaneDegraded) return;
+			}
+			if (slices.length === 0) {
+				store.appendObservation({
+					schemaVersion: 1,
+					kind: "latency_rollout_observation",
+					key: deriveLatencyCohortKey(snapshot),
+					status: exitKind ?? "unknown",
+					completed,
+					...ordinaryCore,
+					firedArms,
+					endedAt,
+					phase: "metrics",
+					snapshotFingerprint: snapshot.fingerprint,
+					sessionId,
+					sampleUnit: "session",
+					...ordinaryJoin,
+				});
+			}
+			const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
+			if (active.length === 0 && slices.length === 0) return;
+			const observed = {
+				completion: completed,
+				repairCycles: ordinaryCore.repairCycles,
+				treatmentAttributedP0P1Escapes: ordinaryCore.p0p1Escapes,
+				costUsd: ordinaryCore.costUsd,
+				stageTimeMs: ordinaryCore.stageTimeMs,
+				spawnedAgents: ordinaryCore.spawnedAgents,
+			};
+			const persistStop = (decision: LatencyRolloutDecisionV1): void => {
+				if (!decision.decision.stop) return;
+				const persisted = store.appendDecisionOrAbort(decision);
+				if (persisted.persisted && typeof this.settings.override === "function") {
+					for (const arm of decision.disabledArms) {
+						this.settings.override(LATENCY_ARM_SETTINGS[arm], false);
+					}
+					this.invalidateLatencyArmSnapshot();
+				}
+			};
+			if (slices.length > 0) {
+				const dimMetrics = summarizeDshDimensionMetrics(replayObservations(store.readAll()), Date.parse(endedAt));
+				for (const slice of slices) {
+					const metrics = dimMetrics.get(slice.id);
+					persistStop(
+						buildLatencyRolloutDecision({
+							workflowId: sessionId,
+							status: exitKind ?? "unknown",
+							snapshot,
+							observed,
+							firedArms,
+							targetDimensionId: slice.id,
+							dsh: metrics
+								? {
+										a1GetBranchErrorRate: metrics.a1GetBranchErrorRate,
+										a23ZeroInjectionRate: metrics.a23ZeroInjectionRate,
+										a4CapViolations: metrics.a4CapViolations,
+										nonInferiorityDropPp: metrics.nonInferiorityDropPp,
+										minSampleMet: metrics.minSampleMet,
+									}
+								: undefined,
+						}),
+					);
+				}
+				return;
+			}
+			const key = deriveLatencyCohortKey(snapshot);
+			const treatment = store.summaryForKey(key);
+			const baseline =
+				key === LATENCY_BASELINE_COHORT_KEY ? undefined : store.summaryForKey(LATENCY_BASELINE_COHORT_KEY);
+			const cohort = treatment && baseline ? computeLatencyCohortMetrics(treatment, baseline) : undefined;
+			persistStop(
+				buildLatencyRolloutDecision({
+					workflowId: sessionId,
+					status: exitKind ?? "unknown",
+					snapshot,
+					observed,
+					firedArms,
+					cohort,
+				}),
+			);
+		} catch (error) {
+			logger.warn("Latency rollout bookkeeping failed during session teardown", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	/** Drop the frozen snapshot so later lookups re-read live settings (rollback invalidation). */
