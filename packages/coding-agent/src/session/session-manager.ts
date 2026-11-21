@@ -1058,6 +1058,11 @@ export class SessionManager {
 	#diskFailureLogged = false;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
 	#atomicPersistenceTail: Promise<void> = Promise.resolve();
+	/**
+	 * Non-reentrant owners queued on or inside the mutation lease.
+	 * Zero means a synchronous leaf move cannot race a pending publish.
+	 */
+	#atomicPersistencePending = 0;
 	/** Live owner lease for the current acquiring chain; null when free. */
 	#atomicOwnerLease: object | null = null;
 	/** Observer notifications withheld until their entries are proven durable. */
@@ -1443,6 +1448,7 @@ export class SessionManager {
 		const latched = this.#diskFailure instanceof SessionPersistenceIndeterminateError ? this.#diskFailure : undefined;
 		if (latched && !options.ignoreLatch) throw latched;
 
+		this.#atomicPersistencePending++;
 		const predecessor = this.#atomicPersistenceTail;
 		const turn = Promise.withResolvers<void>();
 		const reservation = predecessor.catch(() => undefined).then(() => turn.promise);
@@ -1454,49 +1460,42 @@ export class SessionManager {
 		// never overtake it). The signal is re-checked at grant before the
 		// operation runs; once granted, abort never shortens the lease nor the
 		// in-flight publish/repair.
-		let cancelledUntilGrant = false;
-		if (options.signal) {
-			const signal = options.signal;
-			const cancel = Promise.withResolvers<void>();
-			const onAbort = (): void => {
-				cancelledUntilGrant = true;
-				cancel.resolve();
-			};
-			if (signal.aborted) onAbort();
-			else signal.addEventListener("abort", onAbort, { once: true });
-			try {
-				await Promise.race([predecessor.catch(() => undefined), cancel.promise]);
-			} finally {
-				signal.removeEventListener("abort", onAbort);
-			}
-			if (cancelledUntilGrant) {
-				turn.resolve();
-				throw signal.reason;
-			}
-		} else {
-			await predecessor.catch(() => undefined);
-		}
-
-		// Post-predecessor admission gate: a canceled waiter exits without
-		// mutation; an indeterminate latch rejects new work (only recovery may
-		// proceed).
-		if (options.signal?.aborted) {
-			turn.resolve();
-			throw options.signal.reason;
-		}
-		const admittedLatch =
-			this.#diskFailure instanceof SessionPersistenceIndeterminateError ? this.#diskFailure : undefined;
-		if (admittedLatch && !options.ignoreLatch) {
-			turn.resolve();
-			throw admittedLatch;
-		}
-
-		const lease: object = {};
-		this.#atomicOwnerLease = lease;
+		let lease: object | null = null;
 		try {
+			let cancelledUntilGrant = false;
+			if (options.signal) {
+				const signal = options.signal;
+				const cancel = Promise.withResolvers<void>();
+				const onAbort = (): void => {
+					cancelledUntilGrant = true;
+					cancel.resolve();
+				};
+				if (signal.aborted) onAbort();
+				else signal.addEventListener("abort", onAbort, { once: true });
+				try {
+					await Promise.race([predecessor.catch(() => undefined), cancel.promise]);
+				} finally {
+					signal.removeEventListener("abort", onAbort);
+				}
+				if (cancelledUntilGrant) throw signal.reason;
+			} else {
+				await predecessor.catch(() => undefined);
+			}
+
+			// Post-predecessor admission gate: a canceled waiter exits without
+			// mutation; an indeterminate latch rejects new work (only recovery may
+			// proceed).
+			if (options.signal?.aborted) throw options.signal.reason;
+			const admittedLatch =
+				this.#diskFailure instanceof SessionPersistenceIndeterminateError ? this.#diskFailure : undefined;
+			if (admittedLatch && !options.ignoreLatch) throw admittedLatch;
+
+			lease = {};
+			this.#atomicOwnerLease = lease;
 			return await atomicOwnerContext.run({ manager: this, lease }, () => operation());
 		} finally {
-			if (this.#atomicOwnerLease === lease) this.#atomicOwnerLease = null;
+			if (lease !== null && this.#atomicOwnerLease === lease) this.#atomicOwnerLease = null;
+			this.#atomicPersistencePending--;
 			turn.resolve();
 		}
 	}
@@ -1515,6 +1514,18 @@ export class SessionManager {
 			context.manager === this &&
 			context.lease !== null &&
 			context.lease === this.#atomicOwnerLease
+		);
+	}
+
+	/**
+	 * No queued or in-flight owner, and the disk is not latched. A leaf move
+	 * can run before this call returns; otherwise it must wait on the FIFO.
+	 */
+	#exclusiveMutationIsIdle(): boolean {
+		return (
+			this.#atomicPersistencePending === 0 &&
+			this.#atomicOwnerLease === null &&
+			!(this.#diskFailure instanceof SessionPersistenceIndeterminateError)
 		);
 	}
 
@@ -4439,10 +4450,16 @@ export class SessionManager {
 
 	/**
 	 * Move the leaf to an earlier entry so the next append forms a new branch.
-	 * Existing entries are never modified or deleted. Runs under the serialized
-	 * owner so a branch selection can never interleave a pending publish/repair.
+	 * Existing entries are never modified or deleted. When the mutation owner
+	 * is free, the leaf moves before this call returns — callers append the
+	 * next entry synchronously, without awaiting. A pending publish or repair
+	 * still queues the move so the two cannot interleave.
 	 */
 	async branch(branchFromId: string): Promise<void> {
+		if (this.#exclusiveMutationIsIdle()) {
+			this.#branchCore(branchFromId);
+			return;
+		}
 		return this.runExclusive(() => this.#branchCore(branchFromId));
 	}
 
@@ -4453,6 +4470,10 @@ export class SessionManager {
 
 	/** Reset the leaf to null so the next append creates a new root entry. */
 	async resetLeaf(): Promise<void> {
+		if (this.#exclusiveMutationIsIdle()) {
+			this.#setLeaf(null);
+			return;
+		}
 		return this.runExclusive(() => this.#setLeaf(null));
 	}
 
