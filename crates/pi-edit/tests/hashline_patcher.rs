@@ -17,7 +17,11 @@ async fn patcher_apply_cases() {
 
 #[test]
 fn matcher_paths_accept_partial_sections_and_header_noise() {
-	let engine = HashlineEngine { enforce_seen_lines: false, max_columns: 512 };
+	let engine = HashlineEngine {
+		enforce_seen_lines: false,
+		max_columns:        512,
+		reveal_max_columns: 512,
+	};
 	let inspected = engine.inspect(&ArgSnapshot {
 		input: Some(
 			"[one.ts#ABCD]\nPUT 1.=1:\n+one\n[*** Update File: dir with spaces/two.ts#1234]\nPUT \
@@ -823,4 +827,99 @@ async fn refuses_a_repair_whose_kept_row_hides_a_restated_copy() {
 		.to_string();
 	assert!(error.contains("`PUT 2.=4:` rejected"), "{error}");
 	assert_eq!(workspace.read("Stat.tsx").as_deref(), Some(GRID));
+}
+
+/// Same bytes in a file this session never read must not accept a tag issued
+/// only for another path. A store with no reads, and a store that did read
+/// this path, still apply.
+#[tokio::test]
+async fn rejects_tag_issued_only_for_another_identical_file() {
+	let bytes = "value = 1\n";
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("a.py", bytes);
+	let other = common::Workspace::new(EditMode::Hashline);
+	let other_key = pi_edit::path_policy::canonical_key(&other.write("a.py", bytes));
+	let tag = workspace.store.record(&other_key, bytes, None);
+	let input = json!({ "input": format!("[a.py#{tag}]\nPUT 1.=1:\n+value = 2") });
+
+	let writer = common::DiskWriter::default();
+	let error = workspace
+		.apply_json(&input, &writer)
+		.await
+		.expect_err("a tag issued only for another identical file");
+	let message = error.to_string();
+	assert_eq!(error.kind(), "other_file_tag");
+	assert!(message.contains("is not from this session"), "{message}");
+	assert!(
+		message.contains(&format!("was issued in this session for {}.", other_key.display())),
+		"{message}"
+	);
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.py").as_deref(), Some(bytes));
+	assert_eq!(other.read("a.py").as_deref(), Some(bytes));
+
+	let cold = common::Workspace::new(EditMode::Hashline);
+	cold.write("a.py", bytes);
+	cold
+		.apply_json(&input, &common::DiskWriter::default())
+		.await
+		.expect("a cold store has no other path to confuse with this file");
+	assert_eq!(cold.read("a.py").as_deref(), Some("value = 2\n"));
+
+	workspace.snapshot("a.py", bytes, None);
+	workspace
+		.apply_json(&input, &common::DiskWriter::default())
+		.await
+		.expect("recording this path makes its own tag usable");
+	assert_eq!(workspace.read("a.py").as_deref(), Some("value = 2\n"));
+}
+
+/// An unseen line longer than 512 but within the reveal cap is shown inline,
+/// even while `max_columns` stays at 512. At a 512 reveal cap it still demands
+/// `:raw`, and the revealed line applies on resend.
+#[tokio::test]
+async fn inline_reveal_scales_up_to_configured_max_columns() {
+	let wide = "w".repeat(800);
+	let text = format!("kept\n{wide}\n");
+	let patch = |tag: &str| format!("[wide.txt#{tag}]\nPUT 2.=2:\n+REPLACED\n");
+
+	let mut narrow = common::Workspace::new(EditMode::Hashline);
+	narrow.config.max_columns = 512;
+	narrow.config.reveal_max_columns = 512;
+	narrow.config.enforce_seen_lines = true;
+	narrow.write("wide.txt", &text);
+	let tag = narrow.snapshot("wide.txt", &text, Some(&[1]));
+	let writer = common::DiskWriter::default();
+	let error = narrow
+		.apply_json(&json!({ "input": patch(&tag) }), &writer)
+		.await
+		.expect_err("800 columns exceed a 512 cap")
+		.to_string();
+	assert!(error.contains("wide.txt:2:raw"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(narrow.read("wide.txt").as_deref(), Some(text.as_str()));
+
+	let mut raised = common::Workspace::new(EditMode::Hashline);
+	raised.config.max_columns = 512;
+	raised.config.reveal_max_columns = 2048;
+	raised.config.enforce_seen_lines = true;
+	raised.write("wide.txt", &text);
+	let tag = raised.snapshot("wide.txt", &text, Some(&[1]));
+	let writer = common::DiskWriter::default();
+	let error = raised
+		.apply_json(&json!({ "input": patch(&tag) }), &writer)
+		.await
+		.expect_err("the first try reveals the unseen line")
+		.to_string();
+	assert!(error.contains(&wide), "{error}");
+	assert!(error.contains("re-issue the edit"), "{error}");
+	assert!(error.contains("retry"), "{error}");
+	assert!(!error.contains(":raw"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(raised.read("wide.txt").as_deref(), Some(text.as_str()));
+	raised
+		.apply_json(&json!({ "input": patch(&tag) }), &writer)
+		.await
+		.expect("the revealed line is seen on resend");
+	assert_eq!(raised.read("wide.txt").as_deref(), Some("kept\nREPLACED\n"));
 }

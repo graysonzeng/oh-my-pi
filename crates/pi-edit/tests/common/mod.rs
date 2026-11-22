@@ -120,6 +120,7 @@ impl Workspace {
 			fuzzy_threshold: 0.95,
 			enforce_seen_lines: false,
 			max_columns: 512,
+			reveal_max_columns: 512,
 			raw_input: false,
 		};
 		Self { dir, store: EditStore::new(), config }

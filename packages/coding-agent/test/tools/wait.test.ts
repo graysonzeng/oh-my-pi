@@ -217,6 +217,65 @@ describe("wait", () => {
 		build.resolve("done");
 	});
 
+	test("lone wait with only running task jobs takes the top rung (240_000ms) on the first call", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const hanging = Promise.withResolvers<string>();
+		manager.register("task", "agent", async () => hanging.promise, { ownerId: "Main" });
+		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn() }));
+		const first = await elapse(tool, 240_000);
+		expect(report(first)).toContain("within 4m");
+		expect(report(first)).toContain("Call `wait` right away with no other tool call: it then blocks up to 4m.");
+		hanging.resolve("done");
+
+		const earlyManager = new AsyncJobManager({ onJobComplete: () => {} });
+		const early = Promise.withResolvers<string>();
+		earlyManager.register("task", "agent", async () => early.promise, { ownerId: "Main" });
+		const interactive = new WaitTool(
+			session(earlyManager, "Main", false, { getContextMessages: latestTurn(), tuiTranscript: true }),
+		);
+		expect(interactive.description).toContain("End your turn instead");
+		let settled = false;
+		const waiting = interactive.execute("idle-wait", {}).finally(() => {
+			settled = true;
+		});
+		await flushMicrotasks();
+		vi.advanceTimersByTime(239_000);
+		await flushMicrotasks();
+		expect(settled).toBe(false);
+		early.resolve("agent done");
+		const woke = await waiting;
+		expect(woke.details?.jobs?.[0]).toMatchObject({ status: "completed", resultText: "agent done" });
+
+		const next = Promise.withResolvers<string>();
+		earlyManager.register("task", "next", async () => next.promise, { ownerId: "Main" });
+		const elapsedInteractive = report(await elapse(interactive, 240_000));
+		expect(elapsedInteractive).toContain("within 4m");
+		expect(elapsedInteractive).toContain("End your turn: results and messages start your next one.");
+		expect(elapsedInteractive).not.toContain("Call `wait` right away");
+		next.resolve("done");
+	});
+
+	test("non-lone wait or mixed task+bash jobs still starts at the 5_000ms floor", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const task = Promise.withResolvers<string>();
+		manager.register("task", "agent", async () => task.promise, { ownerId: "Main" });
+		const withRead = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn("read") }));
+		expect(report(await elapse(withRead, 5_000))).toContain("within 5.0s");
+		task.resolve("done");
+
+		const mixed = new AsyncJobManager({ onJobComplete: () => {} });
+		const agent = Promise.withResolvers<string>();
+		const build = Promise.withResolvers<string>();
+		mixed.register("task", "agent", async () => agent.promise, { ownerId: "Main" });
+		mixed.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const loneMixed = new WaitTool(session(mixed, "Main", false, { getContextMessages: latestTurn() }));
+		expect(report(await elapse(loneMixed, 5_000))).toContain("within 5.0s");
+		agent.resolve("done");
+		build.resolve("done");
+	});
+
 	test("only the top-level interactive session is told to end its turn instead of waiting again", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });

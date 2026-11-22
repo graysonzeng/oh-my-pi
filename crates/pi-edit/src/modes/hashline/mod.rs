@@ -38,6 +38,8 @@ pub struct HashlineEngine {
 	pub enforce_seen_lines: bool,
 	/// See [`crate::session::SessionConfig::max_columns`].
 	pub max_columns:        usize,
+	/// See [`crate::session::SessionConfig::reveal_max_columns`].
+	pub reveal_max_columns: usize,
 }
 
 impl ModeEngine for HashlineEngine {
@@ -86,7 +88,15 @@ impl ModeEngine for HashlineEngine {
 				None => EditError::parse("No hashline sections found in input."),
 			});
 		}
-		patcher::stage_patch(&patch, input, self.enforce_seen_lines, self.max_columns, files, store)
+		patcher::stage_patch(
+			&patch,
+			input,
+			self.enforce_seen_lines,
+			self.max_columns,
+			self.reveal_max_columns,
+			files,
+			store,
+		)
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {

@@ -1674,7 +1674,7 @@ describe("per-call model preflight", () => {
 		["an unapproved model", "mock/target", { modelRoles: {} }, false, /not approved/],
 		[
 			"a model for an agent with an override",
-			"mock/target",
+			"mock/other",
 			{ "task.agentModelOverrides": { worker: "mock/target" } },
 			false,
 			/conflicts with task\.agentModelOverrides/,
@@ -1693,6 +1693,46 @@ describe("per-call model preflight", () => {
 				}),
 			),
 		).rejects.toThrow(error);
+	});
+
+	it.each([
+		["mock/target:high", "mock/target:high,mock/fallback:medium"],
+		["mock/target", "mock/target:high,mock/fallback:medium"],
+	] as const)(
+		"keeps the override fallback chain when per-call model %s restates %s",
+		async (perCallModel, override) => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({
+					session: perCallSession({
+						"task.perCallModel": "on",
+						"task.agentModelOverrides": { worker: override },
+					}),
+					perCallModel,
+				}),
+			);
+			expect(policy.perCallModelGrants).toBeUndefined();
+			expect(policy.modelOverride).toEqual(["mock/target:high", "mock/fallback:medium"]);
+		},
+	);
+
+	it.each([
+		["mock/target:low", "mock/target:high"],
+		["mock/target:low", "mock/target"],
+		["mock/other", "mock/target"],
+	] as const)("rejects per-call model %s conflicting with override %s", async (perCallModel, override) => {
+		mockDiscovery();
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({
+					session: perCallSession({
+						"task.perCallModel": "on",
+						"task.agentModelOverrides": { worker: override },
+					}),
+					perCallModel,
+				}),
+			),
+		).rejects.toThrow(/conflicts with task\.agentModelOverrides/);
 	});
 
 	// Both defer to the executor's post-refresh check: an unloaded model while discovery runs,

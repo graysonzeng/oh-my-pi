@@ -6,6 +6,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
@@ -344,5 +345,44 @@ describe("@file mention → edit seen-line guard", () => {
 		expect(content).toContain("exceeds");
 		expect(content).not.toMatch(/^\[wide\.json#/);
 		expect(content).not.toMatch(/^1:/m);
+	});
+});
+
+// Regression: tools.outputMaxColumns above grep's 512-byte display cap must still
+// reveal an unseen line inline. maxColumns stays at 512 for cold-store anchors.
+describe("read → edit inline reveal at a raised output column cap", () => {
+	let cwd: string;
+	let file: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reveal-columns-"));
+		file = path.join(cwd, "wide.txt");
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("reveals an unseen ~1000-character line inline, then applies the retry", async () => {
+		const session = createSession(cwd);
+		cfgToolsOutputMaxColumns.set(session.settings, 2048);
+		const wide = "w".repeat(1000);
+		const lines = Array.from({ length: 30 }, (_, index) => (index === 1 ? wide : `line ${index + 1}`));
+		const source = `${lines.join("\n")}\n`;
+		await Bun.write(file, source);
+
+		const header = textOutput(await new ReadTool(session).execute("read", { path: "wide.txt:18-22" })).split("\n")[0];
+		expect(header).toMatch(/^\[wide\.txt#[0-9A-F]{4}\]$/);
+		const input = `${header}\nPUT 2.=2:\n+REPLACED\n`;
+		const edit = new EditTool(session, "hashline");
+
+		const revealed = textOutput(await edit.execute("edit-1", { input }));
+		expect(revealed).toContain(wide);
+		expect(revealed).not.toContain(":raw");
+		expect(await Bun.file(file).text()).toBe(source);
+
+		await edit.execute("edit-2", { input });
+		lines[1] = "REPLACED";
+		expect(await Bun.file(file).text()).toBe(`${lines.join("\n")}\n`);
 	});
 });

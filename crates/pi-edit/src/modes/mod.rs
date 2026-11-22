@@ -15,6 +15,7 @@ pub fn engine_for(
 	fuzzy_threshold: f64,
 	enforce_seen_lines: bool,
 	max_columns: usize,
+	reveal_max_columns: usize,
 ) -> Box<dyn ModeEngine> {
 	match mode {
 		EditMode::Replace => Box::new(replace::ReplaceEngine { allow_fuzzy, fuzzy_threshold }),
@@ -24,7 +25,9 @@ pub fn engine_for(
 		EditMode::ApplyPatch => {
 			Box::new(apply_patch::ApplyPatchEngine { allow_fuzzy, fuzzy_threshold })
 		},
-		EditMode::Hashline => Box::new(hashline::HashlineEngine { enforce_seen_lines, max_columns }),
+		EditMode::Hashline => {
+			Box::new(hashline::HashlineEngine { enforce_seen_lines, max_columns, reveal_max_columns })
+		},
 		EditMode::Sloppy => Box::new(sloppy::SloppyEngine { allow_fuzzy, fuzzy_threshold }),
 	}
 }

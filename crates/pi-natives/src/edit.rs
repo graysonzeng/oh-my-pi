@@ -83,6 +83,9 @@ pub struct EditPolicy {
 	/// tool cuts lines). Without recorded read provenance, hashline anchors on
 	/// longer lines are rejected.
 	pub max_columns:          u32,
+	/// Per-line column cap for inline reveal of unseen hashline lines.
+	/// Absent: same as `max_columns`.
+	pub reveal_max_columns:   Option<u32>,
 	pub block_auto_generated: bool,
 	pub plan_active:          bool,
 	/// Registered internal URL schemes (router spec keys).
@@ -118,6 +121,9 @@ impl EditPolicy {
 			fuzzy_threshold:    self.fuzzy_threshold,
 			enforce_seen_lines: self.enforce_seen_lines,
 			max_columns:        self.max_columns as usize,
+			reveal_max_columns: self
+				.reveal_max_columns
+				.map_or(self.max_columns as usize, |value| value as usize),
 			raw_input:          self.raw_input,
 		})
 	}
@@ -914,7 +920,7 @@ pub struct EditInspection {
 pub fn edit_inspect(mode: String, args_json: String) -> Result<EditInspection> {
 	let mode = parse_mode(&mode)?;
 	let snapshot = snapshot_from_text(&args_json, false, true);
-	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false, 0);
+	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false, 0, 0);
 	let inspection = engine.inspect(&snapshot);
 	Ok(EditInspection {
 		paths:    inspection.paths,
@@ -1260,6 +1266,7 @@ mod tests {
 			fuzzy_threshold:    0.95,
 			enforce_seen_lines: false,
 			max_columns:        512,
+			reveal_max_columns: 512,
 			raw_input:          false,
 		};
 		let (wake, _rx) = flume::bounded::<()>(1);

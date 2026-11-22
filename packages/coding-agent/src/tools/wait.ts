@@ -206,8 +206,9 @@ export function hasWaitTool(session: ToolSession): boolean {
  * still answer soon: each one finished its turn, is blocked on the caller
  * itself (the cycle that would park both sides), or is waiting on the user.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
- * that climbs across back-to-back idle waits, or takes the top rung when the
- * wait is the only call of its turn. A direct message arriving
+ * that climbs across back-to-back idle waits. A wait that is the only call of
+ * its turn takes the top rung once an idle streak is underway, or on the first
+ * call when it watches only task jobs. A direct message arriving
  * mid-wait ends any wait. Messages never ride in the wait's result: each one
  * reaches the caller as a user turn right after it (see `handOffMail`).
  * Broadcast legs and progress notes ask the caller nothing, so they never end
@@ -341,11 +342,14 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}): Promise<AgentToolResult<CoordinationDetails>> {
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, startedAtMs, settledAtEntry } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
-		const rung = !streak
-			? 0
-			: isOnlyCallOfTurn(this.session, args.toolCallId)
+		const loneCall = isOnlyCallOfTurn(this.session, args.toolCallId);
+		const taskOnlyJobs = jobs.length > 0 && !serviceRunning && jobs.every(job => job.type === "task");
+		const rung =
+			loneCall && (streak !== undefined || taskOnlyJobs)
 				? WAIT_TOP_RUNG
-				: Math.min(streak.rung + 1, WAIT_TOP_RUNG);
+				: !streak
+					? 0
+					: Math.min(streak.rung + 1, WAIT_TOP_RUNG);
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();

@@ -5,7 +5,7 @@
  * - rule://<name> - Reads rule content
  */
 import * as fs from "node:fs/promises";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { getActiveRules, type Rule } from "../capability/rule";
 import { getActiveSkills } from "../extensibility/skills";
 import ruleDoc from "../prompts/internal-urls/rule.md" with { type: "text" };
@@ -70,11 +70,20 @@ export class RuleProtocolHandler implements ProtocolHandler {
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const rule = findRule(url, context);
+		let content = rule.content;
+		if (rule.path) {
+			try {
+				const raw = await Bun.file(rule.path).text();
+				content = parseFrontmatter(raw, { source: rule.path }).body;
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+		}
 		return {
 			url: url.href,
-			content: rule.content,
+			content,
 			contentType: "text/markdown",
-			size: Buffer.byteLength(rule.content, "utf-8"),
+			size: Buffer.byteLength(content, "utf-8"),
 			sourcePath: rule.path,
 			notes: [],
 		};

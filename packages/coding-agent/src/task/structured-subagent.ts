@@ -9,6 +9,7 @@ import * as os from "node:os";
 import path from "node:path";
 import type { SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -448,15 +449,19 @@ export function invalidModelSelectorReason(
 	return undefined;
 }
 
-/** Gate, validate and approve a per-call `model`; returns the grants the running child stays held to. */
+/**
+ * Gate, validate and approve a per-call `model`. Returns the grants the running
+ * child stays held to, or `undefined` when the selector only restates the primary
+ * `task.agentModelOverrides` entry so that override's full fallback chain stays.
+ */
 function preflightPerCallModel(
 	request: StructuredSubagentRequest,
 	selector: unknown,
 	agent: AgentDefinition,
-	hasModelOverride: boolean,
+	configuredModelOverride: string | string[] | undefined,
 	userTaggedEffort: boolean,
 	parentModelPattern: string | undefined,
-): PerCallModelGrants {
+): PerCallModelGrants | undefined {
 	const { settings, modelRegistry } = request.session;
 	const fail = (message: string): never => {
 		throw new StructuredSubagentError("preflight", message);
@@ -465,7 +470,27 @@ function preflightPerCallModel(
 	const disabled = perCallModelDisabledReason(settings, request.invocationKind);
 	if (disabled) fail(disabled);
 	if (isBundledSeance(agent)) fail(`Per-call model is not supported for the \`${SEANCE_AGENT_NAME}\` agent.`);
-	if (hasModelOverride) {
+	if (configuredModelOverride !== undefined) {
+		const primaryOverride = (
+			Array.isArray(configuredModelOverride) ? configuredModelOverride : configuredModelOverride.split(",")
+		)
+			.map(part => part.trim())
+			.find(Boolean);
+		if (typeof selector === "string" && primaryOverride) {
+			const selectorProblem = invalidModelSelectorReason(selector, "The call", {
+				settings,
+				invocationKind: request.invocationKind,
+			});
+			if (!selectorProblem) {
+				const sel = splitThinkingSuffix(selector.trim());
+				const ov = splitThinkingSuffix(primaryOverride);
+				const sameBase = sel.base.toLowerCase() === ov.base.toLowerCase();
+				const effortOk =
+					sel.level === undefined ||
+					(ov.level !== undefined && sel.level.toLowerCase() === ov.level.toLowerCase());
+				if (sameBase && effortOk) return undefined;
+			}
+		}
 		fail(
 			`Per-call model conflicts with task.agentModelOverrides for agent "${agent.name}". Omit model to use the configured override.`,
 		);
@@ -662,7 +687,7 @@ export async function resolveEffectiveSubagentPolicy(
 					request,
 					perCallSelector,
 					agent,
-					Object.hasOwn(agentModelOverrides, agentName),
+					Object.hasOwn(agentModelOverrides, agentName) ? agentModelOverrides[agentName] : undefined,
 					userTaggedEffort,
 					// A multi-upstream or otherwise richer parent route cannot grant a simpler selector.
 					parentActiveModel

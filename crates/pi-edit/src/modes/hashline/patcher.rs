@@ -105,6 +105,16 @@ pub(crate) fn mismatch(
 	let actual = file_hash(normalized);
 	let file_lines: Vec<String> = normalized.split('\n').map(str::to_owned).collect();
 	let anchor_lines = section.collect_anchor_lines().unwrap_or_default();
+	// Classify against the store as the edit found it. Recording the reply's
+	// rows would make this live file look like it already owned the tag, and
+	// hide that the tag was issued for a different path with the same bytes.
+	let hash_recognized = store.has_hash(canonical, expected);
+	let tag_origin_paths: Vec<String> = store
+		.paths_with_hash(expected)
+		.into_iter()
+		.filter(|path| path != canonical)
+		.map(|path| path.to_string_lossy().into_owned())
+		.collect();
 	// The reply hands back the current tag and prints the rows around each
 	// anchor in full, so those rows count as seen for a resend under it.
 	record_reply_provenance(store, canonical, normalized, || {
@@ -112,23 +122,13 @@ pub(crate) fn mismatch(
 			.into_iter()
 			.collect()
 	});
-	// When the tag isn't from this exact path, list the other paths in this
-	// session that *did* issue the same tag — so the rejection can name the
-	// file the tag was actually for and the model doesn't follow a wrong-tree
-	// suggestion.
-	let tag_origin_paths: Vec<String> = store
-		.paths_with_hash(expected)
-		.into_iter()
-		.filter(|path| path != canonical)
-		.map(|path| path.to_string_lossy().into_owned())
-		.collect();
 	mismatch_error(&MismatchDetails {
 		path: Some(section.path.clone()),
 		expected_file_hash: expected.to_owned(),
 		actual_file_hash: actual,
 		file_lines,
 		anchor_lines,
-		hash_recognized: store.has_hash(canonical, expected),
+		hash_recognized,
 		tag_origin_paths,
 	})
 }
@@ -430,6 +430,7 @@ fn assert_seen_lines(
 	text: &str,
 	current: Option<&str>,
 	max_columns: usize,
+	reveal_max_columns: usize,
 ) -> Result<(), EditError> {
 	let Some(snapshot) = store.by_content(canonical, text) else {
 		// No retained read (restart, store eviction): the tag still matches the
@@ -482,7 +483,12 @@ fn assert_seen_lines(
 		else {
 			continue;
 		};
-		if value.chars().count() > SEEN_LINE_REVEAL_MAX_COLUMNS {
+		let reveal_cap = if reveal_max_columns == 0 {
+			2048
+		} else {
+			reveal_max_columns.clamp(SEEN_LINE_REVEAL_MAX_COLUMNS, 2048)
+		};
+		if value.chars().count() > reveal_cap {
 			if let Some(current) = current {
 				return Err(stale_unseen_rejection(
 					section, &unseen, &guarded, expected, canonical, store, text, current, true,
@@ -598,6 +604,7 @@ fn record_reply_provenance(
 
 /// `seen_line_guard` enables the displayed-line guard with its column cap
 /// (see [`crate::session::SessionConfig::max_columns`]); `None` disables it.
+/// `reveal_max_columns` is the inline-reveal cap (0: 2048).
 pub(crate) fn apply_with_recovery(
 	section: &PatchSection,
 	canonical: &Path,
@@ -606,10 +613,24 @@ pub(crate) fn apply_with_recovery(
 	clipboard: &mut Clipboard,
 	store: &EditStore,
 	seen_line_guard: Option<usize>,
+	reveal_max_columns: usize,
 ) -> Result<ApplyResult, EditError> {
 	let expected = section.file_hash.as_deref().unwrap_or_default();
 	let live_matches = file_hash(normalized).eq_ignore_ascii_case(expected);
 	let stored = store.by_hash(canonical, expected);
+	// Identical bytes elsewhere are not this path's tag. A cold store has no
+	// retained issuer, and a path this session actually read still matches.
+	let live_hash = file_hash(normalized);
+	if live_matches
+		&& stored.is_none()
+		&& !store.has_hash(canonical, &live_hash)
+		&& store
+			.paths_with_hash(&live_hash)
+			.iter()
+			.any(|path| path != canonical)
+	{
+		return Err(mismatch(section, canonical, normalized, expected, store));
+	}
 	let mut block_resolutions = Vec::new();
 	let mut resolve_warnings = Vec::new();
 	let resolved = if has_block_edit(edits) {
@@ -643,6 +664,7 @@ pub(crate) fn apply_with_recovery(
 				normalized,
 				None,
 				max_columns,
+				reveal_max_columns,
 			)?;
 		}
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
@@ -692,6 +714,7 @@ pub(crate) fn apply_with_recovery(
 				&snapshot.text,
 				Some(normalized),
 				max_columns,
+				reveal_max_columns,
 			)?;
 		}
 		resolve_warnings.extend(recovered.warnings);
@@ -818,6 +841,7 @@ pub fn stage_patch(
 	raw_input: &str,
 	enforce_seen_lines: bool,
 	max_columns: usize,
+	reveal_max_columns: usize,
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Result<Vec<StagedFile>, EditError> {
@@ -830,6 +854,7 @@ pub fn stage_patch(
 		match stage_section(
 			original,
 			seen_line_guard,
+			reveal_max_columns,
 			files,
 			store,
 			&mut clipboard,
@@ -879,6 +904,7 @@ pub fn stage_patch(
 fn stage_section(
 	original: &PatchSection,
 	seen_line_guard: Option<usize>,
+	reveal_max_columns: usize,
 	files: &mut dyn FileSource,
 	store: &EditStore,
 	clipboard: &mut Clipboard,
@@ -978,6 +1004,7 @@ fn stage_section(
 		clipboard,
 		store,
 		seen_line_guard,
+		reveal_max_columns,
 	)?;
 	let mut warnings = parsed.warnings.clone();
 	if section.path != original.path {
@@ -1175,6 +1202,7 @@ mod lifecycle {
 					fuzzy_threshold:    0.0,
 					enforce_seen_lines: true,
 					max_columns:        MAX_COLUMNS,
+					reveal_max_columns: MAX_COLUMNS,
 					raw_input:          true,
 				},
 				self.store.clone(),

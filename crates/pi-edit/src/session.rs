@@ -37,6 +37,10 @@ pub struct SessionConfig {
 	/// tool cuts lines). Without recorded read provenance, hashline anchors on
 	/// longer lines are rejected because their display may have been cut.
 	pub max_columns:        usize,
+	/// Per-line column cap, in Unicode scalars, for inline reveal of unseen
+	/// lines in hashline rejection replies. Separate from `max_columns`, which
+	/// stays the narrowest display cap for cold-store `possibly_cut_anchors`.
+	pub reveal_max_columns: usize,
 	/// The payload is not JSON (custom-format tool): the buffer is `input`.
 	pub raw_input:          bool,
 }
@@ -156,6 +160,7 @@ impl Session {
 			config.fuzzy_threshold,
 			config.enforce_seen_lines,
 			config.max_columns,
+			config.reveal_max_columns,
 		);
 		let files = FileCache::new(config.policy.clone());
 		Self {
@@ -640,6 +645,7 @@ mod tests {
 			fuzzy_threshold:    0.95,
 			enforce_seen_lines: false,
 			max_columns:        0,
+			reveal_max_columns: 0,
 			raw_input:          false,
 		};
 		let mut session = Session::new(config, EditStore::new());
