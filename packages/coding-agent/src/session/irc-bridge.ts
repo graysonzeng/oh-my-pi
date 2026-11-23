@@ -184,6 +184,7 @@ export class IrcBridge {
 	 *  asides, these are invisible to turn injection (`flushPending`, the loop
 	 *  aside poll) and resume into a monitored wake once the contract clears. */
 	queueDeferredWake(records: AgentMessage[]): void {
+		for (const record of records) this.#rememberArrival(record);
 		this.#deferredWakes.push(...records);
 	}
 

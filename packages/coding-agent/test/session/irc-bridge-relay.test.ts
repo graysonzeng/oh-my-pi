@@ -246,4 +246,30 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 			{ id: "prog-1", progress: true },
 		]);
 	});
+
+	it("preserves arrival sequence across deferred wakes resumed alongside later asides", () => {
+		const { bridge } = makeStreamingChild();
+		const wakeA: CustomMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "first wake",
+			display: false,
+			details: { id: "wake-a", from: "PeerA", message: "first wake" },
+			timestamp: 100,
+		};
+		const asideB: CustomMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "later aside",
+			display: false,
+			details: { id: "aside-b", from: "PeerB", message: "later aside" },
+			timestamp: 200,
+		};
+
+		bridge.queueDeferredWake([wakeA]);
+		bridge.queueAside([asideB]);
+		bridge.queueAside(bridge.drainDeferredWakes());
+
+		expect(bridge.drainInboxMessages("Child").map(msg => msg.id)).toEqual(["wake-a", "aside-b"]);
+	});
 });

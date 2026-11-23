@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { getTestTempDir } from "@oh-my-pi/pi-utils/dirs";
+import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import {
 	BACKGROUND_LATENCY_ARM_IDS,
 	buildLatencyRolloutDecision,
@@ -418,6 +420,9 @@ export function computeLatencyCohortMetrics(
 
 /** Default durable location shared by every session/process on this machine. */
 export function defaultLatencyRolloutCohortFile(): string {
+	if (isBunTestRuntime()) {
+		return path.join(getTestTempDir("omp-test-workflow-artifacts"), "latency-rollout-cohort.jsonl");
+	}
 	return path.join(os.homedir(), ".omp", "workflow-artifacts", "latency-rollout-cohort.jsonl");
 }
 

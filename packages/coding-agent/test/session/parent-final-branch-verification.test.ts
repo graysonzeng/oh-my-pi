@@ -20,15 +20,36 @@ import {
 	buildParentFinalVerificationDetails,
 	PARENT_FINAL_VERIFICATION_MESSAGE_TYPE,
 } from "../../src/latency/parent-final-verification";
-import { LatencyRolloutCohortStore } from "../../src/latency/rollout-cohort";
+import { defaultLatencyRolloutCohortFile, LatencyRolloutCohortStore } from "../../src/latency/rollout-cohort";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+
+function appendMinimalAssistantMessage(manager: SessionManager, text = "ok"): void {
+	manager.appendMessage({
+		role: "assistant",
+		provider: "anthropic",
+		model: "mock",
+		api: "anthropic-messages",
+		content: [{ type: "text", text }],
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	});
+}
 
 async function ordinaryVerifier(manager: SessionManager): Promise<{ source: string; status: string } | undefined> {
 	using tempDir = TempDir.createSync("@omp-parent-final-");
 	const auth = createInMemoryAuthStorage();
 	try {
+		appendMinimalAssistantMessage(manager);
 		const model = createMockModel({ provider: "anthropic", responses: [{ content: ["ok"] }] });
 		const agent = new Agent({
 			initialState: { model, systemPrompt: [], tools: [], messages: [] },
@@ -156,23 +177,7 @@ describe("parent-final verification branch isolation", () => {
 		});
 		try {
 			const manager = SessionManager.inMemory();
-			manager.appendMessage({
-				role: "assistant",
-				provider: "anthropic",
-				model: "mock",
-				api: "anthropic-messages",
-				content: [{ type: "text", text: "partial work" }],
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "stop",
-				timestamp: Date.now(),
-			});
+			appendMinimalAssistantMessage(manager, "partial work");
 			const model = createMockModel({ provider: "anthropic", responses: [{ content: ["ok"] }] });
 			const agent = new Agent({
 				initialState: { model, systemPrompt: [], tools: [], messages: [] },
@@ -199,5 +204,107 @@ describe("parent-final verification branch isolation", () => {
 			registerSpy.mockRestore();
 			auth.close();
 		}
+	});
+
+	it("skips rollout recording when an empty session disposes without assistant messages or pending tool calls", async () => {
+		using tempDir = TempDir.createSync("@omp-parent-final-empty-");
+		const auth = createInMemoryAuthStorage();
+		try {
+			const model = createMockModel({ provider: "anthropic", responses: [{ content: ["ok"] }] });
+			const agent = new Agent({
+				initialState: { model, systemPrompt: [], tools: [], messages: [] },
+				streamFn: model.stream,
+			});
+			const store = new LatencyRolloutCohortStore(tempDir.join("cohort.jsonl"));
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: new ModelRegistry(auth),
+				latencyArmSnapshot: freezeLatencyArmSnapshot({ frozenAt: "2026-09-26T00:00:00.000Z" }),
+				latencyRolloutStore: store,
+			});
+			await session.dispose();
+			expect(store.readAll()).toHaveLength(0);
+		} finally {
+			auth.close();
+		}
+	});
+
+	it("degrades cleanly without hanging teardown when cohort observation or stop decision persistence fails", async () => {
+		using tempDir = TempDir.createSync("@omp-parent-final-unwritable-");
+		const auth = createInMemoryAuthStorage();
+		const blockedParent = tempDir.join("blocked-parent");
+		fs.writeFileSync(blockedParent, "not-a-directory\n");
+		try {
+			const managerObs = SessionManager.inMemory();
+			appendMinimalAssistantMessage(managerObs);
+			const modelA = createMockModel({ provider: "anthropic", responses: [{ content: ["ok"] }] });
+			const agentA = new Agent({
+				initialState: { model: modelA, systemPrompt: [], tools: [], messages: [] },
+				streamFn: modelA.stream,
+			});
+			const obsFailStore = new LatencyRolloutCohortStore(path.join(blockedParent, "cohort.jsonl"));
+			const sessionA = new AgentSession({
+				agent: agentA,
+				sessionManager: managerObs,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: new ModelRegistry(auth),
+				latencyArmSnapshot: freezeLatencyArmSnapshot({ frozenAt: "2026-09-26T00:00:00.000Z" }),
+				latencyRolloutStore: obsFailStore,
+			});
+			await sessionA.dispose();
+			expect(obsFailStore.controlPlaneDegraded).toBe(true);
+
+			const managerStop = SessionManager.inMemory();
+			appendMinimalAssistantMessage(managerStop);
+			const modelB = createMockModel({ provider: "anthropic", responses: [{ content: ["ok"] }] });
+			const agentB = new Agent({
+				initialState: { model: modelB, systemPrompt: [], tools: [], messages: [] },
+				streamFn: modelB.stream,
+			});
+			const stopFailStore = new LatencyRolloutCohortStore(path.join(blockedParent, "stop-cohort.jsonl"));
+			vi.spyOn(stopFailStore, "appendObservation").mockReturnValueOnce(true);
+			const unregisteredCombo = freezeLatencyArmSnapshot({
+				frozenAt: "2026-09-26T00:00:00.000Z",
+				arms: {
+					context_optimization: true,
+					read_dedupe: true,
+					context_budget_tuning: false,
+					role_static_split: false,
+					bash_advisory: false,
+					bash_bounded_injection: false,
+					concurrency_declaration: false,
+					concurrency_execution: false,
+					eval_gate_migration: false,
+					provider_health_breaker: false,
+					adaptive_thinking_context: false,
+					dsh_session_search: false,
+					dsh_omit_goal_time: false,
+					dsh_goal_hash_shadow: false,
+					dsh_headless_continuation: false,
+				},
+			});
+			const sessionB = new AgentSession({
+				agent: agentB,
+				sessionManager: managerStop,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: new ModelRegistry(auth),
+				latencyArmSnapshot: unregisteredCombo,
+				latencyRolloutStore: stopFailStore,
+			});
+			await sessionB.dispose();
+			expect(stopFailStore.controlPlaneDegraded).toBe(true);
+		} finally {
+			vi.restoreAllMocks();
+			auth.close();
+		}
+	});
+
+	it("directs defaultLatencyRolloutCohortFile() to a temp directory under bun test", () => {
+		const cohortFile = defaultLatencyRolloutCohortFile();
+		const prodDir = path.join(os.homedir(), ".omp", "workflow-artifacts");
+		expect(cohortFile.startsWith(os.tmpdir())).toBe(true);
+		expect(cohortFile.startsWith(prodDir)).toBe(false);
 	});
 });

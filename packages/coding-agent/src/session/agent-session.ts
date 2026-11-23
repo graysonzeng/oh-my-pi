@@ -8224,6 +8224,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const store = this.#latencyRolloutStore;
 			if (!store) return;
 			if (this.sessionManager.isOwnedElsewhere()) return;
+			if (exitKind === null) return;
 			if (this.#rolloutEvaluated) return;
 			this.#rolloutEvaluated = true;
 			const sessionId = this.sessionManager.getSessionId();
@@ -8246,7 +8247,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						schemaVersion: 1,
 						kind: "latency_rollout_observation",
 						key: slice.cohortKey ?? deriveLatencyCohortKey(snapshot),
-						status: exitKind ?? "unknown",
+						status: exitKind,
 						completed,
 						...ordinaryCore,
 						firedArms,
@@ -8288,11 +8289,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (store.controlPlaneDegraded) return;
 			}
 			if (slices.length === 0) {
-				store.appendObservation({
+				const observationOk = store.appendObservation({
 					schemaVersion: 1,
 					kind: "latency_rollout_observation",
 					key: deriveLatencyCohortKey(snapshot),
-					status: exitKind ?? "unknown",
+					status: exitKind,
 					completed,
 					...ordinaryCore,
 					firedArms,
@@ -8303,6 +8304,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					sampleUnit: "session",
 					...ordinaryJoin,
 				});
+				if (!observationOk) {
+					store.markControlPlaneDegraded();
+					return;
+				}
 			}
 			const active = LATENCY_ARM_IDS.filter(id => snapshot.arms[id] === true);
 			if (active.length === 0 && slices.length === 0) return;
@@ -8316,7 +8321,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			};
 			const persistStop = (decision: LatencyRolloutDecisionV1): void => {
 				if (!decision.decision.stop) return;
-				const persisted = store.appendDecisionOrAbort(decision);
+				const persisted = store.appendDecision(decision);
 				if (persisted.persisted && typeof this.settings.override === "function") {
 					for (const arm of decision.disabledArms) {
 						this.settings.override(LATENCY_ARM_SETTINGS[arm], false);
@@ -8331,7 +8336,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					persistStop(
 						buildLatencyRolloutDecision({
 							workflowId: sessionId,
-							status: exitKind ?? "unknown",
+							status: exitKind,
 							snapshot,
 							observed,
 							firedArms,
@@ -8361,7 +8366,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			persistStop(
 				buildLatencyRolloutDecision({
 					workflowId: sessionId,
-					status: exitKind ?? "unknown",
+					status: exitKind,
 					snapshot,
 					observed,
 					firedArms,
