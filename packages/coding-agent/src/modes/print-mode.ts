@@ -8,7 +8,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
-import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $flag, hasFsCode, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
@@ -83,18 +83,22 @@ function stripProviderPayload<T extends AgentMessage>(message: T): T {
 /**
  * Shape an event for `--mode json` output.
  *
- * Removes two classes of bloat so transcripts grow linearly with conversation
- * size instead of quadratically (a single long turn used to re-serialize its
- * whole in-progress message on every streamed delta, producing multi-GB logs):
+ * Removes bloat so transcripts grow linearly with conversation size instead of
+ * quadratically (a single long turn used to re-serialize its whole in-progress
+ * message on every streamed delta, producing multi-GB logs):
  * - `message_update` snapshots (`message`, `assistantMessageEvent.partial`,
  *   and the `done`/`error` payloads) are dropped; only the incremental delta
  *   is printed. The authoritative message follows in `message_end`.
+ * - `tool_execution_update` and `tool_stream_update` payloads (`args`,
+ *   `partialResult`, `update`) are dropped; the authoritative result follows in
+ *   `tool_execution_end`.
  * - `providerPayload` is transport-native replay state, opaque and useless
  *   outside this process.
  */
 export function printableEvent(event: AgentSessionEvent): unknown {
 	switch (event.type) {
 		case "tool_stream_update":
+		case "tool_execution_update":
 			return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName };
 		case "message_update": {
 			const streamEvent = event.assistantMessageEvent;
@@ -123,6 +127,10 @@ export function printableEvent(event: AgentSessionEvent): unknown {
 	}
 }
 
+function isStdoutBrokenPipe(err: unknown): boolean {
+	return hasFsCode(err, "EPIPE") || hasFsCode(err, "ERR_STREAM_DESTROYED");
+}
+
 /**
  * Serialized print-mode stdout.
  *
@@ -132,22 +140,44 @@ export function printableEvent(event: AgentSessionEvent): unknown {
  * Each line waits on the previous write's completion callback so records stay
  * ordered and honor backpressure; shutdown blocks on {@link drained}. Same
  * truncation class as issue #5309 (issue #7635).
+ *
+ * Broken downstream pipes (`EPIPE` / `ERR_STREAM_DESTROYED`, e.g. `tee` exiting
+ * ahead of us on `SIGTERM` or `| head`) settle cleanly and drop further writes
+ * instead of escalating through `drained()` into a fatal crash. Non-pipe errors
+ * (such as `ENOSPC`) still reject.
  */
 class SerialStdout {
 	#tail: Promise<void> = Promise.resolve();
+	#brokenPipe = false;
+
+	#handleBrokenPipe(err: unknown): boolean {
+		if (!isStdoutBrokenPipe(err)) return false;
+		if (!this.#brokenPipe) {
+			this.#brokenPipe = true;
+			logger.debug("Print mode stdout pipe closed", { err });
+		}
+		return true;
+	}
 
 	writeLine(text: string): void {
+		if (this.#brokenPipe) return;
 		this.#tail = this.#tail.then(() => {
+			if (this.#brokenPipe) return;
 			const { promise, resolve, reject } = Promise.withResolvers<void>();
-			process.stdout.write(text, err => {
-				if (err) reject(err);
-				else resolve();
-			});
+			try {
+				process.stdout.write(text, err => {
+					if (!err || this.#handleBrokenPipe(err)) resolve();
+					else reject(err);
+				});
+			} catch (err) {
+				if (this.#handleBrokenPipe(err)) resolve();
+				else reject(err);
+			}
 			return promise;
 		});
 	}
 
-	/** Settles once every line written so far has drained; rejects with the first write error. */
+	/** Settles once every line written so far has drained; rejects with the first non-broken-pipe write error. */
 	drained(): Promise<void> {
 		return this.#tail;
 	}
@@ -647,11 +677,34 @@ async function runPrintModeCore(
 		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
 		!isSilentAbort(assistantMsg) &&
 		!signalTeardownActive();
+	// Narrow guard against silent 0-byte exit 0 when `--max-time` expires before
+	// the first assistant message is recorded: builtin-only runs, signal
+	// teardowns, and completed tool-only turns (`assistantMsg` present with
+	// `stopReason === "stop"`) keep their existing behavior.
+	const deadlineExpiredWithoutResponse =
+		!strictMCPFailure &&
+		!costCapped &&
+		!asyncWaitExpired &&
+		admittedAgentTurn &&
+		!signalTeardownActive() &&
+		assistantMsg === undefined &&
+		options.deadline !== undefined &&
+		Date.now() >= options.deadline;
+	if (deadlineExpiredWithoutResponse) {
+		writeStderrLine("Error: Deadline exceeded (--max-time reached before an assistant response was produced).");
+	}
 
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
 	// stop reason through the event subscription.
-	if (mode === "text" && !terminalFailure && !strictMCPFailure && !asyncWaitExpired && !costCapped) {
+	if (
+		mode === "text" &&
+		!terminalFailure &&
+		!deadlineExpiredWithoutResponse &&
+		!strictMCPFailure &&
+		!asyncWaitExpired &&
+		!costCapped
+	) {
 		if (assistantMsg) {
 			if (
 				assistantMsg.errorMessage &&
@@ -680,7 +733,7 @@ async function runPrintModeCore(
 		// verdict is the point of a headless advisor run, so wait through recovery,
 		// and wait on `strict` reviewers past the budget like every primary boundary.
 		await session.waitForAdvisorCatchup(
-			terminalFailure || costCapped
+			terminalFailure || deadlineExpiredWithoutResponse || costCapped
 				? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS
 				: PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
 			{ waitThroughRecovery: true, strictWithoutDeadline: true },
@@ -726,6 +779,15 @@ async function runPrintModeCore(
 	}
 
 	await stderrTail;
-	if (terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed || asyncWaitExpired) return 1;
+	if (
+		terminalFailure ||
+		deadlineExpiredWithoutResponse ||
+		durabilityFailure ||
+		strictMCPFailure ||
+		builtinFailed ||
+		asyncWaitExpired
+	) {
+		return 1;
+	}
 	return costCapped ? PRINT_MODE_COST_CAP_EXIT_CODE : 0;
 }
